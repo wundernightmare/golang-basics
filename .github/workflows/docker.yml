@@ -47,6 +47,9 @@ jobs:
           severity-cutoff: high
         env:
           GRYPE_CONFIG: .grype.yaml
+          # Accept the bundled vuln DB even if older than grype's 5-day default
+          # (CI's clock can run ahead of the latest published DB).
+          GRYPE_DB_VALIDATE_AGE: "false"
 
       # Push only happens on master / tags — wire to your registry of choice.
       # - name: Login + push

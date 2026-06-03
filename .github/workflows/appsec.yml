@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: google/osv-scanner-action@v2
+      - uses: google/osv-scanner-action@v2.3.8
         with:
           scan-args: |-
             --config=osv-scanner.toml
@@ -66,3 +66,4 @@ jobs:
         with:
           dockerfile: ${{ matrix.dockerfile }}
           config: .hadolint.yaml
+          failure-threshold: error # the action's default ("info") overrides the config; pin it
