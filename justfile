@@ -10,7 +10,7 @@
 # fan-out recipes iterate MODULES explicitly rather than relying on `./...`.
 
 # Every Go module in the workspace, in dependency order (libs first).
-MODULES := "libs/httpx services/ping services/heartbeat"
+MODULES := "libs/httpx libs/resilient-http-client services/ping services/heartbeat"
 # Buildable service binaries (module dir : binary name).
 SERVICES := "ping heartbeat"
 
@@ -184,6 +184,9 @@ ci-full: fmt-check check lint test-race audit
 
 httpx +args:
     just --justfile libs/httpx/justfile {{args}}
+
+resilient +args:
+    just --justfile libs/resilient-http-client/justfile {{args}}
 
 ping +args:
     just --justfile services/ping/justfile {{args}}
