@@ -59,7 +59,7 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: go vet ./...
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v${{ needs.versions.outputs.golangci }}
           working-directory: ${{ matrix.module }}

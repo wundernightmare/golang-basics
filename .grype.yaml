@@ -5,6 +5,16 @@
 #
 # Fail the CI variant on HIGH+ (the recipe passes --fail-on high explicitly).
 # Document every waiver below with a removal trigger.
-ignore: []
-#  - vulnerability: GHSA-xxxx-xxxx-xxxx
+ignore:
+  # Base-OS (Debian) CVEs the distro has marked won't-fix / not-fixed: not
+  # patchable at our layer — mitigated by periodic base-image refresh, not by a
+  # code change. The distroless/static base has almost no OS packages, so this
+  # is mostly a guard for parity with the cc-based images.
+  - fix-state: wont-fix
+    package:
+      type: deb
+  - fix-state: not-fixed
+    package:
+      type: deb
+#  - vulnerability: GHSA-xxxx-xxxx-xxxx   # app-dep waiver template
 #    reason: "transitive only, not reachable; remove when <dep> bumps past vX.Y.Z"

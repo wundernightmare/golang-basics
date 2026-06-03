@@ -4,6 +4,7 @@
 ignored:
   - DL3008 # pin apt versions — we use distroless, apt only in the builder stage
   - DL3059 # multiple consecutive RUN — readability over layer-count here
+  - DL3003 # `cd` in RUN — deliberate per-module build (`cd services/<svc> && go build`)
 
 failure-threshold: warning
 
