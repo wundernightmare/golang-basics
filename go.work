@@ -1,0 +1,18 @@
+// go.work — workspace file tying together every module in the monorepo.
+//
+// This is the Go analogue of a Cargo workspace: each "member" is its own
+// module with its own go.mod (mirroring one crate = one module), and the
+// workspace makes local cross-module imports resolve to the on-disk source
+// rather than a published version. Run `go work sync` after adding a module.
+//
+// Members:
+//   libs/httpx          — shared HTTP server scaffolding (the example common lib)
+//   services/ping       — ping/pong HTTP service
+//   services/heartbeat  — background heartbeat worker (+ health/metrics HTTP)
+go 1.25.0
+
+use (
+	./libs/httpx
+	./services/heartbeat
+	./services/ping
+)

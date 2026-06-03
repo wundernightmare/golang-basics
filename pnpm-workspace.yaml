@@ -1,0 +1,14 @@
+# pnpm workspace — the Node layer of this monorepo exists only for the e2e
+# (Playwright) suite and the lefthook git-hook runner; no production Go code
+# depends on it. A catalog pins shared dependency versions in one place, the
+# way the Rust sibling repo's pnpm-workspace.yaml does.
+packages:
+  - e2e
+
+catalog:
+  "@playwright/test": ^1.49.0
+  "@types/node": ^24.0.0
+  typescript: ^5.7.0
+  tsx: ^4.19.0
+  prettier: ^3.4.0
+  oxlint: ^1.0.0

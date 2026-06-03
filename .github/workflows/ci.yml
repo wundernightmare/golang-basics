@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25.x"
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
+
+  lint-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [libs/httpx, services/ping, services/heartbeat]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: go vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.6.1
+          working-directory: ${{ matrix.module }}
+      - name: go test (race)
+        working-directory: ${{ matrix.module }}
+        run: go test -race ./...
+
+  # Final status check for branch protection.
+  gate:
+    runs-on: ubuntu-latest
+    needs: [fmt, lint-test]
+    if: always()
+    steps:
+      - name: verify all jobs passed
+        run: |
+          [ "${{ needs.fmt.result }}" = "success" ] || exit 1
+          [ "${{ needs.lint-test.result }}" = "success" ] || exit 1
+          echo "CI gate passed"
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: build service binaries
+        run: |
+          for s in ping heartbeat; do
+            (cd "services/$s" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "bin/$s" .)
+          done
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile || pnpm install
+      - name: playwright e2e
+        run: pnpm --filter @golang-basics/e2e test

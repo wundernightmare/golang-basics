@@ -1,0 +1,45 @@
+# mise tool versions for local development.
+#
+# Pins the toolchain so clones / worktrees / CI all resolve the same binaries.
+# The Go version is also declared in each module's go.mod (`go 1.26.0`); naming
+# it here gets us a `go` shim without a shell hook. Node is needed for the e2e
+# Playwright suite. golangci-lint is the aggregate Go linter driven by `just
+# lint`.
+#
+# AppSec toolchain (semgrep / gitleaks / osv-scanner / hadolint) is installed by
+# `just setup-sec`; checks run via `just sec`. Versions mirror the Rust sibling
+# repo's pinning so the two drift together.
+
+[tools]
+# Pinned to the latest 1.25.x: golangci-lint (and most of the Go tool ecosystem)
+# tracks one minor behind the bleeding edge, so 1.25 is what lints/builds cleanly
+# everywhere today. Bump to 1.26 once the toolchain is broadly supported. The
+# module `go` directives (go.mod / go.work) target `go 1.25.0` to match.
+go            = "1.25.11"
+node          = "24.15"
+golangci-lint = "2.6.1"
+k6            = "0.56.0"
+
+# AppSec — pinned for reproducibility across machines (Linux / macOS / WSL).
+# Bump versions here, then re-run `just setup-sec` (idempotent). Each `just
+# sec-*` recipe invokes its tool through `mise exec --`, so no shell `mise
+# activate` is required.
+semgrep     = "1.163.0"
+gitleaks    = "8.30.1"
+osv-scanner = "2.3.8"
+hadolint    = "2.14.0"
+
+# Container CVE / SBOM — used by `just docker-scan` / `docker-scan-ci`. syft
+# generates the CycloneDX SBOM, grype matches against the OSV / Debian / Go
+# vuln databases and fails on HIGH+ in CI.
+syft  = "1.44.0"
+grype = "0.112.0"
+
+# Supply-chain signing — cosign in key-mode with `--tlog-upload=false`. No
+# Rekor / Sigstore involvement; verify offline against cosign.pub.
+cosign = "3.0.6"
+
+[env]
+# Go's build/test cache is global + content-addressed — no per-worktree wiring
+# needed (unlike the Rust sibling repo's sccache). Nothing to set here; this
+# block is a placeholder for service-local env when you add it.

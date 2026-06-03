@@ -1,0 +1,11 @@
+# osv-scanner config — OSV.dev advisories against go.mod (all modules) and
+# pnpm-lock.yaml. Run via `just sec-deps`. Overlaps with `just audit`
+# (govulncheck) on purpose: different databases catch different CVEs and the
+# cost of running both is trivial.
+#
+# Document every ignore with the affected package, the reason, and a removal
+# trigger so waivers don't outlive their justification. Example:
+#
+# [[IgnoredVulns]]
+# id = "GO-2024-XXXX"
+# reason = "not reachable: the vulnerable code path is never called. Remove when dep bumps past vX.Y.Z."
