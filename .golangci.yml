@@ -1,0 +1,54 @@
+# golangci-lint configuration (v2 schema).
+#
+# Driven by `just lint` (per-module `golangci-lint run`) and `just fmt`
+# (`golangci-lint fmt`). The linter set is the rough analogue of the Rust
+# sibling repo's clippy gate (`-D warnings -D pedantic -D perf -D suspicious`):
+# correctness + style + a few opinionated checks, without being so strict it
+# blocks routine code.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: standard # govet, ineffassign, staticcheck, unused, errcheck
+  enable:
+    - bodyclose      # HTTP response bodies must be closed
+    - errorlint      # correct errors.Is/As usage
+    - gocritic       # opinionated correctness/perf/style diagnostics
+    - gosec          # security-focused checks (the SAST-ish layer)
+    - misspell       # spelling in comments/strings
+    - nilerr         # `return nil` after a non-nil error
+    - revive         # configurable style lint (golint successor)
+    - unconvert      # redundant type conversions
+    - unparam        # unused function parameters
+
+  settings:
+    revive:
+      rules:
+        - name: exported          # exported symbols need doc comments
+        - name: indent-error-flow
+        - name: unexported-return
+    gosec:
+      excludes:
+        - G114 # http.ListenAndServe without timeouts — Server is built with timeouts in httpx
+
+  exclusions:
+    generated: lax
+    rules:
+      # Test files: relax doc-comment and security noise.
+      - path: _test\.go
+        linters:
+          - revive
+          - gosec
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/tracehubmmp/golang-basics

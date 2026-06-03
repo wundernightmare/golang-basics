@@ -1,0 +1,54 @@
+# Git hooks for the golang-basics workspace. Optional — enable per-clone with
+# `just hooks-install` (installs lefthook via the e2e package's devDependencies).
+#
+# Skip a single invocation with `LEFTHOOK=0 git commit …` when you truly need
+# to bypass; CI runs the same checks, so nothing is lost.
+#
+# `glob` scopes each command to commits that touched matching files, so a
+# pure-docs commit doesn't burn the cache on a no-op lint run.
+
+# ── pre-commit ──────────────────────────────────────────────────────────────
+# Fast correctness gates.
+pre-commit:
+  parallel: true
+  commands:
+    go-fmt:
+      glob: "*.go"
+      run: |
+        unformatted=$(gofmt -l {staged_files})
+        if [ -n "$unformatted" ]; then
+          echo "gofmt needed:"; echo "$unformatted"; exit 1
+        fi
+    go-lint:
+      glob: "*.go"
+      # Lint each module touched. golangci-lint must run inside a module dir.
+      run: |
+        set -e
+        for m in libs/httpx services/ping services/heartbeat; do
+          (cd "$m" && golangci-lint run)
+        done
+    ts-fmt:
+      glob: "e2e/**/*.{ts,json,md}"
+      run: cd e2e && pnpm format:check
+    ts-lint:
+      glob: "e2e/**/*.ts"
+      run: cd e2e && pnpm lint
+
+# ── pre-push ────────────────────────────────────────────────────────────────
+# Heavier checks — too slow for every commit, fast enough before a push.
+pre-push:
+  commands:
+    test:
+      # Unit + in-process tests. No live services required.
+      run: |
+        set -e
+        for m in libs/httpx services/ping services/heartbeat; do
+          (cd "$m" && go test ./...)
+        done
+    vet:
+      glob: "*.go"
+      run: |
+        set -e
+        for m in libs/httpx services/ping services/heartbeat; do
+          (cd "$m" && go vet ./...)
+        done

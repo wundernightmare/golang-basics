@@ -1,0 +1,19 @@
+# Keep the Docker build context lean — only source + manifests are needed.
+.git
+.github
+**/bin
+**/coverage.out
+**/*.test
+
+# Node / e2e tooling never goes into a Go service image.
+e2e/node_modules
+e2e/playwright-report
+e2e/test-results
+benchmarks/results
+benchmarks/node_modules
+
+# Local tooling / editor cruft
+.vscode
+.idea
+**/.DS_Store
+*.log

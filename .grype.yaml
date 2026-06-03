@@ -1,0 +1,10 @@
+# grype config — container image CVE scanning. Used by `just docker-scan` /
+# `docker-scan-ci`. The distroless/static base ships almost no OS packages, so
+# findings are nearly always in the Go dependency graph (mirrored by
+# `just audit`).
+#
+# Fail the CI variant on HIGH+ (the recipe passes --fail-on high explicitly).
+# Document every waiver below with a removal trigger.
+ignore: []
+#  - vulnerability: GHSA-xxxx-xxxx-xxxx
+#    reason: "transitive only, not reachable; remove when <dep> bumps past vX.Y.Z"

@@ -1,0 +1,13 @@
+# hadolint config — Dockerfile linting for every services/*/Dockerfile.
+# Run via `just sec-iac`. Pinning base-image versions to digests is enforced in
+# CI; locally we only waive the noisiest rules.
+ignored:
+  - DL3008 # pin apt versions — we use distroless, apt only in the builder stage
+  - DL3059 # multiple consecutive RUN — readability over layer-count here
+
+failure-threshold: warning
+
+trustedRegistries:
+  - docker.io
+  - gcr.io
+  - ghcr.io

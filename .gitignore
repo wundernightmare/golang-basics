@@ -1,0 +1,38 @@
+# ── Go ────────────────────────────────────────────────────────────────────────
+# Build output / test binaries
+/services/*/bin/
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+
+# go.work is COMMITTED (it defines the workspace). go.work.sum is too, when present.
+
+# ── Node / e2e ────────────────────────────────────────────────────────────────
+node_modules/
+e2e/playwright-report/
+e2e/test-results/
+e2e/.e2e-state.json
+e2e/dist/
+
+# ── Benchmarks ────────────────────────────────────────────────────────────────
+benchmarks/results/
+benchmarks/node_modules/
+
+# ── Local run state (just up / host-services-spawn.sh) ────────────────────────
+.run/
+
+# ── Secrets (machine-local; mirrored into worktrees by the `wt` helper) ───────
+.env
+.env.*
+!.env.example
+cosign.key
+*.pem
+
+# ── Editors / OS ──────────────────────────────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.log

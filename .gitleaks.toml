@@ -1,0 +1,20 @@
+# gitleaks config — secret scanning across the working tree + history.
+# Run via `just sec-secrets`. Extends the bundled default ruleset; add
+# per-path allowlist entries for dev-only fixtures that look like credentials
+# rather than tagging literals inline (keeps false positives from drowning
+# real findings in CI noise).
+title = "golang-basics gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Paths and patterns that are safe by construction"
+paths = [
+  '''(^|/)go\.sum$''',          # module checksums are not secrets
+  '''(^|/)pnpm-lock\.yaml$''',  # lockfile hashes
+  '''\.env\.example$''',        # documented placeholder env
+]
+regexes = [
+  '''minioadmin''',             # well-known local dev placeholder, if ever added
+]

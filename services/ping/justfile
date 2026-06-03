@@ -1,0 +1,102 @@
+# ping justfile
+# Install: cargo install just | brew install just | mise use just
+# Usage:   just <recipe>      | just --list
+
+# Show all available recipes
+default:
+    @just --list --unsorted
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+
+# Compile the package (also surfaces type errors fast)
+build:
+    go build ./...
+
+# Build a static, stripped release binary into ./bin/ping
+release:
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/ping .
+
+# Build and run the service locally (PING_* env vars apply)
+run *args:
+    go run . {{args}}
+
+# Vet + type-check without producing artefacts (fastest feedback)
+check:
+    go vet ./...
+
+# ── Test ──────────────────────────────────────────────────────────────────────
+
+# Run all tests (no live services required)
+test *args:
+    go test ./... {{args}}
+
+# Run tests with the race detector and verbose output
+test-verbose:
+    go test -race -v ./...
+
+# Run tests matching a name filter
+test-filter FILTER:
+    go test -run {{FILTER}} -v ./...
+
+# ── Coverage ──────────────────────────────────────────────────────────────────
+
+# Run all tests and print a per-function coverage summary
+cov:
+    go test -coverprofile=coverage.out ./...
+    go tool cover -func=coverage.out
+
+# Open an HTML coverage report in the browser
+cov-html:
+    go test -coverprofile=coverage.out ./...
+    go tool cover -html=coverage.out
+
+# ── Lint & Format ─────────────────────────────────────────────────────────────
+
+# golangci-lint — the aggregate linter (config in repo-root .golangci.yml)
+lint:
+    golangci-lint run
+
+# golangci-lint — auto-fix where possible
+lint-fix:
+    golangci-lint run --fix
+
+# Format all source files in-place (gofmt + import grouping)
+fmt:
+    gofmt -w .
+    golangci-lint fmt
+
+# Check formatting without modifying files (CI gate)
+fmt-check:
+    test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+
+# ── Modules & Security ────────────────────────────────────────────────────────
+
+# Tidy go.mod / go.sum
+tidy:
+    go mod tidy
+
+# Known-vulnerability scan of this module's dependency graph
+audit:
+    go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+# Show the direct dependency list
+deps:
+    go list -m all
+
+# ── Docs ──────────────────────────────────────────────────────────────────────
+
+# Serve package docs locally (pkgsite on :6060)
+doc:
+    go run golang.org/x/pkgsite/cmd/pkgsite@latest -http :6060 .
+
+# ── Benchmarks ────────────────────────────────────────────────────────────────
+
+# Run Go micro-benchmarks (go test -bench)
+bench:
+    go test -bench=. -benchmem ./...
+
+# ── CI ────────────────────────────────────────────────────────────────────────
+
+# Full per-package CI pipeline: format → vet → lint → test
+ci: fmt-check check lint test
+    @echo "CI passed"

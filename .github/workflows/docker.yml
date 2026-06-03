@@ -1,0 +1,59 @@
+name: docker
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [ping, heartbeat]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (load locally for scan)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          load: true
+          tags: golang-basics-${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: SBOM (syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: golang-basics-${{ matrix.service }}:ci
+          format: cyclonedx-json
+          output-file: sbom-${{ matrix.service }}.json
+
+      - name: CVE scan (grype, fail on high)
+        uses: anchore/scan-action@v4
+        with:
+          image: golang-basics-${{ matrix.service }}:ci
+          fail-build: true
+          severity-cutoff: high
+        env:
+          GRYPE_CONFIG: .grype.yaml
+
+      # Push only happens on master / tags — wire to your registry of choice.
+      # - name: Login + push
+      #   if: github.event_name == 'push'
+      #   uses: docker/build-push-action@v6
+      #   with:
+      #     context: .
+      #     file: services/${{ matrix.service }}/Dockerfile
+      #     push: true
+      #     tags: ghcr.io/tracehubmmp/golang-basics-${{ matrix.service }}:latest
