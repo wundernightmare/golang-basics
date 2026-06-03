@@ -32,18 +32,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: google/osv-scanner-action@v2.3.8
+      - uses: actions/setup-go@v5
         with:
-          scan-args: |-
-            --config=osv-scanner.toml
-            --recursive
-            .
+          go-version: stable
+      # google/osv-scanner-action is a reusable workflow, not a step action, so
+      # install the pinned scanner binary directly and run it.
+      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.3.8
+      - run: osv-scanner scan --config=osv-scanner.toml --recursive .
 
   govulncheck:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        module: [libs/httpx, services/ping, services/heartbeat]
+        module: [libs/httpx, libs/resilient-http-client, services/ping, services/heartbeat]
     steps:
       - uses: actions/checkout@v4
       - name: read pinned Go version from mise.toml

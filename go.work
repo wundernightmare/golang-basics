@@ -6,13 +6,15 @@
 // rather than a published version. Run `go work sync` after adding a module.
 //
 // Members:
-//   libs/httpx          — shared HTTP server scaffolding (the example common lib)
-//   services/ping       — ping/pong HTTP service
-//   services/heartbeat  — background heartbeat worker (+ health/metrics HTTP)
-go 1.25.0
+//   libs/httpx                  — shared HTTP server scaffolding (the example common lib)
+//   libs/resilient-http-client  — policy-per-target outbound HTTP client (rate limit, CB, retry…)
+//   services/ping               — ping/pong HTTP service
+//   services/heartbeat          — background heartbeat worker (+ health/metrics HTTP)
+go 1.25.11
 
 use (
 	./libs/httpx
+	./libs/resilient-http-client
 	./services/heartbeat
 	./services/ping
 )

@@ -48,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [libs/httpx, services/ping, services/heartbeat]
+        module: [libs/httpx, libs/resilient-http-client, services/ping, services/heartbeat]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

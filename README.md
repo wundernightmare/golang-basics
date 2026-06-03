@@ -21,10 +21,12 @@ code lives in per-branch worktrees (`master/` is canonical).
 | [`services/ping`](services/ping)           | HTTP service | `:8080`                      | Ping/pong HTTP service. `GET /ping` → `pong`, with `?msg=` echo + `/version`.                      |
 | [`services/heartbeat`](services/heartbeat) | Worker       | `:8081` (health/metrics)     | Background ticker worker — emits a beat + bumps `heartbeat_beats_total` every interval.            |
 | [`libs/httpx`](libs/httpx)                 | Library      | —                            | Shared HTTP scaffolding: gin engine, structured logging, Prometheus metrics, health, graceful shutdown, env config. |
+| [`libs/resilient-http-client`](libs/resilient-http-client) | Library | —              | Policy-per-target **outbound** HTTP client: rate limiting, circuit breaker, adaptive concurrency, jittered retry, response cache, coalescing, fallbacks, metrics. |
 
-The dependency graph is `services/* → libs/httpx`. Both services — an HTTP-first
-one and a worker — reuse the same library for their `/healthz`, `/readyz` and
-`/metrics` surface, so a worker is as observable as a server.
+The dependency graph is `services/* → libs/*`. Both services — an HTTP-first
+one and a worker — reuse `httpx` for their `/healthz`, `/readyz` and `/metrics`
+surface, so a worker is as observable as a server; `resilient-http-client` is
+the outbound-call counterpart to that inbound scaffolding.
 
 ---
 
@@ -33,12 +35,13 @@ one and a worker — reuse the same library for their `/healthz`, `/readyz` and
 ```
 golang-basics/              ← bare-repo CONTAINER (.bare + .git pointer + wt + CLAUDE.md)
 └── master/                 ← canonical worktree (this tree)
-    ├── go.work             ← workspace: ties the three modules together
+    ├── go.work             ← workspace: ties the four modules together
     ├── justfile            ← workspace task runner (fan-out + delegation)
     ├── mise.toml           ← pinned toolchain (go, golangci-lint, node, k6, AppSec tools)
     ├── lefthook.yml        ← optional git hooks
     ├── .golangci.yml       ← lint config
     ├── libs/httpx/         ← shared library module (go.mod + justfile + README + tests)
+    ├── libs/resilient-http-client/ ← outbound HTTP client library (rate limit, CB, retry, cache…)
     ├── services/ping/      ← HTTP service module (+ Dockerfile)
     ├── services/heartbeat/ ← worker module (+ Dockerfile)
     ├── e2e/                ← Playwright API tests (spawns the service binaries)
