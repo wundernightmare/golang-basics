@@ -1,6 +1,7 @@
 package resilient
 
 import (
+	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- retry-backoff jitter is not security-sensitive; a CSPRNG (crypto/rand) is unnecessary here.
 	"math/rand/v2"
 	"time"
 )
