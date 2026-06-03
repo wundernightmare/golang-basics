@@ -2,9 +2,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # heartbeat — multi-stage production image
 #
-# Build context — workspace ROOT (two levels up from this file), so the build
-# sees go.work + every module (a service module's `replace` points at
-# ../../libs/httpx, which must be present in the context):
+# Build context — workspace ROOT (two levels up from this file). The build is
+# per-module (GOWORK=off): it uses this service's own go.mod + its
+# `replace … => ../../libs/httpx` directive, so it copies ONLY libs/httpx +
+# this service — never go.work or sibling services. That keeps the layer cache
+# isolated: editing another service does not invalidate this image.
 #
 #   docker build -f services/heartbeat/Dockerfile --tag heartbeat:dev .   ← workspace root
 #
@@ -36,25 +38,25 @@ ARG DEBIAN_CODENAME=bookworm
 FROM golang:${GO_VERSION}-${DEBIAN_CODENAME} AS builder
 WORKDIR /build
 
-# Dependency layer — copy only the workspace + manifest files first so the
-# module download is cached until a go.mod / go.sum / go.work changes.
-COPY go.work go.work.sum* ./
-COPY libs/httpx/go.mod libs/httpx/go.sum libs/httpx/
-COPY services/ping/go.mod services/ping/go.sum services/ping/
-COPY services/heartbeat/go.mod services/heartbeat/go.sum services/heartbeat/
+# Dependency layer — manifests only (this module + its replace target), so the
+# module download is cached until a go.mod / go.sum changes. GOWORK=off makes
+# the build resolve via go.mod's `replace`, not the workspace.
+ENV GOWORK=off
+COPY libs/httpx/go.mod libs/httpx/go.sum ./libs/httpx/
+COPY services/heartbeat/go.mod services/heartbeat/go.sum ./services/heartbeat/
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+    cd services/heartbeat && go mod download
 
-# Source layer.
-COPY libs ./libs
-COPY services ./services
+# Source layer — only what this service compiles.
+COPY libs/httpx ./libs/httpx
+COPY services/heartbeat ./services/heartbeat
 
 # Static, trimmed, stripped binary. CGO off → no dynamic libc dependency, so
 # the distroless/static base suffices.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
-      -o /out/heartbeat ./services/heartbeat
+    cd services/heartbeat && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+      -o /out/heartbeat .
 
 # ── Stage 2 – runtime ────────────────────────────────────────────────────────
 # distroless/static contains only ca-certificates, tzdata and /etc/passwd —
