@@ -8,13 +8,25 @@
 // Members:
 //   libs/httpx                  — shared HTTP server scaffolding (the example common lib)
 //   libs/resilient-http-client  — policy-per-target outbound HTTP client (rate limit, CB, retry…)
+//   libs/pgx                    — shared PostgreSQL pool (pgx)
+//   libs/valkey                 — shared Valkey cache (valkey-go)
+//   libs/kafka                  — shared Kafka producer/consumer (franz-go)
+//   libs/otelx                  — shared OpenTelemetry tracing setup
 //   services/ping               — ping/pong HTTP service
 //   services/heartbeat          — background heartbeat worker (+ health/metrics HTTP)
+//   services/tasks              — Tasks CRUD over Postgres + Valkey + Kafka + OTel
+//   services/consumer           — Kafka consumer worker draining tasks.events
 go 1.25.11
 
 use (
 	./libs/httpx
+	./libs/kafka
+	./libs/otelx
+	./libs/pgx
 	./libs/resilient-http-client
+	./libs/valkey
+	./services/consumer
 	./services/heartbeat
 	./services/ping
+	./services/tasks
 )

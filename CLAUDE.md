@@ -36,8 +36,15 @@ README; this file is only the high-signal, easy-to-miss bits.
 - **Local cross-module deps** resolve via `go.work`; each service `go.mod` also
   has a `replace … => ../../libs/httpx` so `go build` works outside the
   workspace too (e.g. inside the per-service Docker build).
-- **Docker is a singleton** if/when a `docker/local.yml` is added: hardcode the
-  project name + host ports so only one stack runs across worktrees.
+- **Docker deps are a singleton**: `docker/deps.yml` hardcodes the project name
+  (`golang-basics-deps`) + host ports, so one Postgres/Valkey/Kafka stack serves
+  every worktree (`just infra-up`). `docker/stack.yml` runs the `tasks`/`consumer`
+  images on that network (`just stack-up`).
+- **Data services need deps.** `tasks`/`consumer` (and the `pgx`/`valkey`/`kafka`
+  libs) talk to Postgres/Valkey/Kafka. Their integration tests use
+  testcontainers, so `just <mod> test` needs a Docker daemon and the suites skip
+  under `-short` (`just <mod> test-short` for the unit-only subset). `ping`,
+  `heartbeat`, `httpx` and `resilient-http-client` stay dependency-free.
 
 ## Conventions
 

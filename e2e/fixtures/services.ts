@@ -19,6 +19,15 @@ export interface ServiceSpec {
   env: Record<string, string>;
 }
 
+/**
+ * tasks + consumer need Postgres + Valkey + Kafka, so they are only spawned
+ * when E2E_WITH_DEPS=1 (and `just infra-up` has the backing services up). The
+ * default ping/heartbeat suite stays dependency-free. Their health URL is
+ * /readyz, not /healthz: readiness only turns green once every dependency
+ * connects — exactly the precondition tasks.spec.ts relies on.
+ */
+export const WITH_DEPS = process.env.E2E_WITH_DEPS === "1";
+
 export const SERVICES: ServiceSpec[] = [
   {
     name: "ping",
@@ -33,6 +42,22 @@ export const SERVICES: ServiceSpec[] = [
     // Fast tick so the heartbeat_beats_total assertion doesn't wait long.
     env: { HEARTBEAT_HTTP_ADDR: ":8081", HEARTBEAT_INTERVAL: "200ms", HEARTBEAT_LOG_LEVEL: "warn" },
   },
+  ...(WITH_DEPS
+    ? [
+        {
+          name: "tasks",
+          bin: path.join(ROOT, "services/tasks/bin/tasks"),
+          healthUrl: "http://localhost:8082/readyz",
+          env: { TASKS_HTTP_ADDR: ":8082", TASKS_LOG_LEVEL: "warn" },
+        },
+        {
+          name: "consumer",
+          bin: path.join(ROOT, "services/consumer/bin/consumer"),
+          healthUrl: "http://localhost:8083/readyz",
+          env: { CONSUMER_HTTP_ADDR: ":8083", CONSUMER_LOG_LEVEL: "warn" },
+        },
+      ]
+    : []),
 ];
 
 const STATE_FILE = path.join(ROOT, "e2e", ".e2e-state.json");

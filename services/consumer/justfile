@@ -1,0 +1,81 @@
+# consumer justfile
+# Install: cargo install just | brew install just | mise use just
+# Usage:   just <recipe>      | just --list
+
+# Show all available recipes
+default:
+    @just --list --unsorted
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+
+# Compile the package (also surfaces type errors fast)
+build:
+    go build ./...
+
+# Build a static, stripped release binary into ./bin/consumer
+release:
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/consumer .
+
+# Build and run the worker locally (CONSUMER_* env vars apply; needs Kafka up)
+run *args:
+    go run . {{args}}
+
+# Vet + type-check without producing artefacts (fastest feedback)
+check:
+    go vet ./...
+
+# ── Test ──────────────────────────────────────────────────────────────────────
+
+# Run all tests. The integration test spins up Kafka via testcontainers.
+test *args:
+    go test ./... {{args}}
+
+# Unit tests only — skips the container-backed integration test (no Docker)
+test-short:
+    go test -short ./...
+
+# Run tests with the race detector and verbose output
+test-verbose:
+    go test -race -v ./...
+
+# ── Coverage ──────────────────────────────────────────────────────────────────
+
+# Run all tests and print a per-function coverage summary
+cov:
+    go test -coverprofile=coverage.out ./...
+    go tool cover -func=coverage.out
+
+# ── Lint & Format ─────────────────────────────────────────────────────────────
+
+# golangci-lint — the aggregate linter (config in repo-root .golangci.yml)
+lint:
+    golangci-lint run
+
+# golangci-lint — auto-fix where possible
+lint-fix:
+    golangci-lint run --fix
+
+# Format all source files in-place (gofmt + import grouping)
+fmt:
+    gofmt -w .
+    golangci-lint fmt
+
+# Check formatting without modifying files (CI gate)
+fmt-check:
+    test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+
+# ── Modules & Security ────────────────────────────────────────────────────────
+
+# Tidy go.mod / go.sum
+tidy:
+    go mod tidy
+
+# Known-vulnerability scan of this module's dependency graph
+audit:
+    go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+# ── CI ────────────────────────────────────────────────────────────────────────
+
+# Full per-package CI pipeline: format → vet → lint → unit tests
+ci: fmt-check check lint test-short
+    @echo "CI passed"

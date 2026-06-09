@@ -1,0 +1,95 @@
+# Local development dependencies for the Postgres/Valkey/Kafka services.
+#
+# Services:
+#   postgres   — PostgreSQL 18                 localhost:5432
+#   valkey     — Valkey 9 (Redis-compatible)   localhost:6379
+#   kafka      — Apache Kafka 3.9 (KRaft)       localhost:9092
+#
+# Usage (from the master worktree root):
+#   just infra-up      |  docker compose -f docker/deps.yml up -d
+#   just infra-down    |  docker compose -f docker/deps.yml down -v
+#
+# App config for HOST processes (e.g. `just tasks run`):
+#   TASKS_DATABASE_URL  postgres://app:app@localhost:5432/app?sslmode=disable
+#   TASKS_VALKEY_URL    valkey://localhost:6379
+#   TASKS_KAFKA_BROKERS localhost:9092
+#
+# Containers on this network reach the broker at kafka:9092 (the INTERNAL
+# listener); host processes use the localhost:9092 EXTERNAL listener. The two
+# listeners are why the advertised addresses differ — a Kafka client always
+# reconnects to the advertised address, so it must be reachable from wherever
+# the client runs. See docker/stack.yml for the in-network app wiring.
+
+name: golang-basics-deps
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: golang-basics-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "5432:5432"
+    volumes:
+      # Postgres 18 wants a single mount at /var/lib/postgresql (it places the
+      # data in a versioned subdirectory itself).
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  valkey:
+    image: valkey/valkey:9.0
+    container_name: golang-basics-valkey
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "60", "1", "--loglevel", "notice"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  kafka:
+    image: confluentinc/confluent-local:7.5.0
+    container_name: golang-basics-kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092" # host → HOST listener (advertised as localhost:9092)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+      # Three listeners: CONTROLLER (KRaft), BROKER (in-network, advertised as
+      # kafka:29092 for app containers) and HOST (advertised as localhost:9092
+      # for processes running on the host).
+      KAFKA_LISTENERS: CONTROLLER://0.0.0.0:9093,BROKER://0.0.0.0:29092,HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka:29092,HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,BROKER:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+volumes:
+  postgres_data:
+  valkey_data:
+  kafka_data:

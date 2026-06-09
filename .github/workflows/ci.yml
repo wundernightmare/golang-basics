@@ -48,7 +48,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [libs/httpx, libs/resilient-http-client, services/ping, services/heartbeat]
+        module:
+          - libs/httpx
+          - libs/resilient-http-client
+          - libs/pgx
+          - libs/valkey
+          - libs/kafka
+          - libs/otelx
+          - services/ping
+          - services/heartbeat
+          - services/tasks
+          - services/consumer
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -63,20 +73,43 @@ jobs:
         with:
           version: v${{ needs.versions.outputs.golangci }}
           working-directory: ${{ matrix.module }}
-      - name: go test (race)
+      # Unit tests only here — the container-backed suites run in `integration`.
+      - name: go test (short, race)
         working-directory: ${{ matrix.module }}
-        run: go test -race ./...
+        run: go test -short -race ./...
+
+  # Container-backed integration tests (Postgres / Valkey / Kafka via
+  # testcontainers). GitHub runners ship a working Docker daemon, so the suites
+  # that skip locally when Docker is absent run for real here (CI is set, which
+  # makes a container-start failure fail the job instead of skipping).
+  integration:
+    needs: versions
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [libs/pgx, libs/valkey, libs/kafka, services/tasks, services/consumer]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.versions.outputs.go }}
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: go test (integration)
+        working-directory: ${{ matrix.module }}
+        run: go test ./...
 
   # Final status check for branch protection.
   gate:
     runs-on: ubuntu-latest
-    needs: [fmt, lint-test]
+    needs: [fmt, lint-test, integration]
     if: always()
     steps:
       - name: verify all jobs passed
         run: |
           [ "${{ needs.fmt.result }}" = "success" ] || exit 1
           [ "${{ needs.lint-test.result }}" = "success" ] || exit 1
+          [ "${{ needs.integration.result }}" = "success" ] || exit 1
           echo "CI gate passed"
 
   e2e:

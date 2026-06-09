@@ -5,8 +5,14 @@ workspace: a `go.work` workspace of service modules + shared library modules
 (the Go analogue of "one crate = one module"), a `just`-driven build/test/lint/
 security/CI surface, per-package justfiles, multi-stage distroless Docker
 images, a Playwright e2e suite, and k6 load tests. It exists as a learning /
-template scaffold — two tiny services and one shared library, wired up the way
-a real Go monorepo would be.
+template scaffold, wired up the way a real Go monorepo would be.
+
+It comes in two layers: **dependency-free** building blocks (the `ping` HTTP
+service, the `heartbeat` worker and the `httpx` / `resilient-http-client` libs)
+and a **data-services** vertical that adds real infrastructure — the `tasks`
+CRUD service (PostgreSQL + Valkey cache + Kafka producer + OpenTelemetry +
+RFC 9457 errors) and the `consumer` worker that drains the events `tasks`
+produces — backed by the `pgx` / `valkey` / `kafka` / `otelx` libs.
 
 It lives in a **bare-repo worktree container** (see [Worktrees](#worktrees-multi-branch-dev)),
 exactly like its Rust sibling: the repo root is a `.bare/` container and the
@@ -20,13 +26,20 @@ code lives in per-branch worktrees (`master/` is canonical).
 | ----------------------------------- | ----------- | ----------------------------- | ------------------------------------------------------------------------------------------------- |
 | [`services/ping`](services/ping)           | HTTP service | `:8080`                      | Ping/pong HTTP service. `GET /ping` → `pong`, with `?msg=` echo + `/version`.                      |
 | [`services/heartbeat`](services/heartbeat) | Worker       | `:8081` (health/metrics)     | Background ticker worker — emits a beat + bumps `heartbeat_beats_total` every interval.            |
-| [`libs/httpx`](libs/httpx)                 | Library      | —                            | Shared HTTP scaffolding: gin engine, structured logging, Prometheus metrics, health, graceful shutdown, env config. |
+| [`services/tasks`](services/tasks)         | HTTP service | `:8082`                      | Tasks CRUD over **Postgres + Valkey + Kafka**, traced, with `problem+json` errors. Publishes `task.created`. |
+| [`services/consumer`](services/consumer)   | Worker       | `:8083` (health/metrics)     | Kafka consumer draining `tasks.events`; bumps `consumer_tasks_consumed_total`.                     |
+| [`libs/httpx`](libs/httpx)                 | Library      | —                            | Shared HTTP scaffolding: gin engine, structured logging, Prometheus metrics, health, graceful shutdown, env + YAML config, RFC 9457 `Problem`. |
 | [`libs/resilient-http-client`](libs/resilient-http-client) | Library | —              | Policy-per-target **outbound** HTTP client: rate limiting, circuit breaker, adaptive concurrency, jittered retry, response cache, coalescing, fallbacks, metrics. |
+| [`libs/pgx`](libs/pgx)                     | Library      | —                            | PostgreSQL pool (`jackc/pgx`): env config, readiness check, boot-time migrations.                  |
+| [`libs/valkey`](libs/valkey)               | Library      | —                            | Valkey cache (`valkey-go`): get/set/del, readiness check, generic cache-aside helper.              |
+| [`libs/kafka`](libs/kafka)                 | Library      | —                            | Kafka producer + consumer (`franz-go`): sync publish, at-least-once consumer-group loop, readiness. |
+| [`libs/otelx`](libs/otelx)                 | Library      | —                            | OpenTelemetry tracing: OTLP exporter, W3C propagation, gin middleware (opt-in).                    |
 
-The dependency graph is `services/* → libs/*`. Both services — an HTTP-first
-one and a worker — reuse `httpx` for their `/healthz`, `/readyz` and `/metrics`
-surface, so a worker is as observable as a server; `resilient-http-client` is
-the outbound-call counterpart to that inbound scaffolding.
+The dependency graph is `services/* → libs/*`. Every service — HTTP-first or
+worker — reuses `httpx` for its `/healthz`, `/readyz` and `/metrics` surface, so
+a worker is as observable as a server. `ping`/`heartbeat` stay dependency-free;
+`tasks`/`consumer` compose the data libs (`pgx`/`valkey`/`kafka`/`otelx`) and
+need the backing services from [`docker/deps.yml`](docker/deps.yml) (`just infra-up`).
 
 ---
 
@@ -35,15 +48,22 @@ the outbound-call counterpart to that inbound scaffolding.
 ```
 golang-basics/              ← bare-repo CONTAINER (.bare + .git pointer + wt + CLAUDE.md)
 └── master/                 ← canonical worktree (this tree)
-    ├── go.work             ← workspace: ties the four modules together
+    ├── go.work             ← workspace: ties all ten modules together
     ├── justfile            ← workspace task runner (fan-out + delegation)
     ├── mise.toml           ← pinned toolchain (go, golangci-lint, node, k6, AppSec tools)
     ├── lefthook.yml        ← optional git hooks
     ├── .golangci.yml       ← lint config
-    ├── libs/httpx/         ← shared library module (go.mod + justfile + README + tests)
+    ├── libs/httpx/         ← shared HTTP scaffolding (engine, health, metrics, problem+json, YAML config)
     ├── libs/resilient-http-client/ ← outbound HTTP client library (rate limit, CB, retry, cache…)
+    ├── libs/pgx/           ← PostgreSQL pool library
+    ├── libs/valkey/        ← Valkey cache library
+    ├── libs/kafka/         ← Kafka producer/consumer library
+    ├── libs/otelx/         ← OpenTelemetry tracing library
     ├── services/ping/      ← HTTP service module (+ Dockerfile)
     ├── services/heartbeat/ ← worker module (+ Dockerfile)
+    ├── services/tasks/     ← Postgres+Valkey+Kafka CRUD service (+ Dockerfile)
+    ├── services/consumer/  ← Kafka consumer worker (+ Dockerfile)
+    ├── docker/             ← deps.yml (Postgres+Valkey+Kafka) + stack.yml (the app images)
     ├── e2e/                ← Playwright API tests (spawns the service binaries)
     ├── benchmarks/         ← k6 load tests
     └── scripts/            ← host-services-spawn.sh (just up / down)
@@ -60,15 +80,26 @@ mise trust && mise install        # or: just setup
 # 2. Build + test everything.
 just ci                           # fmt-check → vet → lint → test
 
-# 3. Run the services on the host.
+# 3. Run the dependency-free services on the host.
 just up                           # ping :8080 + heartbeat :8081
 curl -s localhost:8080/ping | jq .
 curl -s localhost:8081/metrics | grep heartbeat_beats_total
 just down
 
-# 4. Exercise them end-to-end / under load.
-just e2e                          # Playwright (spawns the binaries itself)
+# 4. Run the data-services vertical (Postgres + Valkey + Kafka).
+just infra-up                     # docker compose deps (postgres/valkey/kafka)
+just tasks run &                  # tasks :8082
+just consumer run &               # consumer :8083
+curl -s -XPOST localhost:8082/tasks -d '{"title":"hello"}' | jq .
+curl -s localhost:8083/metrics | grep consumer_tasks_consumed_total
+#   …or run the whole thing in containers instead:
+just stack-up                     # deps + tasks + consumer images, all wired up
+
+# 5. Exercise them end-to-end / under load.
+just e2e                          # Playwright, dependency-free services
+just e2e-deps                     # Playwright incl. tasks + consumer (needs `just infra-up`)
 just bench-smoke                  # k6, 50 VUs × 30s against ping
+just bench-tasks smoke            # k6 against tasks (needs `just infra-up`)
 ```
 
 ---
@@ -99,12 +130,12 @@ just clean           # remove build/test/coverage artefacts
 Forward any recipe to a single module's justfile:
 
 ```sh
-just httpx <recipe>
-just ping <recipe>
-just heartbeat <recipe>
+just httpx <recipe>      # also: resilient, pgx, valkey, kafka, otelx
+just ping <recipe>       # also: heartbeat, tasks, consumer
 
 # examples
 just ping test
+just tasks test-integration   # full PG+Valkey+Kafka stack via testcontainers
 just httpx cov-html
 just heartbeat lint
 ```
@@ -112,9 +143,22 @@ just heartbeat lint
 ### Run a recipe across every module
 
 ```sh
-just each test         # in dependency order: httpx → ping → heartbeat
+just each test         # in dependency order: libs first, then services
 just each lint
 just each ci
+```
+
+### Infra dependencies (Postgres + Valkey + Kafka)
+
+`tasks` and `consumer` need backing services. `docker/deps.yml` brings them up;
+`docker/stack.yml` runs the app images on the same network.
+
+```sh
+just infra-up        # postgres :5432 + valkey :6379 + kafka :9092
+just infra-logs      # tail them
+just infra-down      # stop + drop volumes
+just stack-up        # deps + build & run the tasks/consumer images
+just stack-down      # tear the whole stack down
 ```
 
 ---
@@ -127,11 +171,15 @@ waits for `/healthz`, runs the specs, then stops them. See
 
 ```sh
 just e2e-install     # pnpm install (once)
-just e2e             # build binaries + run the suite
+just e2e             # build binaries + run the dependency-free suite
+just e2e-deps        # + tasks & consumer specs (needs `just infra-up`)
 just e2e-ui          # Playwright UI
 just e2e-filter ping # subset
 just e2e-report      # open last report
 ```
+
+The `tasks`/`consumer` specs run only under `E2E_WITH_DEPS=1` (set by
+`just e2e-deps`); otherwise they skip, so the default suite stays Docker-free.
 
 ## Benchmarks (k6)
 
@@ -139,11 +187,12 @@ Profiles mirror the Rust sibling repo (`smoke` / `load` / `stress` / `soak` /
 `peak`). See [`benchmarks/README.md`](benchmarks/README.md).
 
 ```sh
-just bench-smoke     # 50 VUs × 30s
-just bench-load      # ramp 0→500 VUs
-just bench-stress    # ramp 0→2000 VUs
-just bench-soak      # 500 VUs × 30m
-just bench-peak      # constant-arrival-rate 25k req/s × 1m
+just bench-smoke         # ping: 50 VUs × 30s
+just bench-load          # ping: ramp 0→500 VUs
+just bench-stress        # ping: ramp 0→2000 VUs
+just bench-soak          # ping: 500 VUs × 30m
+just bench-peak          # ping: constant-arrival-rate 25k req/s × 1m
+just bench-tasks smoke   # tasks (create+read): needs `just infra-up`
 ```
 
 ---
@@ -176,14 +225,24 @@ just docker-verify ping dev   # offline verify against cosign.pub
 ## Docker
 
 Each service has a multi-stage **distroless** Dockerfile (static `CGO_ENABLED=0`
-binary on `gcr.io/distroless/static-debian12:nonroot`, uid 65532, no shell). The
-build context is the **workspace root** so the build sees `go.work` + every
-module:
+binary on `gcr.io/distroless/static-debian12:nonroot`, uid 65532, no shell) —
+including `tasks`/`consumer`, since `pgx`, `valkey-go` and `franz-go` are all
+pure Go (no `libpq`/`librdkafka` to link). The build context is the **workspace
+root** so the build sees every module it imports:
 
 ```sh
 docker build -f services/ping/Dockerfile -t ping:dev .
 docker run --rm -p 8080:8080 ping:dev
+
+# the data-services stack (deps + app images), one command:
+just stack-up        # docker compose deps.yml + stack.yml
+curl -s -XPOST localhost:8082/tasks -d '{"title":"hi"}' | jq .
+just stack-down
 ```
+
+`docker/deps.yml` runs Postgres + Valkey + Kafka (KRaft, dual listeners so both
+host processes and in-network containers reach the broker); `docker/stack.yml`
+runs the `tasks`/`consumer` images against it.
 
 ---
 
@@ -216,8 +275,9 @@ What `git worktree add` does **not** do, and `wt` does:
 
 **Build cache.** Go's `GOCACHE` is global and content-addressed, so build/test
 reuse across worktrees is automatic — no per-worktree cache wiring (unlike the
-Rust sibling repo's sccache). **Docker** `docker/local.yml` would be a singleton
-(fixed project name + host ports) — run one stack and reach it at `localhost:<port>`.
+Rust sibling repo's sccache). **Docker** `docker/deps.yml` is a singleton (fixed
+project name `golang-basics-deps` + host ports) — run one deps stack and every
+worktree reaches it at `localhost:<port>`.
 
 ---
 
@@ -230,6 +290,12 @@ Rust sibling repo's sccache). **Docker** `docker/local.yml` would be a singleton
 - **just** drives everything (language-agnostic, same as the Rust sibling).
 - **gin** for HTTP, **log/slog** for logging, **prometheus/client_golang** for
   metrics, **testify** for assertions, **caarlos0/env** for config.
+- Data libs use the actively-maintained, pure-Go drivers: **jackc/pgx**
+  (Postgres), **valkey-io/valkey-go** (Valkey), **twmb/franz-go** (Kafka) and
+  **go.opentelemetry.io/otel** (tracing).
+- **testcontainers-go** backs the integration suites — `just <module> test`
+  spins up real Postgres/Valkey/Kafka, so those tests need a Docker daemon (they
+  skip under `-short`).
 
 See [`CLAUDE.md`](CLAUDE.md) for the high-signal, easy-to-miss bits and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev workflow.
