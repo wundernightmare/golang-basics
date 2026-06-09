@@ -240,7 +240,7 @@ curl -s -XPOST localhost:8082/tasks -d '{"title":"hi"}' | jq .
 just stack-down
 ```
 
-`docker/deps.yml` runs Postgres + Valkey + Kafka (KRaft, dual listeners so both
+`docker/deps.yml` runs Postgres + Valkey + Redpanda (the Kafka API broker, dual listeners so both
 host processes and in-network containers reach the broker); `docker/stack.yml`
 runs the `tasks`/`consumer` images against it.
 
