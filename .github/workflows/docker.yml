@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [ping, heartbeat]
+        service: [ping, heartbeat, tasks, consumer]
     steps:
       - uses: actions/checkout@v4
 
