@@ -7,7 +7,7 @@
 #   just stack-up      # brings deps up, then builds + runs the app images
 #   just stack-down    # tears everything (app + deps + volumes) down
 #
-# The app containers reach the broker at kafka:29092 (the BROKER listener), and
+# The app containers reach the broker at redpanda:29092 (the INTERNAL listener), and
 # Postgres/Valkey by their compose service names — see docker/deps.yml.
 
 name: golang-basics-stack
@@ -24,7 +24,7 @@ services:
       TASKS_HTTP_ADDR: ":8082"
       TASKS_DATABASE_URL: postgres://app:app@postgres:5432/app?sslmode=disable
       TASKS_VALKEY_URL: valkey://valkey:6379
-      TASKS_KAFKA_BROKERS: kafka:29092
+      TASKS_KAFKA_BROKERS: redpanda:29092
       TASKS_KAFKA_TOPIC: tasks.events
       TASKS_LOG_FORMAT: json
     ports:
@@ -41,7 +41,7 @@ services:
     restart: on-failure
     environment:
       CONSUMER_HTTP_ADDR: ":8083"
-      CONSUMER_KAFKA_BROKERS: kafka:29092
+      CONSUMER_KAFKA_BROKERS: redpanda:29092
       CONSUMER_KAFKA_TOPIC: tasks.events
       CONSUMER_KAFKA_GROUP: tasks-consumer
       CONSUMER_LOG_FORMAT: json
