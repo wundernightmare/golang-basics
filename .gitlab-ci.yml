@@ -1,0 +1,166 @@
+# GitLab CI — mirrors .github/workflows/{ci,appsec,docker}.yml.
+#
+# golang-basics is a go.work workspace; a workspace root is not itself a module,
+# so the lint/test jobs fan out over each module (parallel:matrix), exactly like
+# the GitHub matrices. Container-backed integration tests + Docker builds use a
+# Docker-in-Docker service.
+#
+# Tool versions mirror mise.toml (Go 1.25.x, golangci-lint 2.6.1, AppSec tools).
+
+stages:
+  - check
+  - integration
+  - security
+  - docker
+
+variables:
+  GOTOOLCHAIN: local
+
+# ── check: gofmt gate + per-module vet / lint / unit tests ────────────────────
+fmt:
+  stage: check
+  image: golang:1.25-bookworm
+  script:
+    - out="$(gofmt -l .)"; if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
+
+lint-test:
+  stage: check
+  image: golang:1.25-bookworm
+  parallel:
+    matrix:
+      - MODULE:
+          - libs/httpx
+          - libs/resilient-http-client
+          - libs/pgx
+          - libs/valkey
+          - libs/kafka
+          - libs/otelx
+          - services/ping
+          - services/heartbeat
+          - services/tasks
+          - services/consumer
+  before_script:
+    - curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.6.1
+    - export PATH="$(go env GOPATH)/bin:$PATH"
+  script:
+    - cd "$MODULE"
+    - go vet ./...
+    - golangci-lint run
+    - go test -short -race ./...
+
+# ── integration: testcontainers (Postgres / Valkey / Kafka) ───────────────────
+# Needs a Docker daemon — provided by the dind service. CI=true makes the suites
+# fail (not skip) if a container cannot start, and the host override points
+# testcontainers at the dind host.
+integration:
+  stage: integration
+  image: golang:1.25-bookworm
+  services:
+    - name: docker:27-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    TESTCONTAINERS_HOST_OVERRIDE: docker
+    TESTCONTAINERS_RYUK_DISABLED: "true"
+    CI: "true"
+  parallel:
+    matrix:
+      - MODULE: [libs/pgx, libs/valkey, libs/kafka, services/tasks, services/consumer]
+  script:
+    - cd "$MODULE"
+    - go test ./...
+
+# ── e2e: Playwright API suite against the spawned service binaries + deps ──────
+e2e:
+  stage: integration
+  image: golang:1.25-bookworm
+  services:
+    - name: docker:27-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    - apt-get install -y nodejs docker.io
+    - corepack enable && corepack prepare pnpm@latest --activate
+  script:
+    - docker compose -f docker/deps.yml up -d
+    - for s in ping heartbeat tasks consumer; do (cd "services/$s" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "bin/$s" .); done
+    - pnpm install --frozen-lockfile || pnpm install
+    - cd e2e && E2E_WITH_DEPS=1 pnpm test
+  after_script:
+    - docker compose -f docker/deps.yml down -v || true
+
+# ── security (AppSec) — mirrors appsec.yml ────────────────────────────────────
+secret-detection:
+  stage: security
+  image:
+    name: zricethezav/gitleaks:latest
+    entrypoint: [""]
+  script:
+    - gitleaks detect --source . --config .gitleaks.toml --verbose
+
+sast:
+  stage: security
+  image:
+    name: semgrep/semgrep:latest
+    entrypoint: [""]
+  script:
+    - semgrep ci --config p/owasp-top-ten --config p/golang
+
+dependency-scanning:
+  stage: security
+  image: golang:1.25-bookworm
+  script:
+    - go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.3.8
+    - "$(go env GOPATH)/bin/osv-scanner scan --config=osv-scanner.toml --recursive ."
+
+govulncheck:
+  stage: security
+  image: golang:1.25-bookworm
+  parallel:
+    matrix:
+      - MODULE: [libs/httpx, libs/resilient-http-client, libs/pgx, libs/valkey, libs/kafka, libs/otelx, services/ping, services/heartbeat, services/tasks, services/consumer]
+  script:
+    - cd "$MODULE"
+    - go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+hadolint:
+  stage: security
+  image:
+    name: hadolint/hadolint:latest-debian
+    entrypoint: [""]
+  parallel:
+    matrix:
+      - DOCKERFILE: [services/ping/Dockerfile, services/heartbeat/Dockerfile, services/tasks/Dockerfile, services/consumer/Dockerfile]
+  script:
+    - hadolint --config .hadolint.yaml "$DOCKERFILE"
+
+# ── docker: build each image, generate an SBOM, scan for CVEs ─────────────────
+docker-build-scan:
+  stage: docker
+  image: docker:27
+  services:
+    - name: docker:27-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    GRYPE_DB_VALIDATE_AGE: "false"
+  parallel:
+    matrix:
+      - SERVICE: [ping, heartbeat, tasks, consumer]
+  before_script:
+    - apk add --no-cache curl bash
+    - curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin v1.44.0
+    - curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin v0.112.0
+  script:
+    - docker build -f "services/$SERVICE/Dockerfile" -t "golang-basics-$SERVICE:ci" .
+    - syft "golang-basics-$SERVICE:ci" -o cyclonedx-json=sbom-$SERVICE.json
+    - grype "golang-basics-$SERVICE:ci" --config .grype.yaml --fail-on high
+  artifacts:
+    paths:
+      - sbom-*.json
+    expire_in: 1 week
