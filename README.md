@@ -283,10 +283,9 @@ worktree reaches it at `localhost:<port>`.
 
 ## Toolchain notes
 
-- **Go**: module directives target `go 1.25.0`; the toolchain is pinned to the
-  latest `1.25.x` in `mise.toml` because golangci-lint (and most of the Go tool
-  ecosystem) tracks one minor behind the bleeding edge. Bump to 1.26 once it's
-  broadly supported.
+- **Go**: module directives target `go 1.27.0`; the toolchain is pinned to the
+  latest `1.27.x` in `mise.toml`. golangci-lint 2.13.2 is itself built with
+  go1.27.0, so the linter and the module target move together.
 - **just** drives everything (language-agnostic, same as the Rust sibling).
 - **gin** for HTTP, **log/slog** for logging, **prometheus/client_golang** for
   metrics, **testify** for assertions, **caarlos0/env** for config.

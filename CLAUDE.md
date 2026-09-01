@@ -18,11 +18,11 @@ README; this file is only the high-signal, easy-to-miss bits.
 
 ## Go version
 
-- Module directives target `go 1.25.0`; the toolchain is pinned to `1.25.x` in
-  `mise.toml`. golangci-lint can't typecheck against a go1.26 stdlib yet, so do
-  **not** bump module/toolchain to 1.26 until the linter supports it (CI would
-  go red). If `golangci-lint` panics with "file requires newer Go version",
-  that's the symptom.
+- Module directives target `go 1.27.0`; the toolchain is pinned to `1.27.x` in
+  `mise.toml`. Keep the two in step: golangci-lint has to be built against a
+  stdlib at least as new as the module target, or it panics with "file requires
+  newer Go version" and CI goes red. The pinned golangci-lint 2.13.2 is built
+  with go1.27.0, so bump the linter first, then the module/toolchain target.
 
 ## Dev workflow
 

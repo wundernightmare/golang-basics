@@ -5,7 +5,7 @@
 # the GitHub matrices. Container-backed integration tests + Docker builds use a
 # Docker-in-Docker service.
 #
-# Tool versions mirror mise.toml (Go 1.25.x, golangci-lint 2.6.1, AppSec tools).
+# Tool versions mirror mise.toml (Go 1.27.x, golangci-lint 2.13.2, AppSec tools).
 
 stages:
   - check
@@ -19,13 +19,13 @@ variables:
 # ── check: gofmt gate + per-module vet / lint / unit tests ────────────────────
 fmt:
   stage: check
-  image: golang:1.25-bookworm
+  image: golang:1.27-bookworm
   script:
     - out="$(gofmt -l .)"; if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
 
 lint-test:
   stage: check
-  image: golang:1.25-bookworm
+  image: golang:1.27-bookworm
   parallel:
     matrix:
       - MODULE:
@@ -54,7 +54,7 @@ lint-test:
 # testcontainers at the dind host.
 integration:
   stage: integration
-  image: golang:1.25-bookworm
+  image: golang:1.27-bookworm
   services:
     - name: docker:27-dind
       alias: docker
@@ -74,7 +74,7 @@ integration:
 # ── e2e: Playwright API suite against the spawned service binaries + deps ──────
 e2e:
   stage: integration
-  image: golang:1.25-bookworm
+  image: golang:1.27-bookworm
   services:
     - name: docker:27-dind
       alias: docker
@@ -112,14 +112,14 @@ sast:
 
 dependency-scanning:
   stage: security
-  image: golang:1.25-bookworm
+  image: golang:1.27-bookworm
   script:
     - go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.3.8
     - "$(go env GOPATH)/bin/osv-scanner scan --config=osv-scanner.toml --recursive ."
 
 govulncheck:
   stage: security
-  image: golang:1.25-bookworm
+  image: golang:1.27-bookworm
   parallel:
     matrix:
       - MODULE: [libs/httpx, libs/resilient-http-client, libs/pgx, libs/valkey, libs/kafka, libs/otelx, services/ping, services/heartbeat, services/tasks, services/consumer]

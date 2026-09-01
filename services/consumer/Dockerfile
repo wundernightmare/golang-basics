@@ -19,7 +19,7 @@
 #   CONSUMER_OTEL_ENABLED   true to export traces
 # ─────────────────────────────────────────────────────────────────────────────
 
-ARG GO_VERSION=1.25
+ARG GO_VERSION=1.27
 ARG DEBIAN_CODENAME=bookworm
 
 # ── Stage 1 – builder ────────────────────────────────────────────────────────
