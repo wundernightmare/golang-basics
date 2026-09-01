@@ -9,3 +9,16 @@
 # [[IgnoredVulns]]
 # id = "GO-2024-XXXX"
 # reason = "not reachable: the vulnerable code path is never called. Remove when dep bumps past vX.Y.Z."
+
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+reason = """
+golang.org/x/crypto/openpgp is unmaintained and unsafe by design. The advisory
+covers every version of golang.org/x/crypto (introduced at 0, no fixed
+version), so it cannot be pinned out. Nothing here imports openpgp — it is
+absent from the build graph of every module (`go list -deps` finds no
+openpgp package) and x/crypto is present only transitively for ssh/hkdf.
+Remove this waiver if a direct or transitive import of
+golang.org/x/crypto/openpgp ever appears, or if upstream splits the package
+out and publishes a fixed version.
+"""

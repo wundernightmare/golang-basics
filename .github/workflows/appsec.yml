@@ -37,7 +37,7 @@ jobs:
           go-version: stable
       # google/osv-scanner-action is a reusable workflow, not a step action, so
       # install the pinned scanner binary directly and run it.
-      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.3.8
+      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
       - run: osv-scanner scan --config=osv-scanner.toml --recursive .
 
   govulncheck:
