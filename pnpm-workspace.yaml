@@ -5,10 +5,17 @@
 packages:
   - e2e
 
+# pnpm 11 turns an ignored build script into a hard install failure, so every
+# postinstall we actually want has to be approved here (`pnpm approve-builds`).
+# esbuild fetches its platform binary; lefthook installs the git hook runner.
+allowBuilds:
+  esbuild: true
+  lefthook: true
+
 catalog:
-  "@playwright/test": ^1.49.0
-  "@types/node": ^24.0.0
-  typescript: ^5.7.0
-  tsx: ^4.19.0
-  prettier: ^3.4.0
-  oxlint: ^1.0.0
+  "@playwright/test": ^1.62.0
+  "@types/node": ^26.0.0
+  typescript: ^7.0.0
+  tsx: ^4.23.0
+  prettier: ^3.9.0
+  oxlint: ^1.80.0

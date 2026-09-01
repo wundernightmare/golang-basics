@@ -16,7 +16,7 @@
 //   services/heartbeat          — background heartbeat worker (+ health/metrics HTTP)
 //   services/tasks              — Tasks CRUD over Postgres + Valkey + Kafka + OTel
 //   services/consumer           — Kafka consumer worker draining tasks.events
-go 1.25.11
+go 1.27.0
 
 use (
 	./libs/httpx
