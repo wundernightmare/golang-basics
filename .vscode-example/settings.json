@@ -1,0 +1,74 @@
+{
+  // Copy this file to .vscode/settings.json
+  // Merges with any existing settings you already have.
+
+  // ── Editor ─────────────────────────────────────────────────────────────────
+
+  "editor.formatOnSave": true,
+  "editor.rulers": [100],
+
+  // ── Go ─────────────────────────────────────────────────────────────────────
+
+  "[go]": {
+    "editor.defaultFormatter": "golang.go",
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+
+  // Point the Go extension at the mise-pinned binaries (mise.toml) instead of
+  // letting it `go install` its own into GOPATH/bin. Without this the versions
+  // drift per machine and the pins in mise.toml are decorative.
+  //
+  // These are mise *shims*: each resolves the version from the mise.toml of
+  // whatever directory it runs in, so a worktree on a different pin still gets
+  // the right binary. Run `mise install` once per clone to populate them, and
+  // `mise trust` in a fresh worktree or they fail with a misleading
+  // "error parsing config file".
+  "go.toolsManagement.autoUpdate": false,
+  "go.alternateTools": {
+    "go": "${userHome}/.local/share/mise/shims/go",
+    "gopls": "${userHome}/.local/share/mise/shims/gopls",
+    "dlv": "${userHome}/.local/share/mise/shims/dlv",
+    "gotests": "${userHome}/.local/share/mise/shims/gotests",
+    "gomodifytags": "${userHome}/.local/share/mise/shims/gomodifytags",
+    "impl": "${userHome}/.local/share/mise/shims/impl",
+    "golangci-lint": "${userHome}/.local/share/mise/shims/golangci-lint"
+  },
+
+  // Lint with the same tool and config as `just lint` / CI (.golangci.yml at
+  // the repo root; golangci-lint walks up from the package to find it).
+  "go.lintTool": "golangci-lint",
+  "go.lintOnSave": "package",
+
+  // Vet on save mirrors `just check`.
+  "go.vetOnSave": "package",
+
+  // This is a go.work workspace of ten modules — gopls picks that up from
+  // go.work at the repo root, so open the repo root, not an individual module.
+  "gopls": {
+    "semanticTokens": true,
+    // golangci-lint's `standard` set (.golangci.yml) already runs staticcheck;
+    // letting gopls run it too double-reports every finding in the Problems pane.
+    "staticcheck": false
+  },
+
+  // The race detector is what `just test-race` and the CI test job use.
+  "go.testFlags": ["-race"],
+  "go.testTimeout": "120s",
+
+  // ── YAML ───────────────────────────────────────────────────────────────────
+
+  "[yaml]": {
+    "editor.defaultFormatter": "redhat.vscode-yaml"
+  },
+
+  // ── Files ──────────────────────────────────────────────────────────────────
+
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "files.exclude": {
+    "**/bin": true,
+    "**/node_modules": true
+  }
+}

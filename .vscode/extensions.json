@@ -1,0 +1,25 @@
+{
+  // Committed on purpose — .gitignore ignores .vscode/ except this file, so the
+  // recommendations are shared while everyone's personal settings stay local.
+  // VS Code prompts to install these on first open; no copying needed.
+  "recommendations": [
+    // Go language support — gopls, dlv debugging, test lenses, refactorings.
+    // Its tool binaries are pinned in mise.toml and wired up in settings.json.
+    "golang.go",
+
+    // just — syntax highlighting for the justfile that drives every workflow
+    "nefrob.vscode-just-syntax",
+
+    // Docker — docker/deps.yml + stack.yml editing, container management
+    "ms-azuretools.vscode-docker",
+
+    // YAML — .golangci.yml, compose files, GitHub workflows
+    "redhat.vscode-yaml",
+
+    // TOML — mise.toml, osv-scanner.toml
+    "tamasfe.even-better-toml",
+
+    // Markdown preview — README, CLAUDE.md
+    "yzhang.markdown-all-in-one"
+  ]
+}

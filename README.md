@@ -296,5 +296,56 @@ worktree reaches it at `localhost:<port>`.
   spins up real Postgres/Valkey/Kafka, so those tests need a Docker daemon (they
   skip under `-short`).
 
+## VS Code
+
+The Go extension normally `go install`s its helper binaries into `GOPATH/bin` at
+whatever version is latest that day, per machine. They are pinned in
+`mise.toml` instead, so every clone and worktree resolves the same ones:
+
+| Tool | Version | What the extension uses it for |
+|---|---|---|
+| `gopls` | 0.23.0 | language server — completion, go-to-def, diagnostics, refactors |
+| `dlv` | 1.27.1 | debugger — F5, breakpoints, debug-a-single-test |
+| `gotests` | 1.9.0 | *Go: Generate Unit Tests* |
+| `gomodifytags` | 1.17.0 | *Go: Add/Remove Struct Tags* |
+| `impl` | 1.5.0 | *Go: Generate Interface Stubs* |
+
+They use mise's `go:` backend (`go install` from source against the pinned Go),
+so the **first** `mise install` after cloning takes a few minutes; after that
+they are cached like any other tool.
+
+`goplay` (*Go: Run on Go Playground*) is deliberately not pinned — its only
+release is v1.0.0 from 2016, which predates Go modules and has no `go.mod`, so
+`go install …@v1.0.0` cannot resolve it.
+
+Copy the editor config in [`.vscode-example/`](.vscode-example/) to make the
+extension actually use those pins:
+
+```sh
+cp .vscode-example/settings.json .vscode/
+cp .vscode-example/launch.json   .vscode/
+cp .vscode-example/tasks.json    .vscode/
+```
+
+`.vscode/extensions.json` is already committed (the only file `.gitignore`
+un-ignores under `.vscode/`), so the recommended-extensions prompt works without
+copying anything.
+
+`settings.json` wires `go.alternateTools` to the mise **shims** and turns
+`go.toolsManagement.autoUpdate` off, so the extension stops installing its own.
+Shims resolve the version from the `mise.toml` of whatever directory they run
+in, which is what makes a worktree on a different pin get the right binary — run
+`mise install` once per clone, and `mise trust` in a fresh worktree or the shims
+fail with a misleading "error parsing config file".
+
+Linting is wired to `golangci-lint` with the repo's `.golangci.yml`, matching
+`just lint` and CI. gopls' own staticcheck is off because the `standard` set
+already includes it and both would report the same finding twice.
+
+`launch.json` debugs each of the four services against the local dependency
+stack — start it with `just infra-up` first (`just stack-up` would also run the
+services in containers and fight for the same host ports). `tasks.json` maps
+Terminal → Run Task… onto the `just` recipes.
+
 See [`CLAUDE.md`](CLAUDE.md) for the high-signal, easy-to-miss bits and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev workflow.

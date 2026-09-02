@@ -1,0 +1,96 @@
+{
+  // Copy this file to .vscode/tasks.json
+  //
+  // Thin wrappers around the `just` recipes so Terminal → Run Task… reaches the
+  // same commands CI runs. They go through `mise exec` so the pinned toolchain
+  // is used even without a shell hook.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "just: ci (fmt-check + vet + lint + test)",
+      "type": "shell",
+      "command": "mise exec -- just ci",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "just: check (go vet, all modules)",
+      "type": "shell",
+      "command": "mise exec -- just check",
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "just: lint (golangci-lint, all modules)",
+      "type": "shell",
+      "command": "mise exec -- just lint",
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "just: fmt (gofmt + golangci-lint fmt)",
+      "type": "shell",
+      "command": "mise exec -- just fmt",
+      "problemMatcher": []
+    },
+    {
+      "label": "just: test (all modules)",
+      "type": "shell",
+      "command": "mise exec -- just test",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "just: test-race",
+      "type": "shell",
+      "command": "mise exec -- just test-race",
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "just: cov (per-function coverage)",
+      "type": "shell",
+      "command": "mise exec -- just cov",
+      "problemMatcher": []
+    },
+    {
+      "label": "just: tidy (go mod tidy, all modules)",
+      "type": "shell",
+      "command": "mise exec -- just tidy",
+      "problemMatcher": []
+    },
+    {
+      "label": "infra: up (postgres + valkey + redpanda)",
+      "type": "shell",
+      "command": "mise exec -- just infra-up",
+      "problemMatcher": []
+    },
+    {
+      "label": "infra: down",
+      "type": "shell",
+      "command": "mise exec -- just infra-down",
+      "problemMatcher": []
+    },
+    {
+      "label": "stack: up (infra + services in containers)",
+      "type": "shell",
+      "command": "mise exec -- just stack-up",
+      "problemMatcher": []
+    },
+    {
+      "label": "stack: down",
+      "type": "shell",
+      "command": "mise exec -- just stack-down",
+      "problemMatcher": []
+    },
+    {
+      "label": "sec: all AppSec checks",
+      "type": "shell",
+      "command": "mise exec -- just sec",
+      "problemMatcher": []
+    },
+    {
+      "label": "mise: install pinned toolchain",
+      "type": "shell",
+      "command": "mise install",
+      "problemMatcher": []
+    }
+  ]
+}
