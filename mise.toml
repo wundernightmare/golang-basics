@@ -18,6 +18,30 @@ node          = "26.8"
 golangci-lint = "2.13.2"
 k6            = "2.2.0"
 
+# ── VS Code Go tooling ────────────────────────────────────────────────────────
+# The Go extension otherwise `go install`s these into GOPATH/bin at whatever
+# version happens to be latest that day, per machine. Pinning them here makes
+# every clone resolve the same binaries, and `.vscode-example/settings.json`
+# points the extension at these shims with autoUpdate off so it stops
+# installing its own. Bump a version here, then re-run `mise install`.
+#
+# These use the `go:` backend, i.e. `go install` from source against the Go
+# pinned above — the first `mise install` after adding them is slow (a few
+# minutes), afterwards they are cached like any other tool.
+#
+# staticcheck is deliberately absent: .golangci.yml runs the `standard` set,
+# which already includes it, and `go.lintTool` is wired to golangci-lint.
+"go:golang.org/x/tools/gopls"             = "0.23.0"  # language server
+"go:github.com/go-delve/delve/cmd/dlv"    = "1.27.1"  # debugger (F5 / test debugging)
+"go:github.com/cweill/gotests/gotests"    = "1.9.0"   # Go: Generate Unit Tests
+"go:github.com/fatih/gomodifytags"        = "1.17.0"  # Go: Add/Remove Struct Tags
+"go:github.com/josharian/impl"            = "1.5.0"   # Go: Generate Interface Stubs
+#
+# goplay ("Go: Run on Go Playground") is absent on purpose: its only release is
+# v1.0.0 from 2016, which predates Go modules and has no go.mod, so
+# `go install …@v1.0.0` fails with "updates to go.mod needed". It cannot be
+# pinned; leave the extension to handle it if anyone ever wants that command.
+
 # AppSec — pinned for reproducibility across machines (Linux / macOS / WSL).
 # Bump versions here, then re-run `just setup-sec` (idempotent). Each `just
 # sec-*` recipe invokes its tool through `mise exec --`, so no shell `mise

@@ -33,6 +33,14 @@ README; this file is only the high-signal, easy-to-miss bits.
   worktree, `git worktree add` does **not** `mise trust` or `go work sync` —
   the `./wt` helper does both (skipping `mise trust` makes mise-shimmed tools
   fail with a misleading "error parsing config file").
+- **VS Code tooling is pinned too.** gopls / dlv / gotests / gomodifytags /
+  impl live in `mise.toml` under the `go:` backend, and
+  `.vscode-example/settings.json` points `go.alternateTools` at the mise shims
+  with `go.toolsManagement.autoUpdate` off. Don't let the extension install its
+  own into `GOPATH/bin` — that silently un-pins them. Bump versions in
+  `mise.toml`, then `mise install`. Only `.vscode/extensions.json` is committed;
+  everything else under `.vscode/` is gitignored and copied from
+  `.vscode-example/`.
 - **Local cross-module deps** resolve via `go.work`; each service `go.mod` also
   has a `replace … => ../../libs/httpx` so `go build` works outside the
   workspace too (e.g. inside the per-service Docker build).
