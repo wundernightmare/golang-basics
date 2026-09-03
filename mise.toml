@@ -42,6 +42,16 @@ k6            = "2.2.0"
 # `go install …@v1.0.0` fails with "updates to go.mod needed". It cannot be
 # pinned; leave the extension to handle it if anyone ever wants that command.
 
+# ── Test + coverage reporting ─────────────────────────────────────────────────
+# gotestsum wraps `go test -json` and emits a JUnit file, which CI publishes as
+# artifacts:reports:junit; gocover-cobertura turns a Go coverage profile into
+# the Cobertura XML GitLab needs for per-line MR annotations. govulncheck is
+# pinned (not `@latest`) so CI builds it once from a known version instead of
+# recompiling an unpinned one per module.
+"go:gotest.tools/gotestsum"                = "1.13.0"
+"go:github.com/boumenot/gocover-cobertura" = "1.5.0"
+"go:golang.org/x/vuln/cmd/govulncheck"     = "1.7.0"
+
 # AppSec — pinned for reproducibility across machines (Linux / macOS / WSL).
 # Bump versions here, then re-run `just setup-sec` (idempotent). Each `just
 # sec-*` recipe invokes its tool through `mise exec --`, so no shell `mise

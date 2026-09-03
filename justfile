@@ -84,18 +84,20 @@ lint-fix:
     set -euo pipefail
     for m in {{MODULES}}; do (cd "$m" && golangci-lint run --fix); done
 
-# Format all Go source in-place (gofmt + golangci-lint fmt)
+# Format all Go source in-place (gofmt + golangci-lint fmt).
+# Scoped to the module trees — CI relocates GOMODCACHE under .cache/ so GitLab
+# can cache it, and a bare `.` would walk into that cache's test fixtures.
 fmt:
-    gofmt -w .
     #!/usr/bin/env bash
     set -euo pipefail
+    gofmt -w ./libs ./services
     for m in {{MODULES}}; do (cd "$m" && golangci-lint fmt); done
 
 # Check formatting without modifying files (CI gate)
 fmt-check:
     #!/usr/bin/env bash
     set -euo pipefail
-    out="$(gofmt -l .)"
+    out="$(gofmt -l ./libs ./services)"
     if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
     echo "gofmt clean"
 
@@ -236,10 +238,37 @@ infra-logs:
 stack-up: infra-up
     docker compose -f docker/stack.yml up -d --build
 
+# Same, with tracing exported to the local Jaeger (needs `just obs-up`)
+stack-up-otel: infra-up
+    docker compose -f docker/stack.yml -f docker/stack.otel.yml up -d --build
+
 # Tear the whole stack down (app + deps + volumes)
 stack-down:
     docker compose -f docker/stack.yml down -v
     docker compose -f docker/deps.yml down -v
+
+# ── Observability (Jaeger + VictoriaMetrics + Grafana) ────────────────────────
+# Optional; nothing in the app path needs it. Joins the deps network, so
+# `just infra-up` has to have run first.
+
+# Bring up Jaeger :16686, VictoriaMetrics :9095, Grafana :3000 (admin/admin)
+obs-up: infra-up
+    docker compose -f docker/observability.yml up -d
+    @echo "Jaeger   http://localhost:16686"
+    @echo "Metrics  http://localhost:9095"
+    @echo "Grafana  http://localhost:3000  (admin / admin)"
+
+# Stop the observability stack (keeps its volumes)
+obs-down:
+    docker compose -f docker/observability.yml down
+
+# Stop it and wipe the metric/dashboard volumes
+obs-down-wipe:
+    docker compose -f docker/observability.yml down -v
+
+# Tail the observability logs
+obs-logs:
+    docker compose -f docker/observability.yml logs -f
 
 # ── Local bring-up (host services) ────────────────────────────────────────────
 

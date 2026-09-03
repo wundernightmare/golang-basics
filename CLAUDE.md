@@ -41,6 +41,19 @@ README; this file is only the high-signal, easy-to-miss bits.
   `mise.toml`, then `mise install`. Only `.vscode/extensions.json` is committed;
   everything else under `.vscode/` is gitignored and copied from
   `.vscode-example/`.
+- **CI reads mise.toml, never hard-codes versions.** Both pipelines have a
+  `versions` job that parses `mise.toml` (GitHub → step outputs, GitLab →
+  `dotenv` artifact, used even in `image:`). If you need a tool in CI, pin it in
+  `mise.toml` and read it from there — a literal version in a workflow file is a
+  bug waiting to drift.
+- **`gofmt` is scoped to `./libs ./services`, not `.`** — GitLab can only cache
+  paths under `$CI_PROJECT_DIR`, so `GOMODCACHE` lives in `.cache/`, and a bare
+  `gofmt -l .` walks into the module cache's deliberately-malformed test
+  fixtures. Keep `just fmt-check`, the GitHub job and the GitLab job identical.
+- **Observability is opt-in.** `docker/observability.yml` (Jaeger +
+  VictoriaMetrics + Grafana) is the receiving end; `otelx` installs only
+  propagators and a no-op provider unless `*_OTEL_ENABLED=true`, so no code path
+  requires a collector.
 - **Local cross-module deps** resolve via `go.work`; each service `go.mod` also
   has a `replace … => ../../libs/httpx` so `go build` works outside the
   workspace too (e.g. inside the per-service Docker build).

@@ -1,0 +1,24 @@
+# Overlay that points the containerised services at the local Jaeger.
+#
+# Tracing is off by default (otelx installs only the W3C propagators and a no-op
+# provider), so exporting is an explicit opt-in rather than a silent dependency
+# on a collector being up. Bring the observability stack up first:
+#
+#   just infra-up && just obs-up && just stack-up-otel
+#
+# Then create a task and find the trace at http://localhost:16686.
+
+services:
+  tasks:
+    environment:
+      TASKS_OTEL_ENABLED: "true"
+      TASKS_OTEL_SERVICE_NAME: tasks
+      TASKS_OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+      TASKS_OTEL_EXPORTER_OTLP_INSECURE: "true"
+
+  consumer:
+    environment:
+      CONSUMER_OTEL_ENABLED: "true"
+      CONSUMER_OTEL_SERVICE_NAME: consumer
+      CONSUMER_OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+      CONSUMER_OTEL_EXPORTER_OTLP_INSECURE: "true"

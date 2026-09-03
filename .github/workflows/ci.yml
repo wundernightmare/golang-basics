@@ -39,7 +39,8 @@ jobs:
           go-version: ${{ needs.versions.outputs.go }}
       - name: gofmt
         run: |
-          out="$(gofmt -l .)"
+          # Scoped to the module trees, matching `just fmt-check` and GitLab.
+          out="$(gofmt -l ./libs ./services)"
           if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
 
   lint-test:

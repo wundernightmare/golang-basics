@@ -1,0 +1,93 @@
+# Local observability stack — the receiving end for what the services already
+# emit. Optional: nothing in the app path depends on it.
+#
+# Topology (no OTel Collector — Jaeger receives OTLP directly, as in the Rust
+# sibling repo):
+#
+#   ping       :8080/metrics ─┐
+#   heartbeat  :8081/metrics ─┼─(scrape)→ VictoriaMetrics  http://localhost:9095
+#   tasks      :8082/metrics ─┤                 │
+#   consumer   :8083/metrics ─┘                 └────────→ Grafana  http://localhost:3000
+#                                                          (admin / admin, datasource pre-provisioned)
+#   tasks / consumer →(OTLP gRPC :4317)→ Jaeger            http://localhost:16686
+#
+# Scrape targets cover both ways of running the services: `just up` puts them on
+# the host (reached via host.docker.internal) and `just stack-up` puts them in
+# containers on the deps network (reached by container name). Whichever set is
+# not running simply shows as down in VictoriaMetrics.
+#
+# VictoriaMetrics' UI sits on :9095 so it never collides with a service port.
+#
+# Usage:
+#   just infra-up          # deps.yml first — this stack joins its network
+#   just obs-up
+#   just obs-down
+#
+# Tracing is opt-in per service; the exporter is off unless you ask for it:
+#   TASKS_OTEL_ENABLED=true TASKS_OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 \
+#     just up tasks
+# For the containerised path, overlay docker/stack.otel.yml (see justfile).
+
+services:
+  # ── Jaeger all-in-one ───────────────────────────────────────────────────────
+  # Receives OTLP gRPC on :4317 directly; no collector in the middle.
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    container_name: golang-basics-jaeger
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI
+      - "4317:4317" # OTLP gRPC
+    networks: [deps]
+
+  # ── VictoriaMetrics ─────────────────────────────────────────────────────────
+  # Prometheus-compatible; scrapes the services' /metrics endpoints.
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.136.0
+    container_name: golang-basics-victoriametrics
+    restart: unless-stopped
+    command:
+      - "-promscrape.config=/etc/vm/scrape.yml"
+      - "-retentionPeriod=7d"
+      - "-httpListenAddr=:8428"
+    volumes:
+      - ./observability/scrape.yml:/etc/vm/scrape.yml:ro
+      - vm-data:/victoria-metrics-data
+    ports:
+      - "9095:8428"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [deps]
+
+  # ── Grafana ─────────────────────────────────────────────────────────────────
+  # The VictoriaMetrics datasource is provisioned, so the first login lands on a
+  # working Explore view instead of a setup wizard.
+  grafana:
+    image: grafana/grafana:12.4
+    container_name: golang-basics-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on: [victoriametrics]
+    networks: [deps]
+
+volumes:
+  vm-data:
+  grafana-data:
+
+networks:
+  # The network docker/deps.yml creates (compose names it "<project>_default"),
+  # so container-run services are scrapeable by name. deps.yml must be up first.
+  deps:
+    name: golang-basics-deps_default
+    external: true
