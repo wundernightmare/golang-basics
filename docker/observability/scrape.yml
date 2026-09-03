@@ -1,0 +1,34 @@
+# VictoriaMetrics scrape config (Prometheus format).
+#
+# Every service exposes its metrics on its own HTTP port at /metrics via
+# libs/httpx, so there is one job per service with two targets: the container
+# (running under `just stack-up`) and the host (running under `just up`, or a
+# binary you started from VS Code's debugger). Only one of the two is normally
+# alive; the other just reports as down.
+
+global:
+  scrape_interval: 10s
+  scrape_timeout: 5s
+  external_labels:
+    stack: golang-basics
+
+scrape_configs:
+  - job_name: ping
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ping:8080", "host.docker.internal:8080"]
+
+  - job_name: heartbeat
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["heartbeat:8081", "host.docker.internal:8081"]
+
+  - job_name: tasks
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["tasks:8082", "host.docker.internal:8082"]
+
+  - job_name: consumer
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["consumer:8083", "host.docker.internal:8083"]

@@ -222,6 +222,46 @@ just docker-verify ping dev   # offline verify against cosign.pub
 
 ---
 
+## CI
+
+Two pipelines, deliberately kept at parity: `.github/workflows/{ci,appsec,docker}.yml`
+and `.gitlab-ci.yml`.
+
+**Nothing hard-codes a tool version.** Both read the pins out of `mise.toml` —
+GitHub via a `versions` job with step outputs, GitLab via a `versions` job that
+publishes a `dotenv` artifact which later jobs consume as ordinary variables,
+including inside `image:`. Bump a version in `mise.toml` and both pipelines
+follow; there is no second place to remember.
+
+The GitLab side is shaped around not burning runner minutes:
+
+| | |
+|---|---|
+| `prepare` | downloads the module graph **once** and warms `GOMODCACHE`/`GOCACHE`, then every other job pulls that cache — instead of 25 cold downloads across the matrices. It also builds gotestsum / gocover-cobertura / govulncheck once and passes them on as an artifact. |
+| `needs:` | the stage list is a DAG, so the security and packaging jobs start as soon as `versions` is done rather than queueing behind the test matrix. |
+| `interruptible: true` | a superseded pipeline is cancelled instead of running to completion. |
+| `rules:changes` | a docs-only merge request skips the Go pipeline; the default branch always runs everything. |
+| pinned images | golangci-lint, gitleaks, semgrep, hadolint, osv-scanner, syft and grype all come from their own version-pinned images — no `curl \| sh` per matrix job, no `:latest`. |
+
+It also uses what GitLab gives you and GitHub does not: `artifacts:reports:junit`
+puts failing tests in the MR widget, and `coverage:` plus a Cobertura report put
+the percentage and per-line annotations in the diff.
+
+The caches live under `.cache/` inside the project (GitLab only caches paths
+below `$CI_PROJECT_DIR`) — which is why the `gofmt` gate is scoped to
+`./libs ./services` rather than `.`, in all three of `just fmt-check`, the
+GitHub job and the GitLab job.
+
+Run any job locally, in the same container CI would use:
+
+```sh
+npx gitlab-ci-local --list          # resolve the DAG without running anything
+npx gitlab-ci-local fmt
+npx gitlab-ci-local 'unit: [libs/httpx]'
+```
+
+---
+
 ## Docker
 
 Each service has a multi-stage **distroless** Dockerfile (static `CGO_ENABLED=0`
@@ -243,6 +283,45 @@ just stack-down
 `docker/deps.yml` runs Postgres + Valkey + Redpanda (the Kafka API broker, dual listeners so both
 host processes and in-network containers reach the broker); `docker/stack.yml`
 runs the `tasks`/`consumer` images against it.
+
+---
+
+## Observability
+
+`libs/otelx` exports OTLP traces and every service serves Prometheus metrics on
+its own port at `/metrics` — `docker/observability.yml` is the receiving end.
+Optional: nothing in the app path depends on it.
+
+```sh
+just infra-up     # deps first — the stack joins that network
+just obs-up
+#   Jaeger   http://localhost:16686
+#   Metrics  http://localhost:9095   (VictoriaMetrics)
+#   Grafana  http://localhost:3000   (admin / admin)
+just obs-down
+```
+
+| Piece | Role |
+|---|---|
+| Jaeger all-in-one | receives OTLP gRPC on `:4317` directly — no collector in between |
+| VictoriaMetrics | scrapes `/metrics`; config in `docker/observability/scrape.yml` |
+| Grafana | both datasources pre-provisioned, so the first login is a working Explore view |
+
+Each scrape job carries two targets — the container name and
+`host.docker.internal` — so the same config works whether the services run via
+`just stack-up` or on the host via `just up`. Whichever set is not running just
+shows as down.
+
+**Tracing is opt-in.** With `*_OTEL_ENABLED` unset, `otelx` installs only the
+W3C propagators and a no-op provider, so nothing depends on a collector being
+up. To export:
+
+```sh
+just stack-up-otel    # containerised, via docker/stack.otel.yml
+
+# or a single service on the host / under the debugger:
+TASKS_OTEL_ENABLED=true TASKS_OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 just up tasks
+```
 
 ---
 

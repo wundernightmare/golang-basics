@@ -5,27 +5,176 @@
 # the GitHub matrices. Container-backed integration tests + Docker builds use a
 # Docker-in-Docker service.
 #
-# Tool versions mirror mise.toml (Go 1.27.x, golangci-lint 2.13.2, AppSec tools).
+# Tool versions are NOT written here. The `versions` job parses mise.toml and
+# publishes every pin as a dotenv artifact, so this file and `mise install`
+# cannot drift — the same single-source-of-truth trick the GitHub `versions` job
+# uses. Bump a version in mise.toml; nothing here changes.
+#
+# Cost model: the module + build cache is warmed once by `prepare` and pulled by
+# everything else, tools ship as pinned images or as binaries built once in
+# `prepare`, and `needs:` turns the stage list into a DAG so security and
+# packaging do not queue behind the test matrix.
+
+workflow:
+  rules:
+    # One pipeline per change: MR pipelines for MRs, branch pipelines for the
+    # default branch and tags. Without this a push to an MR branch runs twice.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
 
 stages:
+  - prepare
   - check
-  - integration
+  - test
   - security
-  - docker
+  - package
+
+default:
+  # A superseded pipeline is cancelled instead of burning runner minutes.
+  interruptible: true
+  timeout: 20m
 
 variables:
   GOTOOLCHAIN: local
+  # GitLab only caches paths inside the project directory, so the Go caches are
+  # relocated there rather than left in $HOME.
+  GOMODCACHE: $CI_PROJECT_DIR/.cache/go-mod
+  GOCACHE: $CI_PROJECT_DIR/.cache/go-build
+  MODULES: >-
+    libs/httpx libs/resilient-http-client libs/pgx libs/valkey libs/kafka
+    libs/otelx services/ping services/heartbeat services/tasks services/consumer
 
-# ── check: gofmt gate + per-module vet / lint / unit tests ────────────────────
-fmt:
-  stage: check
-  image: golang:1.27-bookworm
+# ── Reusable fragments ────────────────────────────────────────────────────────
+
+.cache-pull: &cache-pull
+  key:
+    files: [go.work.sum]
+    prefix: go
+  paths:
+    - .cache/go-mod
+    - .cache/go-build
+  policy: pull
+
+# Go jobs: pinned image from mise.toml, warm cache, tools from `prepare` on PATH.
+.go:
+  image: golang:${GO_VERSION}-bookworm
+  needs:
+    - job: versions
+      artifacts: true
+    - job: prepare
+      artifacts: true
+  cache: *cache-pull
+  before_script:
+    - export PATH="$CI_PROJECT_DIR/bin:$PATH"
+
+# Skip the Go pipeline on docs-only merge requests; always run on the default
+# branch so nothing merges unverified.
+.rules-go:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - "**/*.go"
+        - "**/go.mod"
+        - "**/go.sum"
+        - go.work
+        - go.work.sum
+        - .golangci.yml
+        - .gitlab-ci.yml
+        - mise.toml
+
+.rules-docker:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - "**/*.go"
+        - "**/Dockerfile"
+        - .dockerignore
+        - docker/**/*
+        - .gitlab-ci.yml
+        - mise.toml
+
+.dind:
+  services:
+    - name: docker:28-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+
+# ── prepare ───────────────────────────────────────────────────────────────────
+
+# Single source of truth: every pin below is read out of mise.toml and published
+# as a dotenv artifact, which downstream jobs consume as ordinary variables —
+# including in `image:`. Nothing in this file hard-codes a tool version.
+versions:
+  stage: prepare
+  image: alpine:3.22
   script:
-    - out="$(gofmt -l .)"; if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
+    - |
+      pin() {
+        grep -E "^\"?$1\"?[[:space:]]*=" mise.toml | head -1 \
+          | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/'
+      }
+      {
+        echo "GO_VERSION=$(pin go)"
+        echo "NODE_VERSION=$(pin node)"
+        echo "GOLANGCI_VERSION=$(pin golangci-lint)"
+        echo "OSV_VERSION=$(pin osv-scanner)"
+        echo "SYFT_VERSION=$(pin syft)"
+        echo "GRYPE_VERSION=$(pin grype)"
+        echo "GITLEAKS_VERSION=$(pin gitleaks)"
+        echo "SEMGREP_VERSION=$(pin semgrep)"
+        echo "HADOLINT_VERSION=$(pin hadolint)"
+        echo "GOTESTSUM_VERSION=$(pin go:gotest.tools/gotestsum)"
+        echo "COBERTURA_VERSION=$(pin go:github.com/boumenot/gocover-cobertura)"
+        echo "GOVULNCHECK_VERSION=$(pin go:golang.org/x/vuln/cmd/govulncheck)"
+      } | tee versions.env
+    # A typo in mise.toml would otherwise surface as a broken `image:` much later.
+    - grep -q '^GO_VERSION=[0-9]' versions.env || { echo "failed to read pins from mise.toml"; exit 1; }
+  artifacts:
+    reports:
+      dotenv: versions.env
 
-lint-test:
+# Warms the shared module + build cache once (instead of 25 cold downloads
+# across the matrices) and builds the Go-based tools a single time, handing them
+# to every later job as an artifact.
+prepare:
+  stage: prepare
+  image: golang:${GO_VERSION}-bookworm
+  needs:
+    - job: versions
+      artifacts: true
+  cache:
+    <<: *cache-pull
+    policy: pull-push
+  script:
+    - for m in $MODULES; do (cd "$m" && go mod download); done
+    - mkdir -p bin
+    - GOBIN="$CI_PROJECT_DIR/bin" go install "gotest.tools/gotestsum@v${GOTESTSUM_VERSION}"
+    - GOBIN="$CI_PROJECT_DIR/bin" go install "github.com/boumenot/gocover-cobertura@v${COBERTURA_VERSION}"
+    - GOBIN="$CI_PROJECT_DIR/bin" go install "golang.org/x/vuln/cmd/govulncheck@v${GOVULNCHECK_VERSION}"
+  artifacts:
+    paths: [bin/]
+    expire_in: 1 day
+
+# ── check ─────────────────────────────────────────────────────────────────────
+
+fmt:
+  extends: [.go, .rules-go]
   stage: check
-  image: golang:1.27-bookworm
+  script:
+    # Scoped to the module trees: GOMODCACHE now lives under .cache/ so GitLab
+    # can cache it, and a bare `gofmt -l .` walks into its test fixtures.
+    - out="$(gofmt -l ./libs ./services)"; if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
+
+vet:
+  extends: [.go, .rules-go]
+  stage: check
   parallel:
     matrix:
       - MODULE:
@@ -39,112 +188,231 @@ lint-test:
           - services/heartbeat
           - services/tasks
           - services/consumer
-  before_script:
-    - curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.6.1
-    - export PATH="$(go env GOPATH)/bin:$PATH"
   script:
     - cd "$MODULE"
     - go vet ./...
-    - golangci-lint run
-    - go test -short -race ./...
 
-# ── integration: testcontainers (Postgres / Valkey / Kafka) ───────────────────
-# Needs a Docker daemon — provided by the dind service. CI=true makes the suites
-# fail (not skip) if a container cannot start, and the host override points
-# testcontainers at the dind host.
+# golangci-lint ships its own image with a matching Go toolchain, which replaces
+# the previous curl-install-per-matrix-job.
+lint:
+  extends: .rules-go
+  stage: check
+  image: golangci/golangci-lint:v${GOLANGCI_VERSION}
+  needs:
+    - job: versions
+      artifacts: true
+    - job: prepare
+      artifacts: true
+  cache: *cache-pull
+  parallel:
+    matrix:
+      - MODULE:
+          - libs/httpx
+          - libs/resilient-http-client
+          - libs/pgx
+          - libs/valkey
+          - libs/kafka
+          - libs/otelx
+          - services/ping
+          - services/heartbeat
+          - services/tasks
+          - services/consumer
+  script:
+    - cd "$MODULE"
+    - golangci-lint run
+
+# ── test ──────────────────────────────────────────────────────────────────────
+
+# Unit tests only — the container-backed suites run in `integration`. gotestsum
+# emits JUnit so failures show up in the MR widget instead of only in the log,
+# and the coverage profile feeds both the `coverage:` regex (the MR percentage)
+# and Cobertura (per-line annotations in the diff).
+unit:
+  extends: [.go, .rules-go]
+  stage: test
+  parallel:
+    matrix:
+      - MODULE:
+          - libs/httpx
+          - libs/resilient-http-client
+          - libs/pgx
+          - libs/valkey
+          - libs/kafka
+          - libs/otelx
+          - services/ping
+          - services/heartbeat
+          - services/tasks
+          - services/consumer
+  script:
+    - cd "$MODULE"
+    - |
+      gotestsum --junitfile junit.xml --format testname -- \
+        -short -race -coverprofile=coverage.out -covermode=atomic ./...
+    - go tool cover -func=coverage.out | tail -1
+    - gocover-cobertura < coverage.out > coverage.xml
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - $MODULE/coverage.out
+    reports:
+      junit: $MODULE/junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: $MODULE/coverage.xml
+
+# Container-backed integration tests (Postgres / Valkey / Kafka via
+# testcontainers). GitLab already exports CI=true, which is what makes the
+# suites fail — rather than skip — if a container cannot start; the host
+# override points testcontainers at the dind service.
 integration:
-  stage: integration
-  image: golang:1.27-bookworm
-  services:
-    - name: docker:27-dind
-      alias: docker
+  extends: [.go, .dind, .rules-go]
+  stage: test
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
     TESTCONTAINERS_HOST_OVERRIDE: docker
     TESTCONTAINERS_RYUK_DISABLED: "true"
-    CI: "true"
   parallel:
     matrix:
       - MODULE: [libs/pgx, libs/valkey, libs/kafka, services/tasks, services/consumer]
   script:
     - cd "$MODULE"
-    - go test ./...
+    - gotestsum --junitfile junit.xml --format testname -- ./...
+  artifacts:
+    when: always
+    expire_in: 1 week
+    reports:
+      junit: $MODULE/junit.xml
 
-# ── e2e: Playwright API suite against the spawned service binaries + deps ──────
+# The GitHub e2e job runs the dependency-free subset (ping + heartbeat only);
+# this one runs the full suite with E2E_WITH_DEPS=1, which additionally spawns
+# tasks + consumer against real Postgres / Valkey / Kafka. The two are
+# deliberately different scopes, not drift.
 e2e:
-  stage: integration
-  image: golang:1.27-bookworm
-  services:
-    - name: docker:27-dind
-      alias: docker
+  extends: [.go, .dind, .rules-go]
+  stage: test
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
   before_script:
-    - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    - apt-get install -y nodejs docker.io
-    - corepack enable && corepack prepare pnpm@latest --activate
+    - export PATH="$CI_PROJECT_DIR/bin:$PATH"
+    - curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION%%.*}.x" | bash -
+    - apt-get install -y --no-install-recommends nodejs docker.io
+    # Node 26 no longer ships corepack; packageManager in package.json pins pnpm.
+    - npm install -g corepack@latest && corepack enable
   script:
     - docker compose -f docker/deps.yml up -d
-    - for s in ping heartbeat tasks consumer; do (cd "services/$s" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "bin/$s" .); done
-    - pnpm install --frozen-lockfile || pnpm install
+    - for s in $(echo "$MODULES" | tr ' ' '\n' | grep '^services/' | cut -d/ -f2); do
+        (cd "services/$s" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "bin/$s" .);
+      done
+    - pnpm install --frozen-lockfile
     - cd e2e && E2E_WITH_DEPS=1 pnpm test
   after_script:
     - docker compose -f docker/deps.yml down -v || true
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - e2e/playwright-report/
+      - e2e/test-results/
 
 # ── security (AppSec) — mirrors appsec.yml ────────────────────────────────────
+# These need neither the test matrix nor each other, so `needs: [versions]` lets
+# them start as soon as the pins are known instead of waiting for `test`.
+
 secret-detection:
   stage: security
   image:
-    name: zricethezav/gitleaks:latest
+    name: zricethezav/gitleaks:v${GITLEAKS_VERSION}
     entrypoint: [""]
+  needs:
+    - job: versions
+      artifacts: true
   script:
     - gitleaks detect --source . --config .gitleaks.toml --verbose
 
 sast:
   stage: security
   image:
-    name: semgrep/semgrep:latest
+    name: semgrep/semgrep:${SEMGREP_VERSION}
     entrypoint: [""]
+  needs:
+    - job: versions
+      artifacts: true
   script:
     - semgrep ci --config p/owasp-top-ten --config p/golang
 
+# osv-scanner ships an official image, which also avoids the `go install` that
+# pinned it independently of mise.toml (and stuck on a version that panics on
+# go1.27 SSA). The binary is the image entrypoint, cleared here so GitLab can
+# run its shell wrapper — hence the absolute path.
+#
+# Call analysis is off: the image bundles go1.26, go.work requires >= 1.27, and
+# GOTOOLCHAIN=local forbids fetching a newer one, so it errors out. Reachability
+# is covered anyway by the dedicated `govulncheck` matrix below, which runs on
+# the pinned toolchain.
 dependency-scanning:
   stage: security
-  image: golang:1.27-bookworm
+  image:
+    name: ghcr.io/google/osv-scanner:v${OSV_VERSION}
+    entrypoint: [""]
+  needs:
+    - job: versions
+      artifacts: true
   script:
-    - go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.3.8
-    - "$(go env GOPATH)/bin/osv-scanner scan --config=osv-scanner.toml --recursive ."
+    - /osv-scanner scan --config=osv-scanner.toml --no-call-analysis=go --recursive .
 
 govulncheck:
+  extends: [.go, .rules-go]
   stage: security
-  image: golang:1.27-bookworm
   parallel:
     matrix:
-      - MODULE: [libs/httpx, libs/resilient-http-client, libs/pgx, libs/valkey, libs/kafka, libs/otelx, services/ping, services/heartbeat, services/tasks, services/consumer]
+      - MODULE:
+          - libs/httpx
+          - libs/resilient-http-client
+          - libs/pgx
+          - libs/valkey
+          - libs/kafka
+          - libs/otelx
+          - services/ping
+          - services/heartbeat
+          - services/tasks
+          - services/consumer
   script:
     - cd "$MODULE"
-    - go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+    - govulncheck ./...
 
 hadolint:
   stage: security
   image:
-    name: hadolint/hadolint:latest-debian
+    name: hadolint/hadolint:v${HADOLINT_VERSION}-debian
     entrypoint: [""]
+  needs:
+    - job: versions
+      artifacts: true
   parallel:
     matrix:
-      - DOCKERFILE: [services/ping/Dockerfile, services/heartbeat/Dockerfile, services/tasks/Dockerfile, services/consumer/Dockerfile]
+      - DOCKERFILE:
+          - services/ping/Dockerfile
+          - services/heartbeat/Dockerfile
+          - services/tasks/Dockerfile
+          - services/consumer/Dockerfile
   script:
     - hadolint --config .hadolint.yaml "$DOCKERFILE"
 
-# ── docker: build each image, generate an SBOM, scan for CVEs ─────────────────
+# ── package: build each image, generate an SBOM, scan for CVEs ────────────────
+# syft and grype run from their own pinned images against a `docker save` tar,
+# so nothing is curl-installed and no docker socket has to be shared into them.
+
 docker-build-scan:
-  stage: docker
-  image: docker:27
-  services:
-    - name: docker:27-dind
-      alias: docker
+  extends: [.dind, .rules-docker]
+  stage: package
+  image: docker:28
+  needs:
+    - job: versions
+      artifacts: true
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
@@ -152,14 +420,17 @@ docker-build-scan:
   parallel:
     matrix:
       - SERVICE: [ping, heartbeat, tasks, consumer]
-  before_script:
-    - apk add --no-cache curl bash
-    - curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin v1.44.0
-    - curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin v0.112.0
   script:
     - docker build -f "services/$SERVICE/Dockerfile" -t "golang-basics-$SERVICE:ci" .
-    - syft "golang-basics-$SERVICE:ci" -o cyclonedx-json=sbom-$SERVICE.json
-    - grype "golang-basics-$SERVICE:ci" --config .grype.yaml --fail-on high
+    - docker save -o "image-$SERVICE.tar" "golang-basics-$SERVICE:ci"
+    - |
+      docker run --rm -v "$CI_PROJECT_DIR:/w" -w /w "anchore/syft:v${SYFT_VERSION}" \
+        "docker-archive:image-$SERVICE.tar" -o "cyclonedx-json=sbom-$SERVICE.json"
+    - |
+      docker run --rm -v "$CI_PROJECT_DIR:/w" -w /w -e GRYPE_DB_VALIDATE_AGE \
+        "anchore/grype:v${GRYPE_VERSION}" \
+        "docker-archive:image-$SERVICE.tar" --config .grype.yaml --fail-on high
+    - rm -f "image-$SERVICE.tar"
   artifacts:
     paths:
       - sbom-*.json

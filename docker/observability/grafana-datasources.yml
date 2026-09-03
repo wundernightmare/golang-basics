@@ -1,0 +1,19 @@
+# Grafana datasource provisioning — VictoriaMetrics speaks the Prometheus API,
+# and Jaeger is wired as a tracing datasource so a trace ID from a log line can
+# be opened directly. Both are reachable by container name on the deps network.
+
+apiVersion: 1
+
+datasources:
+  - name: VictoriaMetrics
+    type: prometheus
+    access: proxy
+    url: http://victoriametrics:8428
+    isDefault: true
+    editable: false
+
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: false

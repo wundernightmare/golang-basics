@@ -8,6 +8,13 @@ coverage.out
 coverage.html
 # `dlv debug` / VS Code F5 drop a build artefact next to the debugged package
 __debug_bin*
+# CI relocates GOMODCACHE/GOCACHE here (GitLab only caches paths inside the
+# project dir) and builds its Go tools into /bin; gitlab-ci-local leaves both
+# behind when run locally.
+/.cache/
+/bin/
+/.gitlab-ci-local/
+versions.env
 
 # go.work is COMMITTED (it defines the workspace). go.work.sum is too, when present.
 
