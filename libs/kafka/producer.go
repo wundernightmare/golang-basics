@@ -7,15 +7,21 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/plugin/kotel"
 )
 
 // Producer publishes records to Kafka synchronously (one network round-trip per
 // Publish, waiting for the broker ack). It is safe for concurrent use;
 // construct one with [NewProducer] and share it.
+//
+// Each Publish is a producer span (child of the span in ctx) and the trace
+// context is written into the record headers, so the consumer on the other
+// side continues the same trace. Register [Producer.Collectors] for metrics.
 type Producer struct {
-	cl  *kgo.Client
-	cfg Config
-	log *slog.Logger
+	cl      *kgo.Client
+	cfg     Config
+	log     *slog.Logger
+	metrics *producerMetrics
 }
 
 // NewProducer builds a producer from cfg and verifies broker connectivity with
@@ -29,6 +35,7 @@ func NewProducer(ctx context.Context, cfg Config, log *slog.Logger) (*Producer, 
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ClientID(cfg.ClientID),
+		kgo.WithHooks(tracingHooks()...),
 		kgo.ProducerLinger(0), // synchronous shape: don't batch-wait
 		// Ask the broker to create the topic on first publish when it is
 		// missing (the broker still decides, via auto.create.topics.enable).
@@ -46,8 +53,16 @@ func NewProducer(ctx context.Context, cfg Config, log *slog.Logger) (*Producer, 
 		return nil, fmt.Errorf("kafka: producer ping: %w", err)
 	}
 
-	log.Info("kafka producer ready", "brokers", cfg.brokersString(), "default_topic", cfg.Topic)
-	return &Producer{cl: cl, cfg: cfg, log: log}, nil
+	log.InfoContext(ctx, "kafka producer ready", "brokers", cfg.brokersString(), "default_topic", cfg.Topic)
+	return &Producer{cl: cl, cfg: cfg, log: log, metrics: newProducerMetrics()}, nil
+}
+
+// tracingHooks returns the franz-go hooks that create produce/receive spans and
+// carry the W3C trace context in record headers. The propagator and tracer
+// provider are the globals otelx.Init installs; with tracing disabled they
+// are no-ops.
+func tracingHooks() []kgo.Hook {
+	return kotel.NewKotel(kotel.WithTracer(kotel.NewTracer())).Hooks()
 }
 
 // Publish sends one record and blocks until the broker acknowledges it. An
@@ -57,11 +72,18 @@ func (p *Producer) Publish(ctx context.Context, topic string, key, value []byte)
 	if topic == "" {
 		topic = p.cfg.Topic
 	}
-	rec := &kgo.Record{Topic: topic, Key: key, Value: value}
-	if err := p.cl.ProduceSync(ctx, rec).FirstErr(); err != nil {
+	// Context on the record is what the kotel hook reads to parent the
+	// produce span and inject the trace headers.
+	rec := &kgo.Record{Topic: topic, Key: key, Value: value, Context: ctx}
+	start := time.Now()
+	err := p.cl.ProduceSync(ctx, rec).FirstErr()
+	p.metrics.duration.WithLabelValues(topic).Observe(time.Since(start).Seconds())
+	if err != nil {
+		p.metrics.records.WithLabelValues(topic, "error").Inc()
 		return fmt.Errorf("kafka: publish to %q: %w", topic, err)
 	}
-	p.log.Debug("kafka record published", "topic", topic, "bytes", len(value))
+	p.metrics.records.WithLabelValues(topic, "ok").Inc()
+	p.log.DebugContext(ctx, "kafka record published", "topic", topic, "bytes", len(value))
 	return nil
 }
 

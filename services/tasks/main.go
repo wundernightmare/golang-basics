@@ -33,7 +33,7 @@ func run() error {
 		return err
 	}
 
-	logger := httpx.NewLogger(cfg.LogLevel, cfg.LogFormat)
+	logger := httpx.NewLogger(cfg.HTTP().LogConfig())
 
 	// Tracing first, so spans from the dependency setup below are captured.
 	shutdownTracing, err := otelx.Init(context.Background(), cfg.OTel(), logger)
@@ -78,12 +78,21 @@ func run() error {
 	}
 	defer producer.Close()
 
-	// HTTP server + tracing middleware + routes.
-	srv := httpx.NewServer(cfg.HTTP(), logger)
-	srv.Engine().Use(otelx.GinMiddleware(cfg.OTel().ServiceName))
+	// HTTP server + tracing middleware + routes. The data libs each expose
+	// their collectors (pool stats, cache hit/miss, publish latency); registering
+	// them here puts everything on one /metrics on the admin listener.
+	srv := httpx.NewServer(cfg.HTTP(), logger,
+		httpx.WithMiddleware(otelx.GinMiddleware(cfg.OTel().ServiceName)))
+	// Postgres is the source of truth: without it nothing works → critical.
+	// The cache is bypassed on a miss and events are published best-effort,
+	// so those two only degrade the service; they must not pull every replica
+	// out of the load balancer at once.
 	srv.Health.Register("postgres", db.ReadyCheck())
-	srv.Health.Register("valkey", cache.ReadyCheck())
-	srv.Health.Register("kafka", producer.ReadyCheck())
+	srv.Health.Register("valkey", cache.ReadyCheck(), httpx.Optional())
+	srv.Health.Register("kafka", producer.ReadyCheck(), httpx.Optional())
+	srv.Metrics.Registry.MustRegister(db.Collectors()...)
+	srv.Metrics.Registry.MustRegister(cache.Collectors()...)
+	srv.Metrics.Registry.MustRegister(producer.Collectors()...)
 
 	api.Register(srv, api.Deps{
 		Store:     st,
@@ -97,7 +106,7 @@ func run() error {
 	ctx, stop := httpx.SignalContext()
 	defer stop()
 
-	logger.Info("tasks starting", "addr", cfg.HTTPAddr, "topic", cfg.KafkaTopic)
+	logger.Info("tasks starting", "addr", cfg.HTTPAddr, "admin_addr", cfg.AdminAddr, "topic", cfg.KafkaTopic, "version", httpx.Version)
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("tasks exited with error", "err", err)
 		return err

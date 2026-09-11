@@ -11,21 +11,22 @@ whole service.
 | Route       | Returns                                                        |
 | ----------- | ------------------------------------------------------------- |
 | `GET /ping` | `200 {"message":"pong"}` — add `?msg=hi` to echo: `{"message":"pong","echo":"hi"}` |
-| `GET /version` | `200` build metadata (service, VCS revision, Go version, time) |
-| `GET /healthz` | liveness (from `httpx`)                                    |
-| `GET /readyz`  | readiness (from `httpx`)                                   |
-| `GET /metrics` | Prometheus exposition (from `httpx`)                      |
+| `GET /version` | `200` build identity (service, version, VCS revision, Go version) — the same body the admin listener serves |
+
+Operational routes — `/healthz`, `/readyz`, `/metrics`, `/version`,
+`/debug/pprof` — live on the **admin** listener (`:9080`), not on the API port.
 
 ## Run
 
 ```sh
-just run                      # go run . on :8080
+just run                      # go run . on :8080 (admin :9080)
 # or with overrides
-PING_HTTP_ADDR=:9000 PING_LOG_FORMAT=text just run
+PING_HTTP_ADDR=:9000 PING_ADMIN_ADDR=:9900 PING_LOG_FORMAT=text just run
 
 curl -s localhost:8080/ping | jq .
 curl -s 'localhost:8080/ping?msg=hello' | jq .
-curl -s localhost:8080/metrics | head
+curl -s localhost:9080/metrics | head
+go tool pprof http://localhost:9080/debug/pprof/heap
 ```
 
 ## Configuration
@@ -34,7 +35,8 @@ All keys are prefixed `PING_` (see [`libs/httpx`](../../libs/httpx#configuration
 
 | Variable                     | Default | Meaning                  |
 | ---------------------------- | ------- | ------------------------ |
-| `PING_HTTP_ADDR`             | `:8080` | listen address           |
+| `PING_HTTP_ADDR`             | `:8080` | API listen address       |
+| `PING_ADMIN_ADDR`            | `:9080` | admin listen address     |
 | `PING_HTTP_SHUTDOWN_TIMEOUT` | `10s`   | graceful-shutdown budget |
 | `PING_LOG_LEVEL`             | `info`  | log level                |
 | `PING_LOG_FORMAT`            | `json`  | `json` or `text`         |

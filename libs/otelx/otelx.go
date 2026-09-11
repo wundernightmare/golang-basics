@@ -40,7 +40,7 @@ func Init(ctx context.Context, cfg Config, log *slog.Logger) (ShutdownFunc, erro
 	))
 
 	if !cfg.Enabled {
-		log.Info("tracing disabled (propagation only)", "service", cfg.ServiceName)
+		log.Info("tracing disabled (propagation only)")
 		return func(context.Context) error { return nil }, nil
 	}
 
@@ -69,7 +69,7 @@ func Init(ctx context.Context, cfg Config, log *slog.Logger) (ShutdownFunc, erro
 	otel.SetTracerProvider(tp)
 
 	log.Info("tracing enabled",
-		"service", cfg.ServiceName, "endpoint", cfg.Endpoint, "sampler_ratio", cfg.SamplerRatio)
+		"endpoint", cfg.Endpoint, "sampler_ratio", cfg.SamplerRatio, "version", cfg.Version)
 	return tp.Shutdown, nil
 }
 

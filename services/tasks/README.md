@@ -24,9 +24,10 @@ produces.
 | `GET /tasks`        | `200 {"tasks":[…]}` newest first                                     |
 | `GET /tasks/:id`    | `200` the task (`X-Cache: hit\|miss`); unknown id → `404` problem    |
 | `DELETE /tasks/:id` | `204`; unknown id → `404` problem                                    |
-| `GET /healthz`      | liveness (from `httpx`)                                              |
-| `GET /readyz`       | readiness — checks Postgres + Valkey + Kafka (from `httpx`)          |
-| `GET /metrics`      | Prometheus exposition (from `httpx`)                                 |
+
+On the **admin** listener (`:9082`, from `httpx`): `/healthz`, `/readyz`
+(checks Postgres + Valkey + Kafka), `/metrics` (HTTP RED + `pgxpool_*` +
+`cache_lookups_total` + `kafka_producer_*`), `/version`, `/debug/pprof`.
 
 ## Configuration
 
@@ -37,6 +38,9 @@ with `TASKS_`-prefixed environment variables — env wins, see
 | Env                                | YAML key             | Default                                              |
 | ---------------------------------- | -------------------- | ---------------------------------------------------- |
 | `TASKS_HTTP_ADDR`                  | `http_addr`          | `:8082`                                              |
+| `TASKS_ADMIN_ADDR`                 | `admin_addr`         | `:9082`                                              |
+| `TASKS_HTTP_SLOW_REQUEST`          | `slow_request`       | `1s`                                                 |
+| `TASKS_LOG_SAMPLE_INITIAL`         | `log_sample_initial` | `100` (`-1` = off)                                   |
 | `TASKS_DATABASE_URL`               | `database_url`       | `postgres://app:app@localhost:5432/app?sslmode=disable` |
 | `TASKS_VALKEY_URL`                 | `valkey_url`         | `valkey://localhost:6379`                            |
 | `TASKS_CACHE_TTL`                  | `cache_ttl`          | `1m`                                                 |

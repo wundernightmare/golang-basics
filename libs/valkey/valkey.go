@@ -7,15 +7,22 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	valkeygo "github.com/valkey-io/valkey-go"
+	"github.com/valkey-io/valkey-go/valkeyotel"
 )
 
 // Cache wraps a valkey-go client with the conveniences a service needs: string
 // and JSON get/set with TTL, a readiness probe and cache-aside loading. It is
 // safe for concurrent use; construct one with [New] and share it.
+//
+// Every command runs under an OpenTelemetry client span (child of the span in
+// the calling context) via valkeyotel, and [Cache.Get] counts hits, misses and
+// errors — register [Cache.Collectors] to export them.
 type Cache struct {
 	client valkeygo.Client
 	log    *slog.Logger
+	lookup *prometheus.CounterVec
 }
 
 // New builds a client from cfg, verifies connectivity with a single PING (so a
@@ -29,7 +36,9 @@ func New(cfg Config, log *slog.Logger) (*Cache, error) {
 	if err != nil {
 		return nil, err
 	}
-	client, err := valkeygo.NewClient(opt)
+	// valkeyotel wraps the client so each command becomes a span; with the
+	// no-op provider installed by default this costs one interface call.
+	client, err := valkeyotel.NewClient(opt)
 	if err != nil {
 		return nil, fmt.Errorf("valkey: connect: %w", err)
 	}
@@ -42,7 +51,25 @@ func New(cfg Config, log *slog.Logger) (*Cache, error) {
 	}
 
 	log.Info("valkey cache ready", "addr", cfg.Addr, "db", cfg.DB)
-	return &Cache{client: client, log: log}, nil
+	return &Cache{client: client, log: log, lookup: newLookupCounter()}, nil
+}
+
+func newLookupCounter() *prometheus.CounterVec {
+	return prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cache_lookups_total",
+		Help: "Cache GETs by outcome: hit, miss, or error (lookup itself failed).",
+	}, []string{"result"})
+}
+
+// Collectors returns the cache's Prometheus collectors for the service to
+// register on its metrics registry:
+//
+//	cache_lookups_total{result="hit|miss|error"}
+//
+// The hit ratio is rate(hit) / rate(hit + miss); a rising error rate with a
+// healthy readiness check usually means timeouts under load.
+func (c *Cache) Collectors() []prometheus.Collector {
+	return []prometheus.Collector{c.lookup}
 }
 
 // Client exposes the underlying valkey-go client for commands this wrapper does
@@ -54,11 +81,14 @@ func (c *Cache) Client() valkeygo.Client { return c.client }
 func (c *Cache) Get(ctx context.Context, key string) (string, bool, error) {
 	v, err := c.client.Do(ctx, c.client.B().Get().Key(key).Build()).ToString()
 	if valkeygo.IsValkeyNil(err) {
+		c.lookup.WithLabelValues("miss").Inc()
 		return "", false, nil
 	}
 	if err != nil {
+		c.lookup.WithLabelValues("error").Inc()
 		return "", false, fmt.Errorf("valkey: get %q: %w", key, err)
 	}
+	c.lookup.WithLabelValues("hit").Inc()
 	return v, true, nil
 }
 
@@ -116,7 +146,7 @@ func Aside[T any](ctx context.Context, c *Cache, key string, ttl time.Duration, 
 		if json.Unmarshal([]byte(raw), &v) == nil {
 			return v, true, nil // cache hit
 		}
-		c.log.Warn("valkey: discarding corrupt cache entry", "key", key)
+		c.log.WarnContext(ctx, "valkey: discarding corrupt cache entry", "key", key)
 	}
 
 	v, err := load(ctx)
@@ -125,7 +155,7 @@ func Aside[T any](ctx context.Context, c *Cache, key string, ttl time.Duration, 
 	}
 	if b, err := json.Marshal(v); err == nil {
 		if err := c.Set(ctx, key, string(b), ttl); err != nil {
-			c.log.Warn("valkey: cache write failed", "key", key, "err", err)
+			c.log.WarnContext(ctx, "valkey: cache write failed", "key", key, "err", err)
 		}
 	}
 	return v, false, nil // cache miss, loaded fresh

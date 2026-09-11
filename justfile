@@ -9,10 +9,22 @@
 # recipes. Because a go.work workspace root is not itself a module, the
 # fan-out recipes iterate MODULES explicitly rather than relying on `./...`.
 
+# Load the (gitignored) .env — proxy, GOPROXY, registry mirrors, scanner DB
+# mirrors — into every recipe. Absent file = no-op. Knobs: .env.example.
+set dotenv-load := true
+
 # Every Go module in the workspace, in dependency order (libs first).
 MODULES := "libs/httpx libs/resilient-http-client libs/pgx libs/valkey libs/kafka libs/otelx services/ping services/heartbeat services/tasks services/consumer"
 # Buildable service binaries (module dir : binary name).
 SERVICES := "ping heartbeat tasks consumer"
+
+# Build args forwarded from the environment into every `docker build`. A
+# value-less --build-arg takes the variable from the environment and is
+# skipped when unset, so an open-network build sees the Dockerfile defaults.
+DOCKER_BUILD_ARGS := "--build-arg DOCKER_HUB --build-arg GCR --build-arg GOPROXY --build-arg GOSUMDB --build-arg GONOSUMDB --build-arg GOFLAGS --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY"
+# Scanner inputs that a closed network points at vendored rules / offline DBs.
+SEMGREP_CONFIG := env("SEMGREP_CONFIG", "p/owasp-top-ten p/golang")
+OSV_SCANNER_FLAGS := env("OSV_SCANNER_FLAGS", "")
 
 # Show all available recipes
 default:
@@ -33,17 +45,19 @@ build:
     for m in {{MODULES}}; do echo "── build $m"; (cd "$m" && go build ./...); done
 
 # Build stripped release binaries for every service into <svc>/bin/
+# (version from VERSION or `git describe`; see scripts/build-service.sh)
 release:
     #!/usr/bin/env bash
     set -euo pipefail
     for s in {{SERVICES}}; do
       echo "── release services/$s"
-      (cd "services/$s" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "bin/$s" .)
+      scripts/build-service.sh "$s"
     done
 
 # ── Workspace test ────────────────────────────────────────────────────────────
 
-# Run every module's tests
+# Run every module's tests (container-backed suites need Docker; on OrbStack /
+# rootless setups export DOCKER_HOST, see README "Tests")
 test *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -122,13 +136,16 @@ sec: sec-secrets sec-sast sec-deps sec-iac
 sec-secrets:
     mise exec -- gitleaks detect --source . --config .gitleaks.toml --verbose
 
-# SAST — semgrep OWASP + Go rule packs
+# SAST — semgrep rule packs (SEMGREP_CONFIG; a directory of vendored rules offline)
 sec-sast:
-    mise exec -- semgrep --config p/owasp-top-ten --config p/golang --error
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cfg=(); for c in {{SEMGREP_CONFIG}}; do cfg+=(--config "$c"); done
+    mise exec -- semgrep scan "${cfg[@]}" --error --metrics=off
 
-# Dependencies — osv-scanner over go.mod + pnpm-lock.yaml
+# Dependencies — osv-scanner over go.mod + pnpm-lock.yaml (OSV_SCANNER_FLAGS: --offline …)
 sec-deps:
-    mise exec -- osv-scanner scan --config osv-scanner.toml --recursive .
+    mise exec -- osv-scanner scan --config osv-scanner.toml --recursive {{OSV_SCANNER_FLAGS}} .
 
 # IaC — hadolint on every Dockerfile
 sec-iac:
@@ -136,23 +153,23 @@ sec-iac:
     set -euo pipefail
     find services -name Dockerfile -print0 | xargs -0 -I{} mise exec -- hadolint --config .hadolint.yaml {}
 
-# Go-native known-vulnerability scan (govulncheck) across every module
+# Go-native known-vulnerability scan (govulncheck, pinned in mise.toml; GOVULNDB for a mirror)
 audit:
     #!/usr/bin/env bash
     set -euo pipefail
-    for m in {{MODULES}}; do echo "── govulncheck $m"; (cd "$m" && go run golang.org/x/vuln/cmd/govulncheck@latest ./...); done
+    for m in {{MODULES}}; do echo "── govulncheck $m"; (cd "$m" && mise exec -- govulncheck ./...); done
 
 # ── Container CVE / SBOM / signing ────────────────────────────────────────────
 
 # Build a single service image locally (context = workspace root)
 docker-build SVC:
-    docker build -f services/{{SVC}}/Dockerfile -t golang-basics-{{SVC}}:dev .
+    docker build {{DOCKER_BUILD_ARGS}} -f services/{{SVC}}/Dockerfile -t golang-basics-{{SVC}}:dev .
 
 # Build all service images
 docker-build-all:
     #!/usr/bin/env bash
     set -euo pipefail
-    for s in {{SERVICES}}; do echo "── image $s"; docker build -f "services/$s/Dockerfile" -t "golang-basics-$s:dev" .; done
+    for s in {{SERVICES}}; do echo "── image $s"; docker build {{DOCKER_BUILD_ARGS}} -f "services/$s/Dockerfile" -t "golang-basics-$s:dev" .; done
 
 # syft SBOM + grype CVE scan of a locally-built image (interactive)
 docker-scan SVC:
@@ -234,13 +251,13 @@ infra-down:
 infra-logs:
     docker compose -f docker/deps.yml logs -f
 
-# Build the app images, then run the whole stack (deps + tasks + consumer)
+# Build the app images (VERSION from git describe), then run the whole stack (deps + tasks + consumer)
 stack-up: infra-up
-    docker compose -f docker/stack.yml up -d --build
+    VERSION="$(git describe --tags --always --dirty)" docker compose -f docker/stack.yml up -d --build
 
-# Same, with tracing exported to the local Jaeger (needs `just obs-up`)
+# Same, with tracing exported to the local OTel Collector (needs `just obs-up`)
 stack-up-otel: infra-up
-    docker compose -f docker/stack.yml -f docker/stack.otel.yml up -d --build
+    VERSION="$(git describe --tags --always --dirty)" docker compose -f docker/stack.yml -f docker/stack.otel.yml up -d --build
 
 # Tear the whole stack down (app + deps + volumes)
 stack-down:
@@ -251,12 +268,14 @@ stack-down:
 # Optional; nothing in the app path needs it. Joins the deps network, so
 # `just infra-up` has to have run first.
 
-# Bring up Jaeger :16686, VictoriaMetrics :9095, Grafana :3000 (admin/admin)
+# Bring up collector :4317, Jaeger :16686, VictoriaMetrics :9095, Loki :3100, Grafana :3000
 obs-up: infra-up
     docker compose -f docker/observability.yml up -d
+    @echo "OTLP     localhost:4317 (gRPC) / :4318 (HTTP)  ← *_OTEL_EXPORTER_OTLP_ENDPOINT"
     @echo "Jaeger   http://localhost:16686"
     @echo "Metrics  http://localhost:9095"
-    @echo "Grafana  http://localhost:3000  (admin / admin)"
+    @echo "Loki     http://localhost:3100"
+    @echo "Grafana  http://localhost:3000  (admin / admin, dashboard: golang-basics)"
 
 # Stop the observability stack (keeps its volumes)
 obs-down:
@@ -342,9 +361,7 @@ bench-tasks PROFILE="smoke":
 setup:
     mise install
     go work sync
-    @echo "Installing Go dev tools…"
-    go install golang.org/x/vuln/cmd/govulncheck@latest
-    @echo "Dev tools installed — run 'just setup-sec' for the AppSec toolchain"
+    @echo "Toolchain installed (govulncheck, gotestsum, … come pinned from mise.toml) — run 'just setup-sec' for the AppSec tools"
 
 # Wire git hooks → lefthook (opt-in per clone; bypass with LEFTHOOK=0)
 hooks-install:

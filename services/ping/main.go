@@ -25,8 +25,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	cfg.Service = "ping"
 
-	logger := httpx.NewLogger(cfg.LogLevel, cfg.LogFormat)
+	logger := httpx.NewLogger(cfg.LogConfig())
 	srv := httpx.NewServer(cfg, logger)
 
 	api.Register(srv)
@@ -34,7 +35,7 @@ func run() error {
 	ctx, stop := httpx.SignalContext()
 	defer stop()
 
-	logger.Info("ping starting", "addr", cfg.Addr)
+	logger.Info("ping starting", "addr", cfg.Addr, "admin_addr", cfg.AdminAddr, "version", httpx.Version)
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("ping exited with error", "err", err)
 		return err

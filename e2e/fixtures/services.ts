@@ -2,7 +2,7 @@
  * Service-spawn fixtures for the e2e harness.
  *
  * The Go analogue of the Rust sibling repo's e2e/fixtures/services.ts: launch
- * each service binary as a child process, wait for its /healthz to come up,
+ * each service binary as a child process, wait for /healthz on its admin port,
  * and hand back the pids so globalTeardown can stop them. No Testcontainers /
  * infra here — these services have no external dependencies.
  */
@@ -32,29 +32,33 @@ export const SERVICES: ServiceSpec[] = [
   {
     name: "ping",
     bin: path.join(ROOT, "services/ping/bin/ping"),
-    healthUrl: "http://localhost:8080/healthz",
-    env: { PING_HTTP_ADDR: ":8080", PING_LOG_LEVEL: "warn" },
+    healthUrl: "http://localhost:9080/healthz",
+    env: { PING_HTTP_ADDR: ":8080", PING_ADMIN_ADDR: ":9080", PING_LOG_LEVEL: "warn" },
   },
   {
     name: "heartbeat",
     bin: path.join(ROOT, "services/heartbeat/bin/heartbeat"),
-    healthUrl: "http://localhost:8081/healthz",
+    healthUrl: "http://localhost:9081/healthz",
     // Fast tick so the heartbeat_beats_total assertion doesn't wait long.
-    env: { HEARTBEAT_HTTP_ADDR: ":8081", HEARTBEAT_INTERVAL: "200ms", HEARTBEAT_LOG_LEVEL: "warn" },
+    env: {
+      HEARTBEAT_ADMIN_ADDR: ":9081",
+      HEARTBEAT_INTERVAL: "200ms",
+      HEARTBEAT_LOG_LEVEL: "warn",
+    },
   },
   ...(WITH_DEPS
     ? [
         {
           name: "tasks",
           bin: path.join(ROOT, "services/tasks/bin/tasks"),
-          healthUrl: "http://localhost:8082/readyz",
-          env: { TASKS_HTTP_ADDR: ":8082", TASKS_LOG_LEVEL: "warn" },
+          healthUrl: "http://localhost:9082/readyz",
+          env: { TASKS_HTTP_ADDR: ":8082", TASKS_ADMIN_ADDR: ":9082", TASKS_LOG_LEVEL: "warn" },
         },
         {
           name: "consumer",
           bin: path.join(ROOT, "services/consumer/bin/consumer"),
-          healthUrl: "http://localhost:8083/readyz",
-          env: { CONSUMER_HTTP_ADDR: ":8083", CONSUMER_LOG_LEVEL: "warn" },
+          healthUrl: "http://localhost:9083/readyz",
+          env: { CONSUMER_ADMIN_ADDR: ":9083", CONSUMER_LOG_LEVEL: "warn" },
         },
       ]
     : []),

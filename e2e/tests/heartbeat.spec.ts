@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-import { HEARTBEAT_URL } from "../helpers/env";
+import { HEARTBEAT_ADMIN_URL } from "../helpers/env";
 
 /** Pull the heartbeat_beats_total counter value out of the Prometheus text. */
 async function readBeats(request: import("@playwright/test").APIRequestContext): Promise<number> {
-  const res = await request.get(`${HEARTBEAT_URL}/metrics`);
+  const res = await request.get(`${HEARTBEAT_ADMIN_URL}/metrics`);
   expect(res.status()).toBe(200);
   const line = (await res.text()).split("\n").find((l) => l.startsWith("heartbeat_beats_total"));
   expect(line, "heartbeat_beats_total present").toBeTruthy();

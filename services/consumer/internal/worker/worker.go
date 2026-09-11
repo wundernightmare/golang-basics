@@ -60,7 +60,7 @@ func New(consumer Consumer, log *slog.Logger, reg prometheus.Registerer) *Worker
 // Run drains the topic until ctx is cancelled (graceful shutdown → nil) or the
 // consumer errors.
 func (w *Worker) Run(ctx context.Context) error {
-	w.log.Info("consumer worker started")
+	w.log.InfoContext(ctx, "consumer worker started")
 	return w.consumer.Run(ctx, w.handle)
 }
 
@@ -68,15 +68,18 @@ func (w *Worker) Run(ctx context.Context) error {
 // skipped and acknowledged (returning nil) rather than failing the loop — a
 // single poison record must not wedge the consumer. A real pipeline would route
 // it to a dead-letter topic.
-func (w *Worker) handle(_ context.Context, msg kafka.Message) error {
+//
+// ctx carries the record's process span (continued from the producer's trace
+// via the record headers), so the *Context log calls stamp the trace id.
+func (w *Worker) handle(ctx context.Context, msg kafka.Message) error {
 	var evt taskCreatedEvent
 	if err := json.Unmarshal(msg.Value, &evt); err != nil {
 		w.skipped.Inc()
-		w.log.Warn("skipping undecodable event", "partition", msg.Partition, "offset", msg.Offset, "err", err)
+		w.log.WarnContext(ctx, "skipping undecodable event", "partition", msg.Partition, "offset", msg.Offset, "err", err)
 		return nil
 	}
 	w.consumed.Inc()
-	w.log.Info("task.created consumed",
+	w.log.InfoContext(ctx, "task.created consumed",
 		"id", evt.ID, "title", evt.Title, "partition", msg.Partition, "offset", msg.Offset)
 	return nil
 }

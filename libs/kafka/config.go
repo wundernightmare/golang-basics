@@ -22,6 +22,7 @@ import (
 //	TASKS_KAFKA_GROUP          consumer group id                (default "tasks-consumer")
 //	TASKS_KAFKA_CLIENT_ID      client id advertised to brokers  (default "golang-basics")
 //	TASKS_KAFKA_DIAL_TIMEOUT   broker dial timeout              (default "10s")
+//	TASKS_KAFKA_LAG_INTERVAL   consumer-lag poll period, 0 = off (default "15s")
 type Config struct {
 	Brokers     []string      `env:"KAFKA_BROKERS" envSeparator:"," envDefault:"localhost:9092"`
 	Topic       string        `env:"KAFKA_TOPIC" envDefault:"tasks.events"`
@@ -29,6 +30,7 @@ type Config struct {
 	Group       string        `env:"KAFKA_GROUP" envDefault:"tasks-consumer"`
 	ClientID    string        `env:"KAFKA_CLIENT_ID" envDefault:"golang-basics"`
 	DialTimeout time.Duration `env:"KAFKA_DIAL_TIMEOUT" envDefault:"10s"`
+	LagInterval time.Duration `env:"KAFKA_LAG_INTERVAL" envDefault:"15s"`
 }
 
 // LoadConfig parses a [Config] from the environment using the given key prefix
