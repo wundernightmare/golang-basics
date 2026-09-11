@@ -1,0 +1,49 @@
+# Vector — ships every compose container's stdout to Loki.
+#
+# The services write one JSON object per line (libs/httpx.NewLogger); the
+# transform lifts its fields (service, level, msg, trace_id, span_id, …) to
+# the top level so Loki can index `service` as a label and Grafana can link
+# trace_id to Jaeger. Lines that are not JSON (Postgres, Redpanda, …) are kept
+# as plain messages labelled by their compose service name, level "raw".
+# Containers are selected by name prefix (every compose file here names its
+# containers golang-basics-*).
+
+sources:
+  docker:
+    type: docker_logs
+    docker_host: unix:///var/run/docker.sock
+    include_containers: ["golang-basics-"]
+
+transforms:
+  app_json:
+    type: remap
+    inputs: [docker]
+    source: |
+      .container = .container_name
+      .compose_service = .label."com.docker.compose.service"
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge!(., parsed)
+        if !exists(.service) { .service = .compose_service }
+      } else {
+        .service = .compose_service
+      }
+      if !exists(.level) { .level = "raw" } # non-JSON lines (Postgres, Redpanda, …)
+      del(.label)
+      del(.host)
+      del(.image)
+
+sinks:
+  loki:
+    type: loki
+    inputs: [app_json]
+    endpoint: http://loki:3100
+    encoding:
+      codec: json
+    labels:
+      service: "{{ service }}"
+      container: "{{ container }}"
+      level: "{{ level }}"
+    out_of_order_action: accept
+    healthcheck:
+      enabled: true
