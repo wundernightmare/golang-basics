@@ -24,11 +24,11 @@ code lives in per-branch worktrees (`master/` is canonical).
 
 | Module                              | Kind        | Port(s)                       | One-liner                                                                                          |
 | ----------------------------------- | ----------- | ----------------------------- | ------------------------------------------------------------------------------------------------- |
-| [`services/ping`](services/ping)           | HTTP service | `:8080`                      | Ping/pong HTTP service. `GET /ping` → `pong`, with `?msg=` echo + `/version`.                      |
-| [`services/heartbeat`](services/heartbeat) | Worker       | `:8081` (health/metrics)     | Background ticker worker — emits a beat + bumps `heartbeat_beats_total` every interval.            |
-| [`services/tasks`](services/tasks)         | HTTP service | `:8082`                      | Tasks CRUD over **Postgres + Valkey + Kafka**, traced, with `problem+json` errors. Publishes `task.created`. |
-| [`services/consumer`](services/consumer)   | Worker       | `:8083` (health/metrics)     | Kafka consumer draining `tasks.events`; bumps `consumer_tasks_consumed_total`.                     |
-| [`libs/httpx`](libs/httpx)                 | Library      | —                            | Shared HTTP scaffolding: gin engine, structured logging, Prometheus metrics, health, graceful shutdown, env + YAML config, RFC 9457 `Problem`. |
+| [`services/ping`](services/ping)           | HTTP service | `:8080` API, `:9080` admin   | Ping/pong HTTP service. `GET /ping` → `pong`, with `?msg=` echo + `/version`.                      |
+| [`services/heartbeat`](services/heartbeat) | Worker       | `:9081` admin                | Background ticker worker — emits a beat + bumps `heartbeat_beats_total` every interval.            |
+| [`services/tasks`](services/tasks)         | HTTP service | `:8082` API, `:9082` admin   | Tasks CRUD over **Postgres + Valkey + Kafka**, traced end-to-end, with `problem+json` errors. Publishes `task.created`. |
+| [`services/consumer`](services/consumer)   | Worker       | `:9083` admin                | Kafka consumer draining `tasks.events`; continues the producer's trace; exports group lag.         |
+| [`libs/httpx`](libs/httpx)                 | Library      | —                            | Shared HTTP scaffolding: gin engine, sampled trace-correlated logging, Prometheus metrics, admin listener (health/metrics/version/pprof), graceful shutdown, env + YAML config, RFC 9457 `Problem`. |
 | [`libs/resilient-http-client`](libs/resilient-http-client) | Library | —              | Policy-per-target **outbound** HTTP client: rate limiting, circuit breaker, adaptive concurrency, jittered retry, response cache, coalescing, fallbacks, metrics. |
 | [`libs/pgx`](libs/pgx)                     | Library      | —                            | PostgreSQL pool (`jackc/pgx`): env config, readiness check, boot-time migrations.                  |
 | [`libs/valkey`](libs/valkey)               | Library      | —                            | Valkey cache (`valkey-go`): get/set/del, readiness check, generic cache-aside helper.              |
@@ -36,8 +36,9 @@ code lives in per-branch worktrees (`master/` is canonical).
 | [`libs/otelx`](libs/otelx)                 | Library      | —                            | OpenTelemetry tracing: OTLP exporter, W3C propagation, gin middleware (opt-in).                    |
 
 The dependency graph is `services/* → libs/*`. Every service — HTTP-first or
-worker — reuses `httpx` for its `/healthz`, `/readyz` and `/metrics` surface, so
-a worker is as observable as a server. `ping`/`heartbeat` stay dependency-free;
+worker — reuses `httpx` for its **admin listener** (`/healthz`, `/readyz`,
+`/metrics`, `/version`, `/debug/pprof`, always API port + 1000), so a worker is
+as observable as a server and the API port never carries operational routes. `ping`/`heartbeat` stay dependency-free;
 `tasks`/`consumer` compose the data libs (`pgx`/`valkey`/`kafka`/`otelx`) and
 need the backing services from [`docker/deps.yml`](docker/deps.yml) (`just infra-up`).
 
@@ -81,17 +82,18 @@ mise trust && mise install        # or: just setup
 just ci                           # fmt-check → vet → lint → test
 
 # 3. Run the dependency-free services on the host.
-just up                           # ping :8080 + heartbeat :8081
+just up                           # ping :8080 (admin :9080) + heartbeat (admin :9081)
 curl -s localhost:8080/ping | jq .
-curl -s localhost:8081/metrics | grep heartbeat_beats_total
+curl -s localhost:9081/metrics | grep heartbeat_beats_total
+curl -s localhost:9080/version | jq .
 just down
 
 # 4. Run the data-services vertical (Postgres + Valkey + Kafka).
 just infra-up                     # docker compose deps (postgres/valkey/kafka)
-just tasks run &                  # tasks :8082
-just consumer run &               # consumer :8083
+just tasks run &                  # tasks :8082 (admin :9082)
+just consumer run &               # consumer (admin :9083)
 curl -s -XPOST localhost:8082/tasks -d '{"title":"hello"}' | jq .
-curl -s localhost:8083/metrics | grep consumer_tasks_consumed_total
+curl -s localhost:9083/metrics | grep -E 'consumer_tasks_consumed_total|kafka_consumer_group_lag'
 #   …or run the whole thing in containers instead:
 just stack-up                     # deps + tasks + consumer images, all wired up
 
@@ -227,11 +229,17 @@ just docker-verify ping dev   # offline verify against cosign.pub
 Two pipelines, deliberately kept at parity: `.github/workflows/{ci,appsec,docker}.yml`
 and `.gitlab-ci.yml`.
 
-**Nothing hard-codes a tool version.** Both read the pins out of `mise.toml` —
-GitHub via a `versions` job with step outputs, GitLab via a `versions` job that
-publishes a `dotenv` artifact which later jobs consume as ordinary variables,
-including inside `image:`. Bump a version in `mise.toml` and both pipelines
-follow; there is no second place to remember.
+**Nothing hard-codes a tool version or a module list.** Both pipelines start
+with a `versions` job that runs `scripts/mise-pins.sh` (tool pins out of
+`mise.toml`) and `scripts/touched-modules.sh --all` (modules out of `go.work`);
+GitHub consumes them as job outputs / `fromJSON` matrices, GitLab as a `dotenv`
+artifact that later jobs use as ordinary variables, including inside `image:`.
+Bump a version in `mise.toml` or add a module to `go.work` and both pipelines
+follow; there is no second place to remember. The scanners (gitleaks, semgrep,
+hadolint, syft, grype) run from the same version-pinned images on both sides,
+so the two pipelines cannot disagree about a finding.
+
+**Nothing hard-codes a host either** — see "Closed networks" below.
 
 The GitLab side is shaped around not burning runner minutes:
 
@@ -245,7 +253,10 @@ The GitLab side is shaped around not burning runner minutes:
 
 It also uses what GitLab gives you and GitHub does not: `artifacts:reports:junit`
 puts failing tests in the MR widget, and `coverage:` plus a Cobertura report put
-the percentage and per-line annotations in the diff.
+the percentage and per-line annotations in the diff. The GitLab `e2e` job runs
+the full suite (tasks + consumer included) against Postgres / Valkey / Redpanda
+declared as `services:` — no docker-in-docker, no compose, no package install,
+and the job image is plain `node`.
 
 The caches live under `.cache/` inside the project (GitLab only caches paths
 below `$CI_PROJECT_DIR`) — which is why the `gofmt` gate is scoped to
@@ -288,39 +299,93 @@ runs the `tasks`/`consumer` images against it.
 
 ## Observability
 
-`libs/otelx` exports OTLP traces and every service serves Prometheus metrics on
-its own port at `/metrics` — `docker/observability.yml` is the receiving end.
-Optional: nothing in the app path depends on it.
+What every service emits, and where — designed so an existing platform (a
+stdout log collector, an OTLP trace collector, a runtime agent scraping
+metrics and pprof) plugs in without code changes:
+
+| Signal  | Where                                            | What                                                                                                                                       |
+| ------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Logs    | stdout, one JSON line per record                 | `service`, `trace_id`/`span_id` when the context carries a span, one access-log line per API request (`route`, `status`, `latency_ms`, `bytes`); debug/info **sampled** per message (first 100/s, then every 100th — `*_LOG_SAMPLE_*`), warn/error/slow never dropped |
+| Traces  | OTLP gRPC to `*_OTEL_EXPORTER_OTLP_ENDPOINT`     | HTTP server span → pgx query spans (otelpgx) → Valkey command spans (valkeyotel) → Kafka produce span; the record headers carry the context so the consumer's `process` span continues the same trace |
+| Metrics | `/metrics` on the **admin** port (API port + 1000) | `build_info`, RED per route (`http_requests_total`, `http_request_duration_seconds` classic + native histogram, `http_requests_in_flight`), `log_dropped_total`, pgx pool (`pgxpool_*`), cache `cache_lookups_total{result}`, Kafka `kafka_producer_*` / `kafka_consumer_*` incl. `kafka_consumer_group_lag` |
+| Profiles| `/debug/pprof/` on the admin port                | cpu / heap / goroutine / block / mutex / trace, for a runtime agent or `go tool pprof http://host:9080/debug/pprof/heap` |
+| Identity| `/version` on the admin port                     | service, version (`-X libs/httpx.Version`, set by `scripts/build-service.sh` / `VERSION` build arg), VCS revision, Go version |
+
+Log with the context (`log.InfoContext(ctx, …)`) and pass `ctx` down; that is
+all a handler has to do for its log lines, DB calls, cache calls and Kafka
+records to share one trace id.
+
+`docker/observability.yml` is a *local* receiving end for the above, shaped
+like the platform the services meet in production — a collector in front of
+the trace store, a stdout shipper in front of the log store, a scraper on the
+admin ports — so the correlation story can be checked on a laptop. Optional:
+nothing in the app path depends on it.
 
 ```sh
 just infra-up     # deps first — the stack joins that network
 just obs-up
+#   OTLP     localhost:4317 (gRPC) / :4318 (HTTP)   ← *_OTEL_EXPORTER_OTLP_ENDPOINT
 #   Jaeger   http://localhost:16686
 #   Metrics  http://localhost:9095   (VictoriaMetrics)
-#   Grafana  http://localhost:3000   (admin / admin)
+#   Loki     http://localhost:3100
+#   Grafana  http://localhost:3000   (admin / admin, dashboard "golang-basics")
+just stack-up-otel   # tasks + consumer in containers, exporting traces
 just obs-down
 ```
 
-| Piece | Role |
-|---|---|
-| Jaeger all-in-one | receives OTLP gRPC on `:4317` directly — no collector in between |
-| VictoriaMetrics | scrapes `/metrics`; config in `docker/observability/scrape.yml` |
-| Grafana | both datasources pre-provisioned, so the first login is a working Explore view |
+| Piece | Role | Cost |
+|---|---|---|
+| OpenTelemetry Collector | the one OTLP endpoint services know; batches, forwards traces to Jaeger; where tail sampling / redaction / a second exporter would go | ~60 MB |
+| Jaeger all-in-one | trace store + UI, in memory; only the collector talks to it | ~50 MB |
+| VictoriaMetrics | scrapes `/metrics` on the admin ports + the dependency exporters; native histograms | ~50 MB |
+| Loki + Vector | Vector tails every `golang-basics-*` container's stdout through the Docker socket, lifts the JSON fields (`service`, `level`, `trace_id`…) and ships to Loki | ~60 + 40 MB |
+| Grafana | datasources provisioned and cross-linked (span → its log lines, log line → its trace); one dashboard from `docker/observability/dashboards/` | the heavy one |
+| postgres-exporter, redis_exporter | Postgres / Valkey metrics; Redpanda is scraped directly on `/public_metrics` | ~10 MB each |
 
 Each scrape job carries two targets — the container name and
 `host.docker.internal` — so the same config works whether the services run via
 `just stack-up` or on the host via `just up`. Whichever set is not running just
 shows as down.
 
+What "it works" looks like, after `just stack-up-otel` and one `POST /tasks`:
+the Jaeger trace holds the `POST /tasks` server span, `INSERT`, `SET`,
+`tasks.events publish` from `tasks` and `tasks.events receive` / `process` from
+`consumer`; a Loki query `{service="consumer"} |= "<trace_id>"` finds the
+consumer's log line and `{service="tasks"} |= "<trace_id>"` the access-log
+line; the dashboard shows the request, the cache hit, the publish and the lag.
+That path is what the telemetry tests assert (see "Tests").
+
 **Tracing is opt-in.** With `*_OTEL_ENABLED` unset, `otelx` installs only the
 W3C propagators and a no-op provider, so nothing depends on a collector being
 up. To export:
 
 ```sh
-just stack-up-otel    # containerised, via docker/stack.otel.yml
-
+# host process → local collector
+TASKS_OTEL_ENABLED=true TASKS_OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 just tasks run
 # or a single service on the host / under the debugger:
-TASKS_OTEL_ENABLED=true TASKS_OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 just up tasks
+CONSUMER_OTEL_ENABLED=true CONSUMER_OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 just consumer run
+```
+
+---
+
+## Tests
+
+Three layers, all real code paths:
+
+| Layer | Where | What it proves |
+|---|---|---|
+| Unit | `*_test.go` next to the code, `-short` | config, handlers with fakes behind the small interfaces, the readiness cache, log sampling arithmetic |
+| Telemetry contract | `libs/otelx/telemetry_test.go`, `libs/httpx/health_test.go`, `*/metrics_test.go` | a real server, the real OpenTelemetry SDK with an in-memory exporter, the real slog handler chain into a buffer, the real Prometheus registry: the access-log line, the span and the counters describe the same request; sampling is exact under concurrency; every exposition is `promlint`-clean; readiness answers from cache and never stampedes a dependency |
+| Integration | `*/telemetry_test.go` in `pgx`, `valkey`, `kafka`, `services/tasks/internal/integration`, `services/consumer/internal/worker` | against real Postgres / Valkey / Kafka via testcontainers: query and command spans are children of the caller's span; a record carries its trace through the broker and the consumer's log line names the producer's trace; pool stats, hit/miss and group lag move with real usage |
+
+The container-backed suites skip under `-short` and when Docker is unreachable
+(they fail instead when `CI` is set). On OrbStack / rootless Docker, point
+testcontainers at the socket first:
+
+```sh
+export DOCKER_HOST=unix://$HOME/.orbstack/run/docker.sock   # OrbStack
+just test                                                    # everything
+just <module> test-short                                     # unit only
 ```
 
 ---

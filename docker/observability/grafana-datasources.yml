@@ -1,11 +1,13 @@
-# Grafana datasource provisioning — VictoriaMetrics speaks the Prometheus API,
-# and Jaeger is wired as a tracing datasource so a trace ID from a log line can
-# be opened directly. Both are reachable by container name on the deps network.
+# Grafana datasources — metrics, traces, logs, cross-linked:
+#   Jaeger span  → "Logs for this span": Loki query by service + trace_id
+#   Loki line    → the trace_id field is a link into Jaeger
+# All three are reachable by container name on the deps network.
 
 apiVersion: 1
 
 datasources:
   - name: VictoriaMetrics
+    uid: prometheus
     type: prometheus
     access: proxy
     url: http://victoriametrics:8428
@@ -13,7 +15,37 @@ datasources:
     editable: false
 
   - name: Jaeger
+    uid: jaeger
     type: jaeger
     access: proxy
     url: http://jaeger:16686
     editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-5m"
+        spanEndTimeShift: "5m"
+        filterByTraceID: false
+        filterBySpanID: false
+        customQuery: true
+        query: '{service="${__span.tags.service.name}"} |= "${__trace.traceId}"'
+      tracesToMetrics:
+        datasourceUid: prometheus
+        queries:
+          - name: "Request rate"
+            query: 'sum(rate(http_requests_total{service="${__span.tags.service.name}"}[5m]))'
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      derivedFields:
+        - name: trace_id
+          matcherType: regex
+          matcherRegex: '"trace_id":"(\w+)"'
+          url: "$${__value.raw}"
+          urlDisplayLabel: "Trace"
+          datasourceUid: jaeger

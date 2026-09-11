@@ -1,51 +1,85 @@
-# Local observability stack — the receiving end for what the services already
-# emit. Optional: nothing in the app path depends on it.
+# Local observability stack — the receiving end for what the services emit,
+# shaped like the platform they will meet in production (a collector in front
+# of the trace backend, a stdout log shipper, a scraper on the admin ports) so
+# the correlation story can be verified locally. Optional: nothing in the app
+# path depends on it.
 #
-# Topology (no OTel Collector — Jaeger receives OTLP directly, as in the Rust
-# sibling repo):
+# Topology
 #
-#   ping       :8080/metrics ─┐
-#   heartbeat  :8081/metrics ─┼─(scrape)→ VictoriaMetrics  http://localhost:9095
-#   tasks      :8082/metrics ─┤                 │
-#   consumer   :8083/metrics ─┘                 └────────→ Grafana  http://localhost:3000
-#                                                          (admin / admin, datasource pre-provisioned)
-#   tasks / consumer →(OTLP gRPC :4317)→ Jaeger            http://localhost:16686
+#   services ─(OTLP gRPC :4317)─▶ otel-collector ─(OTLP)─▶ Jaeger        http://localhost:16686
+#   services ─(stdout JSON)─────▶ vector (docker socket) ─▶ Loki         http://localhost:3100
+#   services :908x/metrics ◀─(scrape)─ VictoriaMetrics                    http://localhost:9095
+#   postgres-exporter / valkey-exporter / redpanda /public_metrics ◀─(scrape)─┘
+#   Grafana: VictoriaMetrics + Jaeger + Loki datasources, trace ⇄ logs links, one dashboard
+#                                                                         http://localhost:3000  (admin / admin)
+#
+# Every image is small enough to run next to the deps stack on a laptop: the
+# collector (core pipeline, ~60 MB RSS), Jaeger all-in-one (in-memory),
+# VictoriaMetrics single-node, Loki single-binary on local disk, Vector as the
+# log shipper, two ~10 MB exporters. Grafana is the heaviest piece.
 #
 # Scrape targets cover both ways of running the services: `just up` puts them on
-# the host (reached via host.docker.internal) and `just stack-up` puts them in
-# containers on the deps network (reached by container name). Whichever set is
-# not running simply shows as down in VictoriaMetrics.
-#
-# VictoriaMetrics' UI sits on :9095 so it never collides with a service port.
+# the host (host.docker.internal) and `just stack-up` puts them in containers on
+# the deps network (container name). Whichever set is not running shows as down.
 #
 # Usage:
 #   just infra-up          # deps.yml first — this stack joins its network
 #   just obs-up
 #   just obs-down
 #
-# Tracing is opt-in per service; the exporter is off unless you ask for it:
-#   TASKS_OTEL_ENABLED=true TASKS_OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 \
-#     just up tasks
-# For the containerised path, overlay docker/stack.otel.yml (see justfile).
+# Point a service at it (tracing is opt-in; see docker/stack.otel.yml for the
+# containerised path):
+#   TASKS_OTEL_ENABLED=true TASKS_OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 just tasks run
+#
+# Image hosts come from DOCKER_HUB (see .env.example) for closed networks.
+
+name: golang-basics-obs
 
 services:
+  # ── OpenTelemetry Collector ─────────────────────────────────────────────────
+  # The one endpoint services know about. Receives OTLP (gRPC + HTTP), batches,
+  # forwards traces to Jaeger. Swap the exporter (or add tail sampling) here
+  # and no service changes. Config: observability/otel-collector.yml.
+  otel-collector:
+    image: ${DOCKER_HUB:-docker.io}/otel/opentelemetry-collector-contrib:0.128.0
+    container_name: golang-basics-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC — services
+      - "4318:4318" # OTLP HTTP — browsers / curl
+    depends_on:
+      jaeger:
+        condition: service_healthy
+    # No docker healthcheck: the image is scratch-based (no shell, no wget).
+    # The health_check extension answers on :13133 for anything outside.
+    networks: [deps]
+
   # ── Jaeger all-in-one ───────────────────────────────────────────────────────
-  # Receives OTLP gRPC on :4317 directly; no collector in the middle.
+  # Trace store + UI, in-memory. Only the collector talks to it; port 4317 is
+  # not published so nothing bypasses the collector by accident.
   jaeger:
-    image: jaegertracing/all-in-one:1.76.0
+    image: ${DOCKER_HUB:-docker.io}/jaegertracing/all-in-one:1.76.0
     container_name: golang-basics-jaeger
     restart: unless-stopped
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
       - "16686:16686" # UI
-      - "4317:4317" # OTLP gRPC
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:14269/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks: [deps]
 
   # ── VictoriaMetrics ─────────────────────────────────────────────────────────
-  # Prometheus-compatible; scrapes the services' /metrics endpoints.
+  # Prometheus-compatible TSDB + scraper; native histograms supported, so the
+  # http_request_duration_seconds native buckets are stored as-is.
   victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.136.0
+    image: ${DOCKER_HUB:-docker.io}/victoriametrics/victoria-metrics:v1.136.0
     container_name: golang-basics-victoriametrics
     restart: unless-stopped
     command:
@@ -61,11 +95,49 @@ services:
       - "host.docker.internal:host-gateway"
     networks: [deps]
 
+  # ── Loki ────────────────────────────────────────────────────────────────────
+  # Log store, single binary on local disk (7d retention). Grafana's built-in
+  # Loki datasource means no plugin download — works in a closed network.
+  loki:
+    image: ${DOCKER_HUB:-docker.io}/grafana/loki:3.5.3
+    container_name: golang-basics-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yml"]
+    volumes:
+      - ./observability/loki.yml:/etc/loki/config.yml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [deps]
+
+  # ── Vector ──────────────────────────────────────────────────────────────────
+  # The stdout log shipper: tails every compose container's stdout through the
+  # Docker socket, parses the services' JSON lines (service, level, trace_id…)
+  # and pushes them to Loki. Exactly the role a platform's log collector plays
+  # in production, so the same log lines are tested end to end here.
+  vector:
+    image: ${DOCKER_HUB:-docker.io}/timberio/vector:0.49.0-alpine
+    container_name: golang-basics-vector
+    restart: unless-stopped
+    volumes:
+      - ./observability/vector.yml:/etc/vector/vector.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+    networks: [deps]
+
   # ── Grafana ─────────────────────────────────────────────────────────────────
-  # The VictoriaMetrics datasource is provisioned, so the first login lands on a
-  # working Explore view instead of a setup wizard.
+  # Datasources (metrics, traces, logs) and the golang-basics dashboard are
+  # provisioned from files: first login lands on a working board, and a trace
+  # links to its log lines and back via trace_id.
   grafana:
-    image: grafana/grafana:12.4
+    image: ${DOCKER_HUB:-docker.io}/grafana/grafana:12.4
     container_name: golang-basics-grafana
     restart: unless-stopped
     environment:
@@ -73,21 +145,52 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
     volumes:
       - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./observability/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/provider.yml:ro
+      - ./observability/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
       - "3000:3000"
-    depends_on: [victoriametrics]
+    depends_on: [victoriametrics, loki]
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [deps]
+
+  # ── Dependency exporters (sidecars to docker/deps.yml) ──────────────────────
+  # Postgres and Valkey have no /metrics of their own; Redpanda does
+  # (:9644/public_metrics, scraped directly — see scrape.yml).
+  postgres-exporter:
+    image: ${DOCKER_HUB:-docker.io}/prometheuscommunity/postgres-exporter:v0.16.0
+    container_name: golang-basics-postgres-exporter
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: "postgresql://app:app@postgres:5432/app?sslmode=disable"
+    networks: [deps]
+
+  valkey-exporter:
+    image: ${DOCKER_HUB:-docker.io}/oliver006/redis_exporter:v1.66.0
+    container_name: golang-basics-valkey-exporter
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: "redis://valkey:6379"
     networks: [deps]
 
 volumes:
   vm-data:
+  loki-data:
   grafana-data:
 
 networks:
   # The network docker/deps.yml creates (compose names it "<project>_default"),
-  # so container-run services are scrapeable by name. deps.yml must be up first.
+  # so container-run services and the deps are reachable by name. deps.yml must
+  # be up first.
   deps:
     name: golang-basics-deps_default
     external: true
