@@ -6,17 +6,50 @@ on:
     tags: ["v*"]
   pull_request:
 
+# Read-only until the push step below is enabled — then add `packages: write`
+# to *that* job only (never at workflow level for pull requests).
 permissions:
   contents: read
-  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Same names as .env.example / the GitLab variables; empty = public upstream.
+env:
+  DOCKER_HUB: ${{ vars.DOCKER_HUB || 'docker.io' }}
+  GCR: ${{ vars.GCR || 'gcr.io' }}
+  GOPROXY: ${{ vars.GOPROXY || 'https://proxy.golang.org,direct' }}
+  GONOSUMDB: ${{ vars.GONOSUMDB }}
+  GRYPE_DB_UPDATE_URL: ${{ vars.GRYPE_DB_UPDATE_URL }}
+  GRYPE_DB_AUTO_UPDATE: ${{ vars.GRYPE_DB_AUTO_UPDATE }}
+  # Accept the bundled vuln DB even if older than grype's 5-day default
+  # (CI's clock can run ahead of the latest published DB).
+  GRYPE_DB_VALIDATE_AGE: "false"
 
 jobs:
-  build:
+  versions:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      SYFT_VERSION: ${{ steps.pins.outputs.SYFT_VERSION }}
+      GRYPE_VERSION: ${{ steps.pins.outputs.GRYPE_VERSION }}
+      SERVICES: ${{ steps.svc.outputs.SERVICES }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pins
+        run: scripts/mise-pins.sh >> "$GITHUB_OUTPUT"
+      - id: svc
+        run: echo "SERVICES=$(find services -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort | jq -Rsc 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        service: [ping, heartbeat, tasks, consumer]
+        service: ${{ fromJSON(needs.versions.outputs.SERVICES) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,29 +62,40 @@ jobs:
           file: services/${{ matrix.service }}/Dockerfile
           load: true
           tags: golang-basics-${{ matrix.service }}:ci
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+            DOCKER_HUB=${{ env.DOCKER_HUB }}
+            GCR=${{ env.GCR }}
+            GOPROXY=${{ env.GOPROXY }}
+            GONOSUMDB=${{ env.GONOSUMDB }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
-      - name: SBOM (syft)
-        uses: anchore/sbom-action@v0
-        with:
-          image: golang-basics-${{ matrix.service }}:ci
-          format: cyclonedx-json
-          output-file: sbom-${{ matrix.service }}.json
+      # syft + grype from the same version-pinned images as the GitLab job,
+      # against a `docker save` tar — identical commands, identical findings.
+      - name: SBOM (syft) + CVE scan (grype, fail on high)
+        run: |
+          docker save -o "image-${{ matrix.service }}.tar" "golang-basics-${{ matrix.service }}:ci"
+          docker run --rm -v "$PWD:/w" -w /w \
+            "${DOCKER_HUB}/anchore/syft:v${{ needs.versions.outputs.SYFT_VERSION }}" \
+            "docker-archive:image-${{ matrix.service }}.tar" -o "cyclonedx-json=sbom-${{ matrix.service }}.json"
+          # Forward only the grype knobs that are actually set (an empty
+          # GRYPE_DB_UPDATE_URL would override grype's default with "").
+          pass=(); for v in GRYPE_DB_VALIDATE_AGE GRYPE_DB_UPDATE_URL GRYPE_DB_AUTO_UPDATE HTTPS_PROXY NO_PROXY; do
+            [ -n "${!v:-}" ] && pass+=(-e "$v")
+          done
+          docker run --rm -v "$PWD:/w" -w /w "${pass[@]}" \
+            "${DOCKER_HUB}/anchore/grype:v${{ needs.versions.outputs.GRYPE_VERSION }}" \
+            "docker-archive:image-${{ matrix.service }}.tar" --config .grype.yaml --fail-on high
 
-      - name: CVE scan (grype, fail on high)
-        uses: anchore/scan-action@v4
+      - uses: actions/upload-artifact@v4
         with:
-          image: golang-basics-${{ matrix.service }}:ci
-          fail-build: true
-          severity-cutoff: high
-        env:
-          GRYPE_CONFIG: .grype.yaml
-          # Accept the bundled vuln DB even if older than grype's 5-day default
-          # (CI's clock can run ahead of the latest published DB).
-          GRYPE_DB_VALIDATE_AGE: "false"
+          name: sbom-${{ matrix.service }}
+          path: sbom-${{ matrix.service }}.json
+          retention-days: 7
 
-      # Push only happens on master / tags — wire to your registry of choice.
+      # Push only happens on master / tags — wire to your registry of choice
+      # and give this job `permissions: packages: write`.
       # - name: Login + push
       #   if: github.event_name == 'push'
       #   uses: docker/build-push-action@v6

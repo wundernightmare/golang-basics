@@ -8,35 +8,56 @@ on:
 permissions:
   contents: read
 
+# One run per ref: a newer push to a PR cancels the in-flight run (GitLab's
+# `interruptible: true`); pushes to master always run to completion.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Closed-network knobs come from repository / organisation *variables* under the
+# same names as .env.example and fall back to the public upstreams. Nothing in
+# this file hard-codes a host or a tool version.
+env:
+  GOPROXY: ${{ vars.GOPROXY || 'https://proxy.golang.org,direct' }}
+  GONOSUMDB: ${{ vars.GONOSUMDB }}
+  GOTOOLCHAIN: local
+
 jobs:
-  # Single source of truth: read the pinned tool versions straight out of
-  # mise.toml so CI uses exactly what local dev does (no drift between
-  # `mise install` and a hard-coded `go-version`).
+  # Single source of truth: tool pins are read out of mise.toml by
+  # scripts/mise-pins.sh (the GitLab `versions` job runs the same script) and
+  # the module lists out of go.work / go.mod, so adding a module or bumping a
+  # tool never touches this file.
   versions:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
-      go: ${{ steps.v.outputs.go }}
-      golangci: ${{ steps.v.outputs.golangci }}
-      node: ${{ steps.v.outputs.node }}
+      GO_VERSION: ${{ steps.pins.outputs.GO_VERSION }}
+      NODE_VERSION: ${{ steps.pins.outputs.NODE_VERSION }}
+      GOLANGCI_VERSION: ${{ steps.pins.outputs.GOLANGCI_VERSION }}
+      MODULES: ${{ steps.mods.outputs.MODULES }}
+      DATA_MODULES: ${{ steps.mods.outputs.DATA_MODULES }}
     steps:
       - uses: actions/checkout@v4
-      - id: v
+      - id: pins
+        run: scripts/mise-pins.sh >> "$GITHUB_OUTPUT"
+      - id: mods
         run: |
-          mt=mise.toml
+          json() { jq -Rsc 'split("\n") | map(select(length > 0))'; }
           {
-            echo "go=$(sed -n 's/^go[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$mt")"
-            echo "golangci=$(sed -n 's/^golangci-lint[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$mt")"
-            echo "node=$(sed -n 's/^node[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$mt")"
+            echo "MODULES=$(scripts/touched-modules.sh --all | json)"
+            # Modules with container-backed suites: the ones that import testcontainers.
+            echo "DATA_MODULES=$(grep -ls testcontainers-go libs/*/go.mod services/*/go.mod | xargs -n1 dirname | json)"
           } >> "$GITHUB_OUTPUT"
 
   fmt:
     needs: versions
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ needs.versions.outputs.go }}
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
       - name: gofmt
         run: |
           # Scoped to the module trees, matching `just fmt-check` and GitLab.
@@ -46,25 +67,16 @@ jobs:
   lint-test:
     needs: versions
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        module:
-          - libs/httpx
-          - libs/resilient-http-client
-          - libs/pgx
-          - libs/valkey
-          - libs/kafka
-          - libs/otelx
-          - services/ping
-          - services/heartbeat
-          - services/tasks
-          - services/consumer
+        module: ${{ fromJSON(needs.versions.outputs.MODULES) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ needs.versions.outputs.go }}
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
           cache-dependency-path: ${{ matrix.module }}/go.sum
       - name: go vet
         working-directory: ${{ matrix.module }}
@@ -72,7 +84,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v${{ needs.versions.outputs.golangci }}
+          version: v${{ needs.versions.outputs.GOLANGCI_VERSION }}
           working-directory: ${{ matrix.module }}
       # Unit tests only here — the container-backed suites run in `integration`.
       - name: go test (short, race)
@@ -86,52 +98,63 @@ jobs:
   integration:
     needs: versions
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        module: [libs/pgx, libs/valkey, libs/kafka, services/tasks, services/consumer]
+        module: ${{ fromJSON(needs.versions.outputs.DATA_MODULES) }}
+    env:
+      TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: ${{ vars.TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ needs.versions.outputs.go }}
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
           cache-dependency-path: ${{ matrix.module }}/go.sum
       - name: go test (integration)
         working-directory: ${{ matrix.module }}
         run: go test ./...
 
-  # Final status check for branch protection.
-  gate:
-    runs-on: ubuntu-latest
-    needs: [fmt, lint-test, integration]
-    if: always()
-    steps:
-      - name: verify all jobs passed
-        run: |
-          [ "${{ needs.fmt.result }}" = "success" ] || exit 1
-          [ "${{ needs.lint-test.result }}" = "success" ] || exit 1
-          [ "${{ needs.integration.result }}" = "success" ] || exit 1
-          echo "CI gate passed"
-
+  # Dependency-free subset (ping + heartbeat); the GitLab job runs the full
+  # suite with E2E_WITH_DEPS=1 against real Postgres / Valkey / Kafka services.
   e2e:
     needs: versions
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COREPACK_NPM_REGISTRY: ${{ vars.COREPACK_NPM_REGISTRY }}
+      npm_config_registry: ${{ vars.NPM_REGISTRY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ needs.versions.outputs.go }}
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ needs.versions.outputs.node }}
+          node-version: ${{ needs.versions.outputs.NODE_VERSION }}
           cache: pnpm
       - name: build service binaries
+        env:
+          VERSION: ${{ github.sha }}
         run: |
-          for s in ping heartbeat; do
-            (cd "services/$s" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "bin/$s" .)
-          done
+          for s in ping heartbeat; do scripts/build-service.sh "$s"; done
       - name: pnpm install
-        run: pnpm install --frozen-lockfile || pnpm install
+        run: pnpm install --frozen-lockfile
       - name: playwright e2e
         run: pnpm --filter @golang-basics/e2e test
+
+  # Final status check for branch protection — the one required check.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    needs: [fmt, lint-test, integration, e2e]
+    if: always()
+    steps:
+      - name: verify all jobs passed
+        run: |
+          for r in "${{ needs.fmt.result }}" "${{ needs.lint-test.result }}" \
+                   "${{ needs.integration.result }}" "${{ needs.e2e.result }}"; do
+            [ "$r" = "success" ] || { echo "a required job did not succeed ($r)"; exit 1; }
+          done
+          echo "CI gate passed"

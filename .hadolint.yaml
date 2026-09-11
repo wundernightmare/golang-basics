@@ -8,7 +8,10 @@ ignored:
 
 failure-threshold: warning
 
+# The Dockerfiles take the registry host as a build arg (DOCKER_HUB / GCR);
+# add your pull-through cache here when you override those in a closed network.
 trustedRegistries:
   - docker.io
   - gcr.io
   - ghcr.io
+  # - harbor.internal

@@ -24,7 +24,7 @@ name: golang-basics-deps
 
 services:
   postgres:
-    image: postgres:18-alpine
+    image: ${DOCKER_HUB:-docker.io}/library/postgres:18-alpine
     container_name: golang-basics-postgres
     restart: unless-stopped
     environment:
@@ -44,7 +44,7 @@ services:
       retries: 5
 
   valkey:
-    image: valkey/valkey:9.0
+    image: ${DOCKER_HUB:-docker.io}/valkey/valkey:9.0
     container_name: golang-basics-valkey
     restart: unless-stopped
     command: ["valkey-server", "--save", "60", "1", "--loglevel", "notice"]
@@ -59,7 +59,7 @@ services:
       retries: 5
 
   redpanda:
-    image: redpandadata/redpanda:v26.1.1
+    image: ${DOCKER_HUB:-docker.io}/redpandadata/redpanda:v26.1.1
     container_name: golang-basics-redpanda
     restart: unless-stopped
     command:

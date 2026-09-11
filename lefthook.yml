@@ -1,11 +1,13 @@
 # Git hooks for the golang-basics workspace. Optional — enable per-clone with
-# `just hooks-install` (installs lefthook via the e2e package's devDependencies).
+# `just hooks-install` (installs lefthook via the root package's devDependencies).
 #
 # Skip a single invocation with `LEFTHOOK=0 git commit …` when you truly need
 # to bypass; CI runs the same checks, so nothing is lost.
 #
-# `glob` scopes each command to commits that touched matching files, so a
-# pure-docs commit doesn't burn the cache on a no-op lint run.
+# `glob` scopes each command to commits that touched matching files, and
+# scripts/touched-modules.sh maps those files to the workspace modules they
+# live in — so a commit to services/ping lints and tests only services/ping.
+# No module list lives here; go.work is the only place modules are enumerated.
 
 # ── pre-commit ──────────────────────────────────────────────────────────────
 # Fast correctness gates.
@@ -21,12 +23,15 @@ pre-commit:
         fi
     go-lint:
       glob: "*.go"
-      # Lint each module touched. golangci-lint must run inside a module dir.
+      # golangci-lint must run inside a module dir; lint only the touched ones.
       run: |
         set -e
-        for m in libs/httpx services/ping services/heartbeat; do
-          (cd "$m" && golangci-lint run)
+        for m in $(scripts/touched-modules.sh {staged_files}); do
+          echo "── lint $m"; (cd "$m" && golangci-lint run)
         done
+    secrets:
+      # Staged-diff secret scan — the same rules CI runs over the whole tree.
+      run: mise exec -- gitleaks git --pre-commit --staged --config .gitleaks.toml --no-banner
     ts-fmt:
       glob: "e2e/**/*.{ts,json,md}"
       run: cd e2e && pnpm format:check
@@ -36,19 +41,21 @@ pre-commit:
 
 # ── pre-push ────────────────────────────────────────────────────────────────
 # Heavier checks — too slow for every commit, fast enough before a push.
+# Scoped to the modules touched by the commits being pushed.
 pre-push:
   commands:
-    test:
-      # Unit + in-process tests. No live services required.
-      run: |
-        set -e
-        for m in libs/httpx services/ping services/heartbeat; do
-          (cd "$m" && go test ./...)
-        done
     vet:
       glob: "*.go"
       run: |
         set -e
-        for m in libs/httpx services/ping services/heartbeat; do
-          (cd "$m" && go vet ./...)
+        for m in $(scripts/touched-modules.sh {push_files}); do
+          echo "── vet $m"; (cd "$m" && go vet ./...)
+        done
+    test:
+      glob: "*.go"
+      # Unit tests only (-short skips the testcontainers suites; CI runs those).
+      run: |
+        set -e
+        for m in $(scripts/touched-modules.sh {push_files}); do
+          echo "── test $m"; (cd "$m" && go test -short ./...)
         done

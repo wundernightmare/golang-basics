@@ -8,63 +8,127 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Closed-network knobs (same names as .env.example) from repository /
+# organisation variables; empty means the public upstream.
+env:
+  GOPROXY: ${{ vars.GOPROXY || 'https://proxy.golang.org,direct' }}
+  GONOSUMDB: ${{ vars.GONOSUMDB }}
+  GOTOOLCHAIN: local
+  DOCKER_HUB: ${{ vars.DOCKER_HUB || 'docker.io' }}
+
 jobs:
-  secrets:
+  versions:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      GO_VERSION: ${{ steps.pins.outputs.GO_VERSION }}
+      OSV_VERSION: ${{ steps.pins.outputs.OSV_VERSION }}
+      GOVULNCHECK_VERSION: ${{ steps.pins.outputs.GOVULNCHECK_VERSION }}
+      GITLEAKS_VERSION: ${{ steps.pins.outputs.GITLEAKS_VERSION }}
+      SEMGREP_VERSION: ${{ steps.pins.outputs.SEMGREP_VERSION }}
+      HADOLINT_VERSION: ${{ steps.pins.outputs.HADOLINT_VERSION }}
+      MODULES: ${{ steps.mods.outputs.MODULES }}
+      DOCKERFILES: ${{ steps.mods.outputs.DOCKERFILES }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pins
+        run: scripts/mise-pins.sh >> "$GITHUB_OUTPUT"
+      - id: mods
+        run: |
+          json() { jq -Rsc 'split("\n") | map(select(length > 0))'; }
+          {
+            echo "MODULES=$(scripts/touched-modules.sh --all | json)"
+            echo "DOCKERFILES=$(find services -mindepth 2 -maxdepth 2 -name Dockerfile | sort | json)"
+          } >> "$GITHUB_OUTPUT"
+
+  # Every scanner below runs from the same version-pinned image the GitLab
+  # pipeline uses (no marketplace action with its own bundled binary, no
+  # per-organisation licence as gitleaks-action needs), so the two pipelines
+  # cannot report different findings for the same commit.
+  secrets:
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: ${{ vars.DOCKER_HUB || 'docker.io' }}/zricethezav/gitleaks:v${{ needs.versions.outputs.GITLEAKS_VERSION }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # full history for gitleaks
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITLEAKS_CONFIG: .gitleaks.toml
+          fetch-depth: 0 # full history
+      - run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          gitleaks detect --source . --config .gitleaks.toml --verbose --no-banner
 
   sast:
+    needs: versions
     runs-on: ubuntu-latest
-    container: semgrep/semgrep
+    timeout-minutes: 15
+    container:
+      image: ${{ vars.DOCKER_HUB || 'docker.io' }}/semgrep/semgrep:${{ needs.versions.outputs.SEMGREP_VERSION }}
+    env:
+      # Space-separated packs, or a directory of vendored rules offline.
+      SEMGREP_CONFIG: ${{ vars.SEMGREP_CONFIG || 'p/owasp-top-ten p/golang' }}
     steps:
       - uses: actions/checkout@v4
-      - run: semgrep ci --config p/owasp-top-ten --config p/golang
-        env:
-          SEMGREP_RULES: ""
+      - run: |
+          set -- ; for c in $SEMGREP_CONFIG; do set -- "$@" --config "$c"; done
+          semgrep scan "$@" --error --metrics=off
 
   deps:
+    needs: versions
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # e.g. "--offline --local-db-path /srv/mirrors/osv" — see .env.example
+      OSV_SCANNER_FLAGS: ${{ vars.OSV_SCANNER_FLAGS }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
-      # google/osv-scanner-action is a reusable workflow, not a step action, so
-      # install the pinned scanner binary directly and run it.
-      - run: go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
-      - run: osv-scanner scan --config=osv-scanner.toml --recursive .
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
+      # Built from source on the pinned toolchain so Go call-graph reachability
+      # analysis runs (the official image bundles an older Go than go.work
+      # requires — that is why the GitLab job passes --no-call-analysis=go).
+      - run: go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@v${{ needs.versions.outputs.OSV_VERSION }}"
+      - run: |
+          # shellcheck disable=SC2086 # OSV_SCANNER_FLAGS is a flag list; splitting is intended
+          osv-scanner scan --config=osv-scanner.toml --recursive $OSV_SCANNER_FLAGS .
 
   govulncheck:
+    needs: versions
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
-        module: [libs/httpx, libs/resilient-http-client, services/ping, services/heartbeat]
+        module: ${{ fromJSON(needs.versions.outputs.MODULES) }}
+    env:
+      GOVULNDB: ${{ vars.GOVULNDB || 'https://vuln.go.dev' }}
     steps:
       - uses: actions/checkout@v4
-      - name: read pinned Go version from mise.toml
-        run: echo "GO_VERSION=$(sed -n 's/^go[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' mise.toml)" >> "$GITHUB_ENV"
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
-      - name: govulncheck
-        working-directory: ${{ matrix.module }}
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - run: go install "golang.org/x/vuln/cmd/govulncheck@v${{ needs.versions.outputs.GOVULNCHECK_VERSION }}"
+      - working-directory: ${{ matrix.module }}
+        run: govulncheck ./...
 
   hadolint:
+    needs: versions
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     strategy:
+      fail-fast: false
       matrix:
-        dockerfile: [services/ping/Dockerfile, services/heartbeat/Dockerfile]
+        dockerfile: ${{ fromJSON(needs.versions.outputs.DOCKERFILES) }}
+    container:
+      image: ${{ vars.DOCKER_HUB || 'docker.io' }}/hadolint/hadolint:v${{ needs.versions.outputs.HADOLINT_VERSION }}-debian
     steps:
       - uses: actions/checkout@v4
-      - uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: ${{ matrix.dockerfile }}
-          config: .hadolint.yaml
-          failure-threshold: error # the action's default ("info") overrides the config; pin it
+      # Severity threshold comes from .hadolint.yaml (failure-threshold: warning).
+      - run: hadolint --config .hadolint.yaml "${{ matrix.dockerfile }}"
