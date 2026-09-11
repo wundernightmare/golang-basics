@@ -1,7 +1,7 @@
 # mise tool versions for local development.
 #
 # Pins the toolchain so clones / worktrees / CI all resolve the same binaries.
-# The Go version is also declared in each module's go.mod (`go 1.26.0`); naming
+# The Go version is also declared in each module's go.mod (`go 1.27.0`); naming
 # it here gets us a `go` shim without a shell hook. Node is needed for the e2e
 # Playwright suite. golangci-lint is the aggregate Go linter driven by `just
 # lint`.
@@ -72,6 +72,8 @@ grype = "0.118.0"
 cosign = "3.1.3"
 
 [env]
-# Go's build/test cache is global + content-addressed — no per-worktree wiring
-# needed (unlike the Rust sibling repo's sccache). Nothing to set here; this
-# block is a placeholder for service-local env when you add it.
+# Load the (gitignored) .env so the mise shims see the same proxy / registry /
+# GOPROXY settings `just` loads via `set dotenv-load`. Silently skipped when
+# the file is absent — an open-network clone needs no .env at all. Every knob
+# is documented in .env.example.
+_.file = ".env"

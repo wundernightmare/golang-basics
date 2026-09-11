@@ -12,6 +12,11 @@ e2e/test-results
 benchmarks/results
 benchmarks/node_modules
 
+# Proxy / registry credentials live in .env — never part of an image.
+.env
+.env.*
+!.env.example
+
 # Local tooling / editor cruft
 .vscode
 .idea

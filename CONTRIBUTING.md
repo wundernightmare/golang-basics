@@ -21,6 +21,9 @@ just hooks-install             # optional: lefthook pre-commit/pre-push gates
    ```
 4. Commit with a conventional-commit subject (`feat:`, `fix:`, `docs:`, …).
 
+Behind a proxy or without direct internet: `cp .env.example .env` and
+uncomment what your network needs (README "Closed networks").
+
 ## Adding a module
 
 1. Create `services/<name>/` or `libs/<name>/` with its own `go.mod`
@@ -30,6 +33,10 @@ just hooks-install             # optional: lefthook pre-commit/pre-push gates
 4. Add it to `MODULES` (and `SERVICES`, if it builds a binary) in the root
    `justfile`, and to the per-package delegation block.
 5. `just tidy` to wire up `go.sum` + `go.work.sum`.
+
+Nothing else: both CI pipelines and the git hooks discover modules from
+`go.work` (`scripts/touched-modules.sh`), integration suites from the modules
+that import testcontainers, and Dockerfiles / services from `services/*`.
 
 ## Tests
 
