@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -45,7 +46,7 @@ type Deps struct {
 	Publisher Publisher
 	Topic     string        // Kafka topic for task.created events
 	CacheTTL  time.Duration // TTL for cached task lookups
-	Logger    interface{ Warn(msg string, args ...any) }
+	Logger    *slog.Logger
 }
 
 type handlers struct{ Deps }
@@ -91,7 +92,7 @@ func (h *handlers) create(c *gin.Context) {
 	h.publishCreated(ctx, task)
 	if body, err := json.Marshal(task); err == nil {
 		if err := h.Cache.Set(ctx, cacheKey(task.ID), string(body), h.CacheTTL); err != nil {
-			h.Logger.Warn("cache write failed", "key", cacheKey(task.ID), "err", err)
+			h.Logger.WarnContext(ctx, "cache write failed", "key", cacheKey(task.ID), "err", err)
 		}
 	}
 
@@ -102,11 +103,11 @@ func (h *handlers) publishCreated(ctx context.Context, task domain.Task) {
 	evt := domain.TaskCreatedEvent{ID: task.ID, Title: task.Title, CreatedAt: task.CreatedAt}
 	payload, err := json.Marshal(evt)
 	if err != nil {
-		h.Logger.Warn("event marshal failed", "id", task.ID, "err", err)
+		h.Logger.WarnContext(ctx, "event marshal failed", "id", task.ID, "err", err)
 		return
 	}
 	if err := h.Publisher.Publish(ctx, h.Topic, []byte(task.ID), payload); err != nil {
-		h.Logger.Warn("event publish failed", "id", task.ID, "topic", h.Topic, "err", err)
+		h.Logger.WarnContext(ctx, "event publish failed", "id", task.ID, "topic", h.Topic, "err", err)
 	}
 }
 
@@ -167,7 +168,7 @@ func (h *handlers) delete(c *gin.Context) {
 	}
 
 	if err := h.Cache.Del(ctx, cacheKey(id)); err != nil {
-		h.Logger.Warn("cache evict failed", "key", cacheKey(id), "err", err)
+		h.Logger.WarnContext(ctx, "cache evict failed", "key", cacheKey(id), "err", err)
 	}
 	c.Status(http.StatusNoContent)
 }

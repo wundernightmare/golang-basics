@@ -15,8 +15,8 @@ import (
 
 func newServer(t *testing.T) *httpx.Server {
 	t.Helper()
-	log := httpx.NewLogger("error", "text")
-	srv := httpx.NewServer(httpx.Config{Addr: ":0"}, log)
+	log := httpx.NewLogger(httpx.LogConfig{Level: "error", Format: "text"})
+	srv := httpx.NewServer(httpx.Config{Service: "ping", Addr: ":0"}, log)
 	api.Register(srv)
 	return srv
 }
@@ -57,18 +57,27 @@ func TestVersion_ReportsService(t *testing.T) {
 	var body api.VersionResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "ping", body.Service)
-	assert.NotEmpty(t, body.GoVer)
+	assert.Equal(t, httpx.Version, body.Version)
+	assert.NotEmpty(t, body.GoVersion)
 }
 
-// The shared health/metrics endpoints come from httpx for free — assert the
-// service wires them up rather than re-testing httpx internals.
+// The operational endpoints come from httpx for free on the admin listener —
+// assert the service wires them up (and keeps them off the API engine) rather
+// than re-testing httpx internals.
 func TestSharedEndpointsArePresent(t *testing.T) {
 	srv := newServer(t)
 	srv.Health.SetReady(true)
 
-	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
+	for _, path := range []string{"/healthz", "/readyz", "/metrics", "/version", "/debug/pprof/"} {
 		rec := httptest.NewRecorder()
+		srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		assert.Equalf(t, http.StatusOK, rec.Code, "GET %s on admin", path)
+
+		if path == "/version" {
+			continue // deliberately public on the API too
+		}
+		rec = httptest.NewRecorder()
 		srv.Engine().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-		assert.Equalf(t, http.StatusOK, rec.Code, "GET %s", path)
+		assert.Equalf(t, http.StatusNotFound, rec.Code, "GET %s must not be on the API port", path)
 	}
 }

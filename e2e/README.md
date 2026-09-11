@@ -11,7 +11,7 @@ binaries, drive them over HTTP, assert" shape, minus the Testcontainers infra
 ```
 playwright.config.ts   API-only config; baseURL = PING_URL
 global-setup.ts    →   spawn services/{ping,heartbeat}/bin/*  (fixtures/services.ts)
-                       wait for /healthz, persist pids to .e2e-state.json
+                       wait for /healthz on the admin port, persist pids to .e2e-state.json
 tests/*.spec.ts        run against the live services
 global-teardown.ts →   SIGTERM every spawned pid
 ```
@@ -37,13 +37,14 @@ Point the suite at an already-running stack (e.g. `just up`) by overriding the
 URLs:
 
 ```sh
-PING_URL=http://localhost:8080 HEARTBEAT_URL=http://localhost:8081 pnpm test
+PING_URL=http://localhost:8080 PING_ADMIN_URL=http://localhost:9080 \
+  HEARTBEAT_ADMIN_URL=http://localhost:9081 pnpm test
 ```
 
 ## Specs
 
-| File                      | Covers                                                   |
-| ------------------------- | -------------------------------------------------------- |
-| `tests/ping.spec.ts`      | `/ping`, `?msg=` echo, `/version`, 404 handling          |
-| `tests/health.spec.ts`    | `/healthz` / `/readyz` / `/metrics` on **both** services |
-| `tests/heartbeat.spec.ts` | `heartbeat_beats_total` increases over time              |
+| File                      | Covers                                                                                                           |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `tests/ping.spec.ts`      | `/ping`, `?msg=` echo, `/version`, 404 handling                                                                  |
+| `tests/health.spec.ts`    | `/healthz` / `/readyz` / `/metrics` / `/version` / pprof on **both** admin listeners; none of it on the API port |
+| `tests/heartbeat.spec.ts` | `heartbeat_beats_total` increases over time                                                                      |

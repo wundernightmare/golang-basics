@@ -23,9 +23,15 @@ import (
 // var under the TASKS_ prefix (e.g. TASKS_DATABASE_URL, TASKS_KAFKA_BROKERS).
 type Config struct {
 	HTTPAddr        string        `yaml:"http_addr" env:"HTTP_ADDR"`
+	AdminAddr       string        `yaml:"admin_addr" env:"ADMIN_ADDR"`
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout" env:"HTTP_SHUTDOWN_TIMEOUT"`
+	SlowRequest     time.Duration `yaml:"slow_request" env:"HTTP_SLOW_REQUEST"`
 	LogLevel        string        `yaml:"log_level" env:"LOG_LEVEL"`
 	LogFormat       string        `yaml:"log_format" env:"LOG_FORMAT"`
+	// Log sampling of debug/info per message per second: first N, then every
+	// M-th. -1 disables (0 means "unset", which takes the default of 100).
+	LogSampleInitial    int `yaml:"log_sample_initial" env:"LOG_SAMPLE_INITIAL"`
+	LogSampleThereafter int `yaml:"log_sample_thereafter" env:"LOG_SAMPLE_THEREAFTER"`
 
 	DatabaseURL string        `yaml:"database_url" env:"DATABASE_URL"`
 	ValkeyURL   string        `yaml:"valkey_url" env:"VALKEY_URL"`
@@ -58,8 +64,20 @@ func (c *Config) withDefaults() {
 	if c.HTTPAddr == "" {
 		c.HTTPAddr = ":8082"
 	}
+	if c.AdminAddr == "" {
+		c.AdminAddr = ":9082"
+	}
 	if c.ShutdownTimeout == 0 {
 		c.ShutdownTimeout = 10 * time.Second
+	}
+	if c.SlowRequest == 0 {
+		c.SlowRequest = time.Second
+	}
+	if c.LogSampleInitial == 0 {
+		c.LogSampleInitial = 100
+	}
+	if c.LogSampleThereafter == 0 {
+		c.LogSampleThereafter = 100
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
@@ -93,10 +111,15 @@ func (c *Config) withDefaults() {
 // HTTP projects the shared HTTP-server fields into a libs/httpx Config.
 func (c Config) HTTP() httpx.Config {
 	return httpx.Config{
-		Addr:            c.HTTPAddr,
-		ShutdownTimeout: c.ShutdownTimeout,
-		LogLevel:        c.LogLevel,
-		LogFormat:       c.LogFormat,
+		Service:             "tasks",
+		Addr:                c.HTTPAddr,
+		AdminAddr:           c.AdminAddr,
+		ShutdownTimeout:     c.ShutdownTimeout,
+		SlowRequest:         c.SlowRequest,
+		LogLevel:            c.LogLevel,
+		LogFormat:           c.LogFormat,
+		LogSampleInitial:    max(c.LogSampleInitial, 0), // -1 → 0 → sampling off
+		LogSampleThereafter: c.LogSampleThereafter,
 	}
 }
 
@@ -127,7 +150,7 @@ func (c Config) OTel() otelx.Config {
 	return otelx.Config{
 		Enabled:      c.OTelEnabled,
 		ServiceName:  "tasks",
-		Version:      "dev",
+		Version:      httpx.Version,
 		Endpoint:     c.OTelEndpoint,
 		Insecure:     true,
 		SamplerRatio: c.OTelSampler,

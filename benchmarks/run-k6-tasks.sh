@@ -25,11 +25,13 @@ log() { printf '\033[36m▸ %s\033[0m\n' "$*"; }
 
 command -v k6 >/dev/null || { echo "k6 not found — install via mise (pinned in mise.toml)" >&2; exit 1; }
 
-log "build tasks (release)"
-( cd "$ROOT/services/tasks" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$RESULTS/tasks" . )
+ADMIN_PORT=$((PORT + 1000))
 
-log "start tasks on :$PORT (deps on localhost — run 'just infra-up' first)"
-TASKS_HTTP_ADDR=":$PORT" \
+log "build tasks (release)"
+"$ROOT/scripts/build-service.sh" tasks "$RESULTS/tasks"
+
+log "start tasks on :$PORT, admin :$ADMIN_PORT (deps on localhost — run 'just infra-up' first)"
+TASKS_HTTP_ADDR=":$PORT" TASKS_ADMIN_ADDR=":$ADMIN_PORT" \
   TASKS_DATABASE_URL="${TASKS_DATABASE_URL:-postgres://app:app@localhost:5432/app?sslmode=disable}" \
   TASKS_VALKEY_URL="${TASKS_VALKEY_URL:-valkey://localhost:6379}" \
   TASKS_KAFKA_BROKERS="${TASKS_KAFKA_BROKERS:-localhost:9092}" \
@@ -41,7 +43,7 @@ trap 'kill "$TASKS_PID" 2>/dev/null || true' EXIT
 log "wait for /readyz (postgres + valkey + kafka)"
 ready=""
 for _ in $(seq 1 100); do
-  if curl -fsS -o /dev/null "$BASE_URL/readyz" 2>/dev/null; then ready=1; break; fi
+  if curl -fsS -o /dev/null "http://localhost:$ADMIN_PORT/readyz" 2>/dev/null; then ready=1; break; fi
   sleep 0.2
 done
 [ -n "$ready" ] || { echo "tasks never became ready — are the deps up? (just infra-up)"; cat "$RESULTS/tasks.log"; exit 1; }

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { CONSUMER_URL, TASKS_URL, WITH_DEPS } from "../helpers/env";
+import { CONSUMER_ADMIN_URL, TASKS_ADMIN_URL, TASKS_URL, WITH_DEPS } from "../helpers/env";
 
 // This suite drives the full data-services vertical (Postgres + Valkey + Kafka)
 // and only runs when E2E_WITH_DEPS=1 — see fixtures/services.ts and `just e2e-deps`.
@@ -8,7 +8,7 @@ test.describe("tasks service", () => {
   test.skip(!WITH_DEPS, "needs Postgres + Valkey + Kafka (run `just e2e-deps`)");
 
   test("readyz reports every dependency healthy @smoke", async ({ request }) => {
-    const res = await request.get(`${TASKS_URL}/readyz`);
+    const res = await request.get(`${TASKS_ADMIN_URL}/readyz`);
     expect(res.status()).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("ready");
@@ -71,7 +71,7 @@ test.describe("tasks service", () => {
 async function consumedTotal(
   request: import("@playwright/test").APIRequestContext,
 ): Promise<number> {
-  const res = await request.get(`${CONSUMER_URL}/metrics`);
+  const res = await request.get(`${CONSUMER_ADMIN_URL}/metrics`);
   if (!res.ok()) return 0;
   const line = (await res.text())
     .split("\n")

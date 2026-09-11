@@ -1,7 +1,7 @@
 // Command heartbeat is a minimal background worker built on libs/httpx. It
 // runs a ticker loop (the "worker" shape of this monorepo) while also serving
-// /healthz, /readyz and /metrics from the shared HTTP scaffolding, so it is
-// observable like any other service. The HTTP server and the worker loop run
+// /healthz, /readyz, /metrics and /debug/pprof on the shared admin listener,
+// so it is observable like any other service. The HTTP server and the worker loop run
 // concurrently under one signal-driven context; either failing tears down the
 // other.
 package main
@@ -28,7 +28,7 @@ func run() error {
 		return err
 	}
 
-	logger := httpx.NewLogger(cfg.LogLevel, cfg.LogFormat)
+	logger := httpx.NewLogger(cfg.HTTP().LogConfig())
 	srv := httpx.NewServer(cfg.HTTP(), logger)
 
 	// The worker registers its counter on the server's registry, so beats
@@ -38,7 +38,7 @@ func run() error {
 	ctx, stop := httpx.SignalContext()
 	defer stop()
 
-	logger.Info("heartbeat starting", "addr", cfg.Addr, "interval", cfg.Interval)
+	logger.Info("heartbeat starting", "admin_addr", cfg.AdminAddr, "interval", cfg.Interval, "version", httpx.Version)
 
 	// Both the HTTP server and the worker return nil on graceful (ctx-driven)
 	// shutdown; a non-nil result means one of them genuinely failed, which

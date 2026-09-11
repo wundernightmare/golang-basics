@@ -1,4 +1,5 @@
-# Overlay that points the containerised services at the local Jaeger.
+# Overlay that points the containerised services at the local OTel Collector
+# (which forwards to Jaeger).
 #
 # Tracing is off by default (otelx installs only the W3C propagators and a no-op
 # provider), so exporting is an explicit opt-in rather than a silent dependency
@@ -13,12 +14,12 @@ services:
     environment:
       TASKS_OTEL_ENABLED: "true"
       TASKS_OTEL_SERVICE_NAME: tasks
-      TASKS_OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+      TASKS_OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       TASKS_OTEL_EXPORTER_OTLP_INSECURE: "true"
 
   consumer:
     environment:
       CONSUMER_OTEL_ENABLED: "true"
       CONSUMER_OTEL_SERVICE_NAME: consumer
-      CONSUMER_OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+      CONSUMER_OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       CONSUMER_OTEL_EXPORTER_OTLP_INSECURE: "true"

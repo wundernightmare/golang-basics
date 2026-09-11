@@ -17,10 +17,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_DIR="$ROOT/.run"
 mkdir -p "$RUN_DIR"
 
-# service : module-dir : health-url
+# service : health-url (on the admin listener — API ports carry no ops routes)
 declare -A HEALTH=(
-  [ping]="http://localhost:8080/healthz"
-  [heartbeat]="http://localhost:8081/healthz"
+  [ping]="http://localhost:9080/healthz"
+  [heartbeat]="http://localhost:9081/healthz"
 )
 ALL_SERVICES=(ping heartbeat)
 
@@ -66,7 +66,7 @@ for svc in "${services[@]}"; do
   [[ -n "${HEALTH[$svc]:-}" ]] || die "unknown service: $svc (known: ${ALL_SERVICES[*]})"
 
   log "build $svc"
-  ( cd "$ROOT/services/$svc" && CGO_ENABLED=0 go build -o "$RUN_DIR/$svc" . )
+  "$ROOT/scripts/build-service.sh" "$svc" "$RUN_DIR/$svc"
 
   log "start $svc"
   ( cd "$ROOT" && "$RUN_DIR/$svc" ) > "$RUN_DIR/$svc.log" 2>&1 &
@@ -78,14 +78,17 @@ done
 
 cat >> "$RUN_DIR/env.sh" <<'EOF'
 export PING_URL=http://localhost:8080
-export HEARTBEAT_URL=http://localhost:8081
+export PING_ADMIN_URL=http://localhost:9080
+export HEARTBEAT_ADMIN_URL=http://localhost:9081
 EOF
 
 cat <<EOF
 
 ✓ services up. Logs + pids under .run/
   curl -s localhost:8080/ping
-  curl -s localhost:8081/metrics | grep heartbeat
+  curl -s localhost:9081/metrics | grep heartbeat
+  curl -s localhost:9080/version
+  go tool pprof http://localhost:9080/debug/pprof/heap
   source .run/env.sh          # PING_URL / HEARTBEAT_URL
   just down                   # stop everything
 EOF

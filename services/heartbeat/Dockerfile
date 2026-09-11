@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # ─────────────────────────────────────────────────────────────────────────────
 # heartbeat — multi-stage production image
 #
@@ -20,7 +19,7 @@
 #
 # Runtime injection (never bake these into the image)
 # ────────────────────────────────────────────────────
-#   HEARTBEAT_HTTP_ADDR    health/metrics listen address (default :8081)
+#   HEARTBEAT_ADMIN_ADDR   health/metrics/pprof listen address (default :9081)
 #   HEARTBEAT_INTERVAL     tick period                   (default 5s)
 #   HEARTBEAT_LOG_LEVEL    log filter                    (default info)
 #   HEARTBEAT_LOG_FORMAT   json | text                   (default json)
@@ -29,14 +28,36 @@
 # ────────────────────────
 # Replace the version tags with @sha256:… digests in CI for byte-for-byte
 # reproducibility and protection against tag-mutation attacks.
+#
+# No `# syntax=docker/dockerfile:…` directive on purpose: it makes BuildKit
+# pull the frontend image from Docker Hub on every build, which a closed
+# network cannot do. Everything used here (`--mount=type=cache`) is in the
+# frontend bundled with any current Docker / BuildKit.
 # ─────────────────────────────────────────────────────────────────────────────
 
 ARG GO_VERSION=1.27
 ARG DEBIAN_CODENAME=bookworm
+# Registry hosts — override with the pull-through cache of a closed network
+# (`--build-arg DOCKER_HUB=harbor.internal/dockerhub`); see .env.example.
+ARG DOCKER_HUB=docker.io
+ARG GCR=gcr.io
+# Stamped into libs/httpx.Version → build_info, /version, OTel service.version.
+# CI passes the tag / commit sha; a local build leaves "dev".
+ARG VERSION=dev
 
 # ── Stage 1 – builder ────────────────────────────────────────────────────────
-FROM golang:${GO_VERSION}-${DEBIAN_CODENAME} AS builder
+FROM ${DOCKER_HUB}/library/golang:${GO_VERSION}-${DEBIAN_CODENAME} AS builder
 WORKDIR /build
+
+# Module proxy / checksum-db settings for the builder, passed
+# through from the environment (`--build-arg GOPROXY` with no value). Unset
+# means the Go defaults (proxy.golang.org + sum.golang.org). HTTP_PROXY /
+# HTTPS_PROXY / NO_PROXY are predefined build args and need no declaration.
+ARG GOPROXY
+ARG GOSUMDB
+ARG GONOSUMDB
+ARG GOFLAGS
+ARG VERSION
 
 # Dependency layer — manifests only (this module + its replace target), so the
 # module download is cached until a go.mod / go.sum changes. GOWORK=off makes
@@ -55,13 +76,14 @@ COPY services/heartbeat ./services/heartbeat
 # the distroless/static base suffices.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    cd services/heartbeat && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+    cd services/heartbeat && CGO_ENABLED=0 go build -trimpath \
+      -ldflags="-s -w -X github.com/tracehubmmp/golang-basics/libs/httpx.Version=${VERSION}" \
       -o /out/heartbeat .
 
 # ── Stage 2 – runtime ────────────────────────────────────────────────────────
 # distroless/static contains only ca-certificates, tzdata and /etc/passwd —
 # no shell, no package manager, nothing writable outside /tmp.
-FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+FROM ${GCR}/distroless/static-debian12:nonroot AS runtime
 
 LABEL org.opencontainers.image.title="heartbeat" \
       org.opencontainers.image.description="Minimal background heartbeat worker (golang-basics)" \
@@ -72,8 +94,9 @@ LABEL org.opencontainers.image.title="heartbeat" \
 WORKDIR /app
 COPY --from=builder --chown=65532:65532 /out/heartbeat ./heartbeat
 
-# health/readiness + Prometheus /metrics
-EXPOSE 8081
+# Admin listener only (health, /metrics, /version, pprof) — a worker has no
+# API. Publish it to the monitoring network, never through the ingress.
+EXPOSE 9081
 
 USER 65532:65532
 ENTRYPOINT ["/app/heartbeat"]

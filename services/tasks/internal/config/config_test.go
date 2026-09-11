@@ -15,13 +15,23 @@ func TestLoadDefaults(t *testing.T) {
 	cfg, err := config.Load("")
 	require.NoError(t, err)
 	require.Equal(t, ":8082", cfg.HTTPAddr)
+	require.Equal(t, ":9082", cfg.AdminAddr)
+	require.Equal(t, 100, cfg.LogSampleInitial)
 	require.Equal(t, time.Minute, cfg.CacheTTL)
 	require.Equal(t, []string{"localhost:9092"}, cfg.KafkaBrokers)
 	require.False(t, cfg.OTelEnabled)
 
 	// Projections inherit the right values.
 	require.Equal(t, ":8082", cfg.HTTP().Addr)
+	require.Equal(t, ":9082", cfg.HTTP().AdminAddr)
+	require.Equal(t, "tasks", cfg.HTTP().Service)
 	require.Equal(t, "tasks", cfg.OTel().ServiceName)
+
+	// -1 turns sampling off; the projection maps it to httpx's 0.
+	t.Setenv("TASKS_LOG_SAMPLE_INITIAL", "-1")
+	cfg, err = config.Load("")
+	require.NoError(t, err)
+	require.Equal(t, 0, cfg.HTTP().LogSampleInitial)
 	require.Equal(t, "tasks.events", cfg.Kafka().Topic)
 }
 

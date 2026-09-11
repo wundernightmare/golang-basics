@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 # ─────────────────────────────────────────────────────────────────────────────
 # consumer — multi-stage production image
 #
@@ -19,12 +18,33 @@
 #   CONSUMER_OTEL_ENABLED   true to export traces
 # ─────────────────────────────────────────────────────────────────────────────
 
+# No `# syntax=docker/dockerfile:…` directive on purpose: it makes BuildKit pull
+# the frontend image from Docker Hub on every build, which a closed network
+# cannot do; `--mount=type=cache` is in the frontend bundled with any current
+# Docker / BuildKit.
 ARG GO_VERSION=1.27
 ARG DEBIAN_CODENAME=bookworm
+# Registry hosts — override with the pull-through cache of a closed network
+# (`--build-arg DOCKER_HUB=harbor.internal/dockerhub`); see .env.example.
+ARG DOCKER_HUB=docker.io
+ARG GCR=gcr.io
+# Stamped into libs/httpx.Version → build_info, /version, OTel service.version.
+# CI passes the tag / commit sha; a local build leaves "dev".
+ARG VERSION=dev
 
 # ── Stage 1 – builder ────────────────────────────────────────────────────────
-FROM golang:${GO_VERSION}-${DEBIAN_CODENAME} AS builder
+FROM ${DOCKER_HUB}/library/golang:${GO_VERSION}-${DEBIAN_CODENAME} AS builder
 WORKDIR /build
+
+# Module proxy / checksum-db settings for the builder, passed
+# through from the environment (`--build-arg GOPROXY` with no value). Unset
+# means the Go defaults (proxy.golang.org + sum.golang.org). HTTP_PROXY /
+# HTTPS_PROXY / NO_PROXY are predefined build args and need no declaration.
+ARG GOPROXY
+ARG GOSUMDB
+ARG GONOSUMDB
+ARG GOFLAGS
+ARG VERSION
 ENV GOWORK=off
 
 COPY libs/httpx/go.mod libs/httpx/go.sum ./libs/httpx/
@@ -41,11 +61,12 @@ COPY services/consumer ./services/consumer
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    cd services/consumer && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+    cd services/consumer && CGO_ENABLED=0 go build -trimpath \
+      -ldflags="-s -w -X github.com/tracehubmmp/golang-basics/libs/httpx.Version=${VERSION}" \
       -o /out/consumer .
 
 # ── Stage 2 – runtime ────────────────────────────────────────────────────────
-FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+FROM ${GCR}/distroless/static-debian12:nonroot AS runtime
 
 LABEL org.opencontainers.image.title="consumer" \
       org.opencontainers.image.description="Kafka consumer worker for task.created events (golang-basics)" \
@@ -56,8 +77,9 @@ LABEL org.opencontainers.image.title="consumer" \
 WORKDIR /app
 COPY --from=builder --chown=65532:65532 /out/consumer ./consumer
 
-# Health/metrics HTTP (Prometheus /metrics on the same port)
-EXPOSE 8083
+# Admin listener only (health, /metrics, /version, pprof) — a worker has no
+# API. Publish it to the monitoring network, never through the ingress.
+EXPOSE 9083
 
 USER 65532:65532
 ENTRYPOINT ["/app/consumer"]

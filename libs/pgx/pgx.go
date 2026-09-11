@@ -6,12 +6,16 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // DB wraps a pgx connection pool together with a structured logger. Construct
 // one with [New] and share it across the whole service; the pool is safe for
-// concurrent use. Expose its readiness with [DB.ReadyCheck].
+// concurrent use. Expose its readiness with [DB.ReadyCheck] and its pool
+// statistics with [DB.Collectors]. Every query runs under an OpenTelemetry
+// span (client span named after the statement) when the calling context
+// carries a trace, so a request's DB time shows up inside its HTTP span.
 type DB struct {
 	pool *pgxpool.Pool
 	log  *slog.Logger
@@ -48,6 +52,9 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*DB, error) {
 	if cfg.ConnectTimeout > 0 {
 		poolCfg.ConnConfig.ConnectTimeout = cfg.ConnectTimeout
 	}
+	// Tracing: a span per query/batch/prepare/connect, child of whatever span
+	// is in the query context. No-op provider → no cost beyond the hook call.
+	poolCfg.ConnConfig.Tracer = otelpgx.NewTracer() // defaults: span named by the trimmed statement
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
@@ -61,7 +68,7 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*DB, error) {
 		return nil, fmt.Errorf("pgx: initial ping: %w", err)
 	}
 
-	log.Info("postgres pool ready",
+	log.InfoContext(ctx, "postgres pool ready",
 		"host", cfg.Host, "database", cfg.Name, "max_conns", cfg.MaxConns)
 	return &DB{pool: pool, log: log}, nil
 }
@@ -104,7 +111,7 @@ func (db *DB) Migrate(ctx context.Context, statements ...string) error {
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("pgx: commit migration: %w", err)
 	}
-	db.log.Info("postgres migration applied", "statements", len(statements))
+	db.log.InfoContext(ctx, "postgres migration applied", "statements", len(statements))
 	return nil
 }
 

@@ -2,7 +2,7 @@
 // structured log line and bumps a Prometheus counter on every tick. It is the
 // "background worker" shape of this monorepo (the analogue of a Kafka-consumer
 // crate in the Rust sibling repo, minus the broker), and it still reuses the
-// shared libs/httpx server for its /healthz, /readyz and /metrics surface.
+// shared libs/httpx admin listener for its health / metrics / pprof surface.
 package worker
 
 import (
@@ -38,17 +38,17 @@ func (w *Worker) Run(ctx context.Context) error {
 	t := time.NewTicker(w.interval)
 	defer t.Stop()
 
-	w.log.Info("heartbeat worker started", "interval", w.interval)
+	w.log.InfoContext(ctx, "heartbeat worker started", "interval", w.interval)
 	var count uint64
 	for {
 		select {
 		case <-ctx.Done():
-			w.log.Info("heartbeat worker stopping", "total_beats", count)
+			w.log.InfoContext(ctx, "heartbeat worker stopping", "total_beats", count)
 			return nil
 		case <-t.C:
 			count++
 			w.beats.Inc()
-			w.log.Info("heartbeat", "count", count)
+			w.log.InfoContext(ctx, "heartbeat", "count", count)
 		}
 	}
 }
