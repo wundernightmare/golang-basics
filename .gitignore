@@ -56,3 +56,4 @@ allure-report/
 /coverage-breakdown*.json
 /.cover/
 /gremlins-*.json
+/bench*.txt

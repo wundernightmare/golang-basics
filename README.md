@@ -385,6 +385,7 @@ harness that makes that cheap is [`libs/testx`](libs/testx) (`_test`-only).
 | **Contract** (telemetry) | `libs/otelx/telemetry_test.go`, `libs/httpx/health_test.go`, `*/metrics_test.go` | the access-log line, the span and the counters describe the same request; sampling is exact under concurrency; every exposition is promlint-clean; readiness never stampedes a dependency | route behaviour (unit), real dependencies (integration) |
 | **Integration** | `libs/{pgx,valkey,kafka}`, `services/tasks/internal/integration`, `services/consumer/internal/worker` — one shared container per test binary | the libs against real Postgres / Valkey / Kafka: query and command spans inside the caller's span, a record carrying its trace through the broker, pool / hit-miss / lag moving with real usage; the tasks vertical wired exactly as `main.go` wires it, one trace across request, log lines and metrics, readiness with its checks | route contracts already proven with fakes; process-level behaviour |
 | **E2E** | `e2e/` (Playwright, real binaries) | what only a real process shows: it starts, is ready on its admin listener, is a scrape target that identifies itself, reports the build stamp, and the cross-process flow tasks → Kafka → consumer | per-route behaviour, error bodies, admin route inventory (unit), the CRUD flow (integration) |
+| **Chaos** | `ChaosSuite` in `services/tasks/internal/integration` (Toxiproxy in front of Postgres / Valkey, a frozen Kafka — `testx.Proxied`, `testx.Pause`) | what the design promises when a dependency fails, slows down or hangs: the cache is bypassed, events are best-effort, readiness degrades for optional dependencies and turns 503 only for the critical one, probes stay fast, everything recovers | happy-path behaviour (integration), the shape of error responses (contract) |
 | **Generative** | `just schemathesis <svc>` (Schemathesis against the real binary and its OpenAPI document) | inputs nobody wrote a test for: every operation with generated positive and negative requests and stateful sequences, no 5xx, every response in the contract's shape — "bad input → 4xx problem" cases are owned here, not hand-written | business semantics the schema cannot express (unit), effects on dependencies (integration) |
 | **Mutation** | `libs/resilient-http-client` (`just mutate`) | whether the unit tests of the pure decision logic would notice a wrong comparison, operator or increment | — |
 | **Load** | `benchmarks/` (k6) | latency / error thresholds under load; runs on the load stand and reports there, outside Allure | — |
@@ -470,8 +471,10 @@ gate on a partial merge.
   shuffled. A test that passes there and fails on a PR is a real flake: mark it
   (`t.Flaky()` in an Allure suite) with a ticket, fix or delete it — do not
   raise the retry count.
-- Time-based tests inject the clock (see the circuit breaker) or use
-  `testing/synctest`; `time.Sleep` in a test is a review finding.
+- Time-based tests inject the clock (the circuit breaker's `nowMS`, the
+  cache's `cacheNow`) or observe state (`waitQueued`, `require.Eventually`);
+  a `time.Sleep` in a test is a review finding unless it *is* the behaviour
+  under test (a slow upstream in the coalescing test).
 
 ### Fuzzing
 
@@ -500,7 +503,10 @@ api/tsp/events.tsp  ─tsp compile─▶ api/jsonschema/TaskCreatedEvent.json �
 reviewer sees the contract diff next to the code diff. `just contracts-check`
 (the `contracts` CI job, part of `just ci`) fails when the committed outputs
 are stale and, on a pull request, when `oasdiff` finds a breaking change
-against master's OpenAPI document.
+against master's OpenAPI document. A change that is breaking by the rules but
+safe in practice is waived in `api/oasdiff-breaking.ignore`, one line per
+change with the reason and the removal trigger — the same discipline as the
+CVE waivers.
 
 The generated types are the wire types: `services/tasks` binds
 `tasksapi.CreateTaskRequest`, answers `tasksapi.Task` / `TaskList`, publishes
@@ -520,6 +526,48 @@ schema `$id` for anything else and keep both consumers running.
 
 Both HTTP services have a contract (`api/tsp/tasks.tsp`, `api/tsp/ping.tsp`),
 one OpenAPI document each.
+
+### Chaos
+
+The resilience code paths — `httpx.Optional()` readiness, the cache-aside
+fall-through, best-effort publishing, timeouts — were designed for failing
+dependencies but, until the chaos suite, never saw one. `libs/testx` now
+provides two primitives on the package's shared containers: `testx.Proxied`
+puts [Toxiproxy](https://github.com/Shopify/toxiproxy) in front of Postgres
+or Valkey (`Down()`, `Up()`, `Latency(d)`, `Reset()`), and `testx.Pause`
+freezes a container with SIGSTOP (Kafka's advertised listeners let a client
+bypass a proxy, so it is frozen instead). The `ChaosSuite` scenarios: Valkey
+unreachable, Postgres slow beyond the check timeout then down, Kafka hung.
+Every scenario restores the dependency on cleanup.
+
+Its first run found three real defects, all in the "designed for, never
+tested" category: a refused Valkey made `GET /tasks/{id}` hang forever
+(valkey-go retries a refused connection until the caller's context ends, and
+a request has none — `VALKEY_OP_TIMEOUT`, 500ms, now bounds every command);
+a hung Kafka held `POST /tasks` for the life of the request
+(`KAFKA_PUBLISH_TIMEOUT`, 5s, bounds a best-effort publish); and a slow
+Postgres turned every readiness probe into a 2-second inline refresh because
+the staleness window did not account for a check running to its timeout.
+
+### TestOps metadata
+
+Every suite carries the identity an Allure TestOps needs: `Epic`, `Feature`
+and `Owner` on the suite (`testx.Meta`), the case id, the `Story` and a TMS
+link on each test (`testx.Case(t, "GB-101", "…")`), bare ids turned into links
+by `testx.LinkTransformer`. **The values are samples.** This repository is a
+template: `golang-basics` / `tasks API` / `@team-platform` / `GB-<n>` and the
+`*.example.internal` hosts show the shape; replace them with your project's
+tree, owner handles, case ids and TestOps / tracker URLs. Two rules survive
+the replacement: an id appears in exactly one test, and a test without an id
+is not in the test plan (`-allure.invert` runs everything else).
+
+### Benchmarks
+
+`bench_test.go` files run nightly (`bench` job) with enough repetitions for
+[benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat); master's
+numbers are kept and the comparison is printed on the run page. It is
+informational — shared runners are too noisy for a hard gate — but a
+regression there is a finding. Locally: `just bench`, `just bench-compare`.
 
 ### Schemathesis
 

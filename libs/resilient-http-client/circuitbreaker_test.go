@@ -77,12 +77,13 @@ func TestCB_HalfOpenProbeFailureReopens(t *testing.T) {
 
 func TestCB_OpenTransitionsToHalfOpenAfterTimeout(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
+		advance := pinClock(t, 1_000)
 		cb := NewCircuitBreaker(0.5, 2, 10*time.Second, time.Millisecond)
 		cb.RecordFailure()
 		cb.RecordFailure()
 		assert.Equal(t, CBOpen, cb.State())
 
-		time.Sleep(3 * time.Millisecond)
+		advance(3)
 		assert.True(t, cb.Allow(), "should admit a probe after the half-open timeout")
 		assert.Equal(t, CBHalfOpen, cb.State())
 	}, "resilient-http-client", "unit")
@@ -90,11 +91,12 @@ func TestCB_OpenTransitionsToHalfOpenAfterTimeout(t *testing.T) {
 
 func TestCB_WindowRotationResetsCounters(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
+		advance := pinClock(t, 1_000)
 		cb := NewCircuitBreaker(0.5, 5, 80*time.Millisecond, 30*time.Second)
 		for range 4 {
 			cb.RecordFailure() // below min → stays Closed
 		}
-		time.Sleep(120 * time.Millisecond)
+		advance(120)
 		cb.RecordSuccess() // triggers window rotation
 		// If rotation were a no-op we'd have 5 reqs at 80% failures → Open.
 		assert.Equal(t, CBClosed, cb.State(), "window should have rotated")
@@ -103,12 +105,13 @@ func TestCB_WindowRotationResetsCounters(t *testing.T) {
 
 func TestCB_ResetWindowAfterHalfOpenClearsHistory(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
+		advance := pinClock(t, 1_000)
 		cb := NewCircuitBreaker(0.5, 2, time.Minute, 0)
 		cb.RecordFailure()
 		cb.RecordFailure() // → Open
 		assert.Equal(t, CBOpen, cb.State())
 
-		time.Sleep(time.Millisecond)
+		advance(1)
 		assert.True(t, cb.Allow()) // → HalfOpen
 		cb.RecordSuccess()         // → Closed + reset window
 		assert.Equal(t, CBClosed, cb.State())

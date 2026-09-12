@@ -32,8 +32,8 @@ func TestWorker_BeatsThenStopsOnCancel(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- w.Run(ctx) }()
 
-		// Let a few ticks happen.
-		time.Sleep(120 * time.Millisecond)
+		// Wait for a couple of ticks to be counted, then stop.
+		require.Eventually(t, func() bool { return gatherBeats(t, reg) >= 2 }, 2*time.Second, 5*time.Millisecond)
 		cancel()
 
 		select {

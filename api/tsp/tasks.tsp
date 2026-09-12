@@ -23,8 +23,9 @@ namespace Tasks;
 model Task {
   /** Server-assigned identifier (UUID). */
   id: string;
-  /** Human-readable title; never empty. */
+  /** Human-readable title; never empty, never containing NUL (PostgreSQL TEXT rejects it). */
   @minLength(1)
+  @pattern("^[^\\u0000]+$")
   title: string;
   /** Completion flag. */
   done: boolean;
@@ -34,8 +35,13 @@ model Task {
 
 /** Body of POST /tasks. */
 model CreateTaskRequest {
-  /** Title of the task; an empty title is rejected with a 400 problem. */
+  /**
+   * Title of the task. Empty, or containing NUL, is rejected with a 400
+   * problem — the pattern states what the store can hold, so a generated
+   * schema-compliant request is always accepted (found by Schemathesis).
+   */
   @minLength(1)
+  @pattern("^[^\\u0000]+$")
   title: string;
 }
 

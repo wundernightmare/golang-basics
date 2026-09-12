@@ -3,6 +3,7 @@ package httpx
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"sync"
@@ -153,11 +154,7 @@ func (h *Health) refresh(ctx context.Context) {
 		wg.Add(1)
 		go func(i int, fn CheckFunc) {
 			defer wg.Done()
-			cctx, cancel := context.WithTimeout(ctx, h.timeout)
-			defer cancel()
-			start := time.Now()
-			err := fn(cctx)
-			out[i] = result{err: err, checkedAt: time.Now(), took: time.Since(start)}
+			out[i] = runCheck(ctx, fn, h.timeout)
 		}(i, fn)
 	}
 	wg.Wait()
@@ -177,6 +174,29 @@ func (h *Health) refresh(ctx context.Context) {
 	h.mu.Unlock()
 }
 
+// runCheck runs fn under timeout and does not wait longer than that: a check
+// that ignores its context (a client library blocking on a frozen broker
+// until its own, longer, deadline) is recorded as timed out and left to
+// finish in the background. Otherwise one such check would stall the whole
+// refresh loop and every probe with it — found by the chaos suite, where a
+// frozen Kafka turned readiness degradation into a 15-second wait.
+func runCheck(ctx context.Context, fn CheckFunc, timeout time.Duration) result {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		defer cancel()
+		done <- fn(cctx)
+	}()
+	select {
+	case err := <-done:
+		return result{err: err, checkedAt: time.Now(), took: time.Since(start)}
+	case <-cctx.Done():
+		return result{err: fmt.Errorf("check did not return within %s: %w", timeout, context.DeadlineExceeded),
+			checkedAt: time.Now(), took: time.Since(start)}
+	}
+}
+
 func boolString(b bool) string {
 	if b {
 		return "true"
@@ -185,7 +205,11 @@ func boolString(b bool) string {
 }
 
 // snapshot returns the cached results, refreshing inline first when any check
-// has no result or one older than two intervals.
+// has no result or one older than two intervals plus the check timeout — a
+// slow dependency makes every background pass last the full timeout, and
+// that must not turn every probe into an inline (slow) refresh. Found by the
+// chaos suite: with Postgres answering in 3s the probe took 2s instead of
+// microseconds.
 func (h *Health) snapshot(ctx context.Context) (map[string]result, map[string]bool) {
 	if h.stale() {
 		h.refreshMu.Lock()
@@ -208,7 +232,7 @@ func (h *Health) snapshot(ctx context.Context) (map[string]result, map[string]bo
 func (h *Health) stale() bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	limit := time.Now().Add(-2 * h.interval)
+	limit := time.Now().Add(-(2*h.interval + h.timeout))
 	for name := range h.checks {
 		r, ok := h.results[name]
 		if !ok || r.checkedAt.Before(limit) {

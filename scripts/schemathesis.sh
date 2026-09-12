@@ -62,7 +62,9 @@ if command -v schemathesis >/dev/null; then
 else
   # host.docker.internal: Docker Desktop / OrbStack resolve it; Linux needs the
   # host-gateway alias.
-  docker run --rm --add-host=host.docker.internal:host-gateway \
+  # --user: the results directory belongs to the invoking user; on Linux the
+  # image's default user could not write into it (found on the GitHub runner).
+  docker run --rm --add-host=host.docker.internal:host-gateway --user "$(id -u):$(id -g)" \
     -v "$root/api:/api:ro" -v "$results:/results" "$image" \
     run "/$spec" --url "http://host.docker.internal:$port" \
     --checks all --max-examples "$max_examples" --report allure --report-allure-path /results

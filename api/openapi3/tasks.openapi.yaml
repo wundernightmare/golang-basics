@@ -108,7 +108,11 @@ components:
         title:
           type: string
           minLength: 1
-          description: Title of the task; an empty title is rejected with a 400 problem.
+          pattern: ^[^\u0000]+$
+          description: |-
+            Title of the task. Empty, or containing NUL, is rejected with a 400
+            problem — the pattern states what the store can hold, so a generated
+            schema-compliant request is always accepted (found by Schemathesis).
       description: Body of POST /tasks.
     Problem:
       type: object
@@ -153,7 +157,8 @@ components:
         title:
           type: string
           minLength: 1
-          description: Human-readable title; never empty.
+          pattern: ^[^\u0000]+$
+          description: Human-readable title; never empty, never containing NUL (PostgreSQL TEXT rejects it).
         done:
           type: boolean
           description: Completion flag.

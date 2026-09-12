@@ -242,3 +242,16 @@ func TestDeleteEvictsCache(t *testing.T) {
 		require.NotContains(t, cache.data, "task:d1", "cache entry evicted on delete")
 	}, "tasks", "unit")
 }
+
+// A title with a NUL byte is a business rule the schema cannot express
+// (PostgreSQL TEXT rejects it): 400, not a 500 from the store. Found by
+// Schemathesis' stateful run in CI.
+func TestCreateRejectsTitleTheStoreCannotHold(t *testing.T) {
+	testx.Run(t, func(t testx.T) {
+		ts, st, _, _ := newServer(t)
+		resp := do(t, ts, http.MethodPost, "/tasks", `{"title":"a\u0000b"}`)
+		defer func() { _ = resp.Body.Close() }()
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		require.Empty(t, st.tasks, "nothing persisted")
+	}, "tasks", "unit")
+}

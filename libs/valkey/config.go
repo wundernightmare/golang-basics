@@ -23,6 +23,7 @@ import (
 //	TASKS_VALKEY_ADDR          host:port                                  (default "localhost:6379")
 //	TASKS_VALKEY_PASSWORD      auth password                              (default "")
 //	TASKS_VALKEY_DB            logical database number                    (default 0)
+//	TASKS_VALKEY_OP_TIMEOUT     per-command deadline           (default "500ms")
 //	TASKS_VALKEY_DIAL_TIMEOUT  connection dial timeout                    (default "5s")
 type Config struct {
 	URL         string        `env:"VALKEY_URL"`
@@ -30,6 +31,11 @@ type Config struct {
 	Password    string        `env:"VALKEY_PASSWORD"`
 	DB          int           `env:"VALKEY_DB" envDefault:"0"`
 	DialTimeout time.Duration `env:"VALKEY_DIAL_TIMEOUT" envDefault:"5s"`
+	// OpTimeout bounds every command (get/set/del). Without it a cache that
+	// refuses connections makes valkey-go retry forever, and a request whose
+	// context has no deadline hangs with it — found by the chaos suite. A
+	// cache is optional: past this, the caller treats it as a miss.
+	OpTimeout time.Duration `env:"VALKEY_OP_TIMEOUT" envDefault:"500ms"`
 }
 
 // LoadConfig parses a [Config] from the environment using the given key prefix

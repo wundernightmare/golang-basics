@@ -38,7 +38,9 @@ func TestMain(m *testing.M) { os.Exit(testx.Main(m)) }
 type Suite struct{ testo.Suite[testx.T] }
 
 func TestTasks(t *testing.T) {
-	testo.RunSuite(t, new(Suite), testx.Options("tasks", "integration", "testcontainers")...)
+	testo.RunSuite(t, new(Suite), testx.Options("tasks", "integration", "testcontainers", testx.Meta{
+		Epic: "golang-basics", Feature: "tasks API", Owner: "@team-platform",
+	})...)
 }
 
 // wired is the service as main.go assembles it, on top of the shared stack.
@@ -56,28 +58,43 @@ type wired struct {
 // test's own t: a step's Cleanup would tear it down when the step returns.
 func wire(t testx.T) wired {
 	t.Helper()
+	return wireWith(t, deps{db: testx.Postgres(t), valkey: testx.Valkey(t), brokers: testx.Kafka(t)})
+}
+
+// deps are the addresses the service is wired to — the shared containers, or
+// (chaos suite) Toxiproxy in front of them.
+type deps struct {
+	db      string
+	valkey  string
+	brokers []string
+}
+
+func wireWith(t testx.T, d deps) wired {
+	t.Helper()
 	ctx := context.Background()
 	buf := &testx.LogBuffer{}
 	log := httpx.NewLogger(httpx.LogConfig{Service: "tasks", Level: "info", Format: "json", Writer: buf})
 	topic := testx.Unique("tasks.events")
 
-	db, err := pgx.New(ctx, pgx.Config{URL: testx.Postgres(t), ConnectTimeout: 5 * time.Second, MaxConns: 5}, log)
+	db, err := pgx.New(ctx, pgx.Config{URL: d.db, ConnectTimeout: 5 * time.Second, MaxConns: 5}, log)
 	require.NoError(t, err)
 	t.Cleanup(db.Close)
 	st := store.New(db)
 	require.NoError(t, st.Migrate(ctx))
 
-	cache, err := valkey.New(valkey.Config{URL: testx.Valkey(t), DialTimeout: 5 * time.Second}, log)
+	cache, err := valkey.New(valkey.Config{URL: d.valkey, DialTimeout: 5 * time.Second}, log)
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
 
 	producer, err := kafka.NewProducer(ctx, kafka.Config{
-		Brokers: testx.Kafka(t), Topic: topic, ClientID: testx.Unique("tasks-it"), DialTimeout: 10 * time.Second,
+		Brokers: d.brokers, Topic: topic, ClientID: testx.Unique("tasks-it"), DialTimeout: 10 * time.Second,
 	}, log)
 	require.NoError(t, err)
 	t.Cleanup(producer.Close)
 
-	srv := httpx.NewServer(httpx.Config{Service: "tasks", Addr: ":0", HealthInterval: time.Hour}, log,
+	// HealthInterval short so the chaos suite sees the checks re-evaluate;
+	// the end-to-end suite reads the cached results just the same.
+	srv := httpx.NewServer(httpx.Config{Service: "tasks", Addr: ":0", HealthInterval: 300 * time.Millisecond, HealthTimeout: 2 * time.Second}, log,
 		httpx.WithMiddleware(otelx.GinMiddleware("tasks")))
 	srv.Health.Register("postgres", db.ReadyCheck())
 	srv.Health.Register("valkey", cache.ReadyCheck(), httpx.Optional())
@@ -86,17 +103,28 @@ func wire(t testx.T) wired {
 	srv.Metrics.Registry.MustRegister(cache.Collectors()...)
 	srv.Metrics.Registry.MustRegister(producer.Collectors()...)
 	srv.Health.SetReady(true)
+	hctx, stopHealth := context.WithCancel(ctx)
+	t.Cleanup(stopHealth)
+	go srv.Health.Run(hctx)
 	api.Register(srv, api.Deps{Store: st, Cache: cache, Publisher: producer, Topic: topic, CacheTTL: time.Minute, Logger: log})
 	ts := httptest.NewServer(srv.Engine())
 	t.Cleanup(ts.Close)
 	return wired{store: st, srv: srv, ts: ts, log: buf, topic: topic}
 }
 
+// readyz returns the admin listener's readiness status and body.
+func readyz(t testing.TB, srv *httpx.Server) (int, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	return rec.Code, rec.Body.String()
+}
+
 func (Suite) TestEndToEnd(t testx.T) {
+	testx.Case(t, "GB-101", "create, read, list, delete a task") // sample TestOps id — replace with your project\'s
 	t.Title("a task lives through create → cached read → Postgres → Kafka → list → delete, and the signals agree")
 	t.Description("HTTP → Postgres → Valkey → Kafka against real containers, wired exactly as main.go does it; " +
 		"one trace across the request, its log lines and the metrics.")
-	t.Feature("tasks")
 	t.Severity(allure.SeverityCritical)
 
 	sr := testx.Recorder(t) // before wiring: the instrumentation captures the provider then
@@ -172,11 +200,10 @@ func (Suite) TestEndToEnd(t testx.T) {
 	})
 
 	testx.Step(t, "/readyz is ready and health_check_up agrees per dependency", func(t testx.T) {
-		rec := httptest.NewRecorder()
-		w.srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
-		t.Require().Equal(http.StatusOK, rec.Code)
-		t.Attach("readyz", allure.Bytes(rec.Body.String()).As(allure.DocumentJSON))
-		t.Assert().Contains(rec.Body.String(), `"status":"ready"`)
+		code, body := readyz(t, w.srv)
+		t.Require().Equal(http.StatusOK, code)
+		t.Attach("readyz", allure.Bytes(body).As(allure.DocumentJSON))
+		t.Assert().Contains(body, `"status":"ready"`)
 		for c, crit := range map[string]string{"postgres": "true", "valkey": "false", "kafka": "false"} {
 			t.Assert().Equal(1.0, testx.Metric(t, w.srv.Metrics.Registry, "health_check_up", map[string]string{"check": c, "critical": crit}), c)
 		}

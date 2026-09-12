@@ -56,13 +56,16 @@ func TestWorkerCountsConsumedAndSkipped(t *testing.T) {
 type Suite struct{ testo.Suite[testx.T] }
 
 func TestConsumerWorker(t *testing.T) {
-	testo.RunSuite(t, new(Suite), testx.Options("consumer", "integration")...)
+	testo.RunSuite(t, new(Suite), testx.Options("consumer", "integration", testx.Meta{
+		Epic: "golang-basics", Feature: "tasks consumer", Owner: "@team-platform", // sample TestOps values
+	})...)
 }
 
 // Integration: over the real broker, the worker consumes what tasks produced,
 // its log line for each event names the trace of the request that produced
 // it, and its counters plus the lib's lag gauge agree with what was consumed.
 func (Suite) TestDrainsEventsWithTheirTrace(t testx.T) {
+	testx.Case(t, "GB-401", "drain events") // sample TestOps id — replace with your project\'s
 	t.Title("the worker drains task.created events and keeps their trace")
 	topic := testx.Unique("tasks.events")
 	ctx := context.Background()

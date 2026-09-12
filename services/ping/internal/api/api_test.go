@@ -25,7 +25,11 @@ import (
 
 type Suite struct{ testo.Suite[testx.T] }
 
-func TestPingAPI(t *testing.T) { testo.RunSuite(t, new(Suite), testx.Options("ping", "unit")...) }
+func TestPingAPI(t *testing.T) {
+	testo.RunSuite(t, new(Suite), testx.Options("ping", "unit", testx.Meta{
+		Epic: "golang-basics", Feature: "ping API", Owner: "@team-platform", // sample TestOps values
+	})...)
+}
 
 func newServer(t testx.T) *httpx.Server {
 	t.Helper()
@@ -60,8 +64,8 @@ func (Suite) CasesMsg() []string { return []string{"", "hello", "привет м
 
 func (Suite) TestPing(t testx.T, p struct{ Msg string }) {
 	t.Parallel()
+	testx.Case(t, "GB-1", "ping and echo") // sample TestOps id — replace with your project\'s
 	t.Title("GET /ping answers pong and echoes ?msg=")
-	t.Feature("ping")
 
 	srv := newServer(t)
 	path := "/ping"
@@ -81,8 +85,8 @@ func (Suite) TestPing(t testx.T, p struct{ Msg string }) {
 
 func (Suite) TestVersion(t testx.T) {
 	t.Parallel()
+	testx.Case(t, "GB-2", "build identity") // sample TestOps id — replace with your project\'s
 	t.Title("GET /version reports the build identity on the API port")
-	t.Feature("ping")
 
 	srv := newServer(t)
 	code, body := getJSON[api.VersionResponse](t, srv.Engine(), "/version")
@@ -97,8 +101,8 @@ func (Suite) TestVersion(t testx.T) {
 // than re-testing httpx internals.
 func (Suite) TestAdminEndpoints(t testx.T) {
 	t.Parallel()
+	testx.Case(t, "GB-3", "admin listener") // sample TestOps id — replace with your project\'s
 	t.Title("operational routes live on the admin listener only")
-	t.Feature("admin")
 
 	srv := newServer(t)
 	srv.Health.SetReady(true)

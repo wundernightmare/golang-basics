@@ -204,7 +204,7 @@ func (c *Consumer) ReadyCheck() func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
-		if err := c.cl.Ping(ctx); err != nil {
+		if err := pingBounded(ctx, c.cl); err != nil {
 			return fmt.Errorf("kafka brokers unreachable: %w", err)
 		}
 		return nil
