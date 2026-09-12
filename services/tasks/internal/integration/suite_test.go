@@ -29,6 +29,7 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/libs/valkey"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/api"
+	"github.com/tracehubmmp/golang-basics/services/tasks/internal/domain"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/store"
 )
 
@@ -200,10 +201,13 @@ func (Suite) TestEndToEnd(t testx.T) {
 		_ = del.Body.Close()
 		t.Require().Equal(http.StatusNoContent, del.StatusCode)
 
+		// The effect: the task is gone. The shape of the 404 is the contract's
+		// business (OpenAPI validation in the api tests, Schemathesis end to end).
 		missing := get(t, w.ts, "/tasks/"+id)
-		defer func() { _ = missing.Body.Close() }()
+		_ = missing.Body.Close()
 		t.Assert().Equal(http.StatusNotFound, missing.StatusCode)
-		t.Assert().Equal(httpx.ProblemContentType, missing.Header.Get("Content-Type"))
+		_, err := w.store.Get(context.Background(), id)
+		t.Assert().ErrorIs(err, domain.ErrNotFound, "the row is gone from Postgres")
 	})
 }
 

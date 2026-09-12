@@ -140,20 +140,14 @@ func do(t testing.TB, ts *httptest.Server, method, path, body string) *http.Resp
 }
 
 // --- tests -------------------------------------------------------------------
-
-func TestCreateValidationRejectsEmptyTitle(t *testing.T) {
-	testx.Run(t, func(t testx.T) {
-		ts, _, _, _ := newServer(t)
-		resp := do(t, ts, http.MethodPost, "/tasks", `{"title":""}`)
-		defer func() { _ = resp.Body.Close() }()
-
-		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-		require.Equal(t, httpx.ProblemContentType, resp.Header.Get("Content-Type"))
-		var p map[string]any
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
-		require.Equal(t, float64(400), p["status"])
-	}, "tasks", "unit")
-}
+//
+// What is *not* here: "empty title → 400 problem", "unknown id → 404 has the
+// problem content type", and every other "bad input → 4xx in the right shape"
+// case. Those follow from the contract (minLength, the documented responses)
+// and Schemathesis generates them (`just schemathesis tasks`); the tests below
+// own the behaviour the schema cannot express — the business `code`, the cache
+// path, the eviction, the published event — and every exchange they make is
+// still validated against the OpenAPI document by `do`.
 
 func TestCreatePersistsPublishesAndCaches(t *testing.T) {
 	testx.Run(t, func(t testx.T) {

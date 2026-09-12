@@ -590,6 +590,59 @@ e2e:
       - .cover/e2e/
       - allure-results/
 
+# Generative API testing: Schemathesis (its own pinned image, no Go inside —
+# the binaries come from build-services) drives ping and tasks with requests
+# generated from their OpenAPI documents; deps are services like in e2e.
+schemathesis:
+  extends: .rules-go
+  stage: test
+  image:
+    name: ${DOCKER_HUB}/schemathesis/schemathesis:${SCHEMATHESIS_VERSION}
+    entrypoint: [""]
+  needs:
+    - job: versions
+      artifacts: true
+    - job: build-services
+      artifacts: true
+  services:
+    - name: ${DOCKER_HUB}/library/postgres:18-alpine
+      alias: postgres
+    - name: ${DOCKER_HUB}/valkey/valkey:9.0
+      alias: valkey
+    - name: ${DOCKER_HUB}/redpandadata/redpanda:v26.1.1
+      alias: redpanda
+      command:
+        - redpanda
+        - start
+        - --node-id=0
+        - --check=false
+        - --set
+        - redpanda.auto_create_topics_enabled=true
+        - --kafka-addr
+        - 0.0.0.0:9092
+        - --advertise-kafka-addr
+        - redpanda:9092
+        - --smp=1
+        - --memory=1G
+        - --reserve-memory=0M
+        - --overprovisioned
+  variables:
+    POSTGRES_DB: app
+    POSTGRES_USER: app
+    POSTGRES_PASSWORD: app
+    TASKS_DATABASE_URL: postgres://app:app@postgres:5432/app?sslmode=disable
+    TASKS_VALKEY_URL: valkey://valkey:6379
+    TASKS_KAFKA_BROKERS: redpanda:9092
+    ALLURE_RESULTS_DIR: $CI_PROJECT_DIR/allure-results
+  script:
+    - SERVICE_BIN="$CI_PROJECT_DIR/services/ping/bin/ping" sh scripts/schemathesis.sh ping
+    - SERVICE_BIN="$CI_PROJECT_DIR/services/tasks/bin/tasks" sh scripts/schemathesis.sh tasks
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - allure-results/
+
 # ── security (AppSec) — mirrors appsec.yml ────────────────────────────────────
 # These need neither the test matrix nor each other, so `needs: [versions]` lets
 # them start as soon as the pins are known instead of waiting for `test`.

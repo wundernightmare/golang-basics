@@ -277,7 +277,7 @@ jobs:
   # One Allure HTML report from every suite's results (unit + integration).
   # allure-commandline is a Node package (root package.json) and needs a JRE.
   allure-report:
-    needs: [versions, lint-test, integration]
+    needs: [versions, lint-test, integration, e2e, schemathesis]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -425,17 +425,52 @@ jobs:
           path: allure-results
           retention-days: 7
 
+  # Generative API testing: Schemathesis drives the real ping and tasks
+  # binaries with requests generated from their OpenAPI documents (positive,
+  # negative, stateful) and checks every response against the contract. The
+  # deps come from docker/deps.yml, the same stack `just infra-up` runs.
+  schemathesis:
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
+      DOCKER_HUB: ${{ vars.DOCKER_HUB || 'docker.io' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
+      - name: deps (Postgres, Valkey, Redpanda)
+        run: |
+          docker compose -f docker/deps.yml up -d
+          for _ in $(seq 1 60); do
+            docker inspect --format '{{.State.Health.Status}}' golang-basics-redpanda 2>/dev/null | grep -q healthy && break
+            sleep 2
+          done
+      - run: scripts/schemathesis.sh ping
+      - run: scripts/schemathesis.sh tasks
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('allure-results/**') != ''
+        with:
+          name: allure-results-schemathesis
+          path: allure-results
+          retention-days: 7
+      - if: always()
+        run: docker compose -f docker/deps.yml down -v
+
   # Final status check for branch protection — the one required check.
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    needs: [fmt, contracts, lint-test, integration, e2e, coverage]
+    needs: [fmt, contracts, lint-test, integration, e2e, schemathesis, coverage]
     if: always()
     steps:
       - name: verify all jobs passed
         run: |
           for r in "${{ needs.fmt.result }}" "${{ needs.contracts.result }}" "${{ needs.lint-test.result }}" \
-                   "${{ needs.integration.result }}" "${{ needs.e2e.result }}" "${{ needs.coverage.result }}"; do
+                   "${{ needs.integration.result }}" "${{ needs.e2e.result }}" "${{ needs.schemathesis.result }}" \
+                   "${{ needs.coverage.result }}"; do
             [ "$r" = "success" ] || { echo "a required job did not succeed ($r)"; exit 1; }
           done
           echo "CI gate passed"

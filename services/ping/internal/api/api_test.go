@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 
 	"github.com/ozontech/testo"
 	allure "github.com/ozontech/testo-allure"
 
+	"github.com/tracehubmmp/golang-basics/libs/contracts/pingapi"
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/services/ping/internal/api"
@@ -33,10 +35,18 @@ func newServer(t testx.T) *httpx.Server {
 	return srv
 }
 
+// contract is the OpenAPI document (api/tsp/ping.tsp) every exchange in this
+// file is checked against.
+var contract = sync.OnceValue(func() *testx.OpenAPI {
+	return testx.LoadOpenAPI(&testing.T{}, "openapi3/ping.openapi.yaml")
+})
+
 func getJSON[V any](t testx.T, h http.Handler, path string) (int, V) {
 	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	h.ServeHTTP(rec, req)
+	contract().Validate(t, req, nil, rec.Code, rec.Header(), rec.Body.Bytes())
 	var v V
 	if rec.Code == http.StatusOK {
 		t.Require().NoError(json.Unmarshal(rec.Body.Bytes(), &v))
@@ -60,8 +70,13 @@ func (Suite) TestPing(t testx.T, p struct{ Msg string }) {
 	}
 	code, body := getJSON[api.PongResponse](t, srv.Engine(), path)
 	t.Require().Equal(http.StatusOK, code)
-	t.Assert().Equal("pong", body.Message)
-	t.Assert().Equal(p.Msg, body.Echo, "echo mirrors ?msg= (empty when absent)")
+	t.Assert().Equal(pingapi.Pong, body.Message)
+	if p.Msg == "" {
+		t.Assert().Nil(body.Echo, "no echo member when ?msg= is absent")
+	} else {
+		t.Require().NotNil(body.Echo)
+		t.Assert().Equal(p.Msg, *body.Echo, "echo mirrors ?msg=")
+	}
 }
 
 func (Suite) TestVersion(t testx.T) {

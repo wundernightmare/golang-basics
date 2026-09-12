@@ -127,6 +127,12 @@ README; this file is only the high-signal, easy-to-miss bits.
   rest) with thresholds that fail the run. When a mutant lives, first ask
   whether the code has an unkillable branch (rewrite with `min`/`max`, inject
   the clock) before adding a test. Nightly/manual in CI, not per PR.
+- **Schemathesis owns "bad input → 4xx"**: do not hand-write validation
+  tests for what the schema already says (`minLength`, documented responses);
+  `just schemathesis <svc>` generates them. Unit tests own business
+  semantics, integration tests own effects on dependencies. Every HTTP
+  service has a `.tsp` contract; a new service gets one before its first
+  handler test.
 - **Contracts are generated, never edited**: change `api/tsp/*.tsp`, run
   `just contracts`, commit the emitted OpenAPI / JSON Schema and the Go types
   in `libs/contracts`. Services use `tasksapi.*` / `events.*` at the wire;

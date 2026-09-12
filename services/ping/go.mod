@@ -6,6 +6,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/ozontech/testo v1.8.0
 	github.com/ozontech/testo-allure v1.4.0
+	github.com/tracehubmmp/golang-basics/libs/contracts v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/httpx v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 )
@@ -115,3 +116,5 @@ require (
 replace github.com/tracehubmmp/golang-basics/libs/httpx => ../../libs/httpx
 
 replace github.com/tracehubmmp/golang-basics/libs/testx => ../../libs/testx
+
+replace github.com/tracehubmmp/golang-basics/libs/contracts => ../../libs/contracts

@@ -1,0 +1,6 @@
+package: pingapi
+output: libs/contracts/pingapi/types.gen.go # relative to the workspace root (`just contracts` runs from there)
+generate:
+  models: true
+output-options:
+  skip-prune: true

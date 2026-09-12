@@ -8,14 +8,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/tracehubmmp/golang-basics/libs/contracts/pingapi"
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 )
 
-// PongResponse is the body returned by GET /ping.
-type PongResponse struct {
-	Message string `json:"message"`
-	Echo    string `json:"echo,omitempty"`
-}
+// PongResponse is the body returned by GET /ping — the generated contract
+// type (api/tsp/ping.tsp).
+type PongResponse = pingapi.PongResponse
 
 // VersionResponse is the body returned by GET /version — the same build
 // identity the admin listener serves, exposed here on the API port as an
@@ -31,9 +30,9 @@ func Register(srv *httpx.Server) {
 
 // pong answers GET /ping with {"message":"pong"}, echoing an optional ?msg=.
 func pong(c *gin.Context) {
-	resp := PongResponse{Message: "pong"}
+	resp := PongResponse{Message: pingapi.Pong}
 	if msg := c.Query("msg"); msg != "" {
-		resp.Echo = msg
+		resp.Echo = &msg
 	}
 	c.JSON(http.StatusOK, resp)
 }

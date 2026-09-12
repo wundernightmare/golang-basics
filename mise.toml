@@ -85,6 +85,11 @@ grype = "0.118.0"
 cosign = "3.1.3"
 
 [env]
+# Schemathesis is not a mise tool but a pinned image (scripts/schemathesis.sh
+# runs it with docker; the GitLab job uses it as the job image). The tag lives
+# here so scripts/mise-pins.sh reads it like every other pin and `mise env`
+# exports it locally.
+SCHEMATHESIS_VERSION = "4.27.0"
 # Load the (gitignored) .env so the mise shims see the same proxy / registry /
 # GOPROXY settings `just` loads via `set dotenv-load`. Silently skipped when
 # the file is absent — an open-network clone needs no .env at all. Every knob

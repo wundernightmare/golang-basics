@@ -385,6 +385,7 @@ harness that makes that cheap is [`libs/testx`](libs/testx) (`_test`-only).
 | **Contract** (telemetry) | `libs/otelx/telemetry_test.go`, `libs/httpx/health_test.go`, `*/metrics_test.go` | the access-log line, the span and the counters describe the same request; sampling is exact under concurrency; every exposition is promlint-clean; readiness never stampedes a dependency | route behaviour (unit), real dependencies (integration) |
 | **Integration** | `libs/{pgx,valkey,kafka}`, `services/tasks/internal/integration`, `services/consumer/internal/worker` — one shared container per test binary | the libs against real Postgres / Valkey / Kafka: query and command spans inside the caller's span, a record carrying its trace through the broker, pool / hit-miss / lag moving with real usage; the tasks vertical wired exactly as `main.go` wires it, one trace across request, log lines and metrics, readiness with its checks | route contracts already proven with fakes; process-level behaviour |
 | **E2E** | `e2e/` (Playwright, real binaries) | what only a real process shows: it starts, is ready on its admin listener, is a scrape target that identifies itself, reports the build stamp, and the cross-process flow tasks → Kafka → consumer | per-route behaviour, error bodies, admin route inventory (unit), the CRUD flow (integration) |
+| **Generative** | `just schemathesis <svc>` (Schemathesis against the real binary and its OpenAPI document) | inputs nobody wrote a test for: every operation with generated positive and negative requests and stateful sequences, no 5xx, every response in the contract's shape — "bad input → 4xx problem" cases are owned here, not hand-written | business semantics the schema cannot express (unit), effects on dependencies (integration) |
 | **Mutation** | `libs/resilient-http-client` (`just mutate`) | whether the unit tests of the pure decision logic would notice a wrong comparison, operator or increment | — |
 | **Load** | `benchmarks/` (k6) | latency / error thresholds under load; runs on the load stand and reports there, outside Allure | — |
 
@@ -516,6 +517,30 @@ fails its own test.
 Event compatibility rule (no tool checks JSON Schema evolution): a field may
 be added as optional; a field is never removed or changed in type. Bump the
 schema `$id` for anything else and keep both consumers running.
+
+Both HTTP services have a contract (`api/tsp/tasks.tsp`, `api/tsp/ping.tsp`),
+one OpenAPI document each.
+
+### Schemathesis
+
+[Schemathesis](https://schemathesis.io) (the validator `tracehub-spec` targets
+its OpenAPI 3.0 output at) is the generative layer: it reads a service's
+OpenAPI document and drives the *real binary* with requests it derives from
+the schema — boundary values, invalid bodies, unknown methods, stateful
+create → get → delete chains — checking that nothing answers 5xx and that
+every response's status, headers and body are in the contract.
+
+```sh
+just schemathesis ping          # dependency-free
+just infra-up && just schemathesis tasks
+```
+
+It runs from its pinned image (`SCHEMATHESIS_VERSION` in `mise.toml`,
+`DOCKER_HUB` for a closed network), reports natively to Allure, and is a job
+in both pipelines (`schemathesis`, in the gate). Its first run found that an
+undocumented method got a 404 instead of a 405; `httpx` now answers 404/405
+as problem+json. With it in place, hand-written "bad input → 4xx" tests were
+removed — the schema and the generator own that class of case.
 
 ### Test hygiene, linted
 

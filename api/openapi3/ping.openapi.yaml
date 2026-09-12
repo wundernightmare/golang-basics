@@ -1,0 +1,93 @@
+openapi: 3.0.0
+info:
+  title: Ping
+  version: 1.0.0
+  description: |-
+    Ping — the HTTP contract of services/ping.
+
+    Small on purpose (the service is the "hello world" of the workspace), but a
+    contract all the same: the Go types (libs/contracts/pingapi), the response
+    validation in the api tests and the Schemathesis run are generated from it.
+tags: []
+paths:
+  /ping:
+    get:
+      operationId: PingOps_ping
+      description: Answer pong, echoing `msg` when given.
+      parameters:
+        - name: msg
+          in: query
+          required: false
+          schema:
+            type: string
+          explode: false
+      responses:
+        '200':
+          description: The request has succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PongResponse'
+  /version:
+    get:
+      operationId: PingOps_version
+      description: Report the build identity on the API port (public on purpose).
+      parameters: []
+      responses:
+        '200':
+          description: The request has succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+components:
+  schemas:
+    PongResponse:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          enum:
+            - pong
+          description: Always "pong".
+        echo:
+          type: string
+          description: The `msg` query parameter, echoed back; absent when it was not given.
+      description: Body of GET /ping.
+    VersionResponse:
+      type: object
+      required:
+        - service
+        - version
+        - revision
+        - build_time
+        - modified
+        - go_version
+      properties:
+        service:
+          type: string
+          description: Service name.
+        version:
+          type: string
+          description: Version stamped at build time (libs/httpx.Version); "dev" locally.
+        revision:
+          type: string
+          description: VCS revision when built from a checkout, else "unknown".
+        build_time:
+          type: string
+          description: vcs.time, RFC 3339, empty when unknown.
+        modified:
+          type: boolean
+          description: Built from a dirty tree.
+        go_version:
+          type: string
+          description: Go toolchain version.
+      description: |-
+        Build identity of the running binary — the same document the admin
+        listener serves on /version (libs/httpx.BuildInfo).
+servers:
+  - url: http://localhost:8080
+    description: local
+    variables: {}
