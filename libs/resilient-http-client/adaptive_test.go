@@ -91,7 +91,7 @@ func TestAdaptive_CancelledWaiterDoesNotLeakSlot(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		defer cancel()
-		assert.Error(t, l.Acquire(ctx)) // times out while queued
+		require.Error(t, l.Acquire(ctx)) // times out while queued
 
 		// After releasing the one held slot, a fresh acquire must succeed promptly:
 		// the cancelled waiter must not have consumed it.

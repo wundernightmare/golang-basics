@@ -53,5 +53,6 @@ cosign.key
 allure-results/
 allure-report/
 /coverage-merged.out
+/coverage-breakdown*.json
 /.cover/
 /gremlins-*.json

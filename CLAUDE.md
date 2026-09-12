@@ -129,6 +129,14 @@ README; this file is only the high-signal, easy-to-miss bits.
   the clock) before adding a test. Nightly/manual in CI, not per PR.
 - **Load tests (k6) stay outside Allure**: they run on the load stand and
   report there; do not wire k6 summaries into the test report.
+- **Coverage must not regress**: the `coverage` job diffs a PR's breakdown
+  against master's (`--diff-threshold 0`). Every layer is collected with
+  `-covermode=atomic` (covdata cannot merge mixed modes; `-race` implies
+  atomic) — keep that flag on any new `go test -cover` / `go build -cover`.
+- **No retries to hide flakes**: `-shuffle=on`, `TZ=UTC`, Playwright
+  `retries: 0`; nightly `stress` (`-count=3 -race`) and `fuzz` jobs. A found
+  flake gets `t.Flaky()` + a ticket, not a retry. Anything parsing external
+  bytes gets a `Fuzz*` target; crashers under `testdata/fuzz/` are committed.
 - **Container-backed tests need `DOCKER_HOST` on OrbStack/rootless Docker**
   (`unix://$HOME/.orbstack/run/docker.sock`); they skip when Docker is
   unreachable and fail when `CI` is set.

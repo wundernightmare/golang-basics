@@ -191,7 +191,7 @@ func TestAdaptive_CancelRemovesTheRightWaiter(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		defer cancel()
-		assert.ErrorIs(t, l.Acquire(ctx), context.DeadlineExceeded) // second waiter gives up
+		require.ErrorIs(t, l.Acquire(ctx), context.DeadlineExceeded) // second waiter gives up
 
 		l.Release() // must go to `first`, the only remaining waiter
 		select {

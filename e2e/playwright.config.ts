@@ -30,7 +30,7 @@ export default defineConfig({
   testDir: "./tests",
   fullyParallel: false, // services are shared singletons on fixed ports
   forbidOnly: !!process.env["CI"],
-  retries: process.env["CI"] ? 1 : 0,
+  retries: 0, // a flake is reported (Allure), never hidden behind a retry
   workers: 1,
   reporter: [
     ["list"],

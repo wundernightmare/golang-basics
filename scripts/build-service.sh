@@ -25,7 +25,7 @@ fi
 # the merged coverage (scripts/cover.sh e2e). Never for a release artefact.
 cover_flags=""
 if [ -n "${COVER:-}" ]; then
-  cover_flags="-cover -coverpkg=github.com/wundernightmare/golang-basics/..."
+  cover_flags="-cover -covermode=atomic -coverpkg=github.com/wundernightmare/golang-basics/..."
 fi
 
 cd "$root/services/$svc"

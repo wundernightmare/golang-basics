@@ -74,3 +74,19 @@ func TestAbortProblemWritesProblemJSON(t *testing.T) {
 		require.NotContains(t, m, "unreachable", "Abort must stop the rest of the handler from writing")
 	}, "httpx", "unit")
 }
+
+// Regression for the FuzzProblemJSON crasher kept in testdata/fuzz: an
+// out-of-range status must produce a 500 problem, not a WriteHeader panic.
+func TestAbortProblemInvalidStatusDegradesTo500(t *testing.T) {
+	testx.Run(t, func(t testx.T) {
+		gin.SetMode(gin.TestMode)
+		for _, status := range []int{0, -1, 99, 1000, 1005} {
+			e := gin.New()
+			e.GET("/", func(c *gin.Context) { httpx.AbortProblem(c, httpx.NewProblem(status, "x")) })
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			require.Equal(t, http.StatusInternalServerError, rec.Code, "status %d", status)
+			require.Contains(t, rec.Body.String(), `"status":500`)
+		}
+	}, "httpx", "unit")
+}

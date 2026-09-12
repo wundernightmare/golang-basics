@@ -208,7 +208,7 @@ func TestRun_GracefulShutdownOnContextCancel(t *testing.T) {
 		cancel()
 		select {
 		case err := <-done:
-			assert.NoError(t, err)
+			require.NoError(t, err)
 		case <-time.After(3 * time.Second):
 			t.Fatal("server did not shut down within timeout")
 		}

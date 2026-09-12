@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -173,7 +172,7 @@ func TestMetrics_ExpositionIsLintCleanAndComplete(t *testing.T) {
 			"# TYPE go_goroutines gauge",
 			"# TYPE process_cpu_seconds_total counter",
 		} {
-			assert.Truef(t, strings.Contains(body, want), "exposition must contain %q", want)
+			assert.Containsf(t, body, want, "exposition must contain %q", want)
 		}
 	}, "httpx", "unit")
 }
