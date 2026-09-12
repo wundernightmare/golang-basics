@@ -13,6 +13,29 @@ allowBuilds:
   esbuild: true
   lefthook: true
 
+# Supply-chain hardening (semgrep p/owasp-top-ten `package_managers.pnpm.*`
+# enforces all three). A frozen-lockfile install is unaffected; they bite on
+# `pnpm update` / a fresh resolution:
+# - a newly published version has to be 7 days old before it resolves — the
+#   window in which the recent npm worm packages were pulled;
+# - transitive deps may only come from the registry (no git / tarball URLs);
+# - a dependency update cannot silently downgrade these settings.
+minimumReleaseAge: 10080
+blockExoticSubdeps: true
+trustPolicy: no-downgrade
+# The escape hatch when a release is needed before the window closes: a
+# time-boxed exclusion with the reason and the removal date — the same rule as
+# the CVE and oasdiff waivers. TypeSpec 1.16.0 and allure-playwright 3.12.1
+# (both 2026-09-09) and the transitive @inquirer / @scalar packages TypeSpec
+# pulled in are younger than 7 days, and the frozen install rejects a lockfile
+# that violates the policy. Remove after 2026-09-17 (`pnpm install
+# --frozen-lockfile` then passes without it).
+minimumReleaseAgeExclude:
+  - "@typespec/*"
+  - "@inquirer/*"
+  - "@scalar/*"
+  - "allure-*"
+
 catalog:
   "@typespec/compiler": 1.16.0
   "@typespec/http": 1.16.0

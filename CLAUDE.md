@@ -57,6 +57,13 @@ README; this file is only the high-signal, easy-to-miss bits.
   knobs in `.env.example` (loaded by `just` and mise) with the same name used
   as a CI variable. No `# syntax=` directive in Dockerfiles.
 - **`semgrep scan --metrics=off`, never `semgrep ci`** (it calls semgrep.dev).
+- **GitHub Actions are pinned to a commit SHA** (`uses: owner/repo@<40-hex> # vX.Y.Z`),
+  never a tag; `.github/dependabot.yml` moves the SHA and the comment
+  together. `github.*` context never goes into `run:` text — pass it through
+  `env:` and expand the variable in the script (shell injection). The `sast`
+  job blocks both. The pnpm workspace keeps `minimumReleaseAge`,
+  `blockExoticSubdeps` and `trustPolicy` set (and `.npmrc` `min-release-age`
+  in step) for the same reason.
 - **`gofmt` is scoped to `./libs ./services`, not `.`** — GitLab can only cache
   paths under `$CI_PROJECT_DIR`, so `GOMODCACHE` lives in `.cache/`, and a bare
   `gofmt -l .` walks into the module cache's deliberately-malformed test

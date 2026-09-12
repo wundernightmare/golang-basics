@@ -225,6 +225,20 @@ just docker-sign ping dev     # cosign sign (key-mode, no Rekor)
 just docker-verify ping dev   # offline verify against cosign.pub
 ```
 
+The pipeline itself is part of the attack surface, and the `sast` job scans it
+too. Three rules there are worth knowing before they block a change:
+
+- every `uses:` is pinned to a full commit SHA with the version as a comment
+  (`actions/checkout@11d5960a… # v4.4.0`) — a tag can be repointed by the
+  action owner; `.github/dependabot.yml` keeps the SHAs current;
+- `github.*` context never appears inside `run:` text — it goes through
+  `env:` and the script expands the variable (an attacker-controlled branch
+  name or PR title in a script is shell injection);
+- the pnpm workspace sets `minimumReleaseAge` (7 days), `blockExoticSubdeps`
+  and `trustPolicy: no-downgrade`, and `.npmrc` sets the matching
+  `min-release-age`, so a freshly published or non-registry package cannot
+  enter the lockfile unnoticed.
+
 ---
 
 ## CI
