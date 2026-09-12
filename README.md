@@ -388,6 +388,69 @@ just test                                                    # everything
 just <module> test-short                                     # unit only
 ```
 
+### Coverage gate
+
+`just cov-check` runs every module's unit tests with a profile, merges them
+(`scripts/merge-coverage.sh`) and gates the total with
+[go-test-coverage](https://github.com/vladopajic/go-test-coverage) against
+[`.testcoverage.yml`](.testcoverage.yml): a workspace total plus higher floors
+for the pure libs (`httpx`, `resilient-http-client`); `main.go` files are
+excluded because the Playwright suite covers them. Both pipelines run the same
+gate (`coverage` job); GitLab additionally keeps the per-module Cobertura
+reports for MR line annotations. The thresholds are a ratchet — raise them as
+coverage improves.
+
+### Allure reports
+
+Two suites are written with [testo](https://github.com/ozontech/testo) and
+the [testo-allure](https://github.com/ozontech/testo-allure) plugin as the
+worked example: `services/ping/internal/api` (unit, parametrised via
+`CasesMsg`) and `services/tasks/internal/integration` (the vertical, one step
+per stage with the HTTP bodies attached). They are plain `go test` tests —
+coverage, `-run`, `-race` and the CI matrix work unchanged — and every run
+writes `allure-results/` next to the package (`ALLURE_RESULTS_DIR` redirects
+it, which is how CI collects all suites into one place).
+
+```sh
+just test                  # or any go test — results land in */allure-results/
+just allure-report         # → allure-report/index.html (single file)
+```
+
+`allure-commandline` comes from the root `package.json` (so through the npm
+mirror in a closed network) and needs a JRE, pinned in `mise.toml`. CI builds
+the same single-file report as an artifact (`allure-report` job) and keeps the
+raw `allure-results/` for an Allure server / TestOps to ingest.
+
+To add Allure to a package: declare `type T = struct{ *testo.T; *allure.PluginAllure }`,
+a `Suite`, `testo.RunSuite(t, new(Suite), allureOptions()...)`, and use
+`allure.Step`, `t.Title/Tags/Attach` and `t.Require()/Assert()`. Keep resources
+that must outlive a step (containers, clients) on the test's own `t`: a step
+is a sub-test and its `Cleanup` runs when the step returns.
+
+### Mutation testing
+
+Coverage says a line ran; mutation testing says a test would notice if it
+were wrong. [gremlins](https://github.com/go-gremlins/gremlins) mutates the
+code (flips a comparison, an arithmetic operator, an increment), re-runs the
+tests, and reports every mutant that *lived*. It is worth its cost on small,
+pure, decision-heavy code and noise elsewhere — so it is scoped, not global:
+
+```sh
+just mutate                             # libs/resilient-http-client (default)
+just mutate libs/resilient-http-client  # backoff.go, circuitbreaker.go, adaptive.go
+```
+
+Scope and thresholds live in the module's [`.gremlins.yaml`](libs/resilient-http-client/.gremlins.yaml);
+the run fails below them. `libs/resilient-http-client/mutation_test.go` is the
+worked example: each test names the mutant that survived before it existed
+(half-open exactly at the timeout, window rotation exactly at the window
+length, the AIMD limiter admitting a waiter only with real headroom, the
+cancelled waiter being the one removed). Two findings were code, not tests:
+redundant guards in `FullJitter` and clamps in `NewAdaptiveLimiter` produced
+unkillable mutants and were rewritten with `min`/`max`, and the breaker clock
+became injectable so those tests no longer sleep. CI runs it nightly and on
+demand (`mutation` job), never per PR.
+
 ---
 
 ## Worktrees (multi-branch dev)

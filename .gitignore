@@ -48,3 +48,9 @@ cosign.key
 .idea/
 .DS_Store
 *.log
+
+# ── Test reports (Allure results/HTML, merged coverage, mutation report) ──────
+allure-results/
+allure-report/
+/coverage-merged.out
+/gremlins-*.json

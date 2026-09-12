@@ -18,18 +18,19 @@ import (
 // The 2^attempt term is computed in float64 to avoid integer overflow at large
 // attempt counts; the result is clamped to capDelay long before that matters.
 func FullJitter(attempt int, base, capDelay time.Duration) time.Duration {
-	if attempt <= 0 || capDelay <= 0 || base <= 0 {
+	if attempt <= 0 {
 		return 0
 	}
-
-	ceiling := float64(base) * float64(int64(1)<<min(attempt, 62))
-	if c := float64(capDelay); ceiling > c {
-		ceiling = c
-	}
-	if ceiling <= 0 {
+	// One clamp instead of three guards: a non-positive base or cap makes the
+	// ceiling non-positive, which the single check below turns into "no delay".
+	// (Mutation testing showed the separate guards were unkillable — every
+	// mutant of them was masked by this check.)
+	ceiling := min(float64(base)*float64(int64(1)<<min(attempt, 62)), float64(capDelay))
+	if ceiling < 1 {
 		return 0
 	}
-	// rand.Int64N requires n > 0; ceiling >= 1ns here.
+	// rand.Int64N requires n > 0; ceiling >= 1ns here, and the result is
+	// inclusive of the ceiling.
 	//nolint:gosec // jitter is a backoff smoother, not a security primitive — a fast PRNG is correct here.
 	return time.Duration(rand.Int64N(int64(ceiling) + 1))
 }

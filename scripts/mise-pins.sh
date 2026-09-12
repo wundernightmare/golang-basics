@@ -40,3 +40,5 @@ emit COSIGN_VERSION      cosign
 emit GOTESTSUM_VERSION   go:gotest.tools/gotestsum
 emit COBERTURA_VERSION   go:github.com/boumenot/gocover-cobertura
 emit GOVULNCHECK_VERSION go:golang.org/x/vuln/cmd/govulncheck
+emit GOTESTCOV_VERSION   go:github.com/vladopajic/go-test-coverage/v2
+emit GREMLINS_VERSION    go:github.com/go-gremlins/gremlins/cmd/gremlins

@@ -4,6 +4,9 @@ on:
   push:
     branches: [master]
   pull_request:
+  schedule:
+    - cron: "17 3 * * *" # nightly: mutation testing (see `mutation` below)
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,6 +37,8 @@ jobs:
       GO_VERSION: ${{ steps.pins.outputs.GO_VERSION }}
       NODE_VERSION: ${{ steps.pins.outputs.NODE_VERSION }}
       GOLANGCI_VERSION: ${{ steps.pins.outputs.GOLANGCI_VERSION }}
+      GOTESTCOV_VERSION: ${{ steps.pins.outputs.GOTESTCOV_VERSION }}
+      GREMLINS_VERSION: ${{ steps.pins.outputs.GREMLINS_VERSION }}
       MODULES: ${{ steps.mods.outputs.MODULES }}
       DATA_MODULES: ${{ steps.mods.outputs.DATA_MODULES }}
     steps:
@@ -87,9 +92,24 @@ jobs:
           version: v${{ needs.versions.outputs.GOLANGCI_VERSION }}
           working-directory: ${{ matrix.module }}
       # Unit tests only here — the container-backed suites run in `integration`.
-      - name: go test (short, race)
+      # The coverage profile feeds the `coverage` gate; the testo/Allure suites
+      # write their results where ALLURE_RESULTS_DIR points.
+      - name: go test (short, race, coverage)
         working-directory: ${{ matrix.module }}
-        run: go test -short -race ./...
+        env:
+          ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
+        run: go test -short -race -coverprofile=coverage.out -covermode=atomic ./...
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
+          path: ${{ matrix.module }}/coverage.out
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('allure-results/**') != ''
+        with:
+          name: allure-results-unit-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
+          path: allure-results
+          retention-days: 7
 
   # Container-backed integration tests (Postgres / Valkey / Kafka via
   # testcontainers). GitHub runners ship a working Docker daemon, so the suites
@@ -113,7 +133,105 @@ jobs:
           cache-dependency-path: ${{ matrix.module }}/go.sum
       - name: go test (integration)
         working-directory: ${{ matrix.module }}
+        env:
+          ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
         run: go test ./...
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('allure-results/**') != ''
+        with:
+          name: allure-results-integration-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
+          path: allure-results
+          retention-days: 7
+
+  # Coverage gate on the merged unit profile (.testcoverage.yml) — the same
+  # check as `just cov-check`, plus a summary on the run page.
+  coverage:
+    needs: [versions, lint-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: profiles
+      - name: merge profiles and gate
+        run: |
+          mkdir -p merged
+          for d in profiles/*/; do mkdir -p "merged/$(basename "$d")"; cp "$d/coverage.out" "merged/$(basename "$d")/"; done
+          # shellcheck disable=SC2046
+          scripts/merge-coverage.sh coverage-merged.out $(ls -d merged/*/)
+          go install "github.com/vladopajic/go-test-coverage/v2@v${{ needs.versions.outputs.GOTESTCOV_VERSION }}"
+          go-test-coverage --config .testcoverage.yml | tee coverage-summary.txt
+          { echo '### Unit coverage (merged, -short)'; echo '```'; cat coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-merged
+          path: coverage-merged.out
+          retention-days: 7
+
+  # One Allure HTML report from every suite's results (unit + integration).
+  # allure-commandline is a Node package (root package.json) and needs a JRE.
+  allure-report:
+    needs: [versions, lint-test, integration]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: allure-results-*
+          path: allure-results
+          merge-multiple: true
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.versions.outputs.NODE_VERSION }}
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec allure generate --clean --single-file -o allure-report allure-results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: allure-report
+          path: allure-report/index.html
+          retention-days: 14
+
+  # Mutation testing of the pure-logic modules — nightly or on demand, not per
+  # PR: it re-runs the suite once per mutant. Thresholds live in each
+  # module's .gremlins.yaml; a drop below them fails the job.
+  mutation:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [libs/resilient-http-client]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
+      - run: go install "github.com/go-gremlins/gremlins/cmd/gremlins@v${{ needs.versions.outputs.GREMLINS_VERSION }}"
+      - working-directory: ${{ matrix.module }}
+        env:
+          GOFLAGS: -count=1 # timeout is derived from the coverage run; never let it hit the cache
+        run: gremlins unleash --output "$GITHUB_WORKSPACE/gremlins-$(basename "${{ matrix.module }}").json" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gremlins-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
+          path: gremlins-*.json
+          retention-days: 14
 
   # Dependency-free subset (ping + heartbeat); the GitLab job runs the full
   # suite with E2E_WITH_DEPS=1 against real Postgres / Valkey / Kafka services.
@@ -148,13 +266,13 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    needs: [fmt, lint-test, integration, e2e]
+    needs: [fmt, lint-test, integration, e2e, coverage]
     if: always()
     steps:
       - name: verify all jobs passed
         run: |
           for r in "${{ needs.fmt.result }}" "${{ needs.lint-test.result }}" \
-                   "${{ needs.integration.result }}" "${{ needs.e2e.result }}"; do
+                   "${{ needs.integration.result }}" "${{ needs.e2e.result }}" "${{ needs.coverage.result }}"; do
             [ "$r" = "success" ] || { echo "a required job did not succeed ($r)"; exit 1; }
           done
           echo "CI gate passed"
