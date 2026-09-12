@@ -40,12 +40,14 @@ that import testcontainers, and Dockerfiles / services from `services/*`.
 
 ## Tests
 
-- Unit/integration tests live next to the code (`*_test.go`); table-driven where
-  it helps. Use `testify` for assertions. `just cov-check` is the coverage gate.
-- Suites that should read well in a report (integration flows, API contracts)
-  are testo + Allure suites — see `services/tasks/internal/integration/suite_test.go`
-  and README "Allure reports". `just allure-report` renders them.
-- Pure decision logic gets mutation-tested: `just mutate` (README "Mutation testing").
+- Every test is an Allure test through `libs/testx` (`testx.Run` or a
+  `testo.Suite[testx.T]`); testify assertions work as before. Put a behaviour's
+  test at the lowest layer that can observe it, once — README "Tests" says
+  which layer owns what.
+- Container-backed tests take their dependency from `testx.Postgres/Valkey/Kafka`
+  and isolate by name (`testx.Unique`), never by starting their own container.
+- `just cov-check` gates the merged (unit + integration + e2e) coverage;
+  `just allure-report` renders every layer; `just mutate` for pure logic.
 - E2E lives in `e2e/` (Playwright, API-only). Add a `*.spec.ts` and, if it
   should run in the fast subset, tag it `@smoke`.
 - Load tests live in `benchmarks/` (k6).

@@ -4,94 +4,108 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ozontech/testo"
+	allure "github.com/ozontech/testo-allure"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	tckafka "github.com/testcontainers/testcontainers-go/modules/kafka"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
+	"github.com/tracehubmmp/golang-basics/libs/testx"
 )
 
+// One Kafka (KRaft) per test binary (testx); every test owns a topic and a
+// consumer group by name.
+func TestMain(m *testing.M) { os.Exit(testx.Main(m)) }
+
 func TestLoadConfigDefaults(t *testing.T) {
-	cfg, err := kafka.LoadConfig("TASKS_")
-	require.NoError(t, err)
-	require.Equal(t, []string{"localhost:9092"}, cfg.Brokers)
-	require.Equal(t, "tasks.events", cfg.Topic)
-	require.Equal(t, []string{"tasks.events"}, cfg.Topics, "Topics falls back to the single Topic")
+	testx.Run(t, func(t testx.T) {
+		cfg, err := kafka.LoadConfig("TASKS_")
+		require.NoError(t, err)
+		require.Equal(t, []string{"localhost:9092"}, cfg.Brokers)
+		require.Equal(t, "tasks.events", cfg.Topic)
+		require.Equal(t, []string{"tasks.events"}, cfg.Topics, "Topics falls back to the single Topic")
 
-	t.Setenv("TASKS_KAFKA_BROKERS", "a:9092,b:9092")
-	t.Setenv("TASKS_KAFKA_TOPICS", "x,y")
-	cfg, err = kafka.LoadConfig("TASKS_")
-	require.NoError(t, err)
-	require.Equal(t, []string{"a:9092", "b:9092"}, cfg.Brokers)
-	require.Equal(t, []string{"x", "y"}, cfg.Topics)
+		t.Setenv("TASKS_KAFKA_BROKERS", "a:9092,b:9092")
+		t.Setenv("TASKS_KAFKA_TOPICS", "x,y")
+		cfg, err = kafka.LoadConfig("TASKS_")
+		require.NoError(t, err)
+		require.Equal(t, []string{"a:9092", "b:9092"}, cfg.Brokers)
+		require.Equal(t, []string{"x", "y"}, cfg.Topics)
+	}, "kafka", "unit")
 }
 
-// startKafka spins up an ephemeral Kafka (KRaft, no ZooKeeper) via
-// testcontainers and returns the broker seed list. Skips under -short or when
-// Docker is unavailable.
-func startKafka(t *testing.T) []string {
+type Suite struct{ testo.Suite[testx.T] }
+
+func TestKafka(t *testing.T) { testo.RunSuite(t, new(Suite), testx.Options("kafka", "integration")...) }
+
+func producer(t testx.T, topic string) *kafka.Producer {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping container-backed test in -short mode")
-	}
-
-	ctx := context.Background()
-	container, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.5.0")
-	if err != nil {
-		if _, ok := os.LookupEnv("CI"); ok {
-			require.NoError(t, err, "kafka container must start in CI")
-		}
-		t.Skipf("could not start kafka container (docker unavailable?): %v", err)
-	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
-
-	brokers, err := container.Brokers(ctx)
+	p, err := kafka.NewProducer(context.Background(), kafka.Config{
+		Brokers: testx.Kafka(t), Topic: topic, ClientID: testx.Unique("prod"), DialTimeout: 10 * time.Second,
+	}, nil)
 	require.NoError(t, err)
-	return brokers
+	t.Cleanup(p.Close)
+	return p
 }
 
-func TestProduceConsumeRoundTrip(t *testing.T) {
-	brokers := startKafka(t)
-	ctx := context.Background()
-
-	const topic = "tasks.events.test"
-	prodCfg := kafka.Config{Brokers: brokers, Topic: topic, ClientID: "test-producer", DialTimeout: 10 * time.Second}
-	prod, err := kafka.NewProducer(ctx, prodCfg, nil)
+func consumer(t testx.T, topic string, lag time.Duration) *kafka.Consumer {
+	t.Helper()
+	c, err := kafka.NewConsumer(context.Background(), kafka.Config{
+		Brokers: testx.Kafka(t), Topics: []string{topic}, Group: testx.Unique("group"),
+		ClientID: testx.Unique("cons"), DialTimeout: 10 * time.Second, LagInterval: lag,
+	}, nil)
 	require.NoError(t, err)
-	defer prod.Close()
+	t.Cleanup(c.Close)
+	return c
+}
 
-	require.NoError(t, prod.ReadyCheck()(ctx))
+// One trip through the broker proves delivery, ordering, the trace continuing
+// from producer to consumer, and the counters + lag describing exactly what
+// happened. Real broker, real SDK, in-memory exporter.
+func (Suite) TestProduceConsume(t testx.T) {
+	t.Title("records round-trip the broker with their trace and are accounted for")
+	t.Severity(allure.SeverityCritical)
+
+	sr := testx.Recorder(t) // before the clients: kotel captures the provider then
+	topic := testx.Unique("tasks.events")
+	prod := producer(t, topic)
+	cons := consumer(t, topic, 300*time.Millisecond)
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(prod.Collectors()...)
+	reg.MustRegister(cons.Collectors()...)
 
 	const n = 5
-	for i := range n {
-		err := prod.Publish(ctx, topic, fmt.Appendf(nil, "key-%d", i), fmt.Appendf(nil, "value-%d", i))
-		require.NoError(t, err)
-	}
-
-	consCfg := kafka.Config{
-		Brokers: brokers, Topics: []string{topic}, Group: "test-group",
-		ClientID: "test-consumer", DialTimeout: 10 * time.Second,
-	}
-	cons, err := kafka.NewConsumer(ctx, consCfg, nil)
-	require.NoError(t, err)
-	defer cons.Close()
+	var parentTrace trace.TraceID
+	testx.Step(t, "publish 5 keyed records under one parent span", func(t testx.T) {
+		pctx, parent := otel.Tracer("test").Start(context.Background(), "create-task")
+		for i := range n {
+			require.NoError(t, prod.Publish(pctx, topic, fmt.Appendf(nil, "key-%d", i), fmt.Appendf(nil, "value-%d", i)))
+		}
+		parent.End()
+		parentTrace = parent.SpanContext().TraceID()
+		require.Equal(t, float64(n), testx.Metric(t, reg, "kafka_producer_records_total", map[string]string{"topic": topic, "result": "ok"}))
+	})
 
 	var (
-		mu   sync.Mutex
-		got  = map[string]string{}
-		done = make(chan struct{})
+		mu    sync.Mutex
+		got   = map[string]string{}
+		spans = map[string]trace.SpanContext{}
 	)
-	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
+	done := make(chan struct{})
 	go func() {
-		_ = cons.Run(runCtx, func(_ context.Context, msg kafka.Message) error {
+		_ = cons.Run(runCtx, func(hctx context.Context, msg kafka.Message) error {
 			mu.Lock()
 			got[string(msg.Key)] = string(msg.Value)
+			spans[string(msg.Key)] = trace.SpanContextFromContext(hctx)
 			full := len(got) == n
 			mu.Unlock()
 			if full {
@@ -105,33 +119,68 @@ func TestProduceConsumeRoundTrip(t *testing.T) {
 		})
 	}()
 
-	select {
-	case <-done:
-	case <-runCtx.Done():
-		t.Fatal("timed out waiting for all records")
-	}
+	testx.Step(t, "every record arrives with its key and value", func(t testx.T) {
+		select {
+		case <-done:
+		case <-runCtx.Done():
+			t.Fatal("timed out waiting for all records")
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for i := range n {
+			require.Equal(t, fmt.Sprintf("value-%d", i), got[fmt.Sprintf("key-%d", i)])
+		}
+	})
+
+	testx.Step(t, "the handler runs inside the producer's trace", func(t testx.T) {
+		mu.Lock()
+		defer mu.Unlock()
+		for k, sc := range spans {
+			require.True(t, sc.IsValid(), k)
+			require.Equal(t, parentTrace, sc.TraceID(), "%s: consumer continues the producer's trace", k)
+		}
+	})
+
+	testx.Step(t, "group lag drops to zero once the records are committed", func(t testx.T) {
+		require.Eventually(t, func() bool {
+			return testx.Metric(t, reg, "kafka_consumer_group_lag", map[string]string{"topic": topic, "partition": "0"}) == 0
+		}, 20*time.Second, 100*time.Millisecond)
+	})
 	cancel()
 
-	mu.Lock()
-	defer mu.Unlock()
-	require.Len(t, got, n)
-	for i := range n {
-		require.Equal(t, fmt.Sprintf("value-%d", i), got[fmt.Sprintf("key-%d", i)])
-	}
+	testx.Step(t, "counters are exact and lint-clean", func(t testx.T) {
+		require.Equal(t, float64(n), testx.Metric(t, reg, "kafka_consumer_records_total", map[string]string{"topic": topic}))
+		require.Equal(t, float64(n), testx.Metric(t, reg, "kafka_consumer_handle_duration_seconds", map[string]string{"topic": topic}))
+		require.Equal(t, -1.0, testx.Metric(t, reg, "kafka_consumer_handler_errors_total", map[string]string{"topic": topic}), "no error series")
+		testx.LintMetrics(t, reg)
+	})
+
+	testx.Step(t, "publish, receive and process spans share the trace", func(t testx.T) {
+		kinds := map[string]int{}
+		for _, s := range sr.Ended() {
+			if s.SpanContext().TraceID() != parentTrace {
+				continue
+			}
+			switch {
+			case strings.HasSuffix(s.Name(), " publish"):
+				kinds["publish"]++
+				require.Equal(t, trace.SpanKindProducer, s.SpanKind())
+			case strings.HasSuffix(s.Name(), " receive"):
+				kinds["receive"]++
+			case strings.HasSuffix(s.Name(), " process"):
+				kinds["process"]++
+				require.Equal(t, trace.SpanKindConsumer, s.SpanKind())
+			}
+		}
+		require.Equal(t, map[string]int{"publish": n, "receive": n, "process": n}, kinds)
+	})
 }
 
-func TestConsumerStopsOnContextCancel(t *testing.T) {
-	brokers := startKafka(t)
-	ctx := context.Background()
+func (Suite) TestConsumerStopsOnContextCancel(t testx.T) {
+	t.Title("a cancelled context is a clean shutdown, not an error")
+	cons := consumer(t, testx.Unique("tasks.events.idle"), 0)
 
-	cons, err := kafka.NewConsumer(ctx, kafka.Config{
-		Brokers: brokers, Topics: []string{"tasks.events.idle"}, Group: "idle-group",
-		ClientID: "idle-consumer", DialTimeout: 10 * time.Second,
-	}, nil)
-	require.NoError(t, err)
-	defer cons.Close()
-
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- cons.Run(runCtx, func(context.Context, kafka.Message) error { return nil }) }()
 
@@ -140,7 +189,7 @@ func TestConsumerStopsOnContextCancel(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		require.NoError(t, err, "a cancelled context is a clean shutdown, not an error")
+		require.NoError(t, err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("consumer did not stop on context cancel")
 	}

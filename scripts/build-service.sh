@@ -20,7 +20,16 @@ if [ -z "$version" ]; then
   version="$(git -C "$root" describe --tags --always --dirty 2>/dev/null || echo dev)"
 fi
 
+# COVER=1 builds a coverage-instrumented binary (every workspace package) that
+# writes its counters to GOCOVERDIR on exit — how the e2e layer contributes to
+# the merged coverage (scripts/cover.sh e2e). Never for a release artefact.
+cover_flags=""
+if [ -n "${COVER:-}" ]; then
+  cover_flags="-cover -coverpkg=github.com/tracehubmmp/golang-basics/..."
+fi
+
 cd "$root/services/$svc"
-CGO_ENABLED=0 go build -trimpath \
+# shellcheck disable=SC2086 # cover_flags is a flag list
+CGO_ENABLED=0 go build -trimpath $cover_flags \
   -ldflags="-s -w -X github.com/tracehubmmp/golang-basics/libs/httpx.Version=${version}" \
   -o "$out" .

@@ -17,6 +17,14 @@ import { PING_URL } from "./helpers/env";
  *   globalTeardown → kill them (pids tracked in .e2e-state.json)
  *
  * Run `just e2e-build` first (it builds the binaries the harness spawns).
+ *
+ * What this layer owns (and the Go tests do not): real binaries, real
+ * listeners on real ports, cross-process flows (tasks → Kafka → consumer),
+ * the build stamp. Route-level behaviour, error bodies and per-endpoint
+ * contracts are unit / integration tests in Go — see README "Tests".
+ *
+ * Results go to Allure (allure-playwright) next to the Go suites' results:
+ * ALLURE_RESULTS_DIR redirects them, as it does for the Go packages.
  */
 export default defineConfig({
   testDir: "./tests",
@@ -24,7 +32,19 @@ export default defineConfig({
   forbidOnly: !!process.env["CI"],
   retries: process.env["CI"] ? 1 : 0,
   workers: 1,
-  reporter: [["list"], ["html", { outputFolder: "playwright-report", open: "never" }]],
+  reporter: [
+    ["list"],
+    ["html", { outputFolder: "playwright-report", open: "never" }],
+    [
+      "allure-playwright",
+      {
+        resultsDir: process.env["ALLURE_RESULTS_DIR"] ?? "allure-results",
+        detail: false,
+        suiteTitle: false,
+        environmentInfo: { layer: "e2e", runner: "playwright" },
+      },
+    ],
+  ],
 
   use: {
     baseURL: PING_URL,

@@ -106,20 +106,29 @@ README; this file is only the high-signal, easy-to-miss bits.
   containers for the data libs. When you add a signal (a metric, a span, a log
   field), extend the contract test in `libs/otelx/telemetry_test.go` or the
   module's `telemetry_test.go`; do not assert it against a mock.
-- **Coverage is gated** (`just cov-check`, `.testcoverage.yml`, merged unit
-  profile). Raise thresholds when coverage improves; lower only with a reason.
-  `main.go` is excluded (covered by e2e), `doc.go` too.
-- **Allure via testo**: `services/ping/internal/api` and
-  `services/tasks/internal/integration` are testo suites with the
-  testo-allure plugin (`type T = struct{ *testo.T; *allure.PluginAllure }`).
-  Results go to `allure-results/` (gitignored) or `ALLURE_RESULTS_DIR`. Steps
-  are sub-tests: never create containers/clients inside `allure.Step` — their
-  `t.Cleanup` fires when the step returns.
+- **Every test goes through `libs/testx`**: `testx.Run` for a plain test,
+  `testo.Suite[testx.T]` + `testx.Options(tags...)` for a suite; sub-tests are
+  `testo.Run`/`testx.Step`, never `t.Run`. Containers come from
+  `testx.Postgres/Valkey/Kafka` (one per test binary, `TestMain` →
+  `testx.Main`) and tests isolate with `testx.Unique`, never a fresh container.
+  Spans/logs/metrics are read with `testx.Recorder/LogBuffer/Metric`. No
+  helper copies in packages.
+- **One layer per behaviour** (README "Tests" table): unit for logic and
+  wiring, contract for the telemetry signals, integration for the libs against
+  real dependencies and the tasks vertical, e2e only for what a real process
+  shows (readiness on the admin port, build stamp, tasks → Kafka → consumer).
+  Do not re-assert a lower layer's behaviour in a higher one; wait for it.
+- **Coverage is the covdata merge of unit + integration + e2e**
+  (`scripts/cover.sh`, `just cov-check`, `.testcoverage.yml`). Tests write
+  `-test.gocoverdir`, e2e binaries are built with `COVER=1` and write
+  `GOCOVERDIR`. Raise the threshold when it improves; lower only with a reason.
 - **Mutation testing is scoped**: `just mutate` runs gremlins on
   `libs/resilient-http-client`'s pure files (its `.gremlins.yaml` excludes the
   rest) with thresholds that fail the run. When a mutant lives, first ask
   whether the code has an unkillable branch (rewrite with `min`/`max`, inject
   the clock) before adding a test. Nightly/manual in CI, not per PR.
+- **Load tests (k6) stay outside Allure**: they run on the load stand and
+  report there; do not wire k6 summaries into the test report.
 - **Container-backed tests need `DOCKER_HOST` on OrbStack/rootless Docker**
   (`unix://$HOME/.orbstack/run/docker.sock`); they skip when Docker is
   unreachable and fail when `CI` is set.

@@ -92,18 +92,24 @@ jobs:
           version: v${{ needs.versions.outputs.GOLANGCI_VERSION }}
           working-directory: ${{ matrix.module }}
       # Unit tests only here — the container-backed suites run in `integration`.
-      # The coverage profile feeds the `coverage` gate; the testo/Allure suites
-      # write their results where ALLURE_RESULTS_DIR points.
+      # Coverage goes to .cover/unit in Go's binary format (every workspace
+      # package instrumented) so the `coverage` job can covdata-merge it with
+      # the integration and e2e layers; every test is an Allure test (testx)
+      # and writes its result where ALLURE_RESULTS_DIR points.
       - name: go test (short, race, coverage)
         working-directory: ${{ matrix.module }}
         env:
           ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
-        run: go test -short -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.cover/unit"
+          go test -short -race -cover -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
+            -args -test.gocoverdir="$GITHUB_WORKSPACE/.cover/unit"
       - uses: actions/upload-artifact@v4
         with:
-          name: coverage-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
-          path: ${{ matrix.module }}/coverage.out
+          name: cover-unit-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
+          path: .cover/unit
           retention-days: 1
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('allure-results/**') != ''
         with:
@@ -131,11 +137,20 @@ jobs:
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
           cache-dependency-path: ${{ matrix.module }}/go.sum
-      - name: go test (integration)
+      - name: go test (integration, coverage)
         working-directory: ${{ matrix.module }}
         env:
           ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
-        run: go test ./...
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.cover/integration"
+          go test -cover -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
+            -args -test.gocoverdir="$GITHUB_WORKSPACE/.cover/integration"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cover-integration-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
+          path: .cover/integration
+          retention-days: 1
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: always() && hashFiles('allure-results/**') != ''
         with:
@@ -143,10 +158,11 @@ jobs:
           path: allure-results
           retention-days: 7
 
-  # Coverage gate on the merged unit profile (.testcoverage.yml) — the same
-  # check as `just cov-check`, plus a summary on the run page.
+  # One coverage number for the whole pyramid: the unit, integration and e2e
+  # layers are covdata-merged (counters summed per block, nothing counted
+  # twice) and gated by .testcoverage.yml — the same as `just cov-check`.
   coverage:
-    needs: [versions, lint-test]
+    needs: [versions, lint-test, integration, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -156,17 +172,24 @@ jobs:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
       - uses: actions/download-artifact@v4
         with:
-          pattern: coverage-*
-          path: profiles
-      - name: merge profiles and gate
+          pattern: cover-unit-*
+          path: .cover/unit
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cover-integration-*
+          path: .cover/integration
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: cover-e2e
+          path: .cover/e2e
+      - name: merge layers and gate
         run: |
-          mkdir -p merged
-          for d in profiles/*/; do mkdir -p "merged/$(basename "$d")"; cp "$d/coverage.out" "merged/$(basename "$d")/"; done
-          # shellcheck disable=SC2046
-          scripts/merge-coverage.sh coverage-merged.out $(ls -d merged/*/)
           go install "github.com/vladopajic/go-test-coverage/v2@v${{ needs.versions.outputs.GOTESTCOV_VERSION }}"
+          scripts/cover.sh merge | tee coverage-layers.txt
           go-test-coverage --config .testcoverage.yml | tee coverage-summary.txt
-          { echo '### Unit coverage (merged, -short)'; echo '```'; cat coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '### Coverage — unit + integration + e2e (covdata merge)'; echo '```'; cat coverage-layers.txt coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-merged
@@ -252,15 +275,36 @@ jobs:
         with:
           node-version: ${{ needs.versions.outputs.NODE_VERSION }}
           cache: pnpm
-      - name: build service binaries
+      # Cover-instrumented binaries: the e2e layer contributes to the merged
+      # coverage through GOCOVERDIR, and Playwright reports to Allure like
+      # every other layer.
+      - name: build service binaries (cover-instrumented)
         env:
           VERSION: ${{ github.sha }}
+          COVER: "1"
         run: |
           for s in ping heartbeat; do scripts/build-service.sh "$s"; done
       - name: pnpm install
         run: pnpm install --frozen-lockfile
       - name: playwright e2e
-        run: pnpm --filter @golang-basics/e2e test
+        env:
+          GOCOVERDIR: ${{ github.workspace }}/.cover/e2e
+          ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
+        run: |
+          mkdir -p "$GOCOVERDIR"
+          pnpm --filter @golang-basics/e2e test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cover-e2e
+          path: .cover/e2e
+          retention-days: 1
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always() && hashFiles('allure-results/**') != ''
+        with:
+          name: allure-results-e2e
+          path: allure-results
+          retention-days: 7
 
   # Final status check for branch protection — the one required check.
   gate:

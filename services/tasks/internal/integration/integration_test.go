@@ -1,6 +1,7 @@
 // Package integration exercises the whole tasks vertical — HTTP → Postgres →
-// Valkey → Kafka — against real containers, proving the libs compose end to end.
-// It skips under -short or when Docker is unavailable.
+// Valkey → Kafka — against real containers (one of each per test binary, from
+// libs/testx), proving the libs compose end to end. It skips under -short or
+// when Docker is unavailable, and fails instead when CI is set.
 package integration_test
 
 import (
@@ -10,81 +11,22 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	tckafka "github.com/testcontainers/testcontainers-go/modules/kafka"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	tcvalkey "github.com/testcontainers/testcontainers-go/modules/valkey"
-	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
+	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/domain"
 )
 
-const topic = "tasks.events.it"
-
-type stack struct {
-	dbURL     string
-	valkeyURL string
-	brokers   []string
-}
-
-func bringUp(t testing.TB) stack {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping container-backed integration test in -short mode")
-	}
-	ctx := context.Background()
-	inCI := func() bool { _, ok := os.LookupEnv("CI"); return ok }
-
-	pg, err := startWithRetry(ctx, t, func(ctx context.Context) (*tcpostgres.PostgresContainer, error) {
-		return tcpostgres.Run(ctx, "postgres:18-alpine",
-			tcpostgres.WithDatabase("app"), tcpostgres.WithUsername("app"), tcpostgres.WithPassword("app"),
-			testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).WithStartupTimeout(60*time.Second)))
-	})
-	if err != nil {
-		if inCI() {
-			require.NoError(t, err)
-		}
-		t.Skipf("docker unavailable (postgres): %v", err)
-	}
-
-	vk, err := startWithRetry(ctx, t, func(ctx context.Context) (*tcvalkey.ValkeyContainer, error) {
-		// Override the module's default exec-based readiness probe with a
-		// log-based one: rootless podman's `exec inspect` stalls under
-		// concurrent container startup, while tailing the server log does not.
-		return tcvalkey.Run(ctx, "valkey/valkey:9.0",
-			testcontainers.WithWaitStrategy(wait.ForLog("Ready to accept connections").
-				WithStartupTimeout(60*time.Second)))
-	})
-	require.NoError(t, err)
-
-	kf, err := startWithRetry(ctx, t, func(ctx context.Context) (*tckafka.KafkaContainer, error) {
-		return tckafka.Run(ctx, "confluentinc/confluent-local:7.5.0")
-	})
-	require.NoError(t, err)
-
-	dbURL, err := pg.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err)
-	vkURL, err := vk.ConnectionString(ctx)
-	require.NoError(t, err)
-	brokers, err := kf.Brokers(ctx)
-	require.NoError(t, err)
-
-	return stack{dbURL: dbURL, valkeyURL: vkURL, brokers: brokers}
-}
-
-func requireEventDelivered(t testing.TB, brokers []string, wantID string) {
+func requireEventDelivered(t testing.TB, brokers []string, topic, wantID string) {
 	t.Helper()
 	cons, err := kafka.NewConsumer(context.Background(), kafka.Config{
-		Brokers: brokers, Topics: []string{topic}, Group: "tasks-it-verify",
-		ClientID: "tasks-it-verify", DialTimeout: 10 * time.Second,
+		Brokers: brokers, Topics: []string{topic}, Group: testx.Unique("verify"),
+		ClientID: testx.Unique("verify"), DialTimeout: 10 * time.Second,
 	}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	defer cons.Close()
@@ -112,31 +54,6 @@ func requireEventDelivered(t testing.TB, brokers []string, wantID string) {
 	case <-runCtx.Done():
 		t.Fatal("task.created event was not delivered to Kafka within the timeout")
 	}
-}
-
-// startWithRetry runs a container factory up to three times. Rootless podman's
-// API socket can momentarily stall its container-inspect calls when several
-// containers come up at once, surfacing as a "context deadline exceeded" on
-// start; a real Docker daemon starts first-try, so the retry is a harmless
-// belt-and-braces for constrained CI hosts.
-func startWithRetry[T testcontainers.Container](
-	ctx context.Context, t testing.TB, run func(context.Context) (T, error),
-) (T, error) {
-	t.Helper()
-	var c T
-	var err error
-	for attempt := 1; attempt <= 3; attempt++ {
-		c, err = run(ctx)
-		if err == nil {
-			c := c
-			t.Cleanup(func() { _ = testcontainers.TerminateContainer(c) })
-			return c, nil
-		}
-		t.Logf("container start attempt %d/3 failed: %v", attempt, err)
-		func() { defer func() { _ = recover() }(); _ = testcontainers.TerminateContainer(c) }()
-		time.Sleep(2 * time.Second)
-	}
-	return c, err
 }
 
 // --- tiny HTTP helpers -------------------------------------------------------

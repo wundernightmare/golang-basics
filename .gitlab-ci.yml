@@ -264,10 +264,15 @@ unit:
   variables:
     ALLURE_RESULTS_DIR: $CI_PROJECT_DIR/allure-results
   script:
+    - mkdir -p "$CI_PROJECT_DIR/.cover/unit"
     - cd "$MODULE"
+    # Text profile → Cobertura for the MR annotations; binary profile
+    # (.cover/unit, every workspace package) → the covdata merge in `coverage`.
     - |
       gotestsum --junitfile junit.xml --format testname -- \
-        -short -race -coverprofile=coverage.out -covermode=atomic ./...
+        -short -race -coverprofile=coverage.out -covermode=atomic \
+        -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
+        -args -test.gocoverdir="$CI_PROJECT_DIR/.cover/unit"
     - go tool cover -func=coverage.out | tail -1
     - gocover-cobertura < coverage.out > coverage.xml
   coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
@@ -275,7 +280,7 @@ unit:
     when: always
     expire_in: 1 week
     paths:
-      - $MODULE/coverage.out
+      - .cover/unit/
       - allure-results/
     reports:
       junit: $MODULE/junit.xml
@@ -300,21 +305,27 @@ integration:
     matrix:
       - MODULE: [libs/pgx, libs/valkey, libs/kafka, services/tasks, services/consumer]
   script:
+    - mkdir -p "$CI_PROJECT_DIR/.cover/integration"
     - cd "$MODULE"
-    - gotestsum --junitfile junit.xml --format testname -- ./...
+    - |
+      gotestsum --junitfile junit.xml --format testname -- \
+        -cover -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
+        -args -test.gocoverdir="$CI_PROJECT_DIR/.cover/integration"
   artifacts:
     when: always
     expire_in: 1 week
     paths:
+      - .cover/integration/
       - allure-results/
     reports:
       junit: $MODULE/junit.xml
 
 # ── report ────────────────────────────────────────────────────────────────────
 
-# Coverage gate on the merged unit profile (.testcoverage.yml): the same
-# check as `just cov-check`. The per-module Cobertura reports above give the
-# MR its line annotations; this one decides pass/fail.
+# One coverage number for the whole pyramid: unit + integration + e2e layers
+# covdata-merged and gated by .testcoverage.yml (`just cov-check`). The
+# per-module Cobertura reports above give the MR its line annotations; this
+# one decides pass/fail.
 coverage:
   extends: [.go, .rules-go]
   stage: report
@@ -325,9 +336,12 @@ coverage:
       artifacts: true
     - job: unit
       artifacts: true
+    - job: integration
+      artifacts: true
+    - job: e2e
+      artifacts: true
   script:
-    # shellcheck disable=SC2086
-    - scripts/merge-coverage.sh coverage-merged.out $MODULES
+    - scripts/cover.sh merge
     - go-test-coverage --config .testcoverage.yml
   artifacts:
     expire_in: 1 week
@@ -393,6 +407,7 @@ build-services:
   stage: test
   variables:
     VERSION: $CI_COMMIT_SHORT_SHA
+    COVER: "1" # cover-instrumented: the e2e layer feeds the merged coverage via GOCOVERDIR
   script:
     - for s in $(echo "$MODULES" | tr ' ' '\n' | grep '^services/' | cut -d/ -f2); do
         scripts/build-service.sh "$s";
@@ -456,11 +471,14 @@ e2e:
     HEARTBEAT_ADMIN_URL: http://localhost:9081
     TASKS_ADMIN_URL: http://localhost:9082
     CONSUMER_ADMIN_URL: http://localhost:9083
+    GOCOVERDIR: $CI_PROJECT_DIR/.cover/e2e
+    ALLURE_RESULTS_DIR: $CI_PROJECT_DIR/allure-results
   before_script:
     # Node 26 no longer ships corepack; packageManager in package.json pins
     # pnpm. COREPACK_NPM_REGISTRY / npm_config_registry redirect both fetches.
     - npm install -g corepack@latest && corepack enable
   script:
+    - mkdir -p "$GOCOVERDIR"
     - pnpm install --frozen-lockfile
     - cd e2e && pnpm test
   artifacts:
@@ -469,6 +487,8 @@ e2e:
     paths:
       - e2e/playwright-report/
       - e2e/test-results/
+      - .cover/e2e/
+      - allure-results/
 
 # ── security (AppSec) — mirrors appsec.yml ────────────────────────────────────
 # These need neither the test matrix nor each other, so `needs: [versions]` lets

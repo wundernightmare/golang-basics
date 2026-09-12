@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tracehubmmp/golang-basics/libs/testx"
+
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
@@ -88,7 +90,7 @@ func (f *fakePublisher) Publish(_ context.Context, topic string, _, value []byte
 
 // --- harness -----------------------------------------------------------------
 
-func newServer(t *testing.T) (*httptest.Server, *fakeStore, *fakeCache, *fakePublisher) {
+func newServer(t testing.TB) (*httptest.Server, *fakeStore, *fakeCache, *fakePublisher) {
 	t.Helper()
 	st, cache, pub := newFakeStore(), newFakeCache(), &fakePublisher{}
 	srv := httpx.NewServer(httpx.Config{LogLevel: "error"}, slog.New(slog.DiscardHandler))
@@ -102,7 +104,7 @@ func newServer(t *testing.T) (*httptest.Server, *fakeStore, *fakeCache, *fakePub
 	return ts, st, cache, pub
 }
 
-func do(t *testing.T, ts *httptest.Server, method, path, body string) *http.Response {
+func do(t testing.TB, ts *httptest.Server, method, path, body string) *http.Response {
 	t.Helper()
 	var r *http.Request
 	var err error
@@ -120,95 +122,109 @@ func do(t *testing.T, ts *httptest.Server, method, path, body string) *http.Resp
 // --- tests -------------------------------------------------------------------
 
 func TestCreateValidationRejectsEmptyTitle(t *testing.T) {
-	ts, _, _, _ := newServer(t)
-	resp := do(t, ts, http.MethodPost, "/tasks", `{"title":""}`)
-	defer func() { _ = resp.Body.Close() }()
+	testx.Run(t, func(t testx.T) {
+		ts, _, _, _ := newServer(t)
+		resp := do(t, ts, http.MethodPost, "/tasks", `{"title":""}`)
+		defer func() { _ = resp.Body.Close() }()
 
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	require.Equal(t, httpx.ProblemContentType, resp.Header.Get("Content-Type"))
-	var p map[string]any
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
-	require.Equal(t, float64(400), p["status"])
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+		require.Equal(t, httpx.ProblemContentType, resp.Header.Get("Content-Type"))
+		var p map[string]any
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
+		require.Equal(t, float64(400), p["status"])
+	}, "tasks", "unit")
 }
 
 func TestCreatePersistsPublishesAndCaches(t *testing.T) {
-	ts, st, cache, pub := newServer(t)
-	resp := do(t, ts, http.MethodPost, "/tasks", `{"title":"write tests"}`)
-	defer func() { _ = resp.Body.Close() }()
+	testx.Run(t, func(t testx.T) {
+		ts, st, cache, pub := newServer(t)
+		resp := do(t, ts, http.MethodPost, "/tasks", `{"title":"write tests"}`)
+		defer func() { _ = resp.Body.Close() }()
 
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var task domain.Task
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&task))
-	require.NotEmpty(t, task.ID)
-	require.Equal(t, "write tests", task.Title)
+		require.Equal(t, http.StatusCreated, resp.StatusCode)
+		var task domain.Task
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&task))
+		require.NotEmpty(t, task.ID)
+		require.Equal(t, "write tests", task.Title)
 
-	require.Len(t, st.tasks, 1, "task persisted to store")
-	require.Len(t, pub.published, 1, "one task.created event published")
-	require.Equal(t, "tasks.events", pub.topic)
+		require.Len(t, st.tasks, 1, "task persisted to store")
+		require.Len(t, pub.published, 1, "one task.created event published")
+		require.Equal(t, "tasks.events", pub.topic)
 
-	var evt domain.TaskCreatedEvent
-	require.NoError(t, json.Unmarshal(pub.published[0], &evt))
-	require.Equal(t, task.ID, evt.ID)
+		var evt domain.TaskCreatedEvent
+		require.NoError(t, json.Unmarshal(pub.published[0], &evt))
+		require.Equal(t, task.ID, evt.ID)
 
-	_, cached := cache.data["task:"+task.ID]
-	require.True(t, cached, "task warmed into cache on create")
+		_, cached := cache.data["task:"+task.ID]
+		require.True(t, cached, "task warmed into cache on create")
+	}, "tasks", "unit")
 }
 
 func TestGetServesFromCacheWithoutHittingStore(t *testing.T) {
-	ts, st, cache, _ := newServer(t)
-	cached := domain.Task{ID: "abc", Title: "cached", CreatedAt: time.Now().UTC()}
-	body, _ := json.Marshal(cached)
-	cache.data["task:abc"] = string(body)
+	testx.Run(t, func(t testx.T) {
+		ts, st, cache, _ := newServer(t)
+		cached := domain.Task{ID: "abc", Title: "cached", CreatedAt: time.Now().UTC()}
+		body, _ := json.Marshal(cached)
+		cache.data["task:abc"] = string(body)
 
-	resp := do(t, ts, http.MethodGet, "/tasks/abc", "")
-	defer func() { _ = resp.Body.Close() }()
+		resp := do(t, ts, http.MethodGet, "/tasks/abc", "")
+		defer func() { _ = resp.Body.Close() }()
 
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, "hit", resp.Header.Get("X-Cache"))
-	require.Equal(t, 0, st.getCalls, "a cache hit must not touch the store")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Equal(t, "hit", resp.Header.Get("X-Cache"))
+		require.Equal(t, 0, st.getCalls, "a cache hit must not touch the store")
+	}, "tasks", "unit")
 }
 
 func TestGetMissesCacheThenLoadsFromStore(t *testing.T) {
-	ts, st, _, _ := newServer(t)
-	st.tasks["xyz"] = domain.Task{ID: "xyz", Title: "stored", CreatedAt: time.Now().UTC()}
+	testx.Run(t, func(t testx.T) {
+		ts, st, _, _ := newServer(t)
+		st.tasks["xyz"] = domain.Task{ID: "xyz", Title: "stored", CreatedAt: time.Now().UTC()}
 
-	resp := do(t, ts, http.MethodGet, "/tasks/xyz", "")
-	defer func() { _ = resp.Body.Close() }()
+		resp := do(t, ts, http.MethodGet, "/tasks/xyz", "")
+		defer func() { _ = resp.Body.Close() }()
 
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.Equal(t, "miss", resp.Header.Get("X-Cache"))
-	require.Equal(t, 1, st.getCalls)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Equal(t, "miss", resp.Header.Get("X-Cache"))
+		require.Equal(t, 1, st.getCalls)
+	}, "tasks", "unit")
 }
 
 func TestGetUnknownReturns404Problem(t *testing.T) {
-	ts, _, _, _ := newServer(t)
-	resp := do(t, ts, http.MethodGet, "/tasks/nope", "")
-	defer func() { _ = resp.Body.Close() }()
+	testx.Run(t, func(t testx.T) {
+		ts, _, _, _ := newServer(t)
+		resp := do(t, ts, http.MethodGet, "/tasks/nope", "")
+		defer func() { _ = resp.Body.Close() }()
 
-	require.Equal(t, http.StatusNotFound, resp.StatusCode)
-	require.Equal(t, httpx.ProblemContentType, resp.Header.Get("Content-Type"))
-	var p map[string]any
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
-	require.Equal(t, "task_not_found", p["code"])
-	require.Equal(t, "/tasks/nope", p["instance"])
+		require.Equal(t, http.StatusNotFound, resp.StatusCode)
+		require.Equal(t, httpx.ProblemContentType, resp.Header.Get("Content-Type"))
+		var p map[string]any
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&p))
+		require.Equal(t, "task_not_found", p["code"])
+		require.Equal(t, "/tasks/nope", p["instance"])
+	}, "tasks", "unit")
 }
 
 func TestDeleteUnknownReturns404(t *testing.T) {
-	ts, _, _, _ := newServer(t)
-	resp := do(t, ts, http.MethodDelete, "/tasks/ghost", "")
-	defer func() { _ = resp.Body.Close() }()
-	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	testx.Run(t, func(t testx.T) {
+		ts, _, _, _ := newServer(t)
+		resp := do(t, ts, http.MethodDelete, "/tasks/ghost", "")
+		defer func() { _ = resp.Body.Close() }()
+		require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	}, "tasks", "unit")
 }
 
 func TestDeleteEvictsCache(t *testing.T) {
-	ts, st, cache, _ := newServer(t)
-	st.tasks["d1"] = domain.Task{ID: "d1", Title: "doomed"}
-	cache.data["task:d1"] = "{}"
+	testx.Run(t, func(t testx.T) {
+		ts, st, cache, _ := newServer(t)
+		st.tasks["d1"] = domain.Task{ID: "d1", Title: "doomed"}
+		cache.data["task:d1"] = "{}"
 
-	resp := do(t, ts, http.MethodDelete, "/tasks/d1", "")
-	defer func() { _ = resp.Body.Close() }()
+		resp := do(t, ts, http.MethodDelete, "/tasks/d1", "")
+		defer func() { _ = resp.Body.Close() }()
 
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
-	require.NotContains(t, st.tasks, "d1")
-	require.NotContains(t, cache.data, "task:d1", "cache entry evicted on delete")
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		require.NotContains(t, st.tasks, "d1")
+		require.NotContains(t, cache.data, "task:d1", "cache entry evicted on delete")
+	}, "tasks", "unit")
 }

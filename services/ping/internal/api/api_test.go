@@ -11,38 +11,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"testing"
 
 	"github.com/ozontech/testo"
 	allure "github.com/ozontech/testo-allure"
-	"github.com/ozontech/testo/testoplugin"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
+	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/services/ping/internal/api"
 )
 
-// T is the suite's test handle: testo's T plus the Allure plugin (Title,
-// Tags, Step, Attach, Require/Assert with step logging).
-type T = struct {
-	*testo.T
-	*allure.PluginAllure
-}
+type Suite struct{ testo.Suite[testx.T] }
 
-// allureOptions redirects the results when CI collects them into one place.
-func allureOptions() []testoplugin.Option {
-	opts := []testoplugin.Option{allure.WithTags("ping", "unit")}
-	if dir := os.Getenv("ALLURE_RESULTS_DIR"); dir != "" {
-		opts = append(opts, allure.WithOutputDir(dir))
-	}
-	return opts
-}
+func TestPingAPI(t *testing.T) { testo.RunSuite(t, new(Suite), testx.Options("ping", "unit")...) }
 
-type Suite struct{ testo.Suite[T] }
-
-func TestPingAPI(t *testing.T) { testo.RunSuite(t, new(Suite), allureOptions()...) }
-
-func newServer(t T) *httpx.Server {
+func newServer(t testx.T) *httpx.Server {
 	t.Helper()
 	log := httpx.NewLogger(httpx.LogConfig{Level: "error", Format: "text"})
 	srv := httpx.NewServer(httpx.Config{Service: "ping", Addr: ":0"}, log)
@@ -50,7 +33,7 @@ func newServer(t T) *httpx.Server {
 	return srv
 }
 
-func getJSON[V any](t T, h http.Handler, path string) (int, V) {
+func getJSON[V any](t testx.T, h http.Handler, path string) (int, V) {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
@@ -65,7 +48,7 @@ func getJSON[V any](t T, h http.Handler, path string) (int, V) {
 // CasesMsg parametrises TestPing: one Allure test per echo value.
 func (Suite) CasesMsg() []string { return []string{"", "hello", "привет мир"} }
 
-func (Suite) TestPing(t T, p struct{ Msg string }) {
+func (Suite) TestPing(t testx.T, p struct{ Msg string }) {
 	t.Parallel()
 	t.Title("GET /ping answers pong and echoes ?msg=")
 	t.Feature("ping")
@@ -81,7 +64,7 @@ func (Suite) TestPing(t T, p struct{ Msg string }) {
 	t.Assert().Equal(p.Msg, body.Echo, "echo mirrors ?msg= (empty when absent)")
 }
 
-func (Suite) TestVersion(t T) {
+func (Suite) TestVersion(t testx.T) {
 	t.Parallel()
 	t.Title("GET /version reports the build identity on the API port")
 	t.Feature("ping")
@@ -97,7 +80,7 @@ func (Suite) TestVersion(t T) {
 // The operational endpoints come from httpx for free on the admin listener —
 // assert the service wires them up (and keeps them off the API engine) rather
 // than re-testing httpx internals.
-func (Suite) TestAdminEndpoints(t T) {
+func (Suite) TestAdminEndpoints(t testx.T) {
 	t.Parallel()
 	t.Title("operational routes live on the admin listener only")
 	t.Feature("admin")
@@ -105,7 +88,7 @@ func (Suite) TestAdminEndpoints(t T) {
 	srv := newServer(t)
 	srv.Health.SetReady(true)
 	for _, path := range []string{"/healthz", "/readyz", "/metrics", "/version", "/debug/pprof/"} {
-		allure.Step(t, "GET "+path, func(t T) {
+		allure.Step(t, "GET "+path, func(t testx.T) {
 			rec := httptest.NewRecorder()
 			srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 			t.Assert().Equal(http.StatusOK, rec.Code, "served on admin")

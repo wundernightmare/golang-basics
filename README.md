@@ -34,6 +34,7 @@ code lives in per-branch worktrees (`master/` is canonical).
 | [`libs/valkey`](libs/valkey)               | Library      | —                            | Valkey cache (`valkey-go`): get/set/del, readiness check, generic cache-aside helper.              |
 | [`libs/kafka`](libs/kafka)                 | Library      | —                            | Kafka producer + consumer (`franz-go`): sync publish, at-least-once consumer-group loop, readiness. |
 | [`libs/otelx`](libs/otelx)                 | Library      | —                            | OpenTelemetry tracing: OTLP exporter, W3C propagation, gin middleware (opt-in).                    |
+| [`libs/testx`](libs/testx)                 | Test harness | —                            | `_test`-only: Allure handle (testo), one shared container per test binary, span recorder, log buffer, metric helpers. |
 
 The dependency graph is `services/* → libs/*`. Every service — HTTP-first or
 worker — reuses `httpx` for its **admin listener** (`/healthz`, `/readyz`,
@@ -370,62 +371,82 @@ CONSUMER_OTEL_ENABLED=true CONSUMER_OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 j
 
 ## Tests
 
-Three layers, all real code paths:
+Every test in the workspace is an Allure test, every layer feeds one merged
+coverage number, and every behaviour is checked at exactly one layer. The
+harness that makes that cheap is [`libs/testx`](libs/testx) (`_test`-only).
 
-| Layer | Where | What it proves |
-|---|---|---|
-| Unit | `*_test.go` next to the code, `-short` | config, handlers with fakes behind the small interfaces, the readiness cache, log sampling arithmetic |
-| Telemetry contract | `libs/otelx/telemetry_test.go`, `libs/httpx/health_test.go`, `*/metrics_test.go` | a real server, the real OpenTelemetry SDK with an in-memory exporter, the real slog handler chain into a buffer, the real Prometheus registry: the access-log line, the span and the counters describe the same request; sampling is exact under concurrency; every exposition is `promlint`-clean; readiness answers from cache and never stampedes a dependency |
-| Integration | `*/telemetry_test.go` in `pgx`, `valkey`, `kafka`, `services/tasks/internal/integration`, `services/consumer/internal/worker` | against real Postgres / Valkey / Kafka via testcontainers: query and command spans are children of the caller's span; a record carries its trace through the broker and the consumer's log line names the producer's trace; pool stats, hit/miss and group lag move with real usage |
+### Layers and what each one owns
 
-The container-backed suites skip under `-short` and when Docker is unreachable
-(they fail instead when `CI` is set). On OrbStack / rootless Docker, point
-testcontainers at the socket first:
+| Layer | Where | Owns | Does not repeat |
+|---|---|---|---|
+| **Unit** | `*_test.go` next to the code, `-short` | pure logic, config parsing, handlers behind the small interfaces with fakes, readiness cache semantics, log sampling arithmetic, route ↔ listener wiring of a service | anything that needs a real dependency |
+| **Contract** (telemetry) | `libs/otelx/telemetry_test.go`, `libs/httpx/health_test.go`, `*/metrics_test.go` | the access-log line, the span and the counters describe the same request; sampling is exact under concurrency; every exposition is promlint-clean; readiness never stampedes a dependency | route behaviour (unit), real dependencies (integration) |
+| **Integration** | `libs/{pgx,valkey,kafka}`, `services/tasks/internal/integration`, `services/consumer/internal/worker` — one shared container per test binary | the libs against real Postgres / Valkey / Kafka: query and command spans inside the caller's span, a record carrying its trace through the broker, pool / hit-miss / lag moving with real usage; the tasks vertical wired exactly as `main.go` wires it, one trace across request, log lines and metrics, readiness with its checks | route contracts already proven with fakes; process-level behaviour |
+| **E2E** | `e2e/` (Playwright, real binaries) | what only a real process shows: it starts, is ready on its admin listener, is a scrape target that identifies itself, reports the build stamp, and the cross-process flow tasks → Kafka → consumer | per-route behaviour, error bodies, admin route inventory (unit), the CRUD flow (integration) |
+| **Mutation** | `libs/resilient-http-client` (`just mutate`) | whether the unit tests of the pure decision logic would notice a wrong comparison, operator or increment | — |
+| **Load** | `benchmarks/` (k6) | latency / error thresholds under load; runs on the load stand and reports there, outside Allure | — |
 
-```sh
-export DOCKER_HOST=unix://$HOME/.orbstack/run/docker.sock   # OrbStack
-just test                                                    # everything
-just <module> test-short                                     # unit only
-```
+When you add a behaviour, put its test at the lowest layer that can observe
+it, and only there. If a higher layer needs it as a precondition, it waits for
+it (the e2e harness waits for `/readyz`), it does not assert it again.
 
-### Coverage gate
+### Harness: `libs/testx`
 
-`just cov-check` runs every module's unit tests with a profile, merges them
-(`scripts/merge-coverage.sh`) and gates the total with
-[go-test-coverage](https://github.com/vladopajic/go-test-coverage) against
-[`.testcoverage.yml`](.testcoverage.yml): a workspace total plus higher floors
-for the pure libs (`httpx`, `resilient-http-client`); `main.go` files are
-excluded because the Playwright suite covers them. Both pipelines run the same
-gate (`coverage` job); GitLab additionally keeps the per-module Cobertura
-reports for MR line annotations. The thresholds are a ratchet — raise them as
-coverage improves.
-
-### Allure reports
-
-Two suites are written with [testo](https://github.com/ozontech/testo) and
-the [testo-allure](https://github.com/ozontech/testo-allure) plugin as the
-worked example: `services/ping/internal/api` (unit, parametrised via
-`CasesMsg`) and `services/tasks/internal/integration` (the vertical, one step
-per stage with the HTTP bodies attached). They are plain `go test` tests —
-coverage, `-run`, `-race` and the CI matrix work unchanged — and every run
-writes `allure-results/` next to the package (`ALLURE_RESULTS_DIR` redirects
-it, which is how CI collects all suites into one place).
+- `testx.Run(t, func(t testx.T) { … }, tags...)` makes a plain test an Allure
+  test; `testo.Suite[testx.T]` with `testo.RunSuite(t, new(Suite), testx.Options(tags...)...)`
+  is the suite form (titles, steps, attachments, parametrised `Cases*`).
+  `testx.T` is a `testing.TB`, so testify keeps working; sub-tests are
+  `testo.Run` / `testx.Step`, never `t.Run`.
+- `testx.Postgres(t)`, `testx.Valkey(t)`, `testx.Kafka(t)` start one
+  container per test binary (retrying the start), skip locally without Docker
+  and fail when `CI` is set; `func TestMain(m *testing.M) { os.Exit(testx.Main(m)) }`
+  terminates them. Tests isolate through `testx.Unique(prefix)` — a table, a
+  key prefix, a topic, a group — never through a fresh container. This is what
+  took the integration layer from ~2 minutes to ~50 seconds.
+- `testx.Recorder(t)` (real SDK, in-memory spans), `testx.LogBuffer` (real
+  logger, in memory), `testx.Metric` / `testx.LintMetrics` (real registry).
+- Resources that must outlive an Allure step (containers, clients, servers)
+  are created on the test's own `t`: a step is a sub-test and its `Cleanup`
+  runs when the step returns.
 
 ```sh
-just test                  # or any go test — results land in */allure-results/
-just allure-report         # → allure-report/index.html (single file)
+export DOCKER_HOST=unix://$HOME/.orbstack/run/docker.sock   # OrbStack / rootless Docker
+just test                     # every Go layer (integration needs Docker)
+just e2e                      # Playwright against real binaries
+just allure-report            # one HTML report from every layer's allure-results/
 ```
 
-`allure-commandline` comes from the root `package.json` (so through the npm
-mirror in a closed network) and needs a JRE, pinned in `mise.toml`. CI builds
-the same single-file report as an artifact (`allure-report` job) and keeps the
-raw `allure-results/` for an Allure server / TestOps to ingest.
+### Allure
 
-To add Allure to a package: declare `type T = struct{ *testo.T; *allure.PluginAllure }`,
-a `Suite`, `testo.RunSuite(t, new(Suite), allureOptions()...)`, and use
-`allure.Step`, `t.Title/Tags/Attach` and `t.Require()/Assert()`. Keep resources
-that must outlive a step (containers, clients) on the test's own `t`: a step
-is a sub-test and its `Cleanup` runs when the step returns.
+Go suites (testo + testo-allure through `testx`) and Playwright
+(`allure-playwright`) write to `allure-results/` next to the package, or to
+`ALLURE_RESULTS_DIR` — CI points every job at one directory and publishes the
+raw results (for an Allure server / TestOps) plus a single-file HTML report
+(`allure-report` job; locally `just allure-report`, `allure-commandline` from
+the root `package.json`, JRE pinned in `mise.toml`). Tags name the module and
+the layer (`pgx`, `integration`, `telemetry`, `e2e`), so the report can be
+sliced by either.
+
+### Coverage: one number, three layers
+
+`scripts/cover.sh` collects each layer in Go's binary coverage format
+(`-test.gocoverdir` for tests, `GOCOVERDIR` for the cover-instrumented
+binaries the e2e harness spawns; every workspace package instrumented via
+`-coverpkg`) and `go tool covdata merge` unions them — counters summed per
+block, nothing counted twice. `just cov-check` gates the merged profile with
+[`.testcoverage.yml`](.testcoverage.yml); `just cov-all` collects all three
+layers first. Both pipelines do the same: the test jobs upload `.cover/<layer>`,
+the `coverage` job merges and gates and prints the per-layer and merged totals.
+
+| Layer | Alone |
+|---|---|
+| unit | ~70 % |
+| integration | ~86 % |
+| e2e | ~74 % of the packages it touches |
+| **merged** | **~87 %** (gate: 70 %, ratchet up) |
+
+`main.go` and wiring are covered by e2e, the libs by unit + integration, the
+service internals by all three — which is the point of merging.
 
 ### Mutation testing
 
@@ -442,14 +463,57 @@ just mutate libs/resilient-http-client  # backoff.go, circuitbreaker.go, adaptiv
 
 Scope and thresholds live in the module's [`.gremlins.yaml`](libs/resilient-http-client/.gremlins.yaml);
 the run fails below them. `libs/resilient-http-client/mutation_test.go` is the
-worked example: each test names the mutant that survived before it existed
-(half-open exactly at the timeout, window rotation exactly at the window
-length, the AIMD limiter admitting a waiter only with real headroom, the
-cancelled waiter being the one removed). Two findings were code, not tests:
-redundant guards in `FullJitter` and clamps in `NewAdaptiveLimiter` produced
-unkillable mutants and were rewritten with `min`/`max`, and the breaker clock
-became injectable so those tests no longer sleep. CI runs it nightly and on
-demand (`mutation` job), never per PR.
+worked example: each test names the mutant that survived before it existed.
+Two findings were code, not tests: redundant guards in `FullJitter` and clamps
+in `NewAdaptiveLimiter` produced unkillable mutants and were rewritten with
+`min`/`max`, and the breaker clock became injectable so those tests no longer
+sleep. CI runs it nightly and on demand (`mutation` job), never per PR. The run
+must not hit the `go test` cache (`GOFLAGS=-count=1`, the recipe sets it): the
+per-mutant timeout is derived from the initial coverage run.
+
+---
+
+## Closed networks (proxies, mirrors, no direct internet)
+
+This repo is meant to be the template for projects on a self-hosted GitLab
+behind a corporate proxy, so **every upstream it touches is a variable with the
+public default**. An open-network clone needs no configuration; a closed one
+sets the same names in three places and edits nothing else:
+
+| Where                | How                                                                    |
+| -------------------- | ---------------------------------------------------------------------- |
+| local shell / `just` | `cp .env.example .env` and uncomment what you need (`just` loads it via `set dotenv-load`, mise via `[env] _.file`) |
+| GitLab               | group- or project-level CI/CD variables with the same names            |
+| GitHub               | repository / organisation *variables* (`vars.*`) with the same names   |
+
+[`.env.example`](.env.example) documents every knob with an example value. The
+short list of what a closed network has to mirror, and which variable points at
+it:
+
+| Upstream                                   | Variable(s)                                                   | Notes |
+| ------------------------------------------ | ------------------------------------------------------------- | ----- |
+| proxy.golang.org / sum.golang.org          | `GOPROXY`, `GONOSUMDB` (or `GOSUMDB=off`)                     | Athens / Nexus / Artifactory proxy the sumdb through `GOPROXY`; GitLab's Go proxy does not — use `GONOSUMDB` |
+| Docker Hub, ghcr.io, gcr.io                | `DOCKER_HUB`, `GHCR`, `GCR`                                   | image prefix in every Dockerfile (`--build-arg`), compose file and CI `image:`; `.hadolint.yaml` `trustedRegistries` lists the allowed hosts |
+| Docker Hub (testcontainers)                | `TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX`                        | trailing slash; postgres / valkey / confluent-local in the integration suites |
+| vuln.go.dev                                | `GOVULNDB`                                                    | static site — mirror over HTTP or `file://` |
+| grype DB                                   | `GRYPE_DB_UPDATE_URL`, `GRYPE_DB_AUTO_UPDATE=false`           | or `grype db import` a tarball |
+| api.osv.dev                                | `OSV_SCANNER_FLAGS="--offline --local-db-path …"`             | fetch the DB once with `--download-offline-databases` on a connected host |
+| semgrep.dev rule packs                     | `SEMGREP_CONFIG=semgrep/rules`                                | vendor the packs (`semgrep --config p/golang --dump-config`); the recipes already pass `--metrics=off` |
+| registry.npmjs.org                         | `registry=` in `.npmrc`, `COREPACK_NPM_REGISTRY`              | corepack fetches pnpm before `.npmrc` is read |
+| nodejs.org/dist                            | `NODE_DIST_URL`                                               | the GitLab `allure-report` job runs on a JRE image and adds Node from a tarball |
+| GitHub Releases / PyPI (mise-installed tools) | `HTTPS_PROXY`, `MISE_GITHUB_API_TOKEN`, `PIP_INDEX_URL`    | with no egress at all, run those tools as the pinned images instead — exactly what `.gitlab-ci.yml` does |
+
+Design rules that keep it that way:
+
+- No `# syntax=docker/dockerfile:…` directive in the Dockerfiles — it makes
+  BuildKit pull the frontend image on every build.
+- No CI job installs packages (`apt`, `curl | sh`, nodesource); tools are
+  either in the pinned job image or built once from the Go module proxy. The
+  one tarball fetch (Node for `allure-report`) comes from `NODE_DIST_URL`.
+- `--build-arg X` with no value forwards `X` from the environment and is
+  skipped when unset, so proxy / registry settings never appear in a
+  Dockerfile or a compose file — only their defaults do.
+- `.env` is gitignored and `.dockerignore`d; only `.env.example` is committed.
 
 ---
 

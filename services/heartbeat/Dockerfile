@@ -64,6 +64,9 @@ ARG VERSION
 # the build resolve via go.mod's `replace`, not the workspace.
 ENV GOWORK=off
 COPY libs/httpx/go.mod libs/httpx/go.sum ./libs/httpx/
+# libs/testx is a _test-only dependency of the service module; only its
+# go.mod/go.sum are needed to resolve the module graph, no source is compiled.
+COPY libs/testx/go.mod libs/testx/go.sum ./libs/testx/
 COPY services/heartbeat/go.mod services/heartbeat/go.sum ./services/heartbeat/
 RUN --mount=type=cache,target=/go/pkg/mod \
     cd services/heartbeat && go mod download

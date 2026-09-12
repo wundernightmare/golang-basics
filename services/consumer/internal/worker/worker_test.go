@@ -3,37 +3,23 @@ package worker_test
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
 
-	"log/slog"
-
+	"github.com/ozontech/testo"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	tckafka "github.com/testcontainers/testcontainers-go/modules/kafka"
+	"go.opentelemetry.io/otel"
 
+	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
+	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/services/consumer/internal/worker"
 )
 
-// counterValue reads a named counter out of a registry by gathering it.
-func counterValue(t *testing.T, reg *prometheus.Registry, name string) float64 {
-	t.Helper()
-	mfs, err := reg.Gather()
-	require.NoError(t, err)
-	for _, mf := range mfs {
-		if mf.GetName() == name {
-			var sum float64
-			for _, m := range mf.GetMetric() {
-				sum += m.GetCounter().GetValue()
-			}
-			return sum
-		}
-	}
-	return 0
-}
+func TestMain(m *testing.M) { os.Exit(testx.Main(m)) }
 
 // fakeConsumer drives the worker's handler with a fixed set of messages, no
 // broker required.
@@ -48,67 +34,95 @@ func (f *fakeConsumer) Run(ctx context.Context, h kafka.Handler) error {
 	return nil
 }
 
+// Unit: the handler's decode / count / skip logic, driven directly.
 func TestWorkerCountsConsumedAndSkipped(t *testing.T) {
-	valid, _ := json.Marshal(map[string]any{"id": "1", "title": "a"})
-	fc := &fakeConsumer{msgs: []kafka.Message{
-		{Value: valid},
-		{Value: []byte("not json")},
-		{Value: valid},
-	}}
-	reg := prometheus.NewRegistry()
-	w := worker.New(fc, slog.New(slog.DiscardHandler), reg)
+	testx.Run(t, func(t testx.T) {
+		valid, _ := json.Marshal(map[string]any{"id": "1", "title": "a"})
+		fc := &fakeConsumer{msgs: []kafka.Message{
+			{Value: valid},
+			{Value: []byte("not json")},
+			{Value: valid},
+		}}
+		reg := prometheus.NewRegistry()
+		w := worker.New(fc, slog.New(slog.DiscardHandler), reg)
 
-	require.NoError(t, w.Run(context.Background()))
+		require.NoError(t, w.Run(context.Background()))
 
-	require.Equal(t, float64(2), counterValue(t, reg, "consumer_tasks_consumed_total"))
-	require.Equal(t, float64(1), counterValue(t, reg, "consumer_tasks_skipped_total"))
+		require.Equal(t, float64(2), testx.Metric(t, reg, "consumer_tasks_consumed_total", nil))
+		require.Equal(t, float64(1), testx.Metric(t, reg, "consumer_tasks_skipped_total", nil))
+	}, "consumer", "unit")
 }
 
-func TestWorkerConsumesFromRealKafka(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping container-backed test in -short mode")
-	}
+type Suite struct{ testo.Suite[testx.T] }
+
+func TestConsumerWorker(t *testing.T) {
+	testo.RunSuite(t, new(Suite), testx.Options("consumer", "integration")...)
+}
+
+// Integration: over the real broker, the worker consumes what tasks produced,
+// its log line for each event names the trace of the request that produced
+// it, and its counters plus the lib's lag gauge agree with what was consumed.
+func (Suite) TestDrainsEventsWithTheirTrace(t testx.T) {
+	t.Title("the worker drains task.created events and keeps their trace")
+	topic := testx.Unique("tasks.events")
 	ctx := context.Background()
-	const topic = "tasks.events.consumer-it"
 
-	container, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.5.0")
-	if err != nil {
-		if _, ok := os.LookupEnv("CI"); ok {
-			require.NoError(t, err)
-		}
-		t.Skipf("docker unavailable (kafka): %v", err)
-	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
-	brokers, err := container.Brokers(ctx)
-	require.NoError(t, err)
+	testx.Recorder(t) // before the clients: kotel captures the provider then
+	buf := &testx.LogBuffer{}
+	log := httpx.NewLogger(httpx.LogConfig{Service: "consumer", Level: "info", Format: "json", Writer: buf})
 
-	// Produce two valid task.created events.
 	prod, err := kafka.NewProducer(ctx, kafka.Config{
-		Brokers: brokers, Topic: topic, ClientID: "consumer-it-prod", DialTimeout: 10 * time.Second,
-	}, slog.New(slog.DiscardHandler))
+		Brokers: testx.Kafka(t), Topic: topic, ClientID: testx.Unique("prod"), DialTimeout: 10 * time.Second,
+	}, log)
 	require.NoError(t, err)
-	defer prod.Close()
-	for _, id := range []string{"a", "b"} {
-		payload, _ := json.Marshal(map[string]any{"id": id, "title": "t-" + id, "created_at": time.Now().UTC()})
-		require.NoError(t, prod.Publish(ctx, topic, []byte(id), payload))
-	}
+	t.Cleanup(prod.Close)
 
-	// Run the worker over a real consumer.
+	// One event per parent trace, so each log line can be matched to its trace.
+	traces := map[string]string{} // event id → trace id
+	testx.Step(t, "tasks publishes two events, each under its own request span", func(t testx.T) {
+		for _, id := range []string{"a", "b"} {
+			pctx, span := otel.Tracer("test").Start(ctx, "POST /tasks")
+			payload, _ := json.Marshal(map[string]any{"id": id, "title": "t-" + id, "created_at": time.Now().UTC()})
+			require.NoError(t, prod.Publish(pctx, topic, []byte(id), payload))
+			span.End()
+			traces[id] = span.SpanContext().TraceID().String()
+		}
+	})
+
 	cons, err := kafka.NewConsumer(ctx, kafka.Config{
-		Brokers: brokers, Topics: []string{topic}, Group: "consumer-it-group",
-		ClientID: "consumer-it", DialTimeout: 10 * time.Second,
-	}, slog.New(slog.DiscardHandler))
+		Brokers: testx.Kafka(t), Topics: []string{topic}, Group: testx.Unique("group"),
+		ClientID: testx.Unique("cons"), DialTimeout: 10 * time.Second, LagInterval: 300 * time.Millisecond,
+	}, log)
 	require.NoError(t, err)
-	defer cons.Close()
-
+	t.Cleanup(cons.Close)
 	reg := prometheus.NewRegistry()
-	w := worker.New(cons, slog.New(slog.DiscardHandler), reg)
+	reg.MustRegister(cons.Collectors()...)
+	w := worker.New(cons, log, reg)
 
-	runCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	go func() { _ = w.Run(runCtx) }()
 
-	require.Eventually(t, func() bool {
-		return counterValue(t, reg, "consumer_tasks_consumed_total") == 2
-	}, 25*time.Second, 250*time.Millisecond, "worker should consume both events")
+	testx.Step(t, "both events are consumed and committed (lag back to 0)", func(t testx.T) {
+		require.Eventually(t, func() bool {
+			return testx.Metric(t, reg, "consumer_tasks_consumed_total", nil) == 2 &&
+				testx.Metric(t, reg, "kafka_consumer_group_lag", map[string]string{"topic": topic, "partition": "0"}) == 0
+		}, 25*time.Second, 250*time.Millisecond)
+		require.Equal(t, 2.0, testx.Metric(t, reg, "kafka_consumer_records_total", map[string]string{"topic": topic}))
+	})
+	cancel()
+
+	testx.Step(t, "each consumed-event log line carries the producing request's trace id", func(t testx.T) {
+		consumed := map[string]string{}
+		for _, m := range buf.Lines(t) {
+			if m["msg"] != "task.created consumed" {
+				continue
+			}
+			require.Equal(t, "consumer", m["service"])
+			id, _ := m["id"].(string)
+			tid, _ := m["trace_id"].(string)
+			consumed[id] = tid
+		}
+		require.Equal(t, traces, consumed)
+	})
 }

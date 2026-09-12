@@ -1,23 +1,23 @@
 # go-test-coverage — the coverage gate (`just cov-check`, the `coverage` CI job).
 #
-# Runs on the merged profile of every module's unit tests (`-short`, no
-# containers), so the numbers are what a PR pipeline sees. The thresholds are a
-# ratchet: raise them when coverage improves, lower only with a reason in the
-# commit. Integration coverage (testcontainers suites) is reported by the
-# GitLab `unit`/`integration` jobs but not gated, since it depends on Docker.
+# Runs on coverage-merged.out: the covdata-merged union of the unit layer
+# (`go test -short`), the integration layer (container-backed suites) and the
+# e2e layer (cover-instrumented binaries driven by Playwright) — see
+# scripts/cover.sh. One number for the whole pyramid, no layer counted twice.
+# The thresholds are a ratchet: raise them when coverage improves, lower only
+# with a reason in the commit.
 profile: coverage-merged.out
 local-prefix: github.com/tracehubmmp/golang-basics
 
 threshold:
-  file: 0     # no per-file gate: main.go and wiring are covered by e2e, not unit
+  file: 0
   package: 0
-  total: 55   # unit-only, merged across the workspace (57.5% when introduced)
+  total: 70   # unit + integration + e2e merged (set from the first full run; ratchet up)
 
-# Entry points are exercised by the Playwright e2e suite, not by unit tests.
 exclude:
   paths:
-    - ^services/[^/]+/main\.go$
     - ^libs/[^/]+/doc\.go$
+    - ^libs/testx/  # the harness itself is not a coverage target
 
 # Per-package overrides for the parts that are pure logic and must stay high.
 override:

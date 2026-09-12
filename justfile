@@ -14,7 +14,7 @@
 set dotenv-load := true
 
 # Every Go module in the workspace, in dependency order (libs first).
-MODULES := "libs/httpx libs/resilient-http-client libs/pgx libs/valkey libs/kafka libs/otelx services/ping services/heartbeat services/tasks services/consumer"
+MODULES := "libs/httpx libs/testx libs/resilient-http-client libs/pgx libs/valkey libs/kafka libs/otelx services/ping services/heartbeat services/tasks services/consumer"
 # Buildable service binaries (module dir : binary name).
 SERVICES := "ping heartbeat tasks consumer"
 
@@ -84,16 +84,27 @@ cov:
       (cd "$m" && go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out | tail -1)
     done
 
-# Coverage gate: unit tests (-short) of every module, profiles merged into
-# coverage-merged.out, thresholds from .testcoverage.yml (go-test-coverage)
+# Coverage per layer into .cover/<layer> (binary format, merged by covdata):
+#   just cov-layer unit | integration | e2e     (see scripts/cover.sh)
+cov-layer LAYER:
+    scripts/cover.sh {{LAYER}}
+
+# Merge every collected layer into coverage-merged.out and gate it with
+# .testcoverage.yml — the number that counts is the union of unit +
+# integration + e2e, not any single layer.
 cov-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for m in {{MODULES}}; do
-      (cd "$m" && go test -short -coverprofile=coverage.out -covermode=atomic ./... >/dev/null)
-    done
-    scripts/merge-coverage.sh coverage-merged.out {{MODULES}}
+    scripts/cover.sh merge
     mise exec -- go-test-coverage --config .testcoverage.yml
+    @echo "Allure: results from every layer are in */allure-results — just allure-report"
+
+# Everything: all three layers (integration needs Docker, e2e builds cover-
+# instrumented binaries and runs Playwright), then the merged gate.
+cov-all:
+    rm -rf .cover
+    scripts/cover.sh unit
+    scripts/cover.sh integration
+    scripts/cover.sh e2e
+    just cov-check
 
 # Mutation testing (gremlins) of a module's pure logic; config: <module>/.gremlins.yaml.
 # GOFLAGS=-count=1: gremlins derives the per-mutant timeout from the initial
@@ -251,6 +262,9 @@ kafka +args:
 
 otelx +args:
     just --justfile libs/otelx/justfile {{args}}
+
+testx +args:
+    just --justfile libs/testx/justfile {{args}}
 
 tasks +args:
     just --justfile services/tasks/justfile {{args}}
