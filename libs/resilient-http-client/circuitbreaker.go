@@ -163,4 +163,6 @@ func (cb *CircuitBreaker) maybeRotateWindow() {
 	}
 }
 
-func nowMS() int64 { return time.Now().UnixMilli() }
+// nowMS is the breaker's clock in unix milliseconds. A variable so tests can
+// pin it and drive window rotation and the half-open timeout without sleeping.
+var nowMS = func() int64 { return time.Now().UnixMilli() }

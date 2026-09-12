@@ -19,7 +19,8 @@
 # file touches is a variable with the public default — registry hosts
 # (DOCKER_HUB / GHCR / GCR), GOPROXY, scanner databases, rule packs. Override
 # them as group/project CI/CD variables (same names as .env.example); nothing
-# here needs editing. No job installs packages with apt/curl.
+# here needs editing. No job installs packages with apt/curl — the one tarball
+# fetch (Node for the allure-report job) comes from the NODE_DIST_URL variable.
 
 workflow:
   rules:
@@ -28,11 +29,13 @@ workflow:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "schedule" # nightly: mutation testing
 
 stages:
   - prepare
   - check
   - test
+  - report
   - security
   - package
 
@@ -63,6 +66,8 @@ variables:
   OSV_SCANNER_FLAGS: ""
   # testcontainers (integration job) prefixes Docker Hub images with this.
   TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: ""
+  # Node tarballs for the allure-report job (a JRE image + Node).
+  NODE_DIST_URL: https://nodejs.org/dist
   # GitLab only caches paths inside the project directory, so the Go caches are
   # relocated there rather than left in $HOME.
   GOMODCACHE: $CI_PROJECT_DIR/.cache/go-mod
@@ -170,6 +175,7 @@ prepare:
     - GOBIN="$CI_PROJECT_DIR/bin" go install "gotest.tools/gotestsum@v${GOTESTSUM_VERSION}"
     - GOBIN="$CI_PROJECT_DIR/bin" go install "github.com/boumenot/gocover-cobertura@v${COBERTURA_VERSION}"
     - GOBIN="$CI_PROJECT_DIR/bin" go install "golang.org/x/vuln/cmd/govulncheck@v${GOVULNCHECK_VERSION}"
+    - GOBIN="$CI_PROJECT_DIR/bin" go install "github.com/vladopajic/go-test-coverage/v2@v${GOTESTCOV_VERSION}"
   artifacts:
     paths: [bin/]
     expire_in: 1 day
@@ -255,6 +261,8 @@ unit:
           - services/heartbeat
           - services/tasks
           - services/consumer
+  variables:
+    ALLURE_RESULTS_DIR: $CI_PROJECT_DIR/allure-results
   script:
     - cd "$MODULE"
     - |
@@ -268,6 +276,7 @@ unit:
     expire_in: 1 week
     paths:
       - $MODULE/coverage.out
+      - allure-results/
     reports:
       junit: $MODULE/junit.xml
       coverage_report:
@@ -286,6 +295,7 @@ integration:
     DOCKER_TLS_CERTDIR: ""
     TESTCONTAINERS_HOST_OVERRIDE: docker
     TESTCONTAINERS_RYUK_DISABLED: "true"
+    ALLURE_RESULTS_DIR: $CI_PROJECT_DIR/allure-results
   parallel:
     matrix:
       - MODULE: [libs/pgx, libs/valkey, libs/kafka, services/tasks, services/consumer]
@@ -295,8 +305,86 @@ integration:
   artifacts:
     when: always
     expire_in: 1 week
+    paths:
+      - allure-results/
     reports:
       junit: $MODULE/junit.xml
+
+# ── report ────────────────────────────────────────────────────────────────────
+
+# Coverage gate on the merged unit profile (.testcoverage.yml): the same
+# check as `just cov-check`. The per-module Cobertura reports above give the
+# MR its line annotations; this one decides pass/fail.
+coverage:
+  extends: [.go, .rules-go]
+  stage: report
+  needs:
+    - job: versions
+      artifacts: true
+    - job: prepare
+      artifacts: true
+    - job: unit
+      artifacts: true
+  script:
+    # shellcheck disable=SC2086
+    - scripts/merge-coverage.sh coverage-merged.out $MODULES
+    - go-test-coverage --config .testcoverage.yml
+  artifacts:
+    expire_in: 1 week
+    paths: [coverage-merged.out]
+
+# One Allure HTML report from every suite's results (unit + integration).
+# allure-commandline is a Node package (root package.json → npm mirror) that
+# needs a JRE, and no pinned image ships both. The JRE image is the base and
+# Node comes as a tarball from NODE_DIST_URL — a variable with the public
+# default, mirror it like GOPROXY in a closed network (.env.example).
+allure-report:
+  extends: .rules-go
+  stage: report
+  image: ${DOCKER_HUB}/library/eclipse-temurin:25-jre
+  needs:
+    - job: versions
+      artifacts: true
+    - job: unit
+      artifacts: true
+    - job: integration
+      artifacts: true
+      optional: true
+  variables:
+    NODE_DIST: node-v${NODE_VERSION}-linux-x64
+  before_script:
+    # Node from its own tarball (NODE_DIST_URL for a mirror), then pnpm via corepack.
+    - curl -fsSL "${NODE_DIST_URL}/v${NODE_VERSION}/${NODE_DIST}.tar.xz" | tar -xJ -C /opt
+    - export PATH="/opt/${NODE_DIST}/bin:$PATH"
+    - npm install -g corepack@latest && corepack enable
+    - pnpm install --frozen-lockfile
+  script:
+    - test -d allure-results || { echo "no allure-results"; exit 0; }
+    - pnpm exec allure generate --clean --single-file -o allure-report allure-results
+  artifacts:
+    expire_in: 2 weeks
+    paths: [allure-report/]
+
+# Mutation testing of the pure-logic modules — on the nightly schedule or by
+# hand, never per MR (one suite run per mutant). Thresholds: <module>/.gremlins.yaml.
+mutation:
+  extends: .go
+  stage: report
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+  parallel:
+    matrix:
+      - MODULE: [libs/resilient-http-client]
+  script:
+    - GOBIN="$CI_PROJECT_DIR/bin" go install "github.com/go-gremlins/gremlins/cmd/gremlins@v${GREMLINS_VERSION}"
+    - cd "$MODULE" && GOFLAGS=-count=1 gremlins unleash --output "$CI_PROJECT_DIR/gremlins-$(basename "$MODULE").json"
+  artifacts:
+    when: always
+    expire_in: 2 weeks
+    paths: [gremlins-*.json]
 
 # Service binaries for the e2e harness, built once on the pinned toolchain and
 # handed over as an artifact so the e2e job needs no Go at all.

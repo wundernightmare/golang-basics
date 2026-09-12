@@ -15,6 +15,7 @@
     "e2e:report": "pnpm --filter @golang-basics/e2e report"
   },
   "devDependencies": {
+    "allure-commandline": "2.43.0",
     "lefthook": "^2.1.0"
   }
 }

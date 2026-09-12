@@ -41,7 +41,11 @@ that import testcontainers, and Dockerfiles / services from `services/*`.
 ## Tests
 
 - Unit/integration tests live next to the code (`*_test.go`); table-driven where
-  it helps. Use `testify` for assertions.
+  it helps. Use `testify` for assertions. `just cov-check` is the coverage gate.
+- Suites that should read well in a report (integration flows, API contracts)
+  are testo + Allure suites — see `services/tasks/internal/integration/suite_test.go`
+  and README "Allure reports". `just allure-report` renders them.
+- Pure decision logic gets mutation-tested: `just mutate` (README "Mutation testing").
 - E2E lives in `e2e/` (Playwright, API-only). Add a `*.spec.ts` and, if it
   should run in the fast subset, tag it `@smoke`.
 - Load tests live in `benchmarks/` (k6).

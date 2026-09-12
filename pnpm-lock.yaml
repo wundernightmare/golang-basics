@@ -29,6 +29,9 @@ importers:
 
   .:
     devDependencies:
+      allure-commandline:
+        specifier: 2.43.0
+        version: 2.43.0
       lefthook:
         specifier: ^2.1.0
         version: 2.1.12
@@ -462,6 +465,10 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  allure-commandline@2.43.0:
+    resolution: {integrity: sha512-nsqccDOgi80fi9WjvBapZjlFlugodVWudotNtWx6XKiSI7NuN6oTWEkXnkxQBzNg02Yf9lZLtCFlKvjAlcpu6Q==}
+    hasBin: true
+
   esbuild@0.28.2:
     resolution: {integrity: sha512-HKVLS8dvII+xoKW9kmqxbRKrnWEXfJJr/FZhhJmiqIB0e053QNYFqOBouTMO/k5sID4MvCiUCvv8b9M4h32wIA==}
     engines: {node: '>=18'}
@@ -776,6 +783,8 @@ snapshots:
 
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
+
+  allure-commandline@2.43.0: {}
 
   esbuild@0.28.2:
     optionalDependencies:

@@ -33,18 +33,9 @@ type AdaptiveLimiter struct {
 // NewAdaptiveLimiter creates a limiter starting at initial, bounded by
 // [min, max]. min is floored at 1; initial is clamped into range.
 func NewAdaptiveLimiter(initial, minLimit, maxLimit int) *AdaptiveLimiter {
-	if minLimit < 1 {
-		minLimit = 1
-	}
-	if maxLimit < minLimit {
-		maxLimit = minLimit
-	}
-	if initial < minLimit {
-		initial = minLimit
-	}
-	if initial > maxLimit {
-		initial = maxLimit
-	}
+	minLimit = max(minLimit, 1)
+	maxLimit = max(maxLimit, minLimit)
+	initial = min(max(initial, minLimit), maxLimit)
 	return &AdaptiveLimiter{limit: initial, min: minLimit, max: maxLimit}
 }
 
@@ -125,11 +116,7 @@ func (l *AdaptiveLimiter) OnSuccess() {
 func (l *AdaptiveLimiter) OnFailure() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	nl := l.limit / 2
-	if nl < l.min {
-		nl = l.min
-	}
-	l.limit = nl
+	l.limit = max(l.limit/2, l.min)
 }
 
 // CurrentLimit reports the current AIMD limit (for metrics / diagnostics).

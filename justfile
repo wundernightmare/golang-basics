@@ -84,6 +84,33 @@ cov:
       (cd "$m" && go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out | tail -1)
     done
 
+# Coverage gate: unit tests (-short) of every module, profiles merged into
+# coverage-merged.out, thresholds from .testcoverage.yml (go-test-coverage)
+cov-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for m in {{MODULES}}; do
+      (cd "$m" && go test -short -coverprofile=coverage.out -covermode=atomic ./... >/dev/null)
+    done
+    scripts/merge-coverage.sh coverage-merged.out {{MODULES}}
+    mise exec -- go-test-coverage --config .testcoverage.yml
+
+# Mutation testing (gremlins) of a module's pure logic; config: <module>/.gremlins.yaml.
+# GOFLAGS=-count=1: gremlins derives the per-mutant timeout from the initial
+# coverage run, and a cached run (milliseconds) would make every mutant time out.
+mutate MODULE="libs/resilient-http-client":
+    cd {{MODULE}} && GOFLAGS=-count=1 mise exec -- gremlins unleash --output "$OLDPWD/gremlins-$(basename {{MODULE}}).json"
+
+# Render the Allure HTML report from every module's allure-results/ (needs a JRE, pinned in mise.toml)
+allure-report:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dirs=$(find . -type d -name allure-results -not -path '*/node_modules/*' | tr '\n' ' ')
+    [ -n "$dirs" ] || { echo "no allure-results/ found — run the tests first (just test)"; exit 1; }
+    # shellcheck disable=SC2086
+    mise exec -- pnpm exec allure generate --clean --single-file -o allure-report $dirs
+    echo "report: allure-report/index.html"
+
 # ── Lint & format ─────────────────────────────────────────────────────────────
 
 # golangci-lint across every module (config: .golangci.yml at repo root)
