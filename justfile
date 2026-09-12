@@ -57,11 +57,21 @@ release:
 # ── Workspace test ────────────────────────────────────────────────────────────
 
 # Run every module's tests (container-backed suites need Docker; on OrbStack /
-# rootless setups export DOCKER_HOST, see README "Tests")
+# rootless setups export DOCKER_HOST, see README "Tests"). Shuffled like CI.
 test *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    for m in {{MODULES}}; do echo "── test $m"; (cd "$m" && go test ./... {{args}}); done
+    for m in {{MODULES}}; do echo "── test $m"; (cd "$m" && go test -shuffle=on ./... {{args}}); done
+
+# Flakiness hunt: every layer three times, shuffled, under -race (what CI runs nightly)
+stress:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for m in {{MODULES}}; do echo "── stress $m"; (cd "$m" && go test -count=3 -race -shuffle=on ./...); done
+
+# Run every Fuzz* target for FUZZTIME each (default 20s); crashers land in testdata/fuzz/
+fuzz FUZZTIME="20s":
+    FUZZTIME={{FUZZTIME}} scripts/fuzz.sh
 
 # Run every module's tests with the race detector
 test-race:

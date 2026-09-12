@@ -46,6 +46,9 @@ default:
 
 variables:
   GOTOOLCHAIN: local
+  # Determinism hygiene (see the GitHub workflow): fixed zone, shuffled order.
+  TZ: UTC
+  GOFLAGS: -shuffle=on
   # ── Closed-network knobs — defaults are the public upstreams ──────────────
   # Registry hosts, used as the prefix of every image:/services: below and
   # passed into `docker build`. Point at a pull-through cache (Harbor proxy
@@ -309,7 +312,7 @@ integration:
     - cd "$MODULE"
     - |
       gotestsum --junitfile junit.xml --format testname -- \
-        -cover -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
+        -cover -covermode=atomic -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
         -args -test.gocoverdir="$CI_PROJECT_DIR/.cover/integration"
   artifacts:
     when: always
@@ -340,12 +343,27 @@ coverage:
       artifacts: true
     - job: e2e
       artifacts: true
+    # master's breakdown from its latest successful pipeline: a merge request
+    # may not lower the merged coverage (diff threshold 0). Optional so the
+    # very first pipeline, and one on a fresh fork, still run.
+    - project: $CI_PROJECT_PATH
+      ref: $CI_DEFAULT_BRANCH
+      job: coverage
+      artifacts: true
+      optional: true
   script:
+    - '[ -s coverage-breakdown.json ] && mv coverage-breakdown.json coverage-breakdown-base.json || true'
     - scripts/cover.sh merge
-    - go-test-coverage --config .testcoverage.yml
+    - |
+      if [ -s coverage-breakdown-base.json ] && [ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" ]; then
+        go-test-coverage --config .testcoverage.yml \
+          --diff-base-breakdown-file-name coverage-breakdown-base.json --diff-threshold 0
+      else
+        go-test-coverage --config .testcoverage.yml
+      fi
   artifacts:
-    expire_in: 1 week
-    paths: [coverage-merged.out]
+    expire_in: 4 weeks # long enough to always have a base for MRs
+    paths: [coverage-merged.out, coverage-breakdown.json]
 
 # One Allure HTML report from every suite's results (unit + integration).
 # allure-commandline is a Node package (root package.json → npm mirror) that
@@ -378,6 +396,44 @@ allure-report:
   artifacts:
     expire_in: 2 weeks
     paths: [allure-report/]
+
+# Flakiness hunt — nightly: every layer three times, shuffled, under -race.
+stress:
+  extends: .go
+  stage: report
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+  parallel:
+    matrix:
+      - MODULE:
+          - libs/httpx
+          - libs/resilient-http-client
+          - libs/otelx
+          - services/ping
+          - services/heartbeat
+          - services/tasks
+          - services/consumer
+  script:
+    - cd "$MODULE" && go test -short -count=3 -race -shuffle=on ./...
+
+# Fuzzing — nightly: every Fuzz* target for a fixed budget (scripts/fuzz.sh).
+fuzz:
+  extends: .go
+  stage: report
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+  script:
+    - FUZZTIME=45s scripts/fuzz.sh
+  artifacts:
+    when: on_failure
+    expire_in: 2 weeks
+    paths: ["**/testdata/fuzz/"]
 
 # Mutation testing of the pure-logic modules — on the nightly schedule or by
 # hand, never per MR (one suite run per mutant). Thresholds: <module>/.gremlins.yaml.

@@ -23,6 +23,11 @@ linters:
     - revive         # configurable style lint (golint successor)
     - unconvert      # redundant type conversions
     - unparam        # unused function parameters
+    # Test hygiene — what the README "Tests" rules say, checked mechanically:
+    - testifylint    # correct testify usage (require vs assert, Error vs ErrorIs, expected/actual order)
+    - thelper        # helpers call t.Helper() first and take t as the first parameter
+    - tparallel      # t.Parallel used consistently between a test and its sub-tests
+    - usetesting     # t.Context / t.TempDir / t.Setenv instead of the os/context equivalents
 
   settings:
     revive:
@@ -33,6 +38,12 @@ linters:
     gosec:
       excludes:
         - G114 # http.ListenAndServe without timeouts — Server is built with timeouts in httpx
+    thelper:
+      tb:
+        name: false # helpers take `t testing.TB` (not `tb`) so testify calls read the same as in tests
+    testifylint:
+      disable:
+        - float-compare # metric values are integral counts carried as float64; exact Equal is the intent
 
   exclusions:
     generated: lax
@@ -43,6 +54,12 @@ linters:
           - revive
           - gosec
           - unparam
+      # testx.T is a struct (testo.T + the Allure plugin), not *testing.T; thelper
+      # only recognises the stdlib types, so it is not applied where the handle
+      # is testx.T.
+      - path: _test\.go
+        linters: [thelper]
+        text: "testx\\.T"
 
 formatters:
   enable:

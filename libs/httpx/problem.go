@@ -24,8 +24,20 @@ type Problem struct {
 	Extensions map[string]any // additional top-level members
 }
 
+// status returns the HTTP status the problem will be written with: the one
+// set, or 500 when it is not a valid HTTP status code. Without this a stray
+// value (0 from a zero Problem, an errno, a typo) reaches WriteHeader, which
+// panics on anything outside 100–999 — found by FuzzProblemJSON.
+func (p Problem) status() int {
+	if p.Status < 100 || p.Status > 999 {
+		return http.StatusInternalServerError
+	}
+	return p.Status
+}
+
 // MarshalJSON renders the problem as a flat JSON object with the standard
-// members plus any extensions, per RFC 9457 §3.
+// members plus any extensions, per RFC 9457 §3. The status member is the one
+// the response carries (see status).
 func (p Problem) MarshalJSON() ([]byte, error) {
 	m := make(map[string]any, len(p.Extensions)+5)
 	for k, v := range p.Extensions {
@@ -37,11 +49,11 @@ func (p Problem) MarshalJSON() ([]byte, error) {
 	}
 	title := p.Title
 	if title == "" {
-		title = http.StatusText(p.Status)
+		title = http.StatusText(p.status())
 	}
 	m["type"] = typ
 	m["title"] = title
-	m["status"] = p.Status
+	m["status"] = p.status()
 	if p.Detail != "" {
 		m["detail"] = p.Detail
 	}
@@ -68,5 +80,5 @@ func AbortProblem(c *gin.Context, p Problem) {
 		return
 	}
 	c.Abort()
-	c.Data(p.Status, ProblemContentType, body)
+	c.Data(p.status(), ProblemContentType, body)
 }

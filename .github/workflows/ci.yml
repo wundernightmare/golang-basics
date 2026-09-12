@@ -24,6 +24,11 @@ env:
   GOPROXY: ${{ vars.GOPROXY || 'https://proxy.golang.org,direct' }}
   GONOSUMDB: ${{ vars.GONOSUMDB }}
   GOTOOLCHAIN: local
+  # Determinism hygiene: a fixed zone so time-formatting tests cannot depend on
+  # the runner, and a shuffled test order so inter-test coupling shows up here
+  # rather than in someone's local run. -shuffle prints the seed on failure.
+  TZ: UTC
+  GOFLAGS: -shuffle=on
 
 jobs:
   # Single source of truth: tool pins are read out of mise.toml by
@@ -102,7 +107,7 @@ jobs:
           ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
         run: |
           mkdir -p "$GITHUB_WORKSPACE/.cover/unit"
-          go test -short -race -cover -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
+          go test -short -race -cover -covermode=atomic -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
             -args -test.gocoverdir="$GITHUB_WORKSPACE/.cover/unit"
       - uses: actions/upload-artifact@v4
         with:
@@ -143,7 +148,7 @@ jobs:
           ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
         run: |
           mkdir -p "$GITHUB_WORKSPACE/.cover/integration"
-          go test -cover -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
+          go test -cover -covermode=atomic -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
             -args -test.gocoverdir="$GITHUB_WORKSPACE/.cover/integration"
       - uses: actions/upload-artifact@v4
         with:
@@ -184,16 +189,41 @@ jobs:
         with:
           name: cover-e2e
           path: .cover/e2e
+      # master's per-package breakdown, saved by the last push to master (below)
+      # and restored here so a PR is measured against it: no coverage regression.
+      - uses: actions/cache/restore@v4
+        id: base
+        with:
+          path: coverage-breakdown-base.json
+          key: coverage-breakdown-master-${{ github.sha }}
+          restore-keys: coverage-breakdown-master-
       - name: merge layers and gate
         run: |
+          set -o pipefail # a failed merge must fail the step even through tee
           go install "github.com/vladopajic/go-test-coverage/v2@v${{ needs.versions.outputs.GOTESTCOV_VERSION }}"
           scripts/cover.sh merge | tee coverage-layers.txt
-          go-test-coverage --config .testcoverage.yml | tee coverage-summary.txt
+          diff_args=()
+          if [ -s coverage-breakdown-base.json ]; then
+            diff_args=(--diff-base-breakdown-file-name coverage-breakdown-base.json --diff-threshold 0)
+          else
+            echo "no base breakdown for master yet — absolute thresholds only"
+          fi
+          go-test-coverage --config .testcoverage.yml "${diff_args[@]}" | tee coverage-summary.txt
           { echo '### Coverage — unit + integration + e2e (covdata merge)'; echo '```'; cat coverage-layers.txt coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: keep this breakdown as the base for pull requests
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        run: cp coverage-breakdown.json coverage-breakdown-base.json
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        with:
+          path: coverage-breakdown-base.json
+          key: coverage-breakdown-master-${{ github.sha }}
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-merged
-          path: coverage-merged.out
+          path: |
+            coverage-merged.out
+            coverage-breakdown.json
           retention-days: 7
 
   # One Allure HTML report from every suite's results (unit + integration).
@@ -226,6 +256,47 @@ jobs:
           name: allure-report
           path: allure-report/index.html
           retention-days: 14
+
+  # Flakiness hunt — nightly or on demand: every layer three times, shuffled,
+  # under the race detector. A test that passes here 3/3 for weeks and fails
+  # once on a PR is a real flake and gets marked (testo-allure Flaky) with a
+  # ticket, never a silent retry.
+  stress:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.versions.outputs.MODULES) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - working-directory: ${{ matrix.module }}
+        run: go test -count=3 -race -shuffle=on ./...
+
+  # Fuzzing — nightly or on demand: every Fuzz* target for a fixed budget, the
+  # corpus of any crash is uploaded so the failing input can be replayed.
+  fuzz:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
+      - run: FUZZTIME=45s scripts/fuzz.sh
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crashers
+          path: "**/testdata/fuzz/**"
 
   # Mutation testing of the pure-logic modules — nightly or on demand, not per
   # PR: it re-runs the suite once per mutant. Thresholds live in each

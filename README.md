@@ -448,6 +448,44 @@ the `coverage` job merges and gates and prints the per-layer and merged totals.
 `main.go` and wiring are covered by e2e, the libs by unit + integration, the
 service internals by all three — which is the point of merging.
 
+Two gates, both on the merged profile: the absolute total in
+`.testcoverage.yml`, and **no regression** — the `coverage` job keeps
+master's per-package breakdown (`coverage-breakdown.json`, a cache on GitHub,
+the master pipeline's artifact on GitLab) and a pull request is compared to it
+with `--diff-threshold 0`. Old code's coverage cannot pay for new code's.
+Every layer is collected with `-covermode=atomic`: `covdata` refuses to merge
+mixed modes, and `-race` switches a run to atomic silently, so the mode is
+pinned rather than inferred, and `scripts/cover.sh merge` fails rather than
+gate on a partial merge.
+
+### Flakiness policy
+
+- CI runs every Go test with `-shuffle=on` and `TZ=UTC` (the seed is printed
+  on failure); Playwright runs with `retries: 0`. A flake is reported, never
+  hidden behind a retry.
+- The nightly `stress` job runs every layer three times under `-race`,
+  shuffled. A test that passes there and fails on a PR is a real flake: mark it
+  (`t.Flaky()` in an Allure suite) with a ticket, fix or delete it — do not
+  raise the retry count.
+- Time-based tests inject the clock (see the circuit breaker) or use
+  `testing/synctest`; `time.Sleep` in a test is a review finding.
+
+### Fuzzing
+
+Everything that parses bytes from outside the process has a `Fuzz*` target:
+`problem+json` rendering, the YAML config loader, the retry jitter, the
+circuit-breaker state machine. `just fuzz` runs each for a budget locally; the
+nightly `fuzz` job does the same in CI. A crash writes its input to
+`testdata/fuzz/<Target>/` — it is committed and runs as a plain regression
+test from then on (`libs/httpx/testdata/fuzz/FuzzProblemJSON` is the first
+one: an out-of-range status used to reach `WriteHeader` and panic; it now
+degrades to a 500 problem).
+
+### Test hygiene, linted
+
+`golangci-lint` runs `testifylint`, `thelper`, `tparallel` and `usetesting`
+on the test files, so the conventions above are checked, not remembered.
+
 ### Mutation testing
 
 Coverage says a line ran; mutation testing says a test would notice if it

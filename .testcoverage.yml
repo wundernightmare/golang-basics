@@ -9,6 +9,12 @@
 profile: coverage-merged.out
 local-prefix: github.com/tracehubmmp/golang-basics
 
+# Per-package breakdown of this run. CI keeps master's copy and hands it to a
+# PR run as --diff-base-breakdown-file-name with --diff-threshold 0: a change
+# may not lower the merged coverage at all, whatever the absolute total is.
+# That is the ratchet that stops old code's coverage from hiding new code's.
+breakdown-file-name: coverage-breakdown.json
+
 threshold:
   file: 0
   package: 0

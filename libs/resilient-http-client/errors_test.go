@@ -12,6 +12,7 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestOutboundError_Classification(t *testing.T) {
@@ -43,7 +44,7 @@ func TestOutboundError_UnwrapsCause(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
 		cause := errors.New("root cause")
 		err := transient("wrapper", cause)
-		assert.ErrorIs(t, err, cause)
+		require.ErrorIs(t, err, cause)
 		assert.Contains(t, err.Error(), "root cause")
 	}, "resilient-http-client", "unit")
 }

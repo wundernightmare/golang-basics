@@ -11,6 +11,10 @@
 # block across unit tests, container-backed tests and the real binaries the
 # e2e harness spawns. The merged text profile is what .testcoverage.yml gates
 # and what CI publishes; the per-layer numbers show what each layer adds.
+#
+# Every layer uses -covermode=atomic. covdata refuses to merge mixed modes
+# ("counter mode clash"), and `-race` silently switches a run to atomic while
+# a plain run defaults to set — so the mode is pinned rather than inferred.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,13 +32,13 @@ case "${1:?usage: cover.sh unit|integration|e2e|merge}" in
   unit)
     dir="$(layer_dir unit)"
     for m in $modules; do
-      (cd "$root/$m" && go test -short -cover -coverpkg="$pkgs" ./... -args -test.gocoverdir="$dir" >/dev/null)
+      (cd "$root/$m" && go test -short -cover -covermode=atomic -coverpkg="$pkgs" ./... -args -test.gocoverdir="$dir" >/dev/null)
     done
     ;;
   integration)
     dir="$(layer_dir integration)"
     for m in $modules; do
-      (cd "$root/$m" && go test -cover -coverpkg="$pkgs" ./... -args -test.gocoverdir="$dir" >/dev/null)
+      (cd "$root/$m" && go test -cover -covermode=atomic -coverpkg="$pkgs" ./... -args -test.gocoverdir="$dir" >/dev/null)
     done
     ;;
   e2e)
@@ -56,9 +60,16 @@ case "${1:?usage: cover.sh unit|integration|e2e|merge}" in
       fi
     done
     [ -n "$inputs" ] || { echo "cover.sh merge: no layer data under $cover" >&2; exit 1; }
-    rm -rf "$cover/merged" && mkdir -p "$cover/merged"
-    go tool covdata merge -i="$inputs" -o "$cover/merged"
-    go tool covdata textfmt -i="$cover/merged" -o "$root/coverage-merged.out"
+    rm -rf "$cover/merged" "$root/coverage-merged.out" && mkdir -p "$cover/merged"
+    # covdata reports some failures (e.g. a counter-mode clash) as "error:" on
+    # stderr without a non-zero exit — check the output, never trust the gate
+    # on a partial merge.
+    go tool covdata merge -i="$inputs" -o "$cover/merged" 2>&1 | tee "$cover/merge.log"
+    go tool covdata textfmt -i="$cover/merged" -o "$root/coverage-merged.out" 2>&1 | tee -a "$cover/merge.log"
+    if grep -qi 'error' "$cover/merge.log" || [ ! -s "$root/coverage-merged.out" ]; then
+      echo "cover.sh merge: covdata reported errors; refusing to gate on a partial profile" >&2
+      exit 1
+    fi
     echo "merged → coverage-merged.out ($(go tool covdata percent -i="$cover/merged" | wc -l | tr -d ' ') packages)"
     ;;
   *) echo "cover.sh: unknown layer '$1'" >&2; exit 2 ;;
