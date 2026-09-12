@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@playwright/test": "catalog:",
+    "allure-playwright": "catalog:",
     "@types/node": "catalog:",
     "oxlint": "catalog:",
     "prettier": "catalog:",

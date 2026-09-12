@@ -12,6 +12,9 @@ catalogs:
     '@types/node':
       specifier: ^26.0.0
       version: 26.4.0
+    allure-playwright:
+      specifier: 3.12.1
+      version: 3.12.1
     oxlint:
       specifier: ^1.80.0
       version: 1.80.0
@@ -44,6 +47,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 26.4.0
+      allure-playwright:
+        specifier: 'catalog:'
+        version: 3.12.1(@playwright/test@1.62.1)
       oxlint:
         specifier: 'catalog:'
         version: 1.80.0
@@ -469,6 +475,25 @@ packages:
     resolution: {integrity: sha512-nsqccDOgi80fi9WjvBapZjlFlugodVWudotNtWx6XKiSI7NuN6oTWEkXnkxQBzNg02Yf9lZLtCFlKvjAlcpu6Q==}
     hasBin: true
 
+  allure-js-commons@3.12.1:
+    resolution: {integrity: sha512-w5G2CVNNwe/aEZxQwHGtRXnXXdvXr/tJCKY4kn3ZmVkpsp/6YCtJL6qV/PqLtNtyrS0WgWbxYdNvFitCB35mHw==}
+    peerDependencies:
+      allure-playwright: 3.12.1
+    peerDependenciesMeta:
+      allure-playwright:
+        optional: true
+
+  allure-playwright@3.12.1:
+    resolution: {integrity: sha512-6s4795fiFVbF/HsNqY8r5660Nx2KwBcR7kHAXN+hQ0aqcLAKPE0qBs/YdiGhegOx0A2/Ic+KBaVILRSw+pSQOw==}
+    peerDependencies:
+      '@playwright/test': '>=1.62.0'
+
+  charenc@0.0.2:
+    resolution: {integrity: sha512-yrLQ/yVUFXkzg7EDQsPieE/53+0RlaWTs+wBrvW36cyilJ2SaDWfl4Yj7MtLTXleV9uEKefbAGUPv2/iWSooRA==}
+
+  crypt@0.0.2:
+    resolution: {integrity: sha512-mCxBlsHFYh9C+HVpiEacem8FEBnMXgU9gy4zmNC+SXAZNB/1idgp/aulFJ4FgCi7GPEVbfyng092GqL2k2rmow==}
+
   esbuild@0.28.2:
     resolution: {integrity: sha512-HKVLS8dvII+xoKW9kmqxbRKrnWEXfJJr/FZhhJmiqIB0e053QNYFqOBouTMO/k5sID4MvCiUCvv8b9M4h32wIA==}
     engines: {node: '>=18'}
@@ -483,6 +508,9 @@ packages:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
+
+  is-buffer@1.1.6:
+    resolution: {integrity: sha512-NcdALwpXkTm5Zvvbk7owOUSvVvBKDgKP5/ewfXEznmQFfs4ZRmanOeKBTjRVjka3QFoN6XJ+9F3USqfHqTaU5w==}
 
   lefthook-darwin-arm64@2.1.12:
     resolution: {integrity: sha512-GSUjqaCuxAYlPOovbjXEWE3HAIa/xOQkTTmZ937zieQldjPLTaC7+s5FHoxKywn+D9riBlofkDqG7Z4f5zzmPA==}
@@ -537,6 +565,9 @@ packages:
   lefthook@2.1.12:
     resolution: {integrity: sha512-2uOexfsrrRhCiTUWdGyDySxVHHhOFJ8MQejs27dM3hugrQB48/z1ZVlaNoxpZ1SnzQ1GaDIbO5rAvicwyiknYQ==}
     hasBin: true
+
+  md5@2.3.0:
+    resolution: {integrity: sha512-T1GITYmFaKuO91vxyoQMFETst+O71VUPEU3ze5GNzDm0OWdP8v1ziTaAEPUr/3kLsY3Sftgz242A1SetQiDL7g==}
 
   oxlint@1.80.0:
     resolution: {integrity: sha512-5nTiSps4qdbCWLbxzuO00alHkEO2exR9YMN/ig6QXWrLsYSG0KaObOAM+l6oU2LcKPWoSAGYbkZIGEu1ViiWKA==}
@@ -786,6 +817,21 @@ snapshots:
 
   allure-commandline@2.43.0: {}
 
+  allure-js-commons@3.12.1(allure-playwright@3.12.1(@playwright/test@1.62.1)):
+    dependencies:
+      md5: 2.3.0
+    optionalDependencies:
+      allure-playwright: 3.12.1(@playwright/test@1.62.1)
+
+  allure-playwright@3.12.1(@playwright/test@1.62.1):
+    dependencies:
+      '@playwright/test': 1.62.1
+      allure-js-commons: 3.12.1(allure-playwright@3.12.1(@playwright/test@1.62.1))
+
+  charenc@0.0.2: {}
+
+  crypt@0.0.2: {}
+
   esbuild@0.28.2:
     optionalDependencies:
       '@esbuild/aix-ppc64': 0.28.2
@@ -820,6 +866,8 @@ snapshots:
 
   fsevents@2.3.3:
     optional: true
+
+  is-buffer@1.1.6: {}
 
   lefthook-darwin-arm64@2.1.12:
     optional: true
@@ -863,6 +911,12 @@ snapshots:
       lefthook-openbsd-x64: 2.1.12
       lefthook-windows-arm64: 2.1.12
       lefthook-windows-x64: 2.1.12
+
+  md5@2.3.0:
+    dependencies:
+      charenc: 0.0.2
+      crypt: 0.0.2
+      is-buffer: 1.1.6
 
   oxlint@1.80.0:
     optionalDependencies:

@@ -13,6 +13,7 @@ allowBuilds:
   lefthook: true
 
 catalog:
+  allure-playwright: 3.12.1
   "@playwright/test": ^1.62.0
   "@types/node": ^26.0.0
   typescript: ^7.0.0
