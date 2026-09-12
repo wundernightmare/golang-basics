@@ -34,7 +34,7 @@ jobs:
       MODULES: ${{ steps.mods.outputs.MODULES }}
       DOCKERFILES: ${{ steps.mods.outputs.DOCKERFILES }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: pins
         run: scripts/mise-pins.sh >> "$GITHUB_OUTPUT"
       - id: mods
@@ -56,7 +56,7 @@ jobs:
     container:
       image: ${{ vars.DOCKER_HUB || 'docker.io' }}/zricethezav/gitleaks:v${{ needs.versions.outputs.GITLEAKS_VERSION }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # full history
       - run: |
@@ -73,7 +73,7 @@ jobs:
       # Space-separated packs, or a directory of vendored rules offline.
       SEMGREP_CONFIG: ${{ vars.SEMGREP_CONFIG || 'p/owasp-top-ten p/golang' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: |
           set -- ; for c in $SEMGREP_CONFIG; do set -- "$@" --config "$c"; done
           semgrep scan "$@" --error --metrics=off
@@ -86,8 +86,8 @@ jobs:
       # e.g. "--offline --local-db-path /srv/mirrors/osv" — see .env.example
       OSV_SCANNER_FLAGS: ${{ vars.OSV_SCANNER_FLAGS }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
       # Built from source on the pinned toolchain so Go call-graph reachability
@@ -109,8 +109,8 @@ jobs:
     env:
       GOVULNDB: ${{ vars.GOVULNDB || 'https://vuln.go.dev' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
           cache-dependency-path: ${{ matrix.module }}/go.sum
@@ -129,6 +129,6 @@ jobs:
     container:
       image: ${{ vars.DOCKER_HUB || 'docker.io' }}/hadolint/hadolint:v${{ needs.versions.outputs.HADOLINT_VERSION }}-debian
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Severity threshold comes from .hadolint.yaml (failure-threshold: warning).
       - run: hadolint --config .hadolint.yaml "${{ matrix.dockerfile }}"
