@@ -1,0 +1,22 @@
+# Keeps the SHA-pinned `uses:` references in .github/workflows current: every
+# action is pinned to a full commit (semgrep `github-actions-mutable-action-tag`
+# blocks tags, which the owner can repoint), so without a bot the pins rot.
+# Dependabot rewrites the SHA and the `# vX.Y.Z` comment together.
+#
+# Only the actions ecosystem is here on purpose: Go modules and the pnpm
+# workspace are bumped by hand with `just deps` so the mise pins, the go.work
+# sum and the lockfile move in one reviewed commit. On a self-hosted GitLab
+# there are no actions to pin; Renovate (self-hostable) covers the same job.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Same 7-day window as the pnpm `minimumReleaseAge`: a freshly cut action
+    # release is not proposed until it has been out for a week.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
