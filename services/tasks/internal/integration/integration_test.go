@@ -17,9 +17,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/tracehubmmp/golang-basics/libs/contracts/events"
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
-	"github.com/tracehubmmp/golang-basics/services/tasks/internal/domain"
 )
 
 func requireEventDelivered(t testing.TB, brokers []string, topic, wantID string) {
@@ -37,8 +37,8 @@ func requireEventDelivered(t testing.TB, brokers []string, topic, wantID string)
 
 	go func() {
 		_ = cons.Run(runCtx, func(_ context.Context, msg kafka.Message) error {
-			var evt domain.TaskCreatedEvent
-			if json.Unmarshal(msg.Value, &evt) == nil && evt.ID == wantID {
+			var evt events.TaskCreatedEvent
+			if json.Unmarshal(msg.Value, &evt) == nil && evt.Id == wantID {
 				select {
 				case <-found:
 				default:

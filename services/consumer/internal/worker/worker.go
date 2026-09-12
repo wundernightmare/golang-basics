@@ -9,21 +9,12 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/tracehubmmp/golang-basics/libs/contracts/events"
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
 )
-
-// taskCreatedEvent is the consumer's local copy of the event contract published
-// by services/tasks. It is intentionally duplicated rather than imported: the
-// two services are decoupled and only share the JSON shape on the wire.
-type taskCreatedEvent struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	CreatedAt time.Time `json:"created_at"`
-}
 
 // Consumer is the lib dependency (satisfied by *libs/kafka.Consumer); the
 // interface keeps the worker unit-testable without a broker.
@@ -72,7 +63,9 @@ func (w *Worker) Run(ctx context.Context) error {
 // ctx carries the record's process span (continued from the producer's trace
 // via the record headers), so the *Context log calls stamp the trace id.
 func (w *Worker) handle(ctx context.Context, msg kafka.Message) error {
-	var evt taskCreatedEvent
+	// The event type is the generated contract (api/tsp/events.tsp) — the same
+	// Go type the producer marshals, so the wire shape cannot drift.
+	var evt events.TaskCreatedEvent
 	if err := json.Unmarshal(msg.Value, &evt); err != nil {
 		w.skipped.Inc()
 		w.log.WarnContext(ctx, "skipping undecodable event", "partition", msg.Partition, "offset", msg.Offset, "err", err)
@@ -80,6 +73,6 @@ func (w *Worker) handle(ctx context.Context, msg kafka.Message) error {
 	}
 	w.consumed.Inc()
 	w.log.InfoContext(ctx, "task.created consumed",
-		"id", evt.ID, "title", evt.Title, "partition", msg.Partition, "offset", msg.Offset)
+		"id", evt.Id, "title", evt.Title, "partition", msg.Partition, "offset", msg.Offset)
 	return nil
 }

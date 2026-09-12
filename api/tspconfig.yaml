@@ -1,0 +1,16 @@
+# TypeSpec → OpenAPI 3.0 (the HTTP contract) + JSON Schema (the event
+# contract). Both outputs are committed; `just contracts` regenerates them and
+# the Go types, and CI fails when a commit forgets to.
+emit:
+  - "@typespec/openapi3"
+  - "@typespec/json-schema"
+options:
+  "@typespec/openapi3":
+    emitter-output-dir: "{project-root}/openapi3"
+    output-file: "tasks.openapi.yaml"
+    # 3.0: the broadest validator support (kin-openapi, Schemathesis, oasdiff).
+    openapi-versions:
+      - "3.0.0"
+  "@typespec/json-schema":
+    emitter-output-dir: "{project-root}/jsonschema"
+    file-type: json # one file per @jsonSchema model (the events)

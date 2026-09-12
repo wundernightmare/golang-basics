@@ -1,0 +1,17 @@
+{
+  "name": "@golang-basics/api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "API and event contracts in TypeSpec — the source the OpenAPI document, the JSON Schemas and the Go types are generated from",
+  "scripts": {
+    "compile": "tsp compile tsp/main.tsp",
+    "clean": "rm -rf openapi3 jsonschema"
+  },
+  "devDependencies": {
+    "@typespec/compiler": "catalog:",
+    "@typespec/http": "catalog:",
+    "@typespec/openapi": "catalog:",
+    "@typespec/openapi3": "catalog:",
+    "@typespec/json-schema": "catalog:"
+  }
+}

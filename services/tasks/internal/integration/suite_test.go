@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/tracehubmmp/golang-basics/libs/contracts/tasksapi"
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
 	"github.com/tracehubmmp/golang-basics/libs/otelx"
@@ -28,7 +29,6 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/libs/valkey"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/api"
-	"github.com/tracehubmmp/golang-basics/services/tasks/internal/domain"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/store"
 )
 
@@ -185,14 +185,12 @@ func (Suite) TestEndToEnd(t testx.T) {
 		resp := get(t, w.ts, "/tasks")
 		defer func() { _ = resp.Body.Close() }()
 		t.Require().Equal(http.StatusOK, resp.StatusCode)
-		var body struct {
-			Tasks []domain.Task `json:"tasks"`
-		}
+		var body tasksapi.TaskList
 		t.Require().NoError(json.NewDecoder(resp.Body).Decode(&body))
 		attachJSON(t, "response", body)
 		ids := make([]string, 0, len(body.Tasks))
 		for _, task := range body.Tasks {
-			ids = append(ids, task.ID)
+			ids = append(ids, task.Id)
 		}
 		t.Assert().Contains(ids, id)
 	})

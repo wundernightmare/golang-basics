@@ -2,6 +2,11 @@
 // cross-cutting concerns (logging, metrics, health, shutdown, tracing) live in
 // the shared libs, and this package only orchestrates store + cache + producer
 // behind a small set of interfaces so the wiring is unit-testable with fakes.
+//
+// The wire types are the generated contracts (libs/contracts/tasksapi from
+// api/tsp/tasks.tsp, libs/contracts/events from api/tsp/events.tsp); the
+// handlers convert to and from the internal domain model at this boundary,
+// and the api tests validate every exchange against the OpenAPI document.
 package api
 
 import (
@@ -15,6 +20,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/tracehubmmp/golang-basics/libs/contracts/events"
+	"github.com/tracehubmmp/golang-basics/libs/contracts/tasksapi"
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/domain"
 )
@@ -61,18 +68,19 @@ func Register(srv *httpx.Server, deps Deps) {
 	e.DELETE("/tasks/:id", h.delete)
 }
 
-type createRequest struct {
-	Title string `json:"title"`
-}
-
 func cacheKey(id string) string { return "task:" + id }
+
+// toWire converts the internal model to the contract's Task.
+func toWire(t domain.Task) tasksapi.Task {
+	return tasksapi.Task{Id: t.ID, Title: t.Title, Done: t.Done, CreatedAt: t.CreatedAt}
+}
 
 // create persists a new task, publishes a task.created event and warms the
 // cache. The event and cache writes are best-effort: a task is durable once the
 // row is committed, so a broker/cache hiccup logs a warning rather than failing
 // the request. (Production would close that gap with a transactional outbox.)
 func (h *handlers) create(c *gin.Context) {
-	var req createRequest
+	var req tasksapi.CreateTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		httpx.AbortProblem(c, httpx.NewProblem(http.StatusBadRequest, "invalid JSON body"))
 		return
@@ -90,17 +98,18 @@ func (h *handlers) create(c *gin.Context) {
 	}
 
 	h.publishCreated(ctx, task)
-	if body, err := json.Marshal(task); err == nil {
+	wire := toWire(task)
+	if body, err := json.Marshal(wire); err == nil {
 		if err := h.Cache.Set(ctx, cacheKey(task.ID), string(body), h.CacheTTL); err != nil {
 			h.Logger.WarnContext(ctx, "cache write failed", "key", cacheKey(task.ID), "err", err)
 		}
 	}
 
-	c.JSON(http.StatusCreated, task)
+	c.JSON(http.StatusCreated, wire)
 }
 
 func (h *handlers) publishCreated(ctx context.Context, task domain.Task) {
-	evt := domain.TaskCreatedEvent{ID: task.ID, Title: task.Title, CreatedAt: task.CreatedAt}
+	evt := events.TaskCreatedEvent{Id: task.ID, Title: task.Title, CreatedAt: task.CreatedAt}
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		h.Logger.WarnContext(ctx, "event marshal failed", "id", task.ID, "err", err)
@@ -119,7 +128,7 @@ func (h *handlers) get(c *gin.Context) {
 	id := c.Param("id")
 
 	if raw, ok, err := h.Cache.Get(ctx, cacheKey(id)); err == nil && ok {
-		var t domain.Task
+		var t tasksapi.Task // cached in wire shape
 		if json.Unmarshal([]byte(raw), &t) == nil {
 			c.Header("X-Cache", "hit")
 			c.JSON(http.StatusOK, t)
@@ -137,11 +146,12 @@ func (h *handlers) get(c *gin.Context) {
 		return
 	}
 
-	if body, err := json.Marshal(task); err == nil {
+	wire := toWire(task)
+	if body, err := json.Marshal(wire); err == nil {
 		_ = h.Cache.Set(ctx, cacheKey(id), string(body), h.CacheTTL)
 	}
 	c.Header("X-Cache", "miss")
-	c.JSON(http.StatusOK, task)
+	c.JSON(http.StatusOK, wire)
 }
 
 func (h *handlers) list(c *gin.Context) {
@@ -151,7 +161,11 @@ func (h *handlers) list(c *gin.Context) {
 		httpx.AbortProblem(c, httpx.NewProblem(http.StatusInternalServerError, "could not list tasks"))
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
+	out := tasksapi.TaskList{Tasks: make([]tasksapi.Task, 0, len(tasks))}
+	for _, t := range tasks {
+		out.Tasks = append(out.Tasks, toWire(t))
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // delete removes a task and evicts its cache entry.

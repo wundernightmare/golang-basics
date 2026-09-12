@@ -1,15 +1,20 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/tracehubmmp/golang-basics/libs/contracts/events"
+	"github.com/tracehubmmp/golang-basics/libs/contracts/tasksapi"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 
 	"github.com/stretchr/testify/require"
@@ -104,6 +109,13 @@ func newServer(t testing.TB) (*httptest.Server, *fakeStore, *fakeCache, *fakePub
 	return ts, st, cache, pub
 }
 
+// contract is the OpenAPI document every exchange in this file is checked
+// against: a handler test passes only if the request matched an operation
+// and the response (status, headers, body) conforms to it.
+var contract = sync.OnceValue(func() *testx.OpenAPI {
+	return testx.LoadOpenAPI(&testing.T{}, "openapi3/tasks.openapi.yaml")
+})
+
 func do(t testing.TB, ts *httptest.Server, method, path, body string) *http.Response {
 	t.Helper()
 	var r *http.Request
@@ -112,10 +124,18 @@ func do(t testing.TB, ts *httptest.Server, method, path, body string) *http.Resp
 		r, err = http.NewRequest(method, ts.URL+path, nil)
 	} else {
 		r, err = http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
 	}
 	require.NoError(t, err)
 	resp, err := ts.Client().Do(r)
 	require.NoError(t, err)
+
+	// Buffer the body so the contract check and the caller both read it.
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(raw))
+	contract().Validate(t, r, []byte(body), resp.StatusCode, resp.Header, raw)
 	return resp
 }
 
@@ -142,20 +162,20 @@ func TestCreatePersistsPublishesAndCaches(t *testing.T) {
 		defer func() { _ = resp.Body.Close() }()
 
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
-		var task domain.Task
+		var task tasksapi.Task
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&task))
-		require.NotEmpty(t, task.ID)
+		require.NotEmpty(t, task.Id)
 		require.Equal(t, "write tests", task.Title)
 
 		require.Len(t, st.tasks, 1, "task persisted to store")
 		require.Len(t, pub.published, 1, "one task.created event published")
 		require.Equal(t, "tasks.events", pub.topic)
 
-		var evt domain.TaskCreatedEvent
+		var evt events.TaskCreatedEvent
 		require.NoError(t, json.Unmarshal(pub.published[0], &evt))
-		require.Equal(t, task.ID, evt.ID)
+		require.Equal(t, task.Id, evt.Id)
 
-		_, cached := cache.data["task:"+task.ID]
+		_, cached := cache.data["task:"+task.Id]
 		require.True(t, cached, "task warmed into cache on create")
 	}, "tasks", "unit")
 }
@@ -163,7 +183,7 @@ func TestCreatePersistsPublishesAndCaches(t *testing.T) {
 func TestGetServesFromCacheWithoutHittingStore(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
 		ts, st, cache, _ := newServer(t)
-		cached := domain.Task{ID: "abc", Title: "cached", CreatedAt: time.Now().UTC()}
+		cached := tasksapi.Task{Id: "abc", Title: "cached", CreatedAt: time.Now().UTC()}
 		body, _ := json.Marshal(cached)
 		cache.data["task:abc"] = string(body)
 

@@ -28,6 +28,8 @@ code lives in per-branch worktrees (`master/` is canonical).
 | [`services/heartbeat`](services/heartbeat) | Worker       | `:9081` admin                | Background ticker worker — emits a beat + bumps `heartbeat_beats_total` every interval.            |
 | [`services/tasks`](services/tasks)         | HTTP service | `:8082` API, `:9082` admin   | Tasks CRUD over **Postgres + Valkey + Kafka**, traced end-to-end, with `problem+json` errors. Publishes `task.created`. |
 | [`services/consumer`](services/consumer)   | Worker       | `:9083` admin                | Kafka consumer draining `tasks.events`; continues the producer's trace; exports group lag.         |
+| [`api`](api)                               | Contracts    | —                            | TypeSpec source of the tasks HTTP API and the Kafka events; emits OpenAPI 3.0 + JSON Schema (committed). |
+| [`libs/contracts`](libs/contracts)         | Library      | —                            | Generated Go types of those contracts (`tasksapi`, `events`), shared by producer and consumer. Never edited by hand. |
 | [`libs/httpx`](libs/httpx)                 | Library      | —                            | Shared HTTP scaffolding: gin engine, sampled trace-correlated logging, Prometheus metrics, admin listener (health/metrics/version/pprof), graceful shutdown, env + YAML config, RFC 9457 `Problem`. |
 | [`libs/resilient-http-client`](libs/resilient-http-client) | Library | —              | Policy-per-target **outbound** HTTP client: rate limiting, circuit breaker, adaptive concurrency, jittered retry, response cache, coalescing, fallbacks, metrics. |
 | [`libs/pgx`](libs/pgx)                     | Library      | —                            | PostgreSQL pool (`jackc/pgx`): env config, readiness check, boot-time migrations.                  |
@@ -480,6 +482,40 @@ nightly `fuzz` job does the same in CI. A crash writes its input to
 test from then on (`libs/httpx/testdata/fuzz/FuzzProblemJSON` is the first
 one: an out-of-range status used to reach `WriteHeader` and panic; it now
 degrades to a 500 problem).
+
+### Contracts
+
+The tasks HTTP API and the Kafka events are written once, in
+[TypeSpec](https://typespec.io) under [`api/tsp`](api/tsp) (the same
+toolchain as `tracehub-spec`, TypeSpec 1.16, OpenAPI 3.0 output), and
+everything else is generated from it:
+
+```
+api/tsp/tasks.tsp   ─tsp compile─▶ api/openapi3/tasks.openapi.yaml ─oapi-codegen─▶ libs/contracts/tasksapi   (Go types)
+api/tsp/events.tsp  ─tsp compile─▶ api/jsonschema/TaskCreatedEvent.json ─go-jsonschema─▶ libs/contracts/events (Go types)
+```
+
+`just contracts` regenerates all of it; the outputs are committed, so a
+reviewer sees the contract diff next to the code diff. `just contracts-check`
+(the `contracts` CI job, part of `just ci`) fails when the committed outputs
+are stale and, on a pull request, when `oasdiff` finds a breaking change
+against master's OpenAPI document.
+
+The generated types are the wire types: `services/tasks` binds
+`tasksapi.CreateTaskRequest`, answers `tasksapi.Task` / `TaskList`, publishes
+`events.TaskCreatedEvent`; `services/consumer` decodes the same
+`events.TaskCreatedEvent`. The former hand-copied event struct is gone.
+
+Tests enforce it: every exchange in `services/tasks/internal/api`'s tests goes
+through `testx.LoadOpenAPI(...).Validate` (request matched an operation,
+response status / headers / body conform, a request the contract rejects was
+answered with a 4xx problem), and the published event bytes are checked with
+`testx.LoadJSONSchema(...).Validate`. A handler that drifts from the contract
+fails its own test.
+
+Event compatibility rule (no tool checks JSON Schema evolution): a field may
+be added as optional; a field is never removed or changed in type. Bump the
+schema `$id` for anything else and keep both consumers running.
 
 ### Test hygiene, linted
 

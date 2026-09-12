@@ -14,7 +14,7 @@
 set dotenv-load := true
 
 # Every Go module in the workspace, in dependency order (libs first).
-MODULES := "libs/httpx libs/testx libs/resilient-http-client libs/pgx libs/valkey libs/kafka libs/otelx services/ping services/heartbeat services/tasks services/consumer"
+MODULES := "libs/contracts libs/httpx libs/testx libs/resilient-http-client libs/pgx libs/valkey libs/kafka libs/otelx services/ping services/heartbeat services/tasks services/consumer"
 # Buildable service binaries (module dir : binary name).
 SERVICES := "ping heartbeat tasks consumer"
 
@@ -238,8 +238,8 @@ docker-verify SVC TAG:
 
 # ── CI gates ──────────────────────────────────────────────────────────────────
 
-# Standard pipeline: fmt-check → vet → lint → test
-ci: fmt-check check lint test
+# Standard pipeline: fmt-check → contracts-check → vet → lint → test
+ci: fmt-check contracts-check check lint test
     @echo "CI passed"
 
 # Extended pipeline: + race tests + supply-chain audit
@@ -275,6 +275,9 @@ otelx +args:
 
 testx +args:
     just --justfile libs/testx/justfile {{args}}
+
+contracts-mod +args:
+    just --justfile libs/contracts/justfile {{args}}
 
 tasks +args:
     just --justfile services/tasks/justfile {{args}}
@@ -405,6 +408,37 @@ bench-peak: release
 # PROFILE is one of smoke|load|stress|soak.
 bench-tasks PROFILE="smoke":
     ./benchmarks/run-k6-tasks.sh {{PROFILE}}
+
+# ── Contracts (TypeSpec → OpenAPI + JSON Schema → Go types) ───────────────────
+
+# Regenerate every contract artefact from api/tsp: the OpenAPI document, the
+# event JSON Schemas, and the Go types in libs/contracts. Commit the result.
+contracts:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pnpm --filter @golang-basics/api compile
+    mise exec -- oapi-codegen -config api/oapi-codegen.yaml api/openapi3/tasks.openapi.yaml
+    mise exec -- go-jsonschema -p events --only-models \
+      --schema-root-type TaskCreatedEvent=TaskCreatedEvent \
+      -o libs/contracts/events/task_created.gen.go api/jsonschema/TaskCreatedEvent.json
+    (cd libs/contracts && gofmt -w . && go build ./...)
+
+# CI gate: generated artefacts are up to date, and the HTTP contract has no
+# breaking change against master (oasdiff). BASE overrides the git ref.
+contracts-check BASE="origin/master":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just contracts >/dev/null
+    if ! git diff --exit-code --stat -- api/openapi3 api/jsonschema libs/contracts; then
+      echo "contracts: generated files are stale — run 'just contracts' and commit" >&2; exit 1
+    fi
+    base="$(mktemp)"; trap 'rm -f "$base"' EXIT
+    if git show "{{BASE}}:api/openapi3/tasks.openapi.yaml" > "$base" 2>/dev/null; then
+      mise exec -- oasdiff breaking "$base" api/openapi3/tasks.openapi.yaml --fail-on ERR
+    else
+      echo "contracts: no base spec at {{BASE}} (first version) — skipping breaking-change check"
+    fi
+    echo "contracts OK"
 
 # ── Setup & housekeeping ──────────────────────────────────────────────────────
 
