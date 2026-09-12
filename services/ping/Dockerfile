@@ -3,9 +3,9 @@
 #
 # Build context — workspace ROOT (two levels up from this file). The build is
 # per-module (GOWORK=off): it uses this service's own go.mod + its
-# `replace … => ../../libs/httpx` directive, so it copies ONLY libs/httpx +
-# this service — never go.work or sibling services. That keeps the layer cache
-# isolated: editing another service does not invalidate this image.
+# `replace … => ../../libs/*` directives, so it copies ONLY the libs it
+# uses + this service — never go.work or sibling services. That keeps the
+# layer cache isolated: editing another service does not invalidate this image.
 #
 #   docker build -f services/ping/Dockerfile --tag ping:dev .   ← workspace root
 #
@@ -64,6 +64,9 @@ ARG VERSION
 # the build resolve via go.mod's `replace`, not the workspace.
 ENV GOWORK=off
 COPY libs/httpx/go.mod libs/httpx/go.sum ./libs/httpx/
+# libs/contracts (the generated pingapi wire types) has no external deps and
+# therefore no go.sum.
+COPY libs/contracts/go.mod ./libs/contracts/
 # libs/testx is a _test-only dependency of the service module; only its
 # go.mod/go.sum are needed to resolve the module graph, no source is compiled.
 COPY libs/testx/go.mod libs/testx/go.sum ./libs/testx/
@@ -72,6 +75,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     cd services/ping && go mod download
 
 # Source layer — only what this service compiles.
+COPY libs/contracts ./libs/contracts
 COPY libs/httpx ./libs/httpx
 COPY services/ping ./services/ping
 
