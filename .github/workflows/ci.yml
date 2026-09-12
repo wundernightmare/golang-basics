@@ -248,10 +248,12 @@ jobs:
           set -o pipefail # a failed merge must fail the step even through tee
           go install "github.com/vladopajic/go-test-coverage/v2@v${{ needs.versions.outputs.GOTESTCOV_VERSION }}"
           scripts/cover.sh merge | tee coverage-layers.txt
+          # The no-regression diff is a pull-request gate; a push to master is
+          # the new base, measured against the absolute thresholds only.
           diff_args=()
-          if [ -s coverage-breakdown-base.json ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ -s coverage-breakdown-base.json ]; then
             diff_args=(--diff-base-breakdown-file-name coverage-breakdown-base.json --diff-threshold 0)
-          else
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "no base breakdown for master yet — absolute thresholds only"
           fi
           go-test-coverage --config .testcoverage.yml "${diff_args[@]}" | tee coverage-summary.txt

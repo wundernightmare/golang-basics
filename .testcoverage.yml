@@ -23,7 +23,9 @@ threshold:
 exclude:
   paths:
     - ^libs/[^/]+/doc\.go$
-    - ^libs/testx/  # the harness itself is not a coverage target
+    - ^libs/testx/      # the harness itself is not a coverage target
+    - ^libs/contracts/  # generated from api/tsp — no logic to cover
+    - \.gen\.go$
 
 # Per-package overrides for the parts that are pure logic and must stay high.
 override:
