@@ -52,11 +52,13 @@ COPY libs/kafka/go.mod libs/kafka/go.sum ./libs/kafka/
 COPY libs/otelx/go.mod libs/otelx/go.sum ./libs/otelx/
 # libs/testx is a _test-only dependency of the service module; only its
 # go.mod/go.sum are needed to resolve the module graph, no source is compiled.
+COPY libs/contracts/go.mod ./libs/contracts/
 COPY libs/testx/go.mod libs/testx/go.sum ./libs/testx/
 COPY services/consumer/go.mod services/consumer/go.sum ./services/consumer/
 RUN --mount=type=cache,target=/go/pkg/mod \
     cd services/consumer && go mod download
 
+COPY libs/contracts ./libs/contracts
 COPY libs/httpx ./libs/httpx
 COPY libs/kafka ./libs/kafka
 COPY libs/otelx ./libs/otelx

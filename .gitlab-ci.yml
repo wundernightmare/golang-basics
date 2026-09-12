@@ -120,6 +120,7 @@ variables:
         - mise.toml
         - scripts/**/*
         - e2e/**/*
+        - api/**/*
         - pnpm-lock.yaml
 
 .rules-docker:
@@ -179,6 +180,9 @@ prepare:
     - GOBIN="$CI_PROJECT_DIR/bin" go install "github.com/boumenot/gocover-cobertura@v${COBERTURA_VERSION}"
     - GOBIN="$CI_PROJECT_DIR/bin" go install "golang.org/x/vuln/cmd/govulncheck@v${GOVULNCHECK_VERSION}"
     - GOBIN="$CI_PROJECT_DIR/bin" go install "github.com/vladopajic/go-test-coverage/v2@v${GOTESTCOV_VERSION}"
+    - GOBIN="$CI_PROJECT_DIR/bin" go install "github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v${OAPICODEGEN_VERSION}"
+    - GOBIN="$CI_PROJECT_DIR/bin" go install "github.com/atombender/go-jsonschema@v${GOJSONSCHEMA_VERSION}"
+    - GOBIN="$CI_PROJECT_DIR/bin" go install "github.com/oasdiff/oasdiff@v${OASDIFF_VERSION}"
   artifacts:
     paths: [bin/]
     expire_in: 1 day
@@ -192,6 +196,46 @@ fmt:
     # Scoped to the module trees: GOMODCACHE now lives under .cache/ so GitLab
     # can cache it, and a bare `gofmt -l .` walks into its test fixtures.
     - out="$(gofmt -l ./libs ./services)"; if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
+
+# Contracts, step 1: the TypeSpec source compiles to exactly the committed
+# OpenAPI / JSON Schema (node image; nothing to apt/curl).
+contracts-tsp:
+  extends: .rules-go
+  stage: check
+  image: ${DOCKER_HUB}/library/node:${NODE_VERSION}-bookworm
+  needs:
+    - job: versions
+      artifacts: true
+  before_script:
+    - npm install -g corepack@latest && corepack enable
+    - pnpm install --frozen-lockfile
+  script:
+    - pnpm --filter @golang-basics/api compile
+    - git diff --exit-code --stat -- api/openapi3 api/jsonschema || { echo "contracts are stale — run 'just contracts' and commit"; exit 1; }
+
+# Contracts, step 2: the Go types match the committed contracts, and the HTTP
+# contract has no breaking change against the default branch (oasdiff).
+contracts-go:
+  extends: [.go, .rules-go]
+  stage: check
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - oapi-codegen -config api/oapi-codegen.yaml api/openapi3/tasks.openapi.yaml
+    - |
+      go-jsonschema -p events --only-models --schema-root-type TaskCreatedEvent=TaskCreatedEvent \
+        -o libs/contracts/events/task_created.gen.go api/jsonschema/TaskCreatedEvent.json
+    - (cd libs/contracts && gofmt -w . && go build ./...)
+    - git diff --exit-code --stat -- libs/contracts || { echo "generated Go contracts are stale — run 'just contracts' and commit"; exit 1; }
+    - |
+      if [ "$CI_PIPELINE_SOURCE" = "merge_request_event" ]; then
+        git fetch --depth=1 origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+        if git show "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME:api/openapi3/tasks.openapi.yaml" > /tmp/base.yaml 2>/dev/null; then
+          oasdiff breaking /tmp/base.yaml api/openapi3/tasks.openapi.yaml --fail-on ERR
+        else
+          echo "no base spec on the target branch — first version"
+        fi
+      fi
 
 vet:
   extends: [.go, .rules-go]

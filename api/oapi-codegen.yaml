@@ -1,0 +1,8 @@
+# oapi-codegen — Go types for the tasks API (no server/client code: the
+# handlers stay hand-written on gin, the contract only fixes the shapes).
+package: tasksapi
+output: libs/contracts/tasksapi/types.gen.go # relative to the workspace root (`just contracts` runs from there)
+generate:
+  models: true
+output-options:
+  skip-prune: true

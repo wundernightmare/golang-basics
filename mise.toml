@@ -55,6 +55,11 @@ k6            = "2.2.0"
 "go:github.com/vladopajic/go-test-coverage/v2" = "2.19.0"
 # Mutation testing of the pure-logic modules (`just mutate`; .gremlins.yaml per module).
 "go:github.com/go-gremlins/gremlins/cmd/gremlins" = "0.6.0"
+# Contracts (`just contracts`): TypeSpec (api/, via pnpm) is the source; these
+# turn the emitted OpenAPI / JSON Schema into Go types and check compatibility.
+"go:github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen" = "2.8.0"
+"go:github.com/atombender/go-jsonschema"                      = "0.24.1"
+"go:github.com/oasdiff/oasdiff"                               = "1.31.0"
 # Allure report renderer (`just allure-report`): allure-commandline is a Node
 # package (root package.json, so it comes through the npm mirror) but needs a
 # JRE at run time.

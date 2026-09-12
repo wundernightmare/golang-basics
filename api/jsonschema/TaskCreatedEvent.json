@@ -1,0 +1,26 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "TaskCreatedEvent",
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "string",
+            "description": "Task identifier (UUID), also the record key."
+        },
+        "title": {
+            "type": "string",
+            "description": "Task title at creation time."
+        },
+        "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time, RFC 3339 UTC."
+        }
+    },
+    "required": [
+        "id",
+        "title",
+        "created_at"
+    ],
+    "description": "Published to the `tasks.events` topic when a task is created; key = task id."
+}

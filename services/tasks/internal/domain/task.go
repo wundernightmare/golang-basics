@@ -16,18 +16,13 @@ var ErrNotFound = errors.New("task not found")
 // HTTP layer maps it to a 400 problem+json response.
 var ErrEmptyTitle = errors.New("task title must not be empty")
 
-// Task is a single to-do item.
+// Task is a single to-do item — the internal model. What crosses the wire is
+// the contract: libs/contracts/tasksapi.Task on HTTP and
+// libs/contracts/events.TaskCreatedEvent on Kafka, both generated from
+// api/tsp; the api layer converts at the boundary.
 type Task struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Done      bool      `json:"done"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// TaskCreatedEvent is the message published to Kafka when a task is created. It
-// is the contract services/consumer decodes; keep it backwards-compatible.
-type TaskCreatedEvent struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string
+	Title     string
+	Done      bool
+	CreatedAt time.Time
 }

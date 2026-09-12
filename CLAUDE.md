@@ -127,6 +127,12 @@ README; this file is only the high-signal, easy-to-miss bits.
   rest) with thresholds that fail the run. When a mutant lives, first ask
   whether the code has an unkillable branch (rewrite with `min`/`max`, inject
   the clock) before adding a test. Nightly/manual in CI, not per PR.
+- **Contracts are generated, never edited**: change `api/tsp/*.tsp`, run
+  `just contracts`, commit the emitted OpenAPI / JSON Schema and the Go types
+  in `libs/contracts`. Services use `tasksapi.*` / `events.*` at the wire;
+  the `domain` model is internal. `just contracts-check` (CI `contracts`)
+  fails on stale outputs and on oasdiff breaking changes. Event schemas:
+  add optional fields only; never remove or retype.
 - **Load tests (k6) stay outside Allure**: they run on the load stand and
   report there; do not wire k6 summaries into the test report.
 - **Coverage must not regress**: the `coverage` job diffs a PR's breakdown

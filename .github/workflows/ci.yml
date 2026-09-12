@@ -44,6 +44,9 @@ jobs:
       GOLANGCI_VERSION: ${{ steps.pins.outputs.GOLANGCI_VERSION }}
       GOTESTCOV_VERSION: ${{ steps.pins.outputs.GOTESTCOV_VERSION }}
       GREMLINS_VERSION: ${{ steps.pins.outputs.GREMLINS_VERSION }}
+      OAPICODEGEN_VERSION: ${{ steps.pins.outputs.OAPICODEGEN_VERSION }}
+      GOJSONSCHEMA_VERSION: ${{ steps.pins.outputs.GOJSONSCHEMA_VERSION }}
+      OASDIFF_VERSION: ${{ steps.pins.outputs.OASDIFF_VERSION }}
       MODULES: ${{ steps.mods.outputs.MODULES }}
       DATA_MODULES: ${{ steps.mods.outputs.DATA_MODULES }}
     steps:
@@ -73,6 +76,49 @@ jobs:
           # Scoped to the module trees, matching `just fmt-check` and GitLab.
           out="$(gofmt -l ./libs ./services)"
           if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
+
+  # Contracts: the TypeSpec source (api/tsp) is compiled and the Go types
+  # regenerated; the commit must already contain exactly that output, and the
+  # HTTP contract must not break against master (oasdiff). Same as
+  # `just contracts-check`.
+  contracts:
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # master's spec for the breaking-change diff
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.versions.outputs.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: |
+          go install "github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v${{ needs.versions.outputs.OAPICODEGEN_VERSION }}"
+          go install "github.com/atombender/go-jsonschema@v${{ needs.versions.outputs.GOJSONSCHEMA_VERSION }}"
+          go install "github.com/oasdiff/oasdiff@v${{ needs.versions.outputs.OASDIFF_VERSION }}"
+      - name: regenerate and compare
+        run: |
+          pnpm --filter @golang-basics/api compile
+          oapi-codegen -config api/oapi-codegen.yaml api/openapi3/tasks.openapi.yaml
+          go-jsonschema -p events --only-models --schema-root-type TaskCreatedEvent=TaskCreatedEvent \
+            -o libs/contracts/events/task_created.gen.go api/jsonschema/TaskCreatedEvent.json
+          (cd libs/contracts && gofmt -w . && go build ./...)
+          git diff --exit-code --stat -- api/openapi3 api/jsonschema libs/contracts \
+            || { echo "::error::contracts are stale — run 'just contracts' and commit"; exit 1; }
+      - name: breaking changes against master
+        if: github.event_name == 'pull_request'
+        run: |
+          if git show "origin/${{ github.base_ref }}:api/openapi3/tasks.openapi.yaml" > /tmp/base.yaml 2>/dev/null; then
+            oasdiff breaking /tmp/base.yaml api/openapi3/tasks.openapi.yaml --fail-on ERR
+          else
+            echo "no base spec on ${{ github.base_ref }} — first version"
+          fi
 
   lint-test:
     needs: versions
@@ -381,12 +427,12 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    needs: [fmt, lint-test, integration, e2e, coverage]
+    needs: [fmt, contracts, lint-test, integration, e2e, coverage]
     if: always()
     steps:
       - name: verify all jobs passed
         run: |
-          for r in "${{ needs.fmt.result }}" "${{ needs.lint-test.result }}" \
+          for r in "${{ needs.fmt.result }}" "${{ needs.contracts.result }}" "${{ needs.lint-test.result }}" \
                    "${{ needs.integration.result }}" "${{ needs.e2e.result }}" "${{ needs.coverage.result }}"; do
             [ "$r" = "success" ] || { echo "a required job did not succeed ($r)"; exit 1; }
           done

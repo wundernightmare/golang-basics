@@ -24,6 +24,17 @@ just hooks-install             # optional: lefthook pre-commit/pre-push gates
 Behind a proxy or without direct internet: `cp .env.example .env` and
 uncomment what your network needs (README "Closed networks").
 
+## Changing an API or an event
+
+1. Edit `api/tsp/tasks.tsp` (HTTP) or `api/tsp/events.tsp` (Kafka).
+2. `just contracts` — regenerates `api/openapi3`, `api/jsonschema` and
+   `libs/contracts`; commit all of it.
+3. Adjust the handler / consumer to the new `tasksapi` / `events` types; the
+   api tests validate every exchange against the OpenAPI document, so a
+   mismatch fails there.
+4. `just contracts-check` — stale outputs and breaking changes fail here and
+   in CI. Events: optional additions only.
+
 ## Adding a module
 
 1. Create `services/<name>/` or `libs/<name>/` with its own `go.mod`

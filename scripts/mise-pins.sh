@@ -42,3 +42,6 @@ emit COBERTURA_VERSION   go:github.com/boumenot/gocover-cobertura
 emit GOVULNCHECK_VERSION go:golang.org/x/vuln/cmd/govulncheck
 emit GOTESTCOV_VERSION   go:github.com/vladopajic/go-test-coverage/v2
 emit GREMLINS_VERSION    go:github.com/go-gremlins/gremlins/cmd/gremlins
+emit OAPICODEGEN_VERSION go:github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen
+emit GOJSONSCHEMA_VERSION go:github.com/atombender/go-jsonschema
+emit OASDIFF_VERSION     go:github.com/oasdiff/oasdiff

@@ -6,6 +6,7 @@
 // rather than a published version. Run `go work sync` after adding a module.
 //
 // Members:
+//   libs/contracts              — generated Go types of the TypeSpec contracts (api/): tasks HTTP API + Kafka events
 //   libs/httpx                  — shared HTTP server scaffolding (the example common lib)
 //   libs/resilient-http-client  — policy-per-target outbound HTTP client (rate limit, CB, retry…)
 //   libs/pgx                    — shared PostgreSQL pool (pgx)
@@ -20,6 +21,7 @@
 go 1.27.0
 
 use (
+	./libs/contracts
 	./libs/httpx
 	./libs/kafka
 	./libs/otelx
