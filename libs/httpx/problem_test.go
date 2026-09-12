@@ -90,3 +90,24 @@ func TestAbortProblemInvalidStatusDegradesTo500(t *testing.T) {
 		}
 	}, "httpx", "unit")
 }
+
+// Every error the API port emits is a problem: an unknown route is a 404
+// problem and a known route with the wrong method a 405 problem (the gin
+// default, 404 for both, fails Schemathesis' unsupported-method check).
+func TestServerNoRouteAndNoMethodAreProblems(t *testing.T) {
+	testx.Run(t, func(t testx.T) {
+		srv := httpx.NewServer(httpx.Config{Service: "t", Addr: ":0"}, httpx.NewLogger(httpx.LogConfig{Level: "error"}))
+		srv.Engine().GET("/known", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+		rec := httptest.NewRecorder()
+		srv.Engine().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nope", nil))
+		require.Equal(t, http.StatusNotFound, rec.Code)
+		require.Equal(t, httpx.ProblemContentType, rec.Header().Get("Content-Type"))
+
+		rec = httptest.NewRecorder()
+		srv.Engine().ServeHTTP(rec, httptest.NewRequest(http.MethodTrace, "/known", nil))
+		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+		require.Equal(t, httpx.ProblemContentType, rec.Header().Get("Content-Type"))
+		require.Contains(t, rec.Body.String(), `"status":405`)
+	}, "httpx", "unit")
+}

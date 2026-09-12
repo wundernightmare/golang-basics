@@ -418,6 +418,7 @@ contracts:
     set -euo pipefail
     pnpm --filter @golang-basics/api compile
     mise exec -- oapi-codegen -config api/oapi-codegen.yaml api/openapi3/tasks.openapi.yaml
+    mise exec -- oapi-codegen -config api/oapi-codegen-ping.yaml api/openapi3/ping.openapi.yaml
     mise exec -- go-jsonschema -p events --only-models \
       --schema-root-type TaskCreatedEvent=TaskCreatedEvent \
       -o libs/contracts/events/task_created.gen.go api/jsonschema/TaskCreatedEvent.json
@@ -433,12 +434,19 @@ contracts-check BASE="origin/master":
       echo "contracts: generated files are stale — run 'just contracts' and commit" >&2; exit 1
     fi
     base="$(mktemp)"; trap 'rm -f "$base"' EXIT
-    if git show "{{BASE}}:api/openapi3/tasks.openapi.yaml" > "$base" 2>/dev/null; then
-      mise exec -- oasdiff breaking "$base" api/openapi3/tasks.openapi.yaml --fail-on ERR
-    else
-      echo "contracts: no base spec at {{BASE}} (first version) — skipping breaking-change check"
-    fi
+    for spec in api/openapi3/*.openapi.yaml; do
+      if git show "{{BASE}}:$spec" > "$base" 2>/dev/null; then
+        mise exec -- oasdiff breaking "$base" "$spec" --fail-on ERR
+      else
+        echo "contracts: no base for $spec at {{BASE}} (first version) — skipping breaking-change check"
+      fi
+    done
     echo "contracts OK"
+
+# Property-based API testing against a real binary and its OpenAPI document
+# (Schemathesis; results go to Allure). tasks needs `just infra-up` first.
+schemathesis SVC="ping":
+    scripts/schemathesis.sh {{SVC}}
 
 # ── Setup & housekeeping ──────────────────────────────────────────────────────
 

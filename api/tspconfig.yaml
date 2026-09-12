@@ -7,7 +7,8 @@ emit:
 options:
   "@typespec/openapi3":
     emitter-output-dir: "{project-root}/openapi3"
-    output-file: "tasks.openapi.yaml"
+    # output-file is set per service by the package.json scripts (one document
+    # per `tsp compile`): tasks.openapi.yaml, ping.openapi.yaml.
     # 3.0: the broadest validator support (kin-openapi, Schemathesis, oasdiff).
     openapi-versions:
       - "3.0.0"

@@ -67,6 +67,17 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) *Server {
 	e := gin.New()
 	e.Use(o.outer...)
 	e.Use(requestLogger(log, cfg.SlowRequest), gin.Recovery(), m.Middleware())
+	// Unknown route → 404, known route with the wrong method → 405 (not 404,
+	// which is what gin does by default and what Schemathesis' unsupported-
+	// method check flags). Both as problem+json, so every error the API port
+	// emits has the same shape.
+	e.HandleMethodNotAllowed = true
+	e.NoRoute(func(c *gin.Context) {
+		AbortProblem(c, NewProblem(http.StatusNotFound, "no route for "+c.Request.Method+" "+c.Request.URL.Path))
+	})
+	e.NoMethod(func(c *gin.Context) {
+		AbortProblem(c, NewProblem(http.StatusMethodNotAllowed, c.Request.Method+" is not allowed on "+c.Request.URL.Path))
+	})
 
 	return &Server{
 		cfg: cfg, log: log, engine: e,
