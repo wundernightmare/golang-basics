@@ -55,6 +55,8 @@ k6            = "2.2.0"
 "go:github.com/vladopajic/go-test-coverage/v2" = "2.19.0"
 # Mutation testing of the pure-logic modules (`just mutate`; .gremlins.yaml per module).
 "go:github.com/go-gremlins/gremlins/cmd/gremlins" = "0.6.0"
+# Micro-benchmark comparison (`just bench`, nightly CI job).
+"go:golang.org/x/perf/cmd/benchstat" = "0.0.0-20260908200009-22c9c6c9d4da"
 # Contracts (`just contracts`): TypeSpec (api/, via pnpm) is the source; these
 # turn the emitted OpenAPI / JSON Schema into Go types and check compatibility.
 "go:github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen" = "2.8.0"

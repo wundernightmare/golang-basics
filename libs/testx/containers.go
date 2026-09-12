@@ -33,6 +33,7 @@ type shared[V any] struct {
 	value     V
 	err       error
 	terminate func(context.Context) error
+	container testcontainers.Container // for the chaos helpers (pause / proxy upstream)
 }
 
 var (
@@ -60,7 +61,7 @@ func Main(m *testing.M) int {
 	code := m.Run()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	for _, term := range []func(context.Context) error{postgres.terminate, valkey.terminate, kafka.terminate} {
+	for _, term := range []func(context.Context) error{postgres.terminate, valkey.terminate, kafka.terminate, toxi.terminate} {
 		if term != nil {
 			_ = term(ctx)
 		}
@@ -72,7 +73,7 @@ func Main(m *testing.M) int {
 // first use. Skips under -short and, outside CI, when Docker is unavailable.
 func Postgres(tb testing.TB) string {
 	tb.Helper()
-	return use(tb, &postgres, "postgres", func(ctx context.Context) (string, func(context.Context) error, error) {
+	return use(tb, &postgres, "postgres", func(ctx context.Context) (string, testcontainers.Container, error) {
 		c, err := tcpostgres.Run(ctx, PostgresImage,
 			tcpostgres.WithDatabase("app"), tcpostgres.WithUsername("app"), tcpostgres.WithPassword("app"),
 			// The log line says the server is up; the listening-port check says the
@@ -85,14 +86,14 @@ func Postgres(tb testing.TB) string {
 			return "", nil, err
 		}
 		dsn, err := c.ConnectionString(ctx, "sslmode=disable")
-		return dsn, terminator(c), err
+		return dsn, c, err
 	})
 }
 
 // Valkey returns the URL of the package's shared Valkey.
 func Valkey(tb testing.TB) string {
 	tb.Helper()
-	return use(tb, &valkey, "valkey", func(ctx context.Context) (string, func(context.Context) error, error) {
+	return use(tb, &valkey, "valkey", func(ctx context.Context) (string, testcontainers.Container, error) {
 		// Log + listening port, not the module's exec-based default: exec
 		// stalls on rootless podman under concurrent starts, and the log line
 		// alone can precede the host-side port mapping by a moment.
@@ -105,20 +106,20 @@ func Valkey(tb testing.TB) string {
 			return "", nil, err
 		}
 		url, err := c.ConnectionString(ctx)
-		return url, terminator(c), err
+		return url, c, err
 	})
 }
 
 // Kafka returns the broker seed list of the package's shared Kafka (KRaft).
 func Kafka(tb testing.TB) []string {
 	tb.Helper()
-	return use(tb, &kafka, "kafka", func(ctx context.Context) ([]string, func(context.Context) error, error) {
+	return use(tb, &kafka, "kafka", func(ctx context.Context) ([]string, testcontainers.Container, error) {
 		c, err := tckafka.Run(ctx, KafkaImage)
 		if err != nil {
 			return nil, nil, err
 		}
 		brokers, err := c.Brokers(ctx)
-		return brokers, terminator(c), err
+		return brokers, c, err
 	})
 }
 
@@ -126,7 +127,7 @@ func Kafka(tb testing.TB) []string {
 // load can stall an inspect call during a concurrent start) and applies the
 // skip/fail policy for every caller.
 func use[V any](tb testing.TB, s *shared[V], name string,
-	start func(context.Context) (V, func(context.Context) error, error),
+	start func(context.Context) (V, testcontainers.Container, error),
 ) V {
 	tb.Helper()
 	if testing.Short() {
@@ -135,8 +136,9 @@ func use[V any](tb testing.TB, s *shared[V], name string,
 	s.once.Do(func() {
 		ctx := context.Background()
 		for attempt := 1; attempt <= 3; attempt++ {
-			s.value, s.terminate, s.err = start(ctx)
+			s.value, s.container, s.err = start(ctx)
 			if s.err == nil {
+				s.terminate = terminator(s.container)
 				return
 			}
 			tb.Logf("%s: start attempt %d/3 failed: %v", name, attempt, s.err)

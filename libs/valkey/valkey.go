@@ -20,9 +20,10 @@ import (
 // the calling context) via valkeyotel, and [Cache.Get] counts hits, misses and
 // errors — register [Cache.Collectors] to export them.
 type Cache struct {
-	client valkeygo.Client
-	log    *slog.Logger
-	lookup *prometheus.CounterVec
+	client    valkeygo.Client
+	log       *slog.Logger
+	lookup    *prometheus.CounterVec
+	opTimeout time.Duration
 }
 
 // New builds a client from cfg, verifies connectivity with a single PING (so a
@@ -50,8 +51,16 @@ func New(cfg Config, log *slog.Logger) (*Cache, error) {
 		return nil, fmt.Errorf("valkey: initial ping: %w", err)
 	}
 
-	log.Info("valkey cache ready", "addr", cfg.Addr, "db", cfg.DB)
-	return &Cache{client: client, log: log, lookup: newLookupCounter()}, nil
+	if cfg.OpTimeout <= 0 {
+		cfg.OpTimeout = 500 * time.Millisecond
+	}
+	log.Info("valkey cache ready", "addr", cfg.Addr, "db", cfg.DB, "op_timeout", cfg.OpTimeout.String())
+	return &Cache{client: client, log: log, lookup: newLookupCounter(), opTimeout: cfg.OpTimeout}, nil
+}
+
+// bound applies the per-command deadline on top of the caller's context.
+func (c *Cache) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, c.opTimeout)
 }
 
 func newLookupCounter() *prometheus.CounterVec {
@@ -79,6 +88,8 @@ func (c *Cache) Client() valkeygo.Client { return c.client }
 // Get returns the value at key. The boolean is false on a cache miss (a missing
 // key is not an error); a non-nil error means the lookup itself failed.
 func (c *Cache) Get(ctx context.Context, key string) (string, bool, error) {
+	ctx, cancel := c.bound(ctx)
+	defer cancel()
 	v, err := c.client.Do(ctx, c.client.B().Get().Key(key).Build()).ToString()
 	if valkeygo.IsValkeyNil(err) {
 		c.lookup.WithLabelValues("miss").Inc()
@@ -101,6 +112,8 @@ func (c *Cache) Set(ctx context.Context, key, value string, ttl time.Duration) e
 	} else {
 		cmd = c.client.B().Set().Key(key).Value(value).Build()
 	}
+	ctx, cancel := c.bound(ctx)
+	defer cancel()
 	if err := c.client.Do(ctx, cmd).Error(); err != nil {
 		return fmt.Errorf("valkey: set %q: %w", key, err)
 	}
@@ -112,6 +125,8 @@ func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
+	ctx, cancel := c.bound(ctx)
+	defer cancel()
 	if err := c.client.Do(ctx, c.client.B().Del().Key(keys...).Build()).Error(); err != nil {
 		return fmt.Errorf("valkey: del: %w", err)
 	}

@@ -85,8 +85,8 @@ func (h *handlers) create(c *gin.Context) {
 		httpx.AbortProblem(c, httpx.NewProblem(http.StatusBadRequest, "invalid JSON body"))
 		return
 	}
-	if req.Title == "" {
-		httpx.AbortProblem(c, httpx.NewProblem(http.StatusBadRequest, domain.ErrEmptyTitle.Error()))
+	if err := domain.ValidateTitle(req.Title); err != nil {
+		httpx.AbortProblem(c, httpx.NewProblem(http.StatusBadRequest, err.Error()))
 		return
 	}
 

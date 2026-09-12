@@ -47,6 +47,7 @@ jobs:
       OAPICODEGEN_VERSION: ${{ steps.pins.outputs.OAPICODEGEN_VERSION }}
       GOJSONSCHEMA_VERSION: ${{ steps.pins.outputs.GOJSONSCHEMA_VERSION }}
       OASDIFF_VERSION: ${{ steps.pins.outputs.OASDIFF_VERSION }}
+      BENCHSTAT_VERSION: ${{ steps.pins.outputs.BENCHSTAT_VERSION }}
       MODULES: ${{ steps.mods.outputs.MODULES }}
       DATA_MODULES: ${{ steps.mods.outputs.DATA_MODULES }}
     steps:
@@ -115,7 +116,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           if git show "origin/${{ github.base_ref }}:api/openapi3/tasks.openapi.yaml" > /tmp/base.yaml 2>/dev/null; then
-            oasdiff breaking /tmp/base.yaml api/openapi3/tasks.openapi.yaml --fail-on ERR
+            oasdiff breaking /tmp/base.yaml api/openapi3/tasks.openapi.yaml --fail-on ERR --err-ignore api/oasdiff-breaking.ignore
           else
             echo "no base spec on ${{ github.base_ref }} — first version"
           fi
@@ -346,6 +347,49 @@ jobs:
           name: fuzz-crashers
           path: "**/testdata/fuzz/**"
 
+  # Micro-benchmarks — nightly or on demand: the Benchmark* functions run with
+  # enough repetitions for benchstat, master's numbers are kept (cache) and
+  # the comparison is printed on the run page. Informational: a regression
+  # is a finding to act on, not an automatic failure — benchmark noise on
+  # shared runners would make a hard gate flaky.
+  bench:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
+      - run: go install "golang.org/x/perf/cmd/benchstat@v${{ needs.versions.outputs.BENCHSTAT_VERSION }}"
+      - uses: actions/cache/restore@v4
+        with:
+          path: bench-base.txt
+          key: bench-master-${{ github.sha }}
+          restore-keys: bench-master-
+      - name: run and compare
+        run: |
+          scripts/bench.sh bench-head.txt
+          { echo '### Benchmarks (benchstat, master → this run)'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -s bench-base.txt ]; then
+            benchstat bench-base.txt bench-head.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no base yet" | tee -a "$GITHUB_STEP_SUMMARY"; benchstat bench-head.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cp bench-head.txt bench-base.txt
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/master'
+        with:
+          path: bench-base.txt
+          key: bench-master-${{ github.sha }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.sha }}
+          path: bench-head.txt
+          retention-days: 30
+
   # Mutation testing of the pure-logic modules — nightly or on demand, not per
   # PR: it re-runs the suite once per mutant. Thresholds live in each
   # module's .gremlins.yaml; a drop below them fails the job.
@@ -375,8 +419,9 @@ jobs:
           path: gremlins-*.json
           retention-days: 14
 
-  # Dependency-free subset (ping + heartbeat); the GitLab job runs the full
-  # suite with E2E_WITH_DEPS=1 against real Postgres / Valkey / Kafka services.
+  # The full suite — ping, heartbeat, tasks and consumer against real Postgres
+  # / Valkey / Redpanda from docker/deps.yml — the same scope as the GitLab
+  # job, so the two pipelines prove the same thing.
   e2e:
     needs: versions
     runs-on: ubuntu-latest
@@ -384,8 +429,17 @@ jobs:
     env:
       COREPACK_NPM_REGISTRY: ${{ vars.COREPACK_NPM_REGISTRY }}
       npm_config_registry: ${{ vars.NPM_REGISTRY }}
+      DOCKER_HUB: ${{ vars.DOCKER_HUB || 'docker.io' }}
+      E2E_WITH_DEPS: "1"
     steps:
       - uses: actions/checkout@v4
+      - name: deps (Postgres, Valkey, Redpanda)
+        run: |
+          docker compose -f docker/deps.yml up -d
+          for _ in $(seq 1 60); do
+            docker inspect --format '{{.State.Health.Status}}' golang-basics-redpanda 2>/dev/null | grep -q healthy && break
+            sleep 2
+          done
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
@@ -402,7 +456,7 @@ jobs:
           VERSION: ${{ github.sha }}
           COVER: "1"
         run: |
-          for s in ping heartbeat; do scripts/build-service.sh "$s"; done
+          for s in ping heartbeat tasks consumer; do scripts/build-service.sh "$s"; done
       - name: pnpm install
         run: pnpm install --frozen-lockfile
       - name: playwright e2e
@@ -424,6 +478,8 @@ jobs:
           name: allure-results-e2e
           path: allure-results
           retention-days: 7
+      - if: always()
+        run: docker compose -f docker/deps.yml down -v
 
   # Generative API testing: Schemathesis drives the real ping and tasks
   # binaries with requests generated from their OpenAPI documents (positive,

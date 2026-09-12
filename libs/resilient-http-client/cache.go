@@ -75,7 +75,7 @@ func (c *InMemoryCache) Get(_ context.Context, key string) (CachedResponse, bool
 		return CachedResponse{}, false
 	}
 	ent := el.Value.(*cacheEntry)
-	if time.Now().After(ent.expiresAt) {
+	if cacheNow().After(ent.expiresAt) {
 		c.removeElement(el)
 		return CachedResponse{}, false
 	}
@@ -90,7 +90,7 @@ func (c *InMemoryCache) Set(_ context.Context, key string, resp CachedResponse, 
 		ttl = c.defaultTTL
 	}
 	stored := CachedResponse{Status: resp.Status, Body: append([]byte(nil), resp.Body...)}
-	exp := time.Now().Add(ttl)
+	exp := cacheNow().Add(ttl)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -124,3 +124,6 @@ func (c *InMemoryCache) removeElement(el *list.Element) {
 	c.ll.Remove(el)
 	delete(c.items, el.Value.(*cacheEntry).key)
 }
+
+// cacheNow is the cache's clock; tests pin it to drive expiry without sleeping.
+var cacheNow = time.Now

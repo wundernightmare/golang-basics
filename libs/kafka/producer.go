@@ -74,6 +74,12 @@ func (p *Producer) Publish(ctx context.Context, topic string, key, value []byte)
 	}
 	// Context on the record is what the kotel hook reads to parent the
 	// produce span and inject the trace headers.
+	timeout := p.cfg.PublishTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	rec := &kgo.Record{Topic: topic, Key: key, Value: value, Context: ctx}
 	start := time.Now()
 	err := p.cl.ProduceSync(ctx, rec).FirstErr()
@@ -93,7 +99,7 @@ func (p *Producer) ReadyCheck() func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
-		if err := p.cl.Ping(ctx); err != nil {
+		if err := pingBounded(ctx, p.cl); err != nil {
 			return fmt.Errorf("kafka brokers unreachable: %w", err)
 		}
 		return nil
@@ -102,3 +108,18 @@ func (p *Producer) ReadyCheck() func(ctx context.Context) error {
 
 // Close flushes any buffered records and shuts the client down.
 func (p *Producer) Close() { p.cl.Close() }
+
+// pingBounded is Ping that returns when ctx does: franz-go's Ping keeps
+// waiting for a broker that accepted the connection but stopped answering
+// (a frozen process) until its own request timeout, well past a readiness
+// deadline. The in-flight request is left to finish in the background.
+func pingBounded(ctx context.Context, cl *kgo.Client) error {
+	done := make(chan error, 1)
+	go func() { done <- cl.Ping(ctx) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}

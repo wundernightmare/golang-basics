@@ -1,0 +1,14 @@
+# Waivers for `oasdiff breaking` (just contracts-check / the contracts CI job).
+#
+# One waived change per line. oasdiff ignores a breaking change when a line
+# here contains both its endpoint ("POST /tasks") and its description, matched
+# case-insensitively as substrings; any other line is inert, so '#' lines
+# serve as comments.
+# Every waiver states why the change is safe and when to remove the line —
+# the same rule as the CVE waivers in .grype.yaml / osv-scanner.toml.
+#
+# Remove once master carries the pattern (the diff against the base then
+# disappears and the line is dead). Safe because the store never accepted a NUL
+# title: before the pattern such requests failed with 500, so no client relied
+# on them — the pattern documents behaviour, it does not narrow it.
+POST /tasks added the pattern `^[^\u0000]+$` to the request property `title`

@@ -155,7 +155,7 @@ func TestAdaptive_OnSuccessAdmitsOnlyWithHeadroom(t *testing.T) {
 			_ = l.Acquire(context.Background())
 			close(admitted)
 		}()
-		time.Sleep(10 * time.Millisecond) // let the waiter queue
+		waitQueued(t, l, 1)
 
 		l.OnFailure() // limit 1, in-flight 2 (surplus)
 		l.OnSuccess() // limit 2 == in-flight 2: no headroom
@@ -187,7 +187,7 @@ func TestAdaptive_CancelRemovesTheRightWaiter(t *testing.T) {
 			_ = l.Acquire(context.Background())
 			close(first)
 		}()
-		time.Sleep(10 * time.Millisecond) // first is queued ahead
+		waitQueued(t, l, 1) // first is queued ahead
 
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		defer cancel()
@@ -235,7 +235,7 @@ func TestAdaptive_WaiterAdmittedBySuccessCountsAsInFlight(t *testing.T) {
 			_ = l.Acquire(context.Background())
 			close(admitted)
 		}()
-		time.Sleep(10 * time.Millisecond)
+		waitQueued(t, l, 1)
 		l.OnSuccess() // limit 2 → the waiter is admitted; in-flight must now be 2
 		select {
 		case <-admitted:
@@ -247,4 +247,15 @@ func TestAdaptive_WaiterAdmittedBySuccessCountsAsInFlight(t *testing.T) {
 		defer cancel()
 		assert.ErrorIs(t, l.Acquire(ctx), context.DeadlineExceeded, "limit 2 with 2 in flight must block")
 	}, "resilient-http-client", "unit")
+}
+
+// waitQueued blocks until n callers are queued on the limiter — observing
+// the state instead of sleeping and hoping the goroutine got there.
+func waitQueued(t testing.TB, l *AdaptiveLimiter, n int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return len(l.waiters) == n
+	}, 2*time.Second, time.Millisecond)
 }

@@ -46,3 +46,4 @@ emit OAPICODEGEN_VERSION go:github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-cod
 emit GOJSONSCHEMA_VERSION go:github.com/atombender/go-jsonschema
 emit OASDIFF_VERSION     go:github.com/oasdiff/oasdiff
 emit SCHEMATHESIS_VERSION SCHEMATHESIS_VERSION
+emit BENCHSTAT_VERSION   go:golang.org/x/perf/cmd/benchstat

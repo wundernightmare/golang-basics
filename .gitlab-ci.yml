@@ -231,7 +231,7 @@ contracts-go:
       if [ "$CI_PIPELINE_SOURCE" = "merge_request_event" ]; then
         git fetch --depth=1 origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
         if git show "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME:api/openapi3/tasks.openapi.yaml" > /tmp/base.yaml 2>/dev/null; then
-          oasdiff breaking /tmp/base.yaml api/openapi3/tasks.openapi.yaml --fail-on ERR
+          oasdiff breaking /tmp/base.yaml api/openapi3/tasks.openapi.yaml --fail-on ERR --err-ignore api/oasdiff-breaking.ignore
         else
           echo "no base spec on the target branch — first version"
         fi
@@ -478,6 +478,35 @@ fuzz:
     when: on_failure
     expire_in: 2 weeks
     paths: ["**/testdata/fuzz/"]
+
+# Micro-benchmarks — nightly: benchstat against the default branch's last run
+# (its artifact), printed, informational.
+bench:
+  extends: .go
+  stage: report
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+      allow_failure: true
+  needs:
+    - job: versions
+      artifacts: true
+    - job: prepare
+      artifacts: true
+    - project: $CI_PROJECT_PATH
+      ref: $CI_DEFAULT_BRANCH
+      job: bench
+      artifacts: true
+      optional: true
+  script:
+    - GOBIN="$CI_PROJECT_DIR/bin" go install "golang.org/x/perf/cmd/benchstat@v${BENCHSTAT_VERSION}"
+    - '[ -s bench-head.txt ] && mv bench-head.txt bench-base.txt || true'
+    - scripts/bench.sh bench-head.txt
+    - '[ -s bench-base.txt ] && benchstat bench-base.txt bench-head.txt || benchstat bench-head.txt'
+  artifacts:
+    expire_in: 4 weeks
+    paths: [bench-head.txt]
 
 # Mutation testing of the pure-logic modules — on the nightly schedule or by
 # hand, never per MR (one suite run per mutant). Thresholds: <module>/.gremlins.yaml.

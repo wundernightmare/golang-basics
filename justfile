@@ -73,6 +73,14 @@ stress:
 fuzz FUZZTIME="20s":
     FUZZTIME={{FUZZTIME}} scripts/fuzz.sh
 
+# Micro-benchmarks of every module (Benchmark* functions, benchstat-ready) into OUT;
+# `just bench-compare base.txt head.txt` prints the benchstat diff
+bench OUT="bench.txt":
+    scripts/bench.sh {{OUT}}
+
+bench-compare BASE HEAD:
+    mise exec -- benchstat {{BASE}} {{HEAD}}
+
 # Run every module's tests with the race detector
 test-race:
     #!/usr/bin/env bash
@@ -436,7 +444,7 @@ contracts-check BASE="origin/master":
     base="$(mktemp)"; trap 'rm -f "$base"' EXIT
     for spec in api/openapi3/*.openapi.yaml; do
       if git show "{{BASE}}:$spec" > "$base" 2>/dev/null; then
-        mise exec -- oasdiff breaking "$base" "$spec" --fail-on ERR
+        mise exec -- oasdiff breaking "$base" "$spec" --fail-on ERR --err-ignore api/oasdiff-breaking.ignore
       else
         echo "contracts: no base for $spec at {{BASE}} (first version) — skipping breaking-change check"
       fi

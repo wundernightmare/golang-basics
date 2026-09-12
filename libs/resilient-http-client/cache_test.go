@@ -45,9 +45,10 @@ func TestInMemoryCache_StoresIndependentCopy(t *testing.T) {
 
 func TestInMemoryCache_Expiry(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
+		advance := pinCacheClock(t)
 		c := NewInMemoryCache(100, time.Minute)
 		c.Set(context.Background(), "k", CachedResponse{Status: 200, Body: []byte("x")}, 10*time.Millisecond)
-		time.Sleep(25 * time.Millisecond)
+		advance(25 * time.Millisecond)
 		_, ok := c.Get(context.Background(), "k")
 		assert.False(t, ok, "expired entry should be a miss")
 	}, "resilient-http-client", "unit")
@@ -75,12 +76,24 @@ func TestInMemoryCache_LRUEviction(t *testing.T) {
 
 func TestInMemoryCache_DefaultTTLWhenNonPositive(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
+		advance := pinCacheClock(t)
 		c := NewInMemoryCache(10, 20*time.Millisecond)
 		c.Set(context.Background(), "k", CachedResponse{Status: 200, Body: []byte("x")}, 0)
 		_, ok := c.Get(context.Background(), "k")
 		assert.True(t, ok)
-		time.Sleep(40 * time.Millisecond)
+		advance(40 * time.Millisecond)
 		_, ok = c.Get(context.Background(), "k")
 		assert.False(t, ok, "should expire per the default TTL")
 	}, "resilient-http-client", "unit")
+}
+
+// pinCacheClock freezes the cache's clock at now and returns a func that
+// advances it — expiry is driven by time, not by sleeping through it.
+func pinCacheClock(t testing.TB) func(time.Duration) {
+	t.Helper()
+	now := time.Now()
+	prev := cacheNow
+	cacheNow = func() time.Time { return now }
+	t.Cleanup(func() { cacheNow = prev })
+	return func(d time.Duration) { now = now.Add(d) }
 }

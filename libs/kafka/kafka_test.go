@@ -43,7 +43,11 @@ func TestLoadConfigDefaults(t *testing.T) {
 
 type Suite struct{ testo.Suite[testx.T] }
 
-func TestKafka(t *testing.T) { testo.RunSuite(t, new(Suite), testx.Options("kafka", "integration")...) }
+func TestKafka(t *testing.T) {
+	testo.RunSuite(t, new(Suite), testx.Options("kafka", "integration", testx.Meta{
+		Epic: "golang-basics", Feature: "kafka client", Owner: "@team-platform", // sample TestOps values
+	})...)
+}
 
 func producer(t testx.T, topic string) *kafka.Producer {
 	t.Helper()
@@ -70,6 +74,7 @@ func consumer(t testx.T, topic string, lag time.Duration) *kafka.Consumer {
 // from producer to consumer, and the counters + lag describing exactly what
 // happened. Real broker, real SDK, in-memory exporter.
 func (Suite) TestProduceConsume(t testx.T) {
+	testx.Case(t, "GB-301", "produce and consume") // sample TestOps id — replace with your project\'s
 	t.Title("records round-trip the broker with their trace and are accounted for")
 	t.Severity(allure.SeverityCritical)
 
@@ -177,6 +182,7 @@ func (Suite) TestProduceConsume(t testx.T) {
 }
 
 func (Suite) TestConsumerStopsOnContextCancel(t testx.T) {
+	testx.Case(t, "GB-302", "graceful shutdown") // sample TestOps id — replace with your project\'s
 	t.Title("a cancelled context is a clean shutdown, not an error")
 	cons := consumer(t, testx.Unique("tasks.events.idle"), 0)
 

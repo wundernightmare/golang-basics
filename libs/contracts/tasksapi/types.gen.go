@@ -9,7 +9,9 @@ import (
 
 // CreateTaskRequest Body of POST /tasks.
 type CreateTaskRequest struct {
-	// Title Title of the task; an empty title is rejected with a 400 problem.
+	// Title Title of the task. Empty, or containing NUL, is rejected with a 400
+	// problem — the pattern states what the store can hold, so a generated
+	// schema-compliant request is always accepted (found by Schemathesis).
 	Title string `json:"title"`
 }
 
@@ -45,7 +47,7 @@ type Task struct {
 	// Id Server-assigned identifier (UUID).
 	Id string `json:"id"`
 
-	// Title Human-readable title; never empty.
+	// Title Human-readable title; never empty, never containing NUL (PostgreSQL TEXT rejects it).
 	Title string `json:"title"`
 }
 
