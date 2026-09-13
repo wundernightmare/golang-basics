@@ -159,7 +159,7 @@ func TestAdminToken_GuardsMutationsOnly(t *testing.T) {
 		srv, buf := adminServer(t, httpx.Config{AdminToken: "s3cret"})
 
 		// Reads and probes stay open.
-		for _, path := range []string{"/admin/log-level", "/admin/config", "/healthz", "/version", "/metrics"} {
+		for _, path := range []string{"/admin/log-level", "/admin/config", "/healthz", "/livez", "/version", "/metrics"} {
 			rec := httptest.NewRecorder()
 			srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 			assert.Equal(t, http.StatusOK, rec.Code, path)

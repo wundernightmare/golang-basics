@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { meta, testCase } from "../fixtures/meta";
 import { HEARTBEAT_ADMIN_URL } from "../helpers/env";
 
 /** Pull the heartbeat_beats_total counter value out of the Prometheus text. */
@@ -12,7 +13,10 @@ async function readBeats(request: import("@playwright/test").APIRequestContext):
 }
 
 test.describe("heartbeat worker", () => {
+  meta({ feature: "heartbeat worker" });
+
   test("emits beats that increase over time", async ({ request }) => {
+    await testCase("GB-521", "the worker ticks and counts");
     const first = await readBeats(request);
     // The worker ticks every 200ms in the e2e env; wait for a few ticks.
     await new Promise((r) => setTimeout(r, 700));

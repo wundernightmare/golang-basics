@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { meta, testCase } from "../fixtures/meta";
 import { CONSUMER_ADMIN_URL, TASKS_URL, WITH_DEPS } from "../helpers/env";
 
 // Owned by this layer: the cross-process flow — a task created through the
@@ -8,9 +9,11 @@ import { CONSUMER_ADMIN_URL, TASKS_URL, WITH_DEPS } from "../helpers/env";
 // its checks are the Go suite in services/tasks/internal/integration.
 // Only runs when E2E_WITH_DEPS=1 — see fixtures/services.ts and `just e2e-deps`.
 test.describe("tasks service", () => {
+  meta({ feature: "tasks pipeline" });
   test.skip(!WITH_DEPS, "needs Postgres + Valkey + Kafka (run `just e2e-deps`)");
 
   test("the consumer drains the task.created event", async ({ request }) => {
+    await testCase("GB-531", "tasks → Kafka → consumer across real processes", "critical");
     const before = await consumedTotal(request);
 
     const created = await request.post(`${TASKS_URL}/tasks`, {

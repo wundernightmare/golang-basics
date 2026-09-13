@@ -24,7 +24,10 @@ import { PING_URL } from "./helpers/env";
  * contracts are unit / integration tests in Go — see README "Tests".
  *
  * Results go to Allure (allure-playwright) next to the Go suites' results:
- * ALLURE_RESULTS_DIR redirects them, as it does for the Go packages.
+ * ALLURE_RESULTS_DIR redirects them, as it does for the Go packages. The
+ * specs carry the same TestOps identity as the Go suites (fixtures/meta.ts:
+ * epic / feature / owner per describe, id + story + TMS link per test), and
+ * `links` below turns the bare ids into links like testx.LinkTransformer.
  */
 export default defineConfig({
   testDir: "./tests",
@@ -42,6 +45,12 @@ export default defineConfig({
         detail: false,
         suiteTitle: false,
         environmentInfo: { layer: "e2e", runner: "playwright" },
+        // Sample hosts, the same placeholders as libs/testx/meta.go — point
+        // them at your TestOps project and issue tracker.
+        links: {
+          tms: { urlTemplate: "https://testops.example.internal/project/1/test-cases/%s" },
+          issue: { urlTemplate: "https://issues.example.internal/browse/%s" },
+        },
       },
     ],
   ],

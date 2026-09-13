@@ -22,6 +22,10 @@ check:
 test *args:
     go test ./... {{args}}
 
+# Unit tests only (-short): the container-backed suites skip themselves — what `just each test-short` runs
+test-short:
+    go test -short ./...
+
 # Run tests with the race detector and verbose output
 test-verbose:
     go test -race -v ./...

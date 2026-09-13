@@ -110,10 +110,21 @@ cov-layer LAYER:
 # Merge every collected layer into coverage-merged.out and gate it with
 # .testcoverage.yml — the number that counts is the union of unit +
 # integration + e2e, not any single layer.
+#
+# Gates whatever is under .cover/ right now: a missing layer gates a partial
+# (lower) number and a stale one can pass what the tree no longer earns.
+# `just cov-all` (wipe .cover, collect all three, then this) is the only safe
+# entry point; alone, this is for re-gating a cov-all that just ran.
 cov-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for l in unit integration e2e; do
+      if [ -d ".cover/$l" ] && [ -n "$(ls -A ".cover/$l")" ]; then echo "cov-check: layer $l found (.cover/$l)"
+      else echo "cov-check: layer $l MISSING (.cover/$l) — the gate runs on a partial merge; use just cov-all"; fi
+    done
     scripts/cover.sh merge
     mise exec -- go-test-coverage --config .testcoverage.yml
-    @echo "Allure: results from every layer are in */allure-results — just allure-report"
+    echo "Allure: results from every layer are in */allure-results — just allure-report"
 
 # Everything: all three layers (integration needs Docker, e2e builds cover-
 # instrumented binaries and runs Playwright), then the merged gate.
@@ -130,14 +141,19 @@ cov-all:
 mutate MODULE="libs/resilient-http-client":
     cd {{MODULE}} && GOFLAGS=-count=1 mise exec -- gremlins unleash --output "$OLDPWD/gremlins-$(basename {{MODULE}}).json"
 
-# Render the Allure HTML report from every module's allure-results/ (needs a JRE, pinned in mise.toml)
+# Render the Allure HTML report from every module's allure-results/ (needs a JRE,
+# pinned in mise.toml). The results are merged into one directory first so the
+# categories.json / executor.json that scripts/allure-meta.sh drops next to
+# them apply to the whole report, the way the CI allure-report jobs do it.
 allure-report:
     #!/usr/bin/env bash
     set -euo pipefail
-    dirs=$(find . -type d -name allure-results -not -path '*/node_modules/*' | tr '\n' ' ')
+    dirs=$(find . -type d -name allure-results -not -path '*/node_modules/*' -not -path './.cache/*')
     [ -n "$dirs" ] || { echo "no allure-results/ found — run the tests first (just test)"; exit 1; }
-    # shellcheck disable=SC2086
-    mise exec -- pnpm exec allure generate --clean --single-file -o allure-report $dirs
+    merged="$(mktemp -d)"; trap 'rm -rf "$merged"' EXIT
+    for d in $dirs; do cp -r "$d/." "$merged/"; done
+    scripts/allure-meta.sh "$merged"
+    mise exec -- pnpm exec allure generate --clean --single-file -o allure-report "$merged"
     echo "report: allure-report/index.html"
 
 # ── Lint & format ─────────────────────────────────────────────────────────────

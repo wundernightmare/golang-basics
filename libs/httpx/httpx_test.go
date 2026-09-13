@@ -57,12 +57,15 @@ func TestLoadConfig_PrefixAndOverride(t *testing.T) {
 func TestHealthz_AlwaysOK(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
 		srv := newTestServer(t)
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
-		srv.Admin().ServeHTTP(rec, req)
+		// /livez is the same handler under the Kubernetes-style name.
+		for _, path := range []string{"/healthz", "/livez"} {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			srv.Admin().ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.JSONEq(t, `{"status":"ok"}`, rec.Body.String())
+			assert.Equal(t, http.StatusOK, rec.Code, path)
+			assert.JSONEq(t, `{"status":"ok"}`, rec.Body.String(), path)
+		}
 	}, "httpx", "unit")
 }
 
@@ -137,7 +140,7 @@ func TestMetricsEndpoint_RecordsRequests(t *testing.T) {
 func TestMetrics_OpsEndpointsAreNotCountedAsRequests(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
 		srv := newTestServer(t)
-		for _, path := range []string{"/healthz", "/readyz", "/version", "/metrics"} {
+		for _, path := range []string{"/healthz", "/livez", "/readyz", "/version", "/metrics"} {
 			srv.Admin().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
 		}
 		rec := httptest.NewRecorder()

@@ -1,18 +1,23 @@
 import { expect, test } from "@playwright/test";
 
+import { meta, testCase } from "../fixtures/meta";
 import { PING_URL } from "../helpers/env";
 
 // Owned by this layer: the real ping binary serves its API on its API port
 // and reports the version stamped into it at build time. Echo, 404 handling
 // and the route contract are services/ping/internal/api unit tests.
 test.describe("ping service", () => {
+  meta({ feature: "ping API" });
+
   test("GET /ping answers through the real process @smoke", async ({ request }) => {
+    await testCase("GB-511", "the real binary serves its API", "critical");
     const res = await request.get(`${PING_URL}/ping`);
     expect(res.status()).toBe(200);
     expect(await res.json()).toMatchObject({ message: "pong" });
   });
 
   test("GET /version carries the build stamp", async ({ request }) => {
+    await testCase("GB-512", "build identity is stamped at build time");
     const res = await request.get(`${PING_URL}/version`);
     expect(res.status()).toBe(200);
     const body = await res.json();

@@ -106,7 +106,7 @@ func (Suite) TestAdminEndpoints(t testx.T) {
 
 	srv := newServer(t)
 	srv.Health.SetReady(true)
-	for _, path := range []string{"/healthz", "/readyz", "/metrics", "/version", "/debug/pprof/"} {
+	for _, path := range []string{"/healthz", "/livez", "/readyz", "/metrics", "/version", "/debug/pprof/"} {
 		allure.Step(t, "GET "+path, func(t testx.T) {
 			rec := httptest.NewRecorder()
 			srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))

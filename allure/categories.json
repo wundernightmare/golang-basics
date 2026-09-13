@@ -1,0 +1,21 @@
+[
+  {
+    "name": "Flaky (ticketed)",
+    "flaky": true,
+    "matchedStatuses": ["failed", "broken"]
+  },
+  {
+    "name": "Infrastructure",
+    "matchedStatuses": ["broken"],
+    "messageRegex": "(?is).*(docker|podman|testcontainers|ryuk|connection refused|ECONNREFUSED|ETIMEDOUT|i/o timeout|deadline exceeded|timed out|timeout).*"
+  },
+  {
+    "name": "Product defects",
+    "matchedStatuses": ["failed", "broken"],
+    "messageRegex": "(?is).*(assert|expect|error trace|not equal|should|received|unexpected).*"
+  },
+  {
+    "name": "Skipped",
+    "matchedStatuses": ["skipped"]
+  }
+]

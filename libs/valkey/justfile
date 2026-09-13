@@ -1,4 +1,4 @@
-# httpx justfile
+# valkey justfile
 # Install: cargo install just | brew install just | mise use just
 # Usage:   just <recipe>      | just --list
 
@@ -18,7 +18,7 @@ check:
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-# Run all tests (no live services required)
+# Run all tests (the container-backed suite needs Docker; see README "Tests")
 test *args:
     go test ./... {{args}}
 

@@ -12,6 +12,7 @@ import (
 // newAdminMux builds the operational surface served on Config.AdminAddr:
 //
 //	GET    /healthz           liveness
+//	GET    /livez             liveness (alias of /healthz; Kubernetes-style name, the Node sibling serves both)
 //	GET    /readyz            readiness (gate + registered checks)
 //	GET    /metrics           Prometheus exposition
 //	GET    /version           build identity + start time / uptime (see [Build])
@@ -33,6 +34,7 @@ import (
 func newAdminMux(s *Server) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.Health.LiveHandler())
+	mux.HandleFunc("GET /livez", s.Health.LiveHandler())
 	mux.HandleFunc("GET /readyz", s.Health.ReadyHandler())
 	mux.Handle("GET /metrics", s.Metrics.Handler())
 	mux.HandleFunc("GET /version", s.versionHandler)

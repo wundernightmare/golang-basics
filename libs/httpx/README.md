@@ -9,13 +9,13 @@ It packages the boilerplate every service otherwise re-writes:
 | Concern            | What you get                                                                 |
 | ------------------ | ---------------------------------------------------------------------------- |
 | HTTP engine        | A configured [`gin`](https://github.com/gin-gonic/gin) engine via `NewServer` for the API listener |
-| Admin listener     | A second, plain `net/http` listener with `/healthz`, `/readyz`, `/metrics`, `/version`, `/admin/config`, `/admin/log-level`, `/debug/pprof` — never on the API port |
+| Admin listener     | A second, plain `net/http` listener with `/healthz` (`/livez`), `/readyz`, `/metrics`, `/version`, `/admin/config`, `/admin/log-level`, `/debug/pprof` — never on the API port |
 | Request id         | `X-Request-Id` honoured or generated, echoed on the response, in every log line of the request (`request_id`) and in every `problem+json` body |
 | Request logging    | One structured line per API request (`route`, `status`, `latency_ms`, `bytes`): info, 4xx → warn, 5xx → error, slower than `HTTP_SLOW_REQUEST` → warn |
 | Logging setup      | `NewLogger(LogConfig)` — JSON/text to stdout, `trace_id`/`span_id`/`request_id` from the context, zap-style sampling of debug/info |
 | Runtime debugging  | Log level switchable at runtime with an auto-revert TTL (`PUT /admin/log-level`); debug logging for one request via `X-Debug-Token`; the effective config, secrets redacted, on `/admin/config` |
 | Metrics            | `build_info`, `http_requests_total{method,path,status}`, `http_request_duration_seconds{method,path}` (classic + native histogram), `http_requests_in_flight`, `log_dropped_total{level}` on a private registry; register the data libs' `Collectors()` on it |
-| Health             | `/healthz` (liveness) and `/readyz` (gate + pluggable checks)                |
+| Health             | `/healthz` (liveness, alias `/livez`) and `/readyz` (gate + pluggable checks) |
 | Build identity     | `httpx.Version` (set via `-ldflags -X`), `httpx.Build(service)`               |
 | Config             | `LoadConfig(prefix)` — env-driven, fully defaulted; `LoadYAML` for a config-file overlay |
 | Graceful shutdown  | `Server.Run(ctx)` drains the API within `ShutdownTimeout` while probes keep answering; `SignalContext()` for SIGINT/SIGTERM |
@@ -58,6 +58,7 @@ carries the trace it belongs to.
 | Route                      | Purpose                                                  |
 | -------------------------- | -------------------------------------------------------- |
 | `GET /healthz`             | Liveness — `200 {"status":"ok"}` while the process runs  |
+| `GET /livez`               | Alias of `/healthz` (the Kubernetes-style name; the Node sibling serves both) |
 | `GET /readyz`              | Readiness — `200` only when the gate is open and every registered check passes, else `503` with a per-check breakdown |
 | `GET /metrics`             | Prometheus exposition for this server's private registry (OpenMetrics negotiated) |
 | `GET /version`             | `BuildInfo` JSON (service, version, revision, build time, Go version) plus `started_at` and `uptime_seconds` |

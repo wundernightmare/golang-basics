@@ -29,7 +29,11 @@ trustPolicy: no-downgrade
 # (both 2026-09-09) and the transitive @inquirer / @scalar packages TypeSpec
 # pulled in are younger than 7 days, and the frozen install rejects a lockfile
 # that violates the policy. Remove after 2026-09-17 (`pnpm install
-# --frozen-lockfile` then passes without it).
+# --frozen-lockfile` then passes without it). Re-checked 2026-09-13 against
+# the registry (`pnpm view <pkg>@<version> time`): the newest pinned release
+# in the four groups is @typespec/openapi@1.16.0 (2026-09-09T19:41Z), so the
+# 7-day window closes 2026-09-16T19:41Z and the date above stands — no
+# extension needed.
 minimumReleaseAgeExclude:
   - "@typespec/*"
   - "@inquirer/*"

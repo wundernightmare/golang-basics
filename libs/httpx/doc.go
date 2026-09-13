@@ -6,7 +6,7 @@
 //
 //   - a configured [gin.Engine] for the API with request ids, sampled,
 //     trace-correlated request logging and panic recovery (see [Server]);
-//   - a separate admin listener with /healthz, /readyz, /metrics, /version,
+//   - a separate admin listener with /healthz, /livez, /readyz, /metrics, /version,
 //     /admin/config, /admin/log-level and /debug/pprof, kept off the API port
 //     so an ingress never exposes them; the mutations take a bearer token;
 //   - runtime debugging without a redeploy: the log level switchable for a

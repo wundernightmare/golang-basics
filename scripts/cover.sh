@@ -57,6 +57,10 @@ case "${1:?usage: cover.sh unit|integration|e2e|merge}" in
         go tool covdata textfmt -i="$cover/$l" -o "$cover/$l.out"
         printf '%-12s %s\n' "$l" "$(gotestcov --profile "$cover/$l.out" --threshold-total 0 2>/dev/null | sed -n 's/^Total test coverage: //p')"
         inputs="${inputs:+$inputs,}$cover/$l"
+      else
+        # Not fatal: a layer that did not run (e.g. the e2e artifact is absent
+        # in CI) is skipped, and the merged number is that much lower.
+        echo "cover.sh merge: warning: no data for layer '$l' under $cover/$l — skipping it (the merged total is partial)" >&2
       fi
     done
     [ -n "$inputs" ] || { echo "cover.sh merge: no layer data under $cover" >&2; exit 1; }

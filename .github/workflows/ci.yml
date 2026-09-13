@@ -234,7 +234,11 @@ jobs:
           pattern: cover-integration-*
           path: .cover/integration
           merge-multiple: true
+      # The e2e upload is `if-no-files-found: ignore`, so this artifact can be
+      # absent (no counters flushed); cover.sh merge then warns and skips the
+      # layer instead of the job failing on the download.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
         with:
           name: cover-e2e
           path: .cover/e2e
@@ -277,8 +281,9 @@ jobs:
             coverage-breakdown.json
           retention-days: 7
 
-  # One Allure HTML report from every suite's results (unit + integration).
-  # allure-commandline is a Node package (root package.json) and needs a JRE.
+  # One Allure HTML report from every suite's results (unit + integration +
+  # e2e + schemathesis). allure-commandline is a Node package (root
+  # package.json) and needs a JRE.
   allure-report:
     needs: [versions, lint-test, integration, e2e, schemathesis]
     if: always()
@@ -301,6 +306,10 @@ jobs:
           distribution: temurin
           java-version: "25"
       - run: pnpm install --frozen-lockfile
+      # categories.json + executor.json next to the merged results. The script
+      # reads the runner's default GITHUB_* variables (no github.* context in
+      # run: text) — same as `just allure-report` and the GitLab job.
+      - run: scripts/allure-meta.sh allure-results
       - run: pnpm exec allure generate --clean --single-file -o allure-report allure-results
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
