@@ -76,8 +76,9 @@ variables:
   GOMODCACHE: $CI_PROJECT_DIR/.cache/go-mod
   GOCACHE: $CI_PROJECT_DIR/.cache/go-build
   MODULES: >-
-    libs/httpx libs/resilient-http-client libs/pgx libs/valkey libs/kafka
-    libs/otelx services/ping services/heartbeat services/tasks services/consumer
+    libs/contracts libs/httpx libs/testx libs/resilient-http-client libs/pgx
+    libs/valkey libs/kafka libs/otelx services/ping services/heartbeat
+    services/tasks services/consumer
 
 # ── Reusable fragments ────────────────────────────────────────────────────────
 
@@ -243,7 +244,9 @@ vet:
   parallel:
     matrix:
       - MODULE:
+          - libs/contracts
           - libs/httpx
+          - libs/testx
           - libs/resilient-http-client
           - libs/pgx
           - libs/valkey
@@ -272,7 +275,9 @@ lint:
   parallel:
     matrix:
       - MODULE:
+          - libs/contracts
           - libs/httpx
+          - libs/testx
           - libs/resilient-http-client
           - libs/pgx
           - libs/valkey
@@ -298,7 +303,9 @@ unit:
   parallel:
     matrix:
       - MODULE:
+          - libs/contracts
           - libs/httpx
+          - libs/testx
           - libs/resilient-http-client
           - libs/pgx
           - libs/valkey
@@ -409,7 +416,8 @@ coverage:
     expire_in: 4 weeks # long enough to always have a base for MRs
     paths: [coverage-merged.out, coverage-breakdown.json]
 
-# One Allure HTML report from every suite's results (unit + integration).
+# One Allure HTML report from every suite's results (unit + integration + e2e
+# + schemathesis; the latter two optional, their jobs may be skipped).
 # allure-commandline is a Node package (root package.json → npm mirror) that
 # needs a JRE, and no pinned image ships both. The JRE image is the base and
 # Node comes as a tarball from NODE_DIST_URL — a variable with the public
@@ -426,6 +434,12 @@ allure-report:
     - job: integration
       artifacts: true
       optional: true
+    - job: e2e
+      artifacts: true
+      optional: true
+    - job: schemathesis
+      artifacts: true
+      optional: true
   variables:
     NODE_DIST: node-v${NODE_VERSION}-linux-x64
   before_script:
@@ -436,6 +450,8 @@ allure-report:
     - pnpm install --frozen-lockfile
   script:
     - test -d allure-results || { echo "no allure-results"; exit 0; }
+    # categories.json + executor.json from the tracked file and the CI_* variables.
+    - bash scripts/allure-meta.sh allure-results
     - pnpm exec allure generate --clean --single-file -o allure-report allure-results
   artifacts:
     expire_in: 2 weeks
@@ -453,7 +469,9 @@ stress:
   parallel:
     matrix:
       - MODULE:
+          - libs/contracts
           - libs/httpx
+          - libs/testx
           - libs/resilient-http-client
           - libs/otelx
           - services/ping
@@ -545,10 +563,10 @@ build-services:
     paths: [services/*/bin/]
     expire_in: 1 day
 
-# The GitHub e2e job runs the dependency-free subset (ping + heartbeat only);
-# this one runs the full suite with E2E_WITH_DEPS=1, which additionally spawns
-# tasks + consumer against real Postgres / Valkey / Redpanda. The two are
-# deliberately different scopes, not drift.
+# The full suite with E2E_WITH_DEPS=1: ping + heartbeat plus tasks + consumer
+# against real Postgres / Valkey / Redpanda — the same scope as the GitHub e2e
+# job (which brings the deps up from docker/deps.yml), so the two pipelines
+# prove the same thing.
 #
 # The backing services are GitLab `services:` (reachable by alias), not
 # docker compose in dind — so the job runs from the plain node image with no
@@ -726,7 +744,9 @@ govulncheck:
   parallel:
     matrix:
       - MODULE:
+          - libs/contracts
           - libs/httpx
+          - libs/testx
           - libs/resilient-http-client
           - libs/pgx
           - libs/valkey

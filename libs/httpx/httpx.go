@@ -63,7 +63,7 @@ func WithConfig(v any) Option {
 // NewServer constructs a server from cfg and log. The API engine applies, in
 // order: request id → debug token (when Config.DebugToken is set) →
 // [WithMiddleware] extras (tracing) → request logging → panic recovery →
-// metrics. The admin handler serves /healthz, /readyz, /metrics, /version,
+// metrics. The admin handler serves /healthz, /livez, /readyz, /metrics, /version,
 // /admin/config, /admin/log-level and /debug/pprof (see newAdminMux).
 func NewServer(cfg Config, log *slog.Logger, opts ...Option) *Server {
 	gin.SetMode(gin.ReleaseMode)

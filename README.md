@@ -39,7 +39,7 @@ code lives in per-branch worktrees (`master/` is canonical).
 | [`libs/testx`](libs/testx)                 | Test harness | —                            | `_test`-only: Allure handle (testo), one shared container per test binary, span recorder, log buffer, metric helpers. |
 
 The dependency graph is `services/* → libs/*`. Every service — HTTP-first or
-worker — reuses `httpx` for its **admin listener** (`/healthz`, `/readyz`,
+worker — reuses `httpx` for its **admin listener** (`/healthz` and its alias `/livez`, `/readyz`,
 `/metrics`, `/version`, `/admin/config`, `/admin/log-level`, `/debug/pprof`,
 always API port + 1000), so a worker is as observable — and as debuggable at
 runtime — as a server, and the API port never carries operational routes. `ping`/`heartbeat` stay dependency-free;
@@ -445,7 +445,16 @@ raw results (for an Allure server / TestOps) plus a single-file HTML report
 (`allure-report` job; locally `just allure-report`, `allure-commandline` from
 the root `package.json`, JRE pinned in `mise.toml`). Tags name the module and
 the layer (`pgx`, `integration`, `telemetry`, `e2e`), so the report can be
-sliced by either.
+sliced by either. Before `allure generate`, `scripts/allure-meta.sh` drops two
+files next to the merged results: [`allure/categories.json`](allure/categories.json)
+(how a failure is bucketed — ticketed flake, infrastructure, product defect,
+skipped; first match in file order wins) and an `executor.json` naming the run
+(GitHub Actions / GitLab CI from the runner's variables, `local` + `git
+describe` on a laptop), which is what the Executors widget and a TestOps
+launch show. The Playwright specs carry the same TestOps identity as the Go
+suites through [`e2e/fixtures/meta.ts`](e2e/fixtures/meta.ts) (`meta({…})`
+per describe, `testCase(id, story)` per test — `GB-5xx` ids, TMS links from
+the `links` template in `playwright.config.ts`).
 
 ### Coverage: one number, three layers
 
@@ -457,6 +466,13 @@ block, nothing counted twice. `just cov-check` gates the merged profile with
 [`.testcoverage.yml`](.testcoverage.yml); `just cov-all` collects all three
 layers first. Both pipelines do the same: the test jobs upload `.cover/<layer>`,
 the `coverage` job merges and gates and prints the per-layer and merged totals.
+
+`cov-check` gates whatever is under `.cover/` at that moment — it prints which
+layer directories it found, and a missing layer only lowers the number (the
+merge warns and skips it) while a stale one can pass what the tree no longer
+earns. **`just cov-all` is the only safe entry point**: it wipes `.cover/`,
+collects the three layers and then gates. Run `cov-check` alone only to
+re-gate a `cov-all` that just ran.
 
 | Layer | Alone |
 |---|---|

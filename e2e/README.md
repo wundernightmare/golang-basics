@@ -41,6 +41,15 @@ PING_URL=http://localhost:8080 PING_ADMIN_URL=http://localhost:9080 \
   HEARTBEAT_ADMIN_URL=http://localhost:9081 pnpm test
 ```
 
+## TestOps metadata
+
+Every spec carries the same Allure / TestOps identity as the Go suites
+(`libs/testx`): `meta({ feature })` in a `describe` sets epic / feature / owner
+(+ the `layer` label), `await testCase("GB-5xx", story)` first thing in a test
+sets the Allure id, story, severity and a TMS link (`fixtures/meta.ts`; link
+templates in `playwright.config.ts`). The values are placeholders — see
+`libs/testx/meta.go`. One id per test, `GB-5xx` for this layer.
+
 ## Specs
 
 | File                      | Covers                                                                                                           |

@@ -14,7 +14,7 @@ import (
 //
 // Two listeners: the API listener (Addr) carries the service's own routes and
 // nothing else; the admin listener (AdminAddr) carries everything operational
-// — /healthz, /readyz, /metrics, /version, /admin/config, /admin/log-level and
+// — /healthz, /livez, /readyz, /metrics, /version, /admin/config, /admin/log-level and
 // /debug/pprof — so an ingress that only routes to the API port never exposes
 // them. A pure worker sets Addr to "" and gets only the admin listener.
 //
