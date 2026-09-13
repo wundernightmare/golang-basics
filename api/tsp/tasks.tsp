@@ -67,6 +67,11 @@ model Problem {
   instance?: string;
   /** Stable machine-readable code for business errors (e.g. task_not_found). */
   code?: string;
+  /**
+   * The request's correlation id — the same value as the X-Request-Id
+   * response header and the request_id field of the service's log lines.
+   */
+  request_id?: string;
 }
 
 /** A problem response with the given status and content type. */

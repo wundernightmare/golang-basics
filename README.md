@@ -30,7 +30,7 @@ code lives in per-branch worktrees (`master/` is canonical).
 | [`services/consumer`](services/consumer)   | Worker       | `:9083` admin                | Kafka consumer draining `tasks.events`; continues the producer's trace; exports group lag.         |
 | [`api`](api)                               | Contracts    | —                            | TypeSpec source of the tasks HTTP API and the Kafka events; emits OpenAPI 3.0 + JSON Schema (committed). |
 | [`libs/contracts`](libs/contracts)         | Library      | —                            | Generated Go types of those contracts (`tasksapi`, `events`), shared by producer and consumer. Never edited by hand. |
-| [`libs/httpx`](libs/httpx)                 | Library      | —                            | Shared HTTP scaffolding: gin engine, sampled trace-correlated logging, Prometheus metrics, admin listener (health/metrics/version/pprof), graceful shutdown, env + YAML config, RFC 9457 `Problem`. |
+| [`libs/httpx`](libs/httpx)                 | Library      | —                            | Shared HTTP scaffolding: gin engine, request ids, sampled trace-correlated logging, Prometheus metrics, admin listener (health/metrics/version/config/runtime log level/pprof), graceful shutdown, env + YAML config, RFC 9457 `Problem`. |
 | [`libs/resilient-http-client`](libs/resilient-http-client) | Library | —              | Policy-per-target **outbound** HTTP client: rate limiting, circuit breaker, adaptive concurrency, jittered retry, response cache, coalescing, fallbacks, metrics. |
 | [`libs/pgx`](libs/pgx)                     | Library      | —                            | PostgreSQL pool (`jackc/pgx`): env config, readiness check, boot-time migrations.                  |
 | [`libs/valkey`](libs/valkey)               | Library      | —                            | Valkey cache (`valkey-go`): get/set/del, readiness check, generic cache-aside helper.              |
@@ -40,8 +40,9 @@ code lives in per-branch worktrees (`master/` is canonical).
 
 The dependency graph is `services/* → libs/*`. Every service — HTTP-first or
 worker — reuses `httpx` for its **admin listener** (`/healthz`, `/readyz`,
-`/metrics`, `/version`, `/debug/pprof`, always API port + 1000), so a worker is
-as observable as a server and the API port never carries operational routes. `ping`/`heartbeat` stay dependency-free;
+`/metrics`, `/version`, `/admin/config`, `/admin/log-level`, `/debug/pprof`,
+always API port + 1000), so a worker is as observable — and as debuggable at
+runtime — as a server, and the API port never carries operational routes. `ping`/`heartbeat` stay dependency-free;
 `tasks`/`consumer` compose the data libs (`pgx`/`valkey`/`kafka`/`otelx`) and
 need the backing services from [`docker/deps.yml`](docker/deps.yml) (`just infra-up`).
 
@@ -326,7 +327,8 @@ metrics and pprof) plugs in without code changes:
 | Traces  | OTLP gRPC to `*_OTEL_EXPORTER_OTLP_ENDPOINT`     | HTTP server span → pgx query spans (otelpgx) → Valkey command spans (valkeyotel) → Kafka produce span; the record headers carry the context so the consumer's `process` span continues the same trace |
 | Metrics | `/metrics` on the **admin** port (API port + 1000) | `build_info`, RED per route (`http_requests_total`, `http_request_duration_seconds` classic + native histogram, `http_requests_in_flight`), `log_dropped_total`, pgx pool (`pgxpool_*`), cache `cache_lookups_total{result}`, Kafka `kafka_producer_*` / `kafka_consumer_*` incl. `kafka_consumer_group_lag` |
 | Profiles| `/debug/pprof/` on the admin port                | cpu / heap / goroutine / block / mutex / trace, for a runtime agent or `go tool pprof http://host:9080/debug/pprof/heap` |
-| Identity| `/version` on the admin port                     | service, version (`-X libs/httpx.Version`, set by `scripts/build-service.sh` / `VERSION` build arg), VCS revision, Go version |
+| Identity| `/version` on the admin port                     | service, version (`-X libs/httpx.Version`, set by `scripts/build-service.sh` / `VERSION` build arg), VCS revision, Go version, start time / uptime |
+| Runtime debugging | admin port + API port                  | `PUT /admin/log-level?level=debug&ttl=30m` (auto-reverts, `*_ADMIN_TOKEN` bearer), `GET /admin/config` (effective config, secrets redacted), `X-Debug-Token` on a request → debug logging for that request only, `X-Request-Id` echoed and in every log line / `problem+json` body — see [`libs/httpx` → Runtime debugging](libs/httpx#runtime-debugging) |
 
 Log with the context (`log.InfoContext(ctx, …)`) and pass `ctx` down; that is
 all a handler has to do for its log lines, DB calls, cache calls and Kafka

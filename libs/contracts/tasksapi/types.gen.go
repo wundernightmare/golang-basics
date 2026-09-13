@@ -26,6 +26,10 @@ type Problem struct {
 	// Instance URI reference identifying this occurrence (the request path).
 	Instance *string `json:"instance,omitempty"`
 
+	// RequestId The request's correlation id — the same value as the X-Request-Id
+	// response header and the request_id field of the service's log lines.
+	RequestId *string `json:"request_id,omitempty"`
+
 	// Status HTTP status of this occurrence — always equals the response status.
 	Status int32 `json:"status"`
 

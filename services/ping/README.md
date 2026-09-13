@@ -37,6 +37,8 @@ All keys are prefixed `PING_` (see [`libs/httpx`](../../libs/httpx#configuration
 | ---------------------------- | ------- | ------------------------ |
 | `PING_HTTP_ADDR`             | `:8080` | API listen address       |
 | `PING_ADMIN_ADDR`            | `:9080` | admin listen address     |
+| `PING_ADMIN_TOKEN`           | *(empty)* | bearer token for `PUT`/`DELETE /admin/*` (empty = open) |
+| `PING_DEBUG_TOKEN`           | *(empty)* | `X-Debug-Token` value for per-request debug logging (empty = off) |
 | `PING_HTTP_SHUTDOWN_TIMEOUT` | `10s`   | graceful-shutdown budget |
 | `PING_LOG_LEVEL`             | `info`  | log level                |
 | `PING_LOG_FORMAT`            | `json`  | `json` or `text`         |

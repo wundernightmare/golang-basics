@@ -22,8 +22,14 @@ import (
 // Load from a file with TASKS_CONFIG=/path/config.yaml; every key is also an env
 // var under the TASKS_ prefix (e.g. TASKS_DATABASE_URL, TASKS_KAFKA_BROKERS).
 type Config struct {
-	HTTPAddr        string        `yaml:"http_addr" env:"HTTP_ADDR"`
-	AdminAddr       string        `yaml:"admin_addr" env:"ADMIN_ADDR"`
+	HTTPAddr  string `yaml:"http_addr" env:"HTTP_ADDR"`
+	AdminAddr string `yaml:"admin_addr" env:"ADMIN_ADDR"`
+	// AdminToken guards PUT/DELETE /admin/* on the admin listener; DebugToken
+	// is the X-Debug-Token value that turns on debug logging for one request.
+	// Both empty by default (open / off) and tagged secret so /admin/config
+	// never shows them.
+	AdminToken      string        `yaml:"admin_token" env:"ADMIN_TOKEN" secret:"true"`
+	DebugToken      string        `yaml:"debug_token" env:"DEBUG_TOKEN" secret:"true"`
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout" env:"HTTP_SHUTDOWN_TIMEOUT"`
 	SlowRequest     time.Duration `yaml:"slow_request" env:"HTTP_SLOW_REQUEST"`
 	LogLevel        string        `yaml:"log_level" env:"LOG_LEVEL"`
@@ -114,6 +120,8 @@ func (c Config) HTTP() httpx.Config {
 		Service:             "tasks",
 		Addr:                c.HTTPAddr,
 		AdminAddr:           c.AdminAddr,
+		AdminToken:          c.AdminToken,
+		DebugToken:          c.DebugToken,
 		ShutdownTimeout:     c.ShutdownTimeout,
 		SlowRequest:         c.SlowRequest,
 		LogLevel:            c.LogLevel,

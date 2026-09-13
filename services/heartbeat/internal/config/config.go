@@ -18,6 +18,7 @@ import (
 // Keys (all prefixed HEARTBEAT_):
 //
 //	HEARTBEAT_ADMIN_ADDR             health/metrics/pprof listen address (default ":9081")
+//	HEARTBEAT_ADMIN_TOKEN            bearer token for PUT/DELETE /admin/* (default "": open)
 //	HEARTBEAT_HTTP_SHUTDOWN_TIMEOUT  graceful-shutdown budget            (default "10s")
 //	HEARTBEAT_LOG_LEVEL              debug|info|warn|error               (default "info")
 //	HEARTBEAT_LOG_FORMAT             json|text                           (default "json")
@@ -26,6 +27,7 @@ import (
 //	HEARTBEAT_INTERVAL               tick period                         (default "5s")
 type Config struct {
 	AdminAddr           string        `env:"ADMIN_ADDR" envDefault:":9081"`
+	AdminToken          string        `env:"ADMIN_TOKEN" secret:"true"`
 	ShutdownTimeout     time.Duration `env:"HTTP_SHUTDOWN_TIMEOUT" envDefault:"10s"`
 	LogLevel            string        `env:"LOG_LEVEL" envDefault:"info"`
 	LogFormat           string        `env:"LOG_FORMAT" envDefault:"json"`
@@ -50,6 +52,7 @@ func (c Config) HTTP() httpx.Config {
 		Service:             "heartbeat",
 		Addr:                "",
 		AdminAddr:           c.AdminAddr,
+		AdminToken:          c.AdminToken,
 		ShutdownTimeout:     c.ShutdownTimeout,
 		LogLevel:            c.LogLevel,
 		LogFormat:           c.LogFormat,

@@ -4,16 +4,21 @@
 //
 // It bundles the boilerplate every service repeats:
 //
-//   - a configured [gin.Engine] for the API with sampled, trace-correlated
-//     request logging and panic recovery (see [Server]);
-//   - a separate admin listener with /healthz, /readyz, /metrics, /version and
-//     /debug/pprof, kept off the API port so an ingress never exposes them;
+//   - a configured [gin.Engine] for the API with request ids, sampled,
+//     trace-correlated request logging and panic recovery (see [Server]);
+//   - a separate admin listener with /healthz, /readyz, /metrics, /version,
+//     /admin/config, /admin/log-level and /debug/pprof, kept off the API port
+//     so an ingress never exposes them; the mutations take a bearer token;
+//   - runtime debugging without a redeploy: the log level switchable for a
+//     while (see [LogLevel]), debug logging for one request via X-Debug-Token
+//     (see [WithDebugLogging]), the effective config with secrets redacted
+//     (see [Redact], [WithConfig]);
 //   - Prometheus metrics: build_info, request count / latency / in-flight, plus
 //     whatever collectors the service registers from the data libs (see [Metrics]);
 //   - liveness and readiness backed by a pluggable check registry (see [Health]);
 //   - environment-driven configuration with a per-service prefix (see [Config]);
-//   - structured logging via log/slog with trace_id/span_id from the context
-//     and zap-style sampling of debug/info records (see [NewLogger]);
+//   - structured logging via log/slog with trace_id/span_id/request_id from
+//     the context and zap-style sampling of debug/info records (see [NewLogger]);
 //   - the binary's build identity, injected at build time (see [Version], [Build]);
 //   - graceful shutdown wired to an [os/signal] context (see [Server.Run] and
 //     [SignalContext]).

@@ -21,6 +21,7 @@ import (
 // Keys (all prefixed CONSUMER_):
 //
 //	CONSUMER_ADMIN_ADDR             health/metrics/pprof listen address (default ":9083")
+//	CONSUMER_ADMIN_TOKEN            bearer token for PUT/DELETE /admin/* (default "": open)
 //	CONSUMER_HTTP_SHUTDOWN_TIMEOUT  graceful-shutdown budget       (default "10s")
 //	CONSUMER_LOG_LEVEL              debug|info|warn|error          (default "info")
 //	CONSUMER_LOG_FORMAT             json|text                      (default "json")
@@ -34,6 +35,7 @@ import (
 //	CONSUMER_OTEL_EXPORTER_OTLP_ENDPOINT  collector host:port      (default "localhost:4317")
 type Config struct {
 	AdminAddr           string        `env:"ADMIN_ADDR" envDefault:":9083"`
+	AdminToken          string        `env:"ADMIN_TOKEN" secret:"true"`
 	ShutdownTimeout     time.Duration `env:"HTTP_SHUTDOWN_TIMEOUT" envDefault:"10s"`
 	LogLevel            string        `env:"LOG_LEVEL" envDefault:"info"`
 	LogFormat           string        `env:"LOG_FORMAT" envDefault:"json"`
@@ -66,6 +68,7 @@ func (c Config) HTTP() httpx.Config {
 		Service:             "consumer",
 		Addr:                "",
 		AdminAddr:           c.AdminAddr,
+		AdminToken:          c.AdminToken,
 		ShutdownTimeout:     c.ShutdownTimeout,
 		LogLevel:            c.LogLevel,
 		LogFormat:           c.LogFormat,

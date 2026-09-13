@@ -10,7 +10,8 @@ import (
 
 // samplingHandler drops repetitive debug/info records the way zap's sampler
 // does: per (level, message) and per tick it passes the first `initial`
-// records, then every `thereafter`-th. Warn and error always pass. Counters
+// records, then every `thereafter`-th. Warn and error always pass, as does
+// anything logged under a [WithDebugLogging] context. Counters
 // live in a fixed table indexed by a hash of the message, so memory is bounded
 // and the hot path allocates nothing; two messages sharing a slot share a
 // budget, which is an acceptable imprecision for a rate limiter.
@@ -53,7 +54,8 @@ func newSamplingHandler(next slog.Handler, initial, thereafter int, tick time.Du
 }
 
 func (h *samplingHandler) Handle(ctx context.Context, r slog.Record) error {
-	if r.Level >= slog.LevelWarn {
+	// A request being debugged on purpose must not lose lines to the budget.
+	if r.Level >= slog.LevelWarn || DebugLogging(ctx) {
 		return h.Handler.Handle(ctx, r)
 	}
 	c := &h.counters[h.slot(r)]
@@ -106,7 +108,11 @@ func (h *samplingHandler) WithGroup(name string) slog.Handler {
 // logDropped finds the sampling handler behind log (if any) and returns its
 // counters for the log_dropped_total metric.
 func logDropped(log *slog.Logger) func() (debug, info uint64) {
-	if sh, ok := log.Handler().(*samplingHandler); ok {
+	h := log.Handler()
+	if lh, ok := h.(levelHandler); ok { // NewLogger's outermost wrapper
+		h = lh.Handler
+	}
+	if sh, ok := h.(*samplingHandler); ok {
 		return sh.Dropped
 	}
 	return nil

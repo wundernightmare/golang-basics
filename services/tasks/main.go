@@ -80,9 +80,11 @@ func run() error {
 
 	// HTTP server + tracing middleware + routes. The data libs each expose
 	// their collectors (pool stats, cache hit/miss, publish latency); registering
-	// them here puts everything on one /metrics on the admin listener.
+	// them here puts everything on one /metrics on the admin listener. The
+	// whole config goes to /admin/config (redacted: the DSN password, tokens).
 	srv := httpx.NewServer(cfg.HTTP(), logger,
-		httpx.WithMiddleware(otelx.GinMiddleware(cfg.OTel().ServiceName)))
+		httpx.WithMiddleware(otelx.GinMiddleware(cfg.OTel().ServiceName)),
+		httpx.WithConfig(cfg))
 	// Postgres is the source of truth: without it nothing works → critical.
 	// The cache is bypassed on a miss and events are published best-effort,
 	// so those two only degrade the service; they must not pull every replica

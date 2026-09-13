@@ -142,6 +142,11 @@ components:
         code:
           type: string
           description: Stable machine-readable code for business errors (e.g. task_not_found).
+        request_id:
+          type: string
+          description: |-
+            The request's correlation id — the same value as the X-Request-Id
+            response header and the request_id field of the service's log lines.
       description: RFC 9457 problem details. Extension members are inlined (RFC 9457 §3.2).
     Task:
       type: object
