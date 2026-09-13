@@ -37,6 +37,7 @@ All keys are prefixed `HEARTBEAT_`:
 | Variable                          | Default | Meaning                       |
 | --------------------------------- | ------- | ----------------------------- |
 | `HEARTBEAT_ADMIN_ADDR`            | `:9081` | admin (health/metrics/pprof) listen address |
+| `HEARTBEAT_ADMIN_TOKEN`           | *(empty)* | bearer token for `PUT`/`DELETE /admin/*` (empty = open) |
 | `HEARTBEAT_LOG_SAMPLE_INITIAL`    | `100`   | log sampling, first N per msg per second (`0` = off) |
 | `HEARTBEAT_LOG_SAMPLE_THEREAFTER` | `100`   | … then every M-th             |
 | `HEARTBEAT_HTTP_SHUTDOWN_TIMEOUT` | `10s`   | graceful-shutdown budget      |

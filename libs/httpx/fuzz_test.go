@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -94,6 +96,46 @@ func FuzzLoadYAML(f *testing.F) {
 		}
 		if cfg.Workers != 7 {
 			t.Fatalf("env overlay lost: workers=%d", cfg.Workers)
+		}
+	})
+}
+
+// FuzzRedact: a config struct holding an arbitrary string — as a DSN, as a
+// tagged secret and inside a slice — never panics on the way through Redact
+// and json.Marshal, and a password given as URL userinfo never survives.
+func FuzzRedact(f *testing.F) {
+	f.Add("postgres://app:hunter2@db:5432/app?sslmode=disable", "hunter2")
+	f.Add("plain value", "")
+	f.Add("://@", "")
+	f.Add("http://u:p%zz@h/", "p%zz")
+	f.Add("kafka://u:pa ss@b:9092,b2:9092", "pa ss")
+	f.Fuzz(func(t *testing.T, s, password string) {
+		type cfg struct {
+			DSN    string   `yaml:"dsn"`
+			Secret string   `yaml:"secret"`
+			List   []string `yaml:"list"`
+		}
+		b, err := json.Marshal(httpx.Redact(cfg{DSN: s, Secret: s, List: []string{s}}))
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("round trip: %v (%q)", err, b)
+		}
+		if s != "" && m["secret"] != "[redacted]" {
+			t.Fatalf("secret field leaked: %v", m["secret"])
+		}
+		// When s is a URL whose userinfo password is `password`, the password
+		// must be gone from the DSN and the list entry alike.
+		if u, err := url.Parse(s); err == nil && u.User != nil && password != "" {
+			if pw, has := u.User.Password(); has && pw == password {
+				for _, v := range []any{m["dsn"], m["list"].([]any)[0]} {
+					if strings.Contains(v.(string), password) {
+						t.Fatalf("password %q survived in %q", password, v)
+					}
+				}
+			}
 		}
 	})
 }

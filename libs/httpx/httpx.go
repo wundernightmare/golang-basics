@@ -11,26 +11,33 @@ import (
 )
 
 // Server wires a [gin.Engine] for the service's API together with the
-// cross-cutting concerns every service shares — structured, sampled request
-// logging with trace correlation, panic recovery, Prometheus metrics — and a
-// second, admin listener for the operational surface (health, metrics,
-// version, pprof). Services call [Server.Engine] to register their own routes,
-// then [Server.Run] to serve both listeners with graceful shutdown.
+// cross-cutting concerns every service shares — request ids, structured,
+// sampled request logging with trace correlation, panic recovery, Prometheus
+// metrics, per-request debug logging — and a second, admin listener for the
+// operational surface (health, metrics, version, config, runtime log level,
+// pprof). Services call [Server.Engine] to register their own routes, then
+// [Server.Run] to serve both listeners with graceful shutdown.
 type Server struct {
-	cfg     Config
-	log     *slog.Logger
-	engine  *gin.Engine
-	admin   http.Handler
-	Build   BuildInfo
-	Metrics *Metrics
-	Health  *Health
+	cfg        Config
+	log        *slog.Logger
+	engine     *gin.Engine
+	admin      http.Handler
+	startedAt  time.Time
+	configView any
+	Build      BuildInfo
+	Metrics    *Metrics
+	Health     *Health
+	// LogLevel is the runtime level control of the logger passed to
+	// [NewServer], nil when that logger did not come from [NewLogger].
+	LogLevel *LogLevel
 }
 
 // Option customises [NewServer].
 type Option func(*serverOptions)
 
 type serverOptions struct {
-	outer []gin.HandlerFunc
+	outer  []gin.HandlerFunc
+	config any
 }
 
 // WithMiddleware installs middleware *outside* the built-in access log and
@@ -44,10 +51,20 @@ func WithMiddleware(mw ...gin.HandlerFunc) Option {
 	return func(o *serverOptions) { o.outer = append(o.outer, mw...) }
 }
 
+// WithConfig sets what GET /admin/config shows — normally the service's own
+// config struct, which usually embeds the fields of [Config]. It is passed
+// through [Redact] on every request, so secrets never leave the process as
+// long as they are tagged `secret:"true"` or named like secrets. Without this
+// option the endpoint shows the [Config] the server was built with.
+func WithConfig(v any) Option {
+	return func(o *serverOptions) { o.config = v }
+}
+
 // NewServer constructs a server from cfg and log. The API engine applies, in
-// order: [WithMiddleware] extras (tracing) → request logging → panic recovery
-// → metrics. The admin handler serves /healthz, /readyz, /metrics, /version
-// and /debug/pprof (see newAdminMux).
+// order: request id → debug token (when Config.DebugToken is set) →
+// [WithMiddleware] extras (tracing) → request logging → panic recovery →
+// metrics. The admin handler serves /healthz, /readyz, /metrics, /version,
+// /admin/config, /admin/log-level and /debug/pprof (see newAdminMux).
 func NewServer(cfg Config, log *slog.Logger, opts ...Option) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	var o serverOptions
@@ -58,6 +75,12 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) *Server {
 	if cfg.Service == "" {
 		cfg.Service = defaultServiceName()
 	}
+	if cfg.LogLevelMaxTTL <= 0 {
+		cfg.LogLevelMaxTTL = defaultLogLevelMaxTTL
+	}
+	if o.config == nil {
+		o.config = cfg // the effective one, defaults applied
+	}
 	build := Build(cfg.Service)
 
 	m := NewMetrics(build, log)
@@ -65,6 +88,10 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) *Server {
 	m.Registry.MustRegister(h.Collectors()...)
 
 	e := gin.New()
+	e.Use(requestID())
+	if cfg.DebugToken != "" {
+		e.Use(debugToken(cfg.DebugToken))
+	}
 	e.Use(o.outer...)
 	e.Use(requestLogger(log, cfg.SlowRequest), gin.Recovery(), m.Middleware())
 	// Unknown route → 404, known route with the wrong method → 405 (not 404,
@@ -79,19 +106,23 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) *Server {
 		AbortProblem(c, NewProblem(http.StatusMethodNotAllowed, c.Request.Method+" is not allowed on "+c.Request.URL.Path))
 	})
 
-	return &Server{
+	s := &Server{
 		cfg: cfg, log: log, engine: e,
-		admin:   newAdminMux(h, m, build),
-		Build:   build,
-		Metrics: m, Health: h,
+		startedAt:  time.Now(),
+		configView: o.config,
+		Build:      build,
+		Metrics:    m, Health: h,
+		LogLevel: LogLevelOf(log),
 	}
+	s.admin = newAdminMux(s)
+	return s
 }
 
 // Engine exposes the underlying gin engine so services can add routes.
 func (s *Server) Engine() *gin.Engine { return s.engine }
 
-// Admin exposes the admin handler (health, metrics, version, pprof), mainly so
-// tests can drive it without a listener.
+// Admin exposes the admin handler (health, metrics, version, config, log
+// level, pprof), mainly so tests can drive it without a listener.
 func (s *Server) Admin() http.Handler { return s.admin }
 
 // Logger returns the server's structured logger.
@@ -118,12 +149,12 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	serveErr := make(chan error, 2)
-	serve := func(name string, srv *http.Server) {
+	serve := func(name string, srv *http.Server, attrs ...any) {
 		if srv == nil {
 			return
 		}
 		go func() {
-			s.log.Info(name+" listening", "addr", srv.Addr)
+			s.log.Info(name+" listening", append([]any{"addr", srv.Addr}, attrs...)...)
 			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				serveErr <- err
 				return
@@ -131,8 +162,14 @@ func (s *Server) Run(ctx context.Context) error {
 			serveErr <- nil
 		}()
 	}
-	serve("admin server", admin)
-	serve("http server", api)
+	// Say out loud whether the admin mutations are guarded: "off" is fine on
+	// a laptop and a finding in a cluster.
+	adminAuth := "bearer"
+	if s.cfg.AdminToken == "" {
+		adminAuth = "off"
+	}
+	serve("admin server", admin, "auth", adminAuth)
+	serve("http server", api, "debug_token", s.cfg.DebugToken != "")
 
 	// Background readiness evaluation for the lifetime of the server; the
 	// first pass runs before the gate opens so /readyz is accurate at once.
@@ -190,6 +227,7 @@ func requestLogger(log *slog.Logger, slow time.Duration) gin.HandlerFunc {
 		if route == "" {
 			route = "unmatched"
 		}
+		// request_id and trace_id arrive through the context (ctxHandler).
 		attrs := []slog.Attr{
 			slog.String("method", c.Request.Method),
 			slog.String("path", c.Request.URL.Path),

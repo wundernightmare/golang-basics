@@ -41,6 +41,7 @@ only past events the handler accepted (see [`libs/kafka`](../../libs/kafka)).
 | Env                        | Default          |
 | -------------------------- | ---------------- |
 | `CONSUMER_ADMIN_ADDR`      | `:9083`          |
+| `CONSUMER_ADMIN_TOKEN`     | *(empty = open)* |
 | `CONSUMER_LOG_SAMPLE_INITIAL` / `_THEREAFTER` | `100` / `100` |
 | `CONSUMER_KAFKA_BROKERS`   | `localhost:9092` |
 | `CONSUMER_KAFKA_TOPIC`     | `tasks.events`   |

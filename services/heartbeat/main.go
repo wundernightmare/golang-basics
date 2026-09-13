@@ -29,7 +29,7 @@ func run() error {
 	}
 
 	logger := httpx.NewLogger(cfg.HTTP().LogConfig())
-	srv := httpx.NewServer(cfg.HTTP(), logger)
+	srv := httpx.NewServer(cfg.HTTP(), logger, httpx.WithConfig(cfg))
 
 	// The worker registers its counter on the server's registry, so beats
 	// show up on /metrics alongside the HTTP metrics.

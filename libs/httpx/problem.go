@@ -72,7 +72,18 @@ func NewProblem(status int, detail string) Problem {
 // AbortProblem writes p as application/problem+json and aborts the gin handler
 // chain. Use it from handlers and from the error-mapping layer so failures are
 // always returned in the RFC 9457 shape.
+//
+// Two members are filled in from the request when the caller left them out:
+// Instance becomes the request path, and the request_id extension carries the
+// id the server echoed in X-Request-Id — so an error body alone is enough to
+// find its log lines.
 func AbortProblem(c *gin.Context, p Problem) {
+	if c.Request != nil {
+		if p.Instance == "" && c.Request.URL != nil {
+			p.Instance = c.Request.URL.Path
+		}
+		p = withRequestIDExtension(p, RequestIDFromContext(c.Request.Context()))
+	}
 	body, err := json.Marshal(p)
 	if err != nil {
 		// Marshalling a Problem cannot realistically fail; degrade safely.
@@ -81,4 +92,34 @@ func AbortProblem(c *gin.Context, p Problem) {
 	}
 	c.Abort()
 	c.Data(p.status(), ProblemContentType, body)
+}
+
+// withRequestIDExtension adds request_id to p's extensions unless the caller
+// set one or id is empty. The caller's map is never mutated.
+func withRequestIDExtension(p Problem, id string) Problem {
+	if id == "" {
+		return p
+	}
+	if _, set := p.Extensions["request_id"]; set {
+		return p
+	}
+	ext := make(map[string]any, len(p.Extensions)+1)
+	for k, v := range p.Extensions {
+		ext[k] = v
+	}
+	ext["request_id"] = id
+	p.Extensions = ext
+	return p
+}
+
+// writeProblem is AbortProblem for the plain net/http admin mux.
+func writeProblem(w http.ResponseWriter, p Problem) {
+	body, err := json.Marshal(p)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", ProblemContentType)
+	w.WriteHeader(p.status())
+	_, _ = w.Write(body)
 }

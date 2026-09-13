@@ -39,6 +39,8 @@ with `TASKS_`-prefixed environment variables — env wins, see
 | ---------------------------------- | -------------------- | ---------------------------------------------------- |
 | `TASKS_HTTP_ADDR`                  | `http_addr`          | `:8082`                                              |
 | `TASKS_ADMIN_ADDR`                 | `admin_addr`         | `:9082`                                              |
+| `TASKS_ADMIN_TOKEN`                | `admin_token`        | *(empty = `PUT`/`DELETE /admin/*` open)*             |
+| `TASKS_DEBUG_TOKEN`                | `debug_token`        | *(empty = `X-Debug-Token` off)*                      |
 | `TASKS_HTTP_SLOW_REQUEST`          | `slow_request`       | `1s`                                                 |
 | `TASKS_LOG_SAMPLE_INITIAL`         | `log_sample_initial` | `100` (`-1` = off)                                   |
 | `TASKS_DATABASE_URL`               | `database_url`       | `postgres://app:app@localhost:5432/app?sslmode=disable` |

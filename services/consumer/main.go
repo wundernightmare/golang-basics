@@ -54,7 +54,7 @@ func run() error {
 	}
 	defer consumer.Close()
 
-	srv := httpx.NewServer(cfg.HTTP(), logger)
+	srv := httpx.NewServer(cfg.HTTP(), logger, httpx.WithConfig(cfg))
 	srv.Health.Register("kafka", consumer.ReadyCheck())
 	// Records / handler latency / group lag from the lib, the worker's own
 	// counters next to them — one /metrics on the admin listener has it all.
