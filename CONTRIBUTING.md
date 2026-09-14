@@ -43,7 +43,9 @@ uncomment what your network needs (README "Closed networks").
 3. Copy a sibling's `justfile` (the recipes are module-generic).
 4. Add it to `MODULES` (and `SERVICES`, if it builds a binary) in the root
    `justfile`, and to the per-package delegation block.
-5. `just tidy` to wire up `go.sum` + `go.work.sum`.
+5. `just tidy` to wire up `go.sum` + `go.work.sum` (`just tidy-check` is what
+   CI and the pre-push hook run: an untidy module or a `go.work` that
+   `go work sync` would rewrite fails the pipeline).
 
 Nothing else: both CI pipelines and the git hooks discover modules from
 `go.work` (`scripts/touched-modules.sh`), integration suites from the modules

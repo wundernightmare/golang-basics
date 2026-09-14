@@ -77,6 +77,8 @@ jobs:
           # Scoped to the module trees, matching `just fmt-check` and GitLab.
           out="$(gofmt -l ./libs ./services)"
           if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
+      - name: go work sync is a no-op
+        run: scripts/tidy-check.sh --workspace
 
   # Contracts: the TypeSpec source (api/tsp) is compiled and the Go types
   # regenerated; the commit must already contain exactly that output, and the
@@ -137,6 +139,10 @@ jobs:
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
           cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: go mod tidy -diff
+        env:
+          MODULE: ${{ matrix.module }}
+        run: scripts/tidy-check.sh "$MODULE"
       - name: go vet
         working-directory: ${{ matrix.module }}
         run: go vet ./...

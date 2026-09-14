@@ -125,6 +125,7 @@ just fmt             # gofmt -w + golangci-lint fmt
 just fmt-check       # gofmt -l gate (CI)
 just lint            # golangci-lint run    in every module
 just tidy            # go mod tidy everywhere + go work sync
+just tidy-check      # fail if `just tidy` would change anything (CI runs the same script)
 just audit           # govulncheck          in every module
 just ci              # fmt-check → vet → lint → test
 just ci-full         # + race tests + audit

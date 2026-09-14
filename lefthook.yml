@@ -44,6 +44,11 @@ pre-commit:
 # Scoped to the modules touched by the commits being pushed.
 pre-push:
   commands:
+    tidy:
+      glob: "{go.mod,go.sum,go.work,go.work.sum,*.go}"
+      # The same script as the CI vet/lint-test jobs: an untidy go.mod / go.sum
+      # or a go.work that `go work sync` would rewrite fails here, not in CI.
+      run: scripts/tidy-check.sh $(scripts/touched-modules.sh {push_files})
     vet:
       glob: "*.go"
       run: |

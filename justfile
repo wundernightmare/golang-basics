@@ -194,6 +194,11 @@ tidy:
     for m in {{MODULES}}; do echo "── tidy $m"; (cd "$m" && go mod tidy); done
     go work sync
 
+# Fail if `just tidy` would change anything (scripts/tidy-check.sh — the same
+# script the CI matrix jobs, the fmt jobs and the pre-push hook run)
+tidy-check:
+    scripts/tidy-check.sh
+
 # ── Security (AppSec) — tools pinned in mise.toml, installed by `just setup-sec` ─
 
 # One-time: install the AppSec toolchain via mise (idempotent)
@@ -263,7 +268,7 @@ docker-verify SVC TAG:
 # ── CI gates ──────────────────────────────────────────────────────────────────
 
 # Standard pipeline: fmt-check → contracts-check → vet → lint → test
-ci: fmt-check contracts-check check lint test
+ci: fmt-check tidy-check contracts-check check lint test
     @echo "CI passed"
 
 # Extended pipeline: + race tests + supply-chain audit

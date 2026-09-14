@@ -197,6 +197,7 @@ fmt:
     # Scoped to the module trees: GOMODCACHE now lives under .cache/ so GitLab
     # can cache it, and a bare `gofmt -l .` walks into its test fixtures.
     - out="$(gofmt -l ./libs ./services)"; if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
+    - scripts/tidy-check.sh --workspace
 
 # Contracts, step 1: the TypeSpec source compiles to exactly the committed
 # OpenAPI / JSON Schema (node image; nothing to apt/curl).
@@ -257,6 +258,7 @@ vet:
           - services/tasks
           - services/consumer
   script:
+    - scripts/tidy-check.sh "$MODULE"
     - cd "$MODULE"
     - go vet ./...
 
