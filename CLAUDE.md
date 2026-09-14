@@ -68,6 +68,13 @@ README; this file is only the high-signal, easy-to-miss bits.
   paths under `$CI_PROJECT_DIR`, so `GOMODCACHE` lives in `.cache/`, and a bare
   `gofmt -l .` walks into the module cache's deliberately-malformed test
   fixtures. Keep `just fmt-check`, the GitHub job and the GitLab job identical.
+- **go.mod / go.sum / go.work are checked, not trusted.** `scripts/tidy-check.sh`
+  (`just tidy-check`, the `lint-test` / `vet` matrix jobs per module, the
+  `fmt` jobs for `go work sync`, the pre-push hook) fails when `just tidy`
+  would change anything. A dependency bump that leaves an `// indirect`
+  require in a module that does not import it, or a go.sum missing the
+  workspace-resolved entries, builds fine and is invisible until this check —
+  run `just tidy` after any `go get` and commit the result with the bump.
 - **Observability is opt-in.** `docker/observability.yml` (Jaeger +
   VictoriaMetrics + Grafana) is the receiving end; `otelx` installs only
   propagators and a no-op provider unless `*_OTEL_ENABLED=true`, so no code path
