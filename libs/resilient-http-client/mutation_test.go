@@ -59,15 +59,12 @@ func TestFullJitter_NonPositiveBaseOrCapIsImmediate(t *testing.T) {
 
 // --- circuit breaker --------------------------------------------------------
 
-// pinClock replaces the breaker clock for the test and returns a func that
-// advances it.
-func pinClock(t testing.TB, start int64) func(ms int64) {
-	t.Helper()
+// pinnedCB builds a breaker on its own test clock starting at start and returns
+// a func that advances that clock.
+func pinnedCB(start int64, failureThreshold float64, minRequests uint32, window, halfOpenTimeout time.Duration) (*CircuitBreaker, func(ms int64)) {
 	now := start
-	prev := nowMS
-	nowMS = func() int64 { return now }
-	t.Cleanup(func() { nowMS = prev })
-	return func(ms int64) { now += ms }
+	cb := newCircuitBreaker(func() int64 { return now }, failureThreshold, minRequests, window, halfOpenTimeout)
+	return cb, func(ms int64) { now += ms }
 }
 
 // CONDITIONALS_BOUNDARY / NEGATION on the threshold validation: exactly 1.0
@@ -83,12 +80,11 @@ func TestCB_ThresholdValidation(t *testing.T) {
 	}, "resilient-http-client", "unit")
 }
 
-// CONDITIONALS_BOUNDARY on `nowMS()-openedAt >= halfOpenMS`: the probe is
+// CONDITIONALS_BOUNDARY on `cb.nowMS()-openedAt >= halfOpenMS`: the probe is
 // admitted exactly when the timeout elapses, not one millisecond later.
 func TestCB_HalfOpenExactlyAtTimeout(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
-		advance := pinClock(t, 1_000)
-		cb := NewCircuitBreaker(0.5, 2, 10*time.Second, 50*time.Millisecond)
+		cb, advance := pinnedCB(1_000, 0.5, 2, 10*time.Second, 50*time.Millisecond)
 		cb.RecordFailure()
 		cb.RecordFailure() // → Open at t=1000
 		require.Equal(t, CBOpen, cb.State())
@@ -105,8 +101,7 @@ func TestCB_HalfOpenExactlyAtTimeout(t *testing.T) {
 // an opening time (openedAt == 0) must not admit probes.
 func TestCB_OpenWithoutOpenedAtNeverAdmits(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
-		pinClock(t, 1_000_000)
-		cb := NewCircuitBreaker(0.5, 2, 10*time.Second, time.Millisecond)
+		cb, _ := pinnedCB(1_000_000, 0.5, 2, 10*time.Second, time.Millisecond)
 		cb.setState(CBOpen) // openedAtMS stays 0
 		assert.False(t, cb.Allow())
 		assert.Equal(t, CBOpen, cb.State())
@@ -119,8 +114,7 @@ func TestCB_OpenWithoutOpenedAtNeverAdmits(t *testing.T) {
 // fresh one (→ Closed).
 func TestCB_WindowRotatesExactlyAtWindowLength(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
-		advance := pinClock(t, 5_000)
-		cb := NewCircuitBreaker(0.5, 5, 100*time.Millisecond, time.Minute)
+		cb, advance := pinnedCB(5_000, 0.5, 5, 100*time.Millisecond, time.Minute)
 		for range 4 {
 			cb.RecordFailure()
 		}
@@ -128,8 +122,7 @@ func TestCB_WindowRotatesExactlyAtWindowLength(t *testing.T) {
 		cb.RecordFailure() // same window: 5 requests, 100% failures → Open
 		assert.Equal(t, CBOpen, cb.State())
 
-		advance = pinClock(t, 5_000)
-		cb = NewCircuitBreaker(0.5, 5, 100*time.Millisecond, time.Minute)
+		cb, advance = pinnedCB(5_000, 0.5, 5, 100*time.Millisecond, time.Minute)
 		for range 4 {
 			cb.RecordFailure()
 		}

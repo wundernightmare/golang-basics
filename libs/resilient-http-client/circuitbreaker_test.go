@@ -12,7 +12,7 @@ import (
 // forceOpen drives the breaker Open immediately, for tests.
 func (cb *CircuitBreaker) forceOpen() {
 	cb.state.Store(uint32(CBOpen))
-	cb.openedAtMS.Store(nowMS())
+	cb.openedAtMS.Store(cb.nowMS())
 }
 
 // setState is a test hatch for transitioning directly into a state.
@@ -77,8 +77,7 @@ func TestCB_HalfOpenProbeFailureReopens(t *testing.T) {
 
 func TestCB_OpenTransitionsToHalfOpenAfterTimeout(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
-		advance := pinClock(t, 1_000)
-		cb := NewCircuitBreaker(0.5, 2, 10*time.Second, time.Millisecond)
+		cb, advance := pinnedCB(1_000, 0.5, 2, 10*time.Second, time.Millisecond)
 		cb.RecordFailure()
 		cb.RecordFailure()
 		assert.Equal(t, CBOpen, cb.State())
@@ -91,8 +90,7 @@ func TestCB_OpenTransitionsToHalfOpenAfterTimeout(t *testing.T) {
 
 func TestCB_WindowRotationResetsCounters(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
-		advance := pinClock(t, 1_000)
-		cb := NewCircuitBreaker(0.5, 5, 80*time.Millisecond, 30*time.Second)
+		cb, advance := pinnedCB(1_000, 0.5, 5, 80*time.Millisecond, 30*time.Second)
 		for range 4 {
 			cb.RecordFailure() // below min → stays Closed
 		}
@@ -105,8 +103,7 @@ func TestCB_WindowRotationResetsCounters(t *testing.T) {
 
 func TestCB_ResetWindowAfterHalfOpenClearsHistory(t *testing.T) {
 	testx.Run(t, func(t testx.T) {
-		advance := pinClock(t, 1_000)
-		cb := NewCircuitBreaker(0.5, 2, time.Minute, 0)
+		cb, advance := pinnedCB(1_000, 0.5, 2, time.Minute, 0)
 		cb.RecordFailure()
 		cb.RecordFailure() // → Open
 		assert.Equal(t, CBOpen, cb.State())

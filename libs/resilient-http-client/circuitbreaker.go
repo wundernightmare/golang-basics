@@ -62,11 +62,19 @@ type CircuitBreaker struct {
 	minRequests      uint32
 	windowMS         int64
 	halfOpenMS       int64
+
+	nowMS func() int64 // clock in unix millis; wallMS outside tests
 }
 
 // NewCircuitBreaker constructs a breaker. A failureThreshold outside (0,1] is
 // clamped to a usable value.
 func NewCircuitBreaker(failureThreshold float64, minRequests uint32, window, halfOpenTimeout time.Duration) *CircuitBreaker {
+	return newCircuitBreaker(wallMS, failureThreshold, minRequests, window, halfOpenTimeout)
+}
+
+// newCircuitBreaker is NewCircuitBreaker on an explicit clock, so tests can
+// drive window rotation and the half-open timeout without sleeping.
+func newCircuitBreaker(nowMS func() int64, failureThreshold float64, minRequests uint32, window, halfOpenTimeout time.Duration) *CircuitBreaker {
 	if failureThreshold <= 0 || failureThreshold > 1 {
 		failureThreshold = defCBThreshold
 	}
@@ -75,8 +83,9 @@ func NewCircuitBreaker(failureThreshold float64, minRequests uint32, window, hal
 		minRequests:      minRequests,
 		windowMS:         window.Milliseconds(),
 		halfOpenMS:       halfOpenTimeout.Milliseconds(),
+		nowMS:            nowMS,
 	}
-	cb.windowStartMS.Store(nowMS())
+	cb.windowStartMS.Store(cb.nowMS())
 	return cb
 }
 
@@ -94,7 +103,7 @@ func (cb *CircuitBreaker) Allow() bool {
 		return true
 	case CBOpen:
 		openedAt := cb.openedAtMS.Load()
-		if openedAt > 0 && nowMS()-openedAt >= cb.halfOpenMS {
+		if openedAt > 0 && cb.nowMS()-openedAt >= cb.halfOpenMS {
 			// Only the CAS winner gets the probe.
 			return cb.state.CompareAndSwap(uint32(CBOpen), uint32(CBHalfOpen))
 		}
@@ -141,11 +150,11 @@ func (cb *CircuitBreaker) RecordFailure() {
 
 func (cb *CircuitBreaker) open() {
 	cb.state.Store(uint32(CBOpen))
-	cb.openedAtMS.Store(nowMS())
+	cb.openedAtMS.Store(cb.nowMS())
 }
 
 func (cb *CircuitBreaker) resetWindow() {
-	cb.windowStartMS.Store(nowMS())
+	cb.windowStartMS.Store(cb.nowMS())
 	cb.windowRequests.Store(0)
 	cb.windowFailures.Store(0)
 }
@@ -154,7 +163,7 @@ func (cb *CircuitBreaker) resetWindow() {
 // the start timestamp ensures only one goroutine performs the reset.
 func (cb *CircuitBreaker) maybeRotateWindow() {
 	start := cb.windowStartMS.Load()
-	now := nowMS()
+	now := cb.nowMS()
 	if now-start >= cb.windowMS {
 		if cb.windowStartMS.CompareAndSwap(start, now) {
 			cb.windowRequests.Store(0)
@@ -163,6 +172,8 @@ func (cb *CircuitBreaker) maybeRotateWindow() {
 	}
 }
 
-// nowMS is the breaker's clock in unix milliseconds. A variable so tests can
-// pin it and drive window rotation and the half-open timeout without sleeping.
-var nowMS = func() int64 { return time.Now().UnixMilli() }
+// wallMS is the breaker's real clock in unix milliseconds. The clock is per
+// breaker rather than a package variable tests swap: a goroutine left running by
+// one test (TestShutdown_TimesOutWithInFlight) kept reading the package variable
+// while the next test pinned it — a data race under -race -shuffle=on.
+func wallMS() int64 { return time.Now().UnixMilli() }
