@@ -40,6 +40,12 @@ minimumReleaseAgeExclude:
   - "@scalar/*"
   - "allure-*"
 
+# Transitive CVEs pinned out. Floors as caret ranges: `pnpm update` still moves
+# them inside the major, and the release-age window still applies. Drop an
+# entry once `pnpm why -r <name>` shows the dependents already require the floor.
+overrides:
+  fast-uri: ^3.1.8                # GHSA-hrr3-gc8f-f4qj via ajv → @typespec/compiler, @scalar/openapi-parser
+
 catalog:
   "@typespec/compiler": 1.16.0
   "@typespec/http": 1.16.0
