@@ -180,14 +180,17 @@ func (h *Health) refresh(ctx context.Context) {
 // finish in the background. Otherwise one such check would stall the whole
 // refresh loop and every probe with it — found by the chaos suite, where a
 // frozen Kafka turned readiness degradation into a 15-second wait.
+//
+// cancel runs here, not in the check goroutine: cancelling there closed
+// cctx.Done() right after a fast check returned, so the select below saw both
+// cases ready, picked one at random and reported half of the instant results
+// as timed out (the flaky TestReadyz_CriticalFailureIsNotReady_OptionalIsDegraded).
 func runCheck(ctx context.Context, fn CheckFunc, timeout time.Duration) result {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	start := time.Now()
 	done := make(chan error, 1)
-	go func() {
-		defer cancel()
-		done <- fn(cctx)
-	}()
+	go func() { done <- fn(cctx) }()
 	select {
 	case err := <-done:
 		return result{err: err, checkedAt: time.Now(), took: time.Since(start)}
