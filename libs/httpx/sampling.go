@@ -4,6 +4,7 @@ import (
 	"context"
 	"hash/fnv"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -13,7 +14,9 @@ import (
 // records, then every `thereafter`-th. Warn and error always pass, as does
 // anything logged under a [WithDebugLogging] context. Counters
 // live in a fixed table indexed by a hash of the message, so memory is bounded
-// and the hot path allocates nothing; two messages sharing a slot share a
+// and the hot path allocates nothing. Each slot is guarded by its own mutex:
+// window reset and increment must be one step, or a count racing the reset is
+// erased and an extra record slips through; two messages sharing a slot share a
 // budget, which is an acceptable imprecision for a rate limiter.
 //
 // The point is cost control: an access log at 20k req/s or a tight loop
@@ -32,8 +35,21 @@ type samplingHandler struct {
 const samplingSlots = 4096
 
 type sampleCounter struct {
-	resetAt atomic.Int64
-	n       atomic.Uint64
+	mu      sync.Mutex
+	resetAt int64
+	n       uint64
+}
+
+// inc counts one record into the window containing now, starting a new
+// window when the current one has expired.
+func (c *sampleCounter) inc(now, tick int64) uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if now >= c.resetAt {
+		c.resetAt, c.n = now+tick, 0
+	}
+	c.n++
+	return c.n
 }
 
 func newSamplingHandler(next slog.Handler, initial, thereafter int, tick time.Duration) *samplingHandler {
@@ -63,14 +79,7 @@ func (h *samplingHandler) Handle(ctx context.Context, r slog.Record) error {
 	if now == 0 {
 		now = time.Now().UnixNano()
 	}
-	if resetAt := c.resetAt.Load(); now >= resetAt {
-		// New window: whoever wins the CAS zeroes the count. A loser simply
-		// counts into the fresh window, which is the intended behaviour.
-		if c.resetAt.CompareAndSwap(resetAt, now+h.tick) {
-			c.n.Store(0)
-		}
-	}
-	n := c.n.Add(1)
+	n := c.inc(now, h.tick)
 	if n <= h.initial || (n-h.initial)%h.thereafter == 0 {
 		return h.Handler.Handle(ctx, r)
 	}
