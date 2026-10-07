@@ -1,0 +1,100 @@
+# Starter alert rules for vmalert (Prometheus rule format), evaluated against
+# VictoriaMetrics by the `vmalert` service in docker/observability.yml.
+#
+# A starting point, not an SLO policy: thresholds are deliberately round and
+# `for:` windows short enough to see them fire locally. Copy into the
+# platform's rule repo and tune there. Every expression keys on the `service`
+# label the scrape config adds (observability/scrape.yml).
+#
+#   UI: http://localhost:8880  (vmalert) — or `ALERTS` in Grafana/Explore.
+
+groups:
+  - name: golang-basics-http
+    rules:
+      # RED: share of API responses that are 5xx, per service.
+      - alert: HighErrorRatio
+        expr: |
+          sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
+            / sum by (service) (rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.service }}: {{ $value | humanizePercentage }} of requests are 5xx"
+
+      # RED: p99 latency per route (classic buckets; the native histogram
+      # carries the same data for backends that read it).
+      - alert: HighP99Latency
+        expr: |
+          histogram_quantile(0.99,
+            sum by (service, route, le) (rate(http_request_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.service }} {{ $labels.route }}: p99 {{ $value | humanizeDuration }}"
+
+  - name: golang-basics-health
+    rules:
+      # Scrape target down: the process (or its admin listener) is gone.
+      - alert: ServiceDown
+        expr: up{job=~"ping|heartbeat|tasks|consumer"} == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.service }} ({{ $labels.instance }}) is not scrapeable"
+          description: >-
+            Both the container and the host target are configured per job;
+            the one you are not running is expected to be down — silence it
+            locally, this rule is meant for one target per service in prod.
+
+      # Readiness: a critical check failing turns /readyz to 503.
+      - alert: ReadinessCheckFailing
+        expr: health_check_up{critical="true"} == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.service }}: critical readiness check {{ $labels.check }} failing"
+
+      - alert: OptionalDependencyDegraded
+        expr: health_check_up{critical="false"} == 0
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.service }}: optional dependency {{ $labels.check }} down (serving degraded)"
+
+  - name: golang-basics-data
+    rules:
+      # Kafka consumer lag (the consumer's own view of the partitions it owns).
+      - alert: KafkaConsumerLagHigh
+        expr: sum by (service, topic) (kafka_consumer_group_lag) > 1000
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.service }}: {{ $value }} records behind on {{ $labels.topic }}"
+
+      # Transactional outbox: rows written with the task but not yet published
+      # by the relay. Growth means Kafka is unreachable or the relay is stuck.
+      # Metric name as exported by services/tasks' outbox relay — keep in step.
+      - alert: OutboxBacklog
+        expr: max by (service) (tasks_outbox_pending) > 100
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.service }}: {{ $value }} outbox events pending publication"
+
+      # Postgres pool saturation: acquired connections vs the configured max.
+      - alert: PgPoolSaturated
+        expr: |
+          sum by (service) (pgxpool_conns{state="acquired"})
+            / max by (service) (pgxpool_max_conns) > 0.9
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.service }}: pgx pool {{ $value | humanizePercentage }} in use"
+
+      # …and requests actually waiting for a connection.
+      - alert: PgPoolStarved
+        expr: sum by (service) (rate(pgxpool_empty_acquire_total[5m])) > 1
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.service }}: {{ $value }}/s acquires waited for a free connection"

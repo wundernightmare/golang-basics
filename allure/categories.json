@@ -1,18 +1,23 @@
 [
   {
-    "name": "Flaky (ticketed)",
-    "flaky": true,
-    "matchedStatuses": ["failed", "broken"]
+    "name": "Quarantined flake (skipped with a ticket)",
+    "matchedStatuses": ["skipped"],
+    "messageRegex": "(?is).*(flak|GB-[0-9]+).*"
+  },
+  {
+    "name": "Build / setup failure",
+    "matchedStatuses": ["failed", "broken"],
+    "traceRegex": "(?is).*(\\[build failed\\]|\\[setup failed\\]|panic: |fatal error: |test timed out after).*"
   },
   {
     "name": "Infrastructure",
-    "matchedStatuses": ["broken"],
-    "messageRegex": "(?is).*(docker|podman|testcontainers|ryuk|connection refused|ECONNREFUSED|ETIMEDOUT|i/o timeout|deadline exceeded|timed out|timeout).*"
+    "matchedStatuses": ["failed", "broken"],
+    "traceRegex": "(?is).*(docker|podman|testcontainers|ryuk|toxiproxy|connection refused|connection reset|no such host|i/o timeout|context deadline exceeded|exited before becoming ready|not 200 within|service binary .* no such file).*"
   },
   {
     "name": "Product defects",
     "matchedStatuses": ["failed", "broken"],
-    "messageRegex": "(?is).*(assert|expect|error trace|not equal|should|received|unexpected).*"
+    "traceRegex": "(?is).*(Error Trace:|Error:|expected|actual|not equal|should|condition never satisfied).*"
   },
   {
     "name": "Skipped",

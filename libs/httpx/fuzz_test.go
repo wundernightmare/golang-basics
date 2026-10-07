@@ -5,6 +5,7 @@ package httpx_test
 // lands in testdata/fuzz/<Target>/ and is committed as a regression case.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,19 +16,27 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 )
 
+type problemKey struct{}
+
 // FuzzProblemJSON: any status/detail/extension the handlers could produce
 // marshals to valid JSON that decodes back with the same members and never
-// panics; the status in the body always equals the response status.
+// panics; the status in the body always equals the response status, also
+// when written through the full server chain.
 func FuzzProblemJSON(f *testing.F) {
 	f.Add(404, "task 7 does not exist", "code", "task_not_found")
 	f.Add(500, "", "", "")
 	f.Add(0, "weird status", "trace_id", "abc")
 	f.Add(999, "nul\x00 and bytes \xff", "k\"ey", "va\nlue")
+
+	srv, _ := loggedServer(f, httpx.Config{})
+	srv.Mux().HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		p, _ := r.Context().Value(problemKey{}).(httpx.Problem)
+		httpx.WriteProblem(w, r, p)
+	})
+
 	f.Fuzz(func(t *testing.T, status int, detail, extKey, extVal string) {
 		p := httpx.NewProblem(status, detail)
 		if extKey != "" {
@@ -56,13 +65,19 @@ func FuzzProblemJSON(f *testing.F) {
 			}
 		}
 
-		gin.SetMode(gin.TestMode)
-		e := gin.New()
-		e.GET("/", func(c *gin.Context) { httpx.AbortProblem(c, p) })
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req = req.WithContext(context.WithValue(req.Context(), problemKey{}, p))
 		rec := httptest.NewRecorder()
-		e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		srv.Handler().ServeHTTP(rec, req)
 		if rec.Code != want {
 			t.Fatalf("response status %d != problem status %d", rec.Code, want)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("response body is not JSON: %v (%q)", err, rec.Body.String())
+		}
+		if got, _ := body["status"].(float64); int(got) != want {
+			t.Fatalf("body status %v != response status %d", body["status"], want)
 		}
 	})
 }
@@ -83,6 +98,7 @@ func FuzzLoadYAML(f *testing.F) {
 	f.Add("addr: [not, a, string]\n")
 	f.Add("workers: !!binary abc\n")
 	f.Add("- just\n- a list\n")
+	f.Add("unknown: key\n")
 	f.Add("\xff\xfe")
 	f.Fuzz(func(t *testing.T, body string) {
 		path := filepath.Join(t.TempDir(), "config.yaml")
@@ -100,22 +116,27 @@ func FuzzLoadYAML(f *testing.F) {
 	})
 }
 
-// FuzzRedact: a config struct holding an arbitrary string — as a DSN, as a
-// tagged secret and inside a slice — never panics on the way through Redact
-// and json.Marshal, and a password given as URL userinfo never survives.
+// FuzzRedact: a config struct holding an arbitrary string — as a URL field,
+// as a tagged secret and inside a slice — never panics on the way through
+// Redact and json.Marshal. When the string is a URL with a userinfo password,
+// the redacted value is that URL with exactly the password replaced: same
+// user, password "xxxxx".
 func FuzzRedact(f *testing.F) {
-	f.Add("postgres://app:hunter2@db:5432/app?sslmode=disable", "hunter2")
-	f.Add("plain value", "")
-	f.Add("://@", "")
-	f.Add("http://u:p%zz@h/", "p%zz")
-	f.Add("kafka://u:pa ss@b:9092,b2:9092", "pa ss")
-	f.Fuzz(func(t *testing.T, s, password string) {
+	f.Add("postgres://app:hunter2@db:5432/app?sslmode=disable")
+	f.Add("plain value")
+	f.Add("://@")
+	f.Add("http://u:p%zz@h/")
+	f.Add("kafka://u:pa%20ss@b:9092")
+	f.Add("redis://:only-password@cache:6379/0")
+	f.Add("postgres://app:x@db/app?sslpassword=y&token=z")
+	f.Add("host=db user=app password=s3cret")
+	f.Fuzz(func(t *testing.T, s string) {
 		type cfg struct {
-			DSN    string   `yaml:"dsn"`
+			Target string   `yaml:"target"`
 			Secret string   `yaml:"secret"`
 			List   []string `yaml:"list"`
 		}
-		b, err := json.Marshal(httpx.Redact(cfg{DSN: s, Secret: s, List: []string{s}}))
+		b, err := json.Marshal(httpx.Redact(cfg{Target: s, Secret: s, List: []string{s}}))
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
@@ -126,16 +147,38 @@ func FuzzRedact(f *testing.F) {
 		if s != "" && m["secret"] != "[redacted]" {
 			t.Fatalf("secret field leaked: %v", m["secret"])
 		}
-		// When s is a URL whose userinfo password is `password`, the password
-		// must be gone from the DSN and the list entry alike.
-		if u, err := url.Parse(s); err == nil && u.User != nil && password != "" {
-			if pw, has := u.User.Password(); has && pw == password {
-				for _, v := range []any{m["dsn"], m["list"].([]any)[0]} {
-					if strings.Contains(v.(string), password) {
-						t.Fatalf("password %q survived in %q", password, v)
-					}
-				}
-			}
+		list, _ := m["list"].([]any)
+		if len(list) != 1 {
+			t.Fatalf("list lost its element: %v", m["list"])
+		}
+		if list[0] != m["target"] {
+			t.Fatalf("the same string redacted differently in a slice: %q vs %q", list[0], m["target"])
+		}
+
+		if !strings.Contains(s, "://") {
+			return
+		}
+		u, err := url.Parse(s)
+		if err != nil || u.User == nil {
+			return
+		}
+		password, has := u.User.Password()
+		if !has {
+			return
+		}
+		out, _ := m["target"].(string)
+		ru, err := url.Parse(out)
+		if err != nil {
+			t.Fatalf("redacted URL %q no longer parses: %v", out, err)
+		}
+		if ru.User == nil {
+			t.Fatalf("redacted URL %q lost its userinfo", out)
+		}
+		if got := ru.User.Username(); got != u.User.Username() {
+			t.Fatalf("user changed: %q → %q", u.User.Username(), got)
+		}
+		if got, ok := ru.User.Password(); !ok || got != "xxxxx" {
+			t.Fatalf("password %q redacted to %q (present=%v), want xxxxx", password, got, ok)
 		}
 	})
 }

@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      GO_VERSION: ${{ steps.pins.outputs.GO_VERSION }}
       SYFT_VERSION: ${{ steps.pins.outputs.SYFT_VERSION }}
       GRYPE_VERSION: ${{ steps.pins.outputs.GRYPE_VERSION }}
       SERVICES: ${{ steps.svc.outputs.SERVICES }}
@@ -40,8 +41,11 @@ jobs:
       - id: pins
         run: scripts/mise-pins.sh >> "$GITHUB_OUTPUT"
       - id: svc
-        run: echo "SERVICES=$(find services -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort | jq -Rsc 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+        run: echo "SERVICES=$(scripts/touched-modules.sh --services | jq -Rsc 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
 
+  # One recipe for every image: docker/service.Dockerfile with SERVICE, the
+  # mise Go pin (required) and the build stamp (Version / Revision / BuildTime
+  # → libs/httpx, mirrored in the OCI labels).
   build:
     needs: versions
     runs-on: ubuntu-latest
@@ -50,8 +54,24 @@ jobs:
       fail-fast: false
       matrix:
         service: ${{ fromJSON(needs.versions.outputs.SERVICES) }}
+    env:
+      SERVICE: ${{ matrix.service }}
+      SYFT_VERSION: ${{ needs.versions.outputs.SYFT_VERSION }}
+      GRYPE_VERSION: ${{ needs.versions.outputs.GRYPE_VERSION }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Build stamp: a tag name on tag pushes, the commit sha otherwise; the
+      # build time is the commit time, so a rebuild of the same commit is
+      # byte-for-byte the same.
+      - id: stamp
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then echo "version=$REF_NAME"; else echo "version=$SHA"; fi >> "$GITHUB_OUTPUT"
+          echo "build_time=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -59,11 +79,15 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: services/${{ matrix.service }}/Dockerfile
+          file: docker/service.Dockerfile
           load: true
           tags: golang-basics-${{ matrix.service }}:ci
           build-args: |
-            VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+            SERVICE=${{ matrix.service }}
+            GO_VERSION=${{ needs.versions.outputs.GO_VERSION }}
+            VERSION=${{ steps.stamp.outputs.version }}
+            GIT_SHA=${{ github.sha }}
+            BUILD_TIME=${{ steps.stamp.outputs.build_time }}
             DOCKER_HUB=${{ env.DOCKER_HUB }}
             GCR=${{ env.GCR }}
             GOPROXY=${{ env.GOPROXY }}
@@ -75,18 +99,16 @@ jobs:
       # against a `docker save` tar — identical commands, identical findings.
       - name: SBOM (syft) + CVE scan (grype, fail on high)
         run: |
-          docker save -o "image-${{ matrix.service }}.tar" "golang-basics-${{ matrix.service }}:ci"
-          docker run --rm -v "$PWD:/w" -w /w \
-            "${DOCKER_HUB}/anchore/syft:v${{ needs.versions.outputs.SYFT_VERSION }}" \
-            "docker-archive:image-${{ matrix.service }}.tar" -o "cyclonedx-json=sbom-${{ matrix.service }}.json"
+          docker save -o "image-$SERVICE.tar" "golang-basics-$SERVICE:ci"
+          docker run --rm -v "$PWD:/w" -w /w "${DOCKER_HUB}/anchore/syft:v${SYFT_VERSION}" \
+            "docker-archive:image-$SERVICE.tar" -o "cyclonedx-json=sbom-$SERVICE.json"
           # Forward only the grype knobs that are actually set (an empty
           # GRYPE_DB_UPDATE_URL would override grype's default with "").
           pass=(); for v in GRYPE_DB_VALIDATE_AGE GRYPE_DB_UPDATE_URL GRYPE_DB_AUTO_UPDATE HTTPS_PROXY NO_PROXY; do
             [ -n "${!v:-}" ] && pass+=(-e "$v")
           done
-          docker run --rm -v "$PWD:/w" -w /w "${pass[@]}" \
-            "${DOCKER_HUB}/anchore/grype:v${{ needs.versions.outputs.GRYPE_VERSION }}" \
-            "docker-archive:image-${{ matrix.service }}.tar" --config .grype.yaml --fail-on high
+          docker run --rm -v "$PWD:/w" -w /w "${pass[@]}" "${DOCKER_HUB}/anchore/grype:v${GRYPE_VERSION}" \
+            "docker-archive:image-$SERVICE.tar" --config .grype.yaml --fail-on high
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -101,6 +123,7 @@ jobs:
       #   uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       #   with:
       #     context: .
-      #     file: services/${{ matrix.service }}/Dockerfile
+      #     file: docker/service.Dockerfile
       #     push: true
+      #     build-args: … (same as above)
       #     tags: ghcr.io/tracehubmmp/golang-basics-${{ matrix.service }}:latest

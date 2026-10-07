@@ -6,12 +6,16 @@
 #
 # Topology
 #
-#   services ─(OTLP gRPC :4317)─▶ otel-collector ─(OTLP)─▶ Jaeger        http://localhost:16686
+#   services ─(OTLP/HTTP :4318)─▶ otel-collector ─(OTLP)─▶ Jaeger        http://localhost:16686
 #   services ─(stdout JSON)─────▶ vector (docker socket) ─▶ Loki         http://localhost:3100
 #   services :908x/metrics ◀─(scrape)─ VictoriaMetrics                    http://localhost:9095
 #   postgres-exporter / valkey-exporter / redpanda /public_metrics ◀─(scrape)─┘
+#   vmalert: evaluates observability/rules.yml against VictoriaMetrics     http://localhost:8880
 #   Grafana: VictoriaMetrics + Jaeger + Loki datasources, trace ⇄ logs links, one dashboard
 #                                                                         http://localhost:3000  (admin / admin)
+#
+# Every published port binds 127.0.0.1 only (Grafana's admin/admin, pprof
+# links and unauthenticated OTLP must not face the LAN).
 #
 # Every image is small enough to run next to the deps stack on a laptop: the
 # collector (core pipeline, ~60 MB RSS), Jaeger all-in-one (in-memory),
@@ -29,7 +33,8 @@
 #
 # Point a service at it (tracing is opt-in; see docker/stack.otel.yml for the
 # containerised path):
-#   TASKS_OTEL_ENABLED=true TASKS_OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317 just tasks run
+#   TASKS_OTEL_ENABLED=true TASKS_OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4318 \
+#     TASKS_OTEL_EXPORTER_OTLP_INSECURE=true just mod services/tasks run
 #
 # Image hosts come from DOCKER_HUB (see .env.example) for closed networks.
 
@@ -37,7 +42,7 @@ name: golang-basics-obs
 
 services:
   # ── OpenTelemetry Collector ─────────────────────────────────────────────────
-  # The one endpoint services know about. Receives OTLP (gRPC + HTTP), batches,
+  # The one endpoint services know about. Receives OTLP over HTTP, batches,
   # forwards traces to Jaeger. Swap the exporter (or add tail sampling) here
   # and no service changes. Config: observability/otel-collector.yml.
   otel-collector:
@@ -48,8 +53,7 @@ services:
     volumes:
       - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
     ports:
-      - "4317:4317" # OTLP gRPC — services
-      - "4318:4318" # OTLP HTTP — browsers / curl
+      - "127.0.0.1:4318:4318" # OTLP/HTTP — services on the host, curl
     depends_on:
       jaeger:
         condition: service_healthy
@@ -67,7 +71,7 @@ services:
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
-      - "16686:16686" # UI
+      - "127.0.0.1:16686:16686" # UI
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:14269/"]
       interval: 10s
@@ -90,9 +94,32 @@ services:
       - ./observability/scrape.yml:/etc/vm/scrape.yml:ro
       - vm-data:/victoria-metrics-data
     ports:
-      - "9095:8428"
+      - "127.0.0.1:9095:8428"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks: [deps]
+
+  # ── vmalert ─────────────────────────────────────────────────────────────────
+  # Evaluates the starter alert rules (observability/rules.yml) against
+  # VictoriaMetrics. No Alertmanager locally — firing alerts are visible in the
+  # vmalert UI and as the ALERTS series; point -notifier.url at an Alertmanager
+  # to route them.
+  vmalert:
+    image: ${DOCKER_HUB:-docker.io}/victoriametrics/vmalert:v1.136.0
+    container_name: golang-basics-vmalert
+    restart: unless-stopped
+    command:
+      - "-datasource.url=http://victoriametrics:8428"
+      - "-remoteWrite.url=http://victoriametrics:8428"
+      - "-remoteRead.url=http://victoriametrics:8428"
+      - "-rule=/etc/vmalert/rules.yml"
+      - "-notifier.blackhole"
+      - "-evaluationInterval=15s"
+    volumes:
+      - ./observability/rules.yml:/etc/vmalert/rules.yml:ro
+    ports:
+      - "127.0.0.1:8880:8880"
+    depends_on: [victoriametrics]
     networks: [deps]
 
   # ── Loki ────────────────────────────────────────────────────────────────────
@@ -107,7 +134,7 @@ services:
       - ./observability/loki.yml:/etc/loki/config.yml:ro
       - loki-data:/loki
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3100/ready"]
       interval: 10s
@@ -154,7 +181,7 @@ services:
       - ./observability/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on: [victoriametrics, loki]
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]

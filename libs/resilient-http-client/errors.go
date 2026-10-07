@@ -1,125 +1,112 @@
 package resilient
 
 import (
-	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
-	"net"
+	"fmt"
+	"time"
 )
 
-// ErrorKind classifies an [OutboundError] as retry-eligible or terminal.
-type ErrorKind uint8
+// Kind classifies an [OutboundError]. A Kind is itself an error, so
+// errors.Is(err, resilient.KindTimeout) works on any error wrapping an
+// [OutboundError].
+type Kind int
 
+// The error kinds.
 const (
-	// KindTransient marks a temporary failure: the caller should re-queue the
-	// job and try again later (network timeout, 5xx, 429, circuit open, rate
-	// limited, or shutting down).
-	KindTransient ErrorKind = iota
-	// KindFatal marks a permanent failure: retrying will not help (4xx other
-	// than 429, TLS certificate error, malformed request).
-	KindFatal
+	// KindTimeout: the per-attempt timeout expired (the caller's context did
+	// not). Counts as a breaker failure; retryable.
+	KindTimeout Kind = iota + 1
+	// KindConnection: dial, TLS, reset or another transport failure. Counts
+	// as a breaker failure; retryable.
+	KindConnection
+	// KindStatus: the dependency answered with status ≥ 400 (see
+	// StatusCode). 5xx counts as a breaker failure; 408, 425, 429 and 5xx
+	// other than 501/505 are retryable.
+	KindStatus
+	// KindCircuitOpen: rejected locally by the target's circuit breaker.
+	KindCircuitOpen
+	// KindRateLimited: rejected locally — no rate-limiter token before the
+	// attempt timeout.
+	KindRateLimited
+	// KindBulkheadFull: rejected locally — no concurrency slot within
+	// max_concurrent_wait.
+	KindBulkheadFull
+	// KindShutdown: rejected locally — the client is shutting down.
+	KindShutdown
+	// KindCanceled: the caller's context was cancelled or hit its deadline.
+	KindCanceled
+	// KindRedirect: a redirect was refused (another host, or too many).
+	KindRedirect
+	// KindInvalid: the request cannot be sent (unknown target, missing or
+	// non-http(s) URL). A caller bug; never retried, not counted in metrics.
+	KindInvalid
 )
 
-// OutboundError is the error returned by every send method. The Transient/Fatal
-// split lets workers decide whether to re-queue (transient) or drop (fatal) a
-// message, mirroring the Rust crate's OutboundError.
+var kindNames = map[Kind]string{
+	KindTimeout:      "timeout",
+	KindConnection:   "connection",
+	KindStatus:       "status",
+	KindCircuitOpen:  "circuit_open",
+	KindRateLimited:  "rate_limited",
+	KindBulkheadFull: "bulkhead_full",
+	KindShutdown:     "shutdown",
+	KindCanceled:     "canceled",
+	KindRedirect:     "redirect",
+	KindInvalid:      "invalid",
+}
+
+// String returns the kind's name.
+func (k Kind) String() string {
+	if s, ok := kindNames[k]; ok {
+		return s
+	}
+	return fmt.Sprintf("kind(%d)", int(k))
+}
+
+// Error makes a Kind usable as an errors.Is target.
+func (k Kind) Error() string { return "resilient: " + k.String() }
+
+// OutboundError is the error of every failed send.
 type OutboundError struct {
-	// Kind is the retry classification.
-	Kind ErrorKind
-	// Msg is a short human-readable description.
-	Msg string
-	// Err is the wrapped underlying cause, if any. Exposed via [errors.Unwrap].
+	// Kind classifies the failure.
+	Kind Kind
+	// Target is the logical target of the request.
+	Target string
+	// StatusCode is the response status for KindStatus (else 0).
+	StatusCode int
+	// RetryAfter is the response's Retry-After, parsed (else 0).
+	RetryAfter time.Duration
+	// Body is the start (at most 4 KiB) of a KindStatus response body, for
+	// diagnostics. It is never part of Error().
+	Body []byte
+	// Err is the underlying cause, if any.
 	Err error
 }
 
-// Error implements the error interface.
+// Error implements error.
 func (e *OutboundError) Error() string {
-	prefix := "transient"
-	if e.Kind == KindFatal {
-		prefix = "fatal"
+	msg := "resilient: " + e.Target + ": " + e.Kind.String()
+	if e.StatusCode != 0 {
+		msg += fmt.Sprintf(" %d", e.StatusCode)
 	}
 	if e.Err != nil {
-		return prefix + ": " + e.Msg + ": " + e.Err.Error()
+		msg += ": " + e.Err.Error()
 	}
-	return prefix + ": " + e.Msg
+	return msg
 }
 
-// Unwrap exposes the wrapped cause for [errors.Is] / [errors.As].
+// Unwrap returns the cause.
 func (e *OutboundError) Unwrap() error { return e.Err }
 
-// Transient reports whether this error is retry-eligible.
-func (e *OutboundError) Transient() bool { return e.Kind == KindTransient }
-
-// Fatal reports whether this error is terminal.
-func (e *OutboundError) Fatal() bool { return e.Kind == KindFatal }
-
-// transient builds a transient error wrapping cause (which may be nil).
-func transient(msg string, cause error) *OutboundError {
-	return &OutboundError{Kind: KindTransient, Msg: msg, Err: cause}
+// Is matches a [Kind]: errors.Is(err, resilient.KindTimeout).
+func (e *OutboundError) Is(target error) bool {
+	k, ok := target.(Kind)
+	return ok && k == e.Kind
 }
 
-// fatal builds a fatal error wrapping cause (which may be nil).
-func fatal(msg string, cause error) *OutboundError {
-	return &OutboundError{Kind: KindFatal, Msg: msg, Err: cause}
-}
-
-// IsTransient reports whether err is (or wraps) a transient [OutboundError].
-// A nil error is not transient.
-func IsTransient(err error) bool {
+// Retryable reports whether err is an [OutboundError] that
+// [Client.SendWithRetry] would retry (for an idempotent request).
+func Retryable(err error) bool {
 	var oe *OutboundError
-	return errors.As(err, &oe) && oe.Kind == KindTransient
-}
-
-// IsFatal reports whether err is (or wraps) a fatal [OutboundError].
-func IsFatal(err error) bool {
-	var oe *OutboundError
-	return errors.As(err, &oe) && oe.Kind == KindFatal
-}
-
-// classifyTransport maps a transport-level (non-HTTP-status) error from the
-// underlying http.Client into a metric label and an [OutboundError].
-//
-// Timeouts and connection failures are transient (worth retrying); TLS
-// certificate problems are fatal (the peer identity will not change on retry).
-func classifyTransport(err error) (label string, oe *OutboundError) {
-	switch {
-	case errors.Is(err, context.DeadlineExceeded):
-		return "timeout", transient("request timed out", err)
-	case errors.Is(err, context.Canceled):
-		return "canceled", transient("request canceled", err)
-	}
-
-	// TLS / certificate validation failures are not going to fix themselves.
-	var (
-		certInvalid x509.CertificateInvalidError
-		unknownAuth x509.UnknownAuthorityError
-		hostErr     x509.HostnameError
-		recordErr   tls.RecordHeaderError
-	)
-	if errors.As(err, &certInvalid) || errors.As(err, &unknownAuth) ||
-		errors.As(err, &hostErr) || errors.As(err, &recordErr) {
-		return "tls_error", fatal("TLS certificate error", err)
-	}
-
-	// net.Error timeouts (e.g. dial/read deadline) are transient.
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return "timeout", transient("network timeout", err)
-	}
-
-	// DNS failures: a lookup miss is usually transient (resolver blip / transient
-	// outage) — let the caller's retry policy decide.
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return "dns_error", transient("dns lookup failed", err)
-	}
-
-	// Generic connection-level failure (refused, reset, unreachable).
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return "connect_error", transient("connection error", err)
-	}
-
-	return "transport_error", transient("transport error", err)
+	return errors.As(err, &oe) && retryable(oe)
 }

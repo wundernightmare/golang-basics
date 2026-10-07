@@ -1,6 +1,14 @@
-# otelx justfile
-# Install: cargo install just | brew install just | mise use just
-# Usage:   just <recipe>      | just --list
+# otelx justfile — OpenTelemetry tracing setup (OTLP/HTTP)
+#
+# One of the per-module justfiles; every module has the same recipes (plus
+# release/run for services), so `just each <recipe>` from the root works
+# everywhere. From the root: `just mod libs/otelx <recipe>`.
+# Install: mise install (just is pinned in the root mise.toml)
+
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+# `mise exec --` when mise is installed (pinned tools), PATH otherwise (CI).
+MISE := `command -v mise >/dev/null 2>&1 && echo "mise exec --" || true`
 
 # Show all available recipes
 default:
@@ -8,91 +16,92 @@ default:
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
-# Compile the package (also surfaces type errors fast)
+# Compile the packages (also surfaces type errors fast)
 build:
     go build ./...
 
-# Vet + type-check without producing artefacts (fastest feedback)
+# go vet (fastest feedback)
 check:
     go vet ./...
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-# Run all tests (no live services required)
+# Full suite
 test *args:
-    go test ./... {{args}}
+    go test -shuffle=on ./... {{args}}
 
-# Unit tests only (-short): the container-backed suites skip themselves — what `just each test-short` runs
-test-short:
-    go test -short ./...
+# Unit tests only (-short: Docker-backed suites skip) — what `ci` runs
+test-short *args:
+    go test -short -shuffle=on ./... {{args}}
 
-# Run tests with the race detector and verbose output
-test-verbose:
-    go test -race -v ./...
+# Race detector + verbose output
+test-verbose *args:
+    go test -race -v ./... {{args}}
 
-# Run tests matching a name filter
+# Tests matching a name filter
 test-filter FILTER:
-    go test -run {{FILTER}} -v ./...
+    go test -run '{{FILTER}}' -v ./...
+
+# JUnit XML into ../../.reports/junit (gotestsum), like the root test-junit
+test-junit *args:
+    mkdir -p "{{justfile_directory()}}/../../.reports/junit"
+    {{MISE}} gotestsum --format testname --junitfile "{{justfile_directory()}}/../../.reports/junit/libs-otelx.xml" -- -shuffle=on ./... {{args}}
+
+# Go micro-benchmarks
+bench:
+    go test -run='^$' -bench=. -benchmem ./...
 
 # ── Coverage ──────────────────────────────────────────────────────────────────
 
-# Run all tests and print a per-function coverage summary
+# Per-function coverage summary
 cov:
-    go test -coverprofile=coverage.out ./...
+    go test -covermode=atomic -coverprofile=coverage.out ./...
     go tool cover -func=coverage.out
 
-# Open an HTML coverage report in the browser
+# HTML coverage report in the browser
 cov-html:
-    go test -coverprofile=coverage.out ./...
+    go test -covermode=atomic -coverprofile=coverage.out ./...
     go tool cover -html=coverage.out
 
 # ── Lint & Format ─────────────────────────────────────────────────────────────
 
-# golangci-lint — the aggregate linter (config in repo-root .golangci.yml)
+# golangci-lint (config: repo-root .golangci.yml)
 lint:
-    golangci-lint run
+    {{MISE}} golangci-lint run
 
-# golangci-lint — auto-fix where possible
+# golangci-lint, auto-fixing where possible
 lint-fix:
-    golangci-lint run --fix
+    {{MISE}} golangci-lint run --fix
 
-# Format all source files in-place (gofmt + import grouping)
+# Format in place (gofmt + golangci-lint fmt import grouping)
 fmt:
     gofmt -w .
-    golangci-lint fmt
+    {{MISE}} golangci-lint fmt
 
-# Check formatting without modifying files (CI gate)
+# Formatting gate
 fmt-check:
-    test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+    out="$(gofmt -l .)"; if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
 
 # ── Modules & Security ────────────────────────────────────────────────────────
 
-# Tidy go.mod / go.sum
+# go mod tidy
 tidy:
     go mod tidy
 
-# Known-vulnerability scan of this module's dependency graph
-audit:
-    go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+# Gate: go.mod / go.sum tidy on their own (GOWORK=off, via the go.mod replaces)
+tidy-check:
+    GOWORK=off go mod tidy -diff
 
-# Show the direct dependency list
+# govulncheck (appsec profile: just setup-appsec at the root)
+audit:
+    MISE_ENV="${MISE_ENV:+$MISE_ENV,}appsec" {{MISE}} govulncheck ./...
+
+# Direct + transitive module list
 deps:
     go list -m all
 
-# ── Docs ──────────────────────────────────────────────────────────────────────
-
-# Serve package docs locally (pkgsite on :6060)
-doc:
-    go run golang.org/x/pkgsite/cmd/pkgsite@latest -http :6060 .
-
-# ── Benchmarks ────────────────────────────────────────────────────────────────
-
-# Run Go micro-benchmarks (go test -bench)
-bench:
-    go test -bench=. -benchmem ./...
-
 # ── CI ────────────────────────────────────────────────────────────────────────
 
-# Full per-package CI pipeline: format → vet → lint → test
-ci: fmt-check check lint test
+# This module's slice of the root `just ci`: fmt-check → tidy-check → vet → lint → test-short
+ci: fmt-check tidy-check check lint test-short
     @echo "CI passed"

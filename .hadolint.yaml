@@ -1,4 +1,4 @@
-# hadolint config — Dockerfile linting for every services/*/Dockerfile.
+# hadolint config — Dockerfile linting for docker/service.Dockerfile (the one image recipe).
 # Run via `just sec-iac`. Pinning base-image versions to digests is enforced in
 # CI; locally we only waive the noisiest rules.
 ignored:

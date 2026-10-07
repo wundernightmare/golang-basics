@@ -177,8 +177,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (path, method) (rate(http_requests_total{service=\"tasks\"}[1m]))",
-          "legendFormat": "{{method}} {{path}}"
+          "expr": "sum by (route, method) (rate(http_requests_total{service=\"tasks\"}[1m]))",
+          "legendFormat": "{{method}} {{route}}"
         }
       ],
       "fieldConfig": {

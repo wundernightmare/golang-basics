@@ -5,7 +5,7 @@ on:
     branches: [master]
   pull_request:
   schedule:
-    - cron: "17 3 * * *" # nightly: mutation testing (see `mutation` below)
+    - cron: "17 3 * * *" # nightly: stress, fuzz, bench, mutation
   workflow_dispatch:
 
 permissions:
@@ -19,71 +19,93 @@ concurrency:
 
 # Closed-network knobs come from repository / organisation *variables* under the
 # same names as .env.example and fall back to the public upstreams. Nothing in
-# this file hard-codes a host or a tool version.
+# this file hard-codes a host, a tool version or a module list.
+#
+# Script hygiene: `${{ … }}` never appears inside `run:` text — every value a
+# script needs goes through `env:` and is expanded by the shell (a branch name
+# or a PR title in a script is shell injection). The appsec `sast` job checks.
 env:
   GOPROXY: ${{ vars.GOPROXY || 'https://proxy.golang.org,direct' }}
   GONOSUMDB: ${{ vars.GONOSUMDB }}
   GOTOOLCHAIN: local
+  DOCKER_HUB: ${{ vars.DOCKER_HUB || 'docker.io' }}
   # Determinism hygiene: a fixed zone so time-formatting tests cannot depend on
   # the runner, and a shuffled test order so inter-test coupling shows up here
   # rather than in someone's local run. -shuffle prints the seed on failure.
   TZ: UTC
   GOFLAGS: -shuffle=on
+  COVERPKG: github.com/tracehubmmp/golang-basics/...
 
 jobs:
-  # Single source of truth: tool pins are read out of mise.toml by
-  # scripts/mise-pins.sh (the GitLab `versions` job runs the same script) and
-  # the module lists out of go.work / go.mod, so adding a module or bumping a
-  # tool never touches this file.
+  # Single source of truth: tool pins come out of mise*.toml (scripts/mise-pins.sh,
+  # every profile file) and module lists out of go.work / go.mod
+  # (scripts/touched-modules.sh). The GitLab pipeline runs the same scripts.
   versions:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       GO_VERSION: ${{ steps.pins.outputs.GO_VERSION }}
       NODE_VERSION: ${{ steps.pins.outputs.NODE_VERSION }}
+      JUST_VERSION: ${{ steps.pins.outputs.JUST_VERSION }}
+      SHELLCHECK_VERSION: ${{ steps.pins.outputs.SHELLCHECK_VERSION }}
       GOLANGCI_VERSION: ${{ steps.pins.outputs.GOLANGCI_VERSION }}
+      GOTESTSUM_VERSION: ${{ steps.pins.outputs.GOTESTSUM_VERSION }}
       GOTESTCOV_VERSION: ${{ steps.pins.outputs.GOTESTCOV_VERSION }}
       GREMLINS_VERSION: ${{ steps.pins.outputs.GREMLINS_VERSION }}
       OAPICODEGEN_VERSION: ${{ steps.pins.outputs.OAPICODEGEN_VERSION }}
       GOJSONSCHEMA_VERSION: ${{ steps.pins.outputs.GOJSONSCHEMA_VERSION }}
       OASDIFF_VERSION: ${{ steps.pins.outputs.OASDIFF_VERSION }}
       BENCHSTAT_VERSION: ${{ steps.pins.outputs.BENCHSTAT_VERSION }}
+      SCHEMATHESIS_VERSION: ${{ steps.pins.outputs.SCHEMATHESIS_VERSION }}
+      JAVA_MAJOR: ${{ steps.pins.outputs.JAVA_MAJOR }}
       MODULES: ${{ steps.mods.outputs.MODULES }}
-      DATA_MODULES: ${{ steps.mods.outputs.DATA_MODULES }}
+      INTEGRATION_MODULES: ${{ steps.mods.outputs.INTEGRATION_MODULES }}
+      MUTATION_MODULES: ${{ steps.mods.outputs.MUTATION_MODULES }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: pins
-        run: scripts/mise-pins.sh >> "$GITHUB_OUTPUT"
+        run: |
+          scripts/mise-pins.sh | tee -a "$GITHUB_OUTPUT"
+          # "temurin-25" → "25" for setup-java.
+          echo "JAVA_MAJOR=$(scripts/mise-pins.sh | sed -n 's/^JAVA_VERSION=[a-z]*-//p')" >> "$GITHUB_OUTPUT"
       - id: mods
         run: |
           json() { jq -Rsc 'split("\n") | map(select(length > 0))'; }
           {
             echo "MODULES=$(scripts/touched-modules.sh --all | json)"
-            # Modules with container-backed suites: the ones that import testcontainers.
-            echo "DATA_MODULES=$(grep -ls testcontainers-go libs/*/go.mod services/*/go.mod | xargs -n1 dirname | json)"
-          } >> "$GITHUB_OUTPUT"
+            # Docker-backed suites: exactly the modules whose go.mod requires libs/testx/containers.
+            echo "INTEGRATION_MODULES=$(scripts/touched-modules.sh --integration | json)"
+            # Mutation testing: the modules that carry a .gremlins.yaml.
+            echo "MUTATION_MODULES=$(scripts/touched-modules.sh --mutation | json)"
+          } | tee -a "$GITHUB_OUTPUT"
 
-  fmt:
+  # Formatting, go.mod tidiness and shell scripts — `just fmt-check tidy-check`
+  # plus shellcheck from its pinned image (the runner's own is a different version).
+  static:
     needs: versions
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
-      - name: gofmt
+          cache-dependency-path: "**/go.sum"
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: ${{ needs.versions.outputs.JUST_VERSION }}
+      - run: just fmt-check tidy-check
+      - name: shellcheck
+        env:
+          SHELLCHECK_VERSION: ${{ needs.versions.outputs.SHELLCHECK_VERSION }}
         run: |
-          # Scoped to the module trees, matching `just fmt-check` and GitLab.
-          out="$(gofmt -l ./libs ./services)"
-          if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
-      - name: go work sync is a no-op
-        run: scripts/tidy-check.sh --workspace
+          docker run --rm -v "$PWD:/mnt:ro" -w /mnt "${DOCKER_HUB}/koalaman/shellcheck:v${SHELLCHECK_VERSION}" \
+            scripts/*.sh benchmarks/*.sh
 
-  # Contracts: the TypeSpec source (api/tsp) is compiled and the Go types
-  # regenerated; the commit must already contain exactly that output, and the
-  # HTTP contract must not break against master (oasdiff). Same as
-  # `just contracts-check`.
+  # Contracts: TypeSpec (api/tsp) → OpenAPI (ping + tasks) + JSON Schema → Go
+  # types; the commit must contain exactly that output, and no OpenAPI document
+  # may break against the target branch (oasdiff). Exactly `just contracts-check`
+  # — the only job with Node.
   contracts:
     needs: versions
     runs-on: ubuntu-latest
@@ -91,40 +113,38 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # master's spec for the breaking-change diff
+          fetch-depth: 0 # the base branch's specs for the breaking-change diff
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
+          cache-dependency-path: libs/contracts/go.mod
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: ${{ needs.versions.outputs.JUST_VERSION }}
+      # pnpm version: package.json `packageManager` (kept equal to the mise pin).
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ needs.versions.outputs.NODE_VERSION }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: |
-          go install "github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v${{ needs.versions.outputs.OAPICODEGEN_VERSION }}"
-          go install "github.com/atombender/go-jsonschema@v${{ needs.versions.outputs.GOJSONSCHEMA_VERSION }}"
-          go install "github.com/oasdiff/oasdiff@v${{ needs.versions.outputs.OASDIFF_VERSION }}"
-      - name: regenerate and compare
-        run: |
-          pnpm --filter @golang-basics/api compile
-          oapi-codegen -config api/oapi-codegen.yaml api/openapi3/tasks.openapi.yaml
-          go-jsonschema -p events --only-models --schema-root-type TaskCreatedEvent=TaskCreatedEvent \
-            -o libs/contracts/events/task_created.gen.go api/jsonschema/TaskCreatedEvent.json
-          (cd libs/contracts && gofmt -w . && go build ./...)
-          git diff --exit-code --stat -- api/openapi3 api/jsonschema libs/contracts \
-            || { echo "::error::contracts are stale — run 'just contracts' and commit"; exit 1; }
-      - name: breaking changes against master
-        if: github.event_name == 'pull_request'
+      - name: contract tools (pinned in mise.toml)
         env:
-          BASE_REF: ${{ github.base_ref }} # never interpolate github.* into run: text (shell injection)
+          OAPICODEGEN_VERSION: ${{ needs.versions.outputs.OAPICODEGEN_VERSION }}
+          GOJSONSCHEMA_VERSION: ${{ needs.versions.outputs.GOJSONSCHEMA_VERSION }}
+          OASDIFF_VERSION: ${{ needs.versions.outputs.OASDIFF_VERSION }}
         run: |
-          if git show "origin/$BASE_REF:api/openapi3/tasks.openapi.yaml" > /tmp/base.yaml 2>/dev/null; then
-            oasdiff breaking /tmp/base.yaml api/openapi3/tasks.openapi.yaml --fail-on ERR --err-ignore api/oasdiff-breaking.ignore
-          else
-            echo "no base spec on $BASE_REF — first version"
-          fi
+          go install "github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v${OAPICODEGEN_VERSION}"
+          go install "github.com/atombender/go-jsonschema@v${GOJSONSCHEMA_VERSION}"
+          go install "github.com/oasdiff/oasdiff@v${OASDIFF_VERSION}"
+      - name: just contracts-check
+        env:
+          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+        run: just contracts-check "origin/$BASE_REF"
 
+  # vet + golangci-lint + unit tests per module. Coverage goes to .cover/unit in
+  # Go's binary format (every workspace package instrumented) for the covdata
+  # merge in `coverage`; gotestsum writes the JUnit the Allure report reads.
   lint-test:
     needs: versions
     runs-on: ubuntu-latest
@@ -133,8 +153,12 @@ jobs:
       fail-fast: false
       matrix:
         module: ${{ fromJSON(needs.versions.outputs.MODULES) }}
+    env:
+      MODULE: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: name
+        run: echo "flat=${MODULE//\//-}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
@@ -145,84 +169,186 @@ jobs:
         run: scripts/tidy-check.sh "$MODULE"
       - name: go vet
         working-directory: ${{ matrix.module }}
-        run: go vet ./...
+        run: go vet -tags e2e ./...
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v${{ needs.versions.outputs.GOLANGCI_VERSION }}
           working-directory: ${{ matrix.module }}
-      # Unit tests only here — the container-backed suites run in `integration`.
-      # Coverage goes to .cover/unit in Go's binary format (every workspace
-      # package instrumented) so the `coverage` job can covdata-merge it with
-      # the integration and e2e layers; every test is an Allure test (testx)
-      # and writes its result where ALLURE_RESULTS_DIR points.
-      - name: go test (short, race, coverage)
+          args: --build-tags e2e
+      - name: gotestsum
+        env:
+          GOTESTSUM_VERSION: ${{ needs.versions.outputs.GOTESTSUM_VERSION }}
+        run: go install "gotest.tools/gotestsum@v${GOTESTSUM_VERSION}"
+      - name: go test (short, race, coverage, JUnit)
         working-directory: ${{ matrix.module }}
         env:
-          ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
+          FLAT: ${{ steps.name.outputs.flat }}
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.cover/unit"
-          go test -short -race -cover -covermode=atomic -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
+          mkdir -p "$GITHUB_WORKSPACE/.cover/unit" "$GITHUB_WORKSPACE/.reports/junit"
+          gotestsum --format testname --junitfile "$GITHUB_WORKSPACE/.reports/junit/unit-$FLAT.xml" -- \
+            -short -race -cover -covermode=atomic -coverpkg="$COVERPKG" ./... \
             -args -test.gocoverdir="$GITHUB_WORKSPACE/.cover/unit"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cover-unit-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
+          name: cover-unit-${{ steps.name.outputs.flat }}
           path: .cover/unit
           retention-days: 1
           if-no-files-found: ignore
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always() && hashFiles('allure-results/**') != ''
+        if: always()
         with:
-          name: allure-results-unit-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
-          path: allure-results
+          name: junit-unit-${{ steps.name.outputs.flat }}
+          path: .reports/junit
           retention-days: 7
+          if-no-files-found: ignore
 
-  # Container-backed integration tests (Postgres / Valkey / Kafka via
-  # testcontainers). GitHub runners ship a working Docker daemon, so the suites
-  # that skip locally when Docker is absent run for real here (CI is set, which
-  # makes a container-start failure fail the job instead of skipping).
+  # Docker-backed suites (Postgres / Valkey / Kafka / Toxiproxy via
+  # libs/testx/containers) under -race. GitHub runners ship a Docker daemon;
+  # CI is set, so a container that cannot start fails the job instead of
+  # skipping it.
   integration:
     needs: versions
+    if: needs.versions.outputs.INTEGRATION_MODULES != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        module: ${{ fromJSON(needs.versions.outputs.DATA_MODULES) }}
+        module: ${{ fromJSON(needs.versions.outputs.INTEGRATION_MODULES) }}
     env:
+      MODULE: ${{ matrix.module }}
       TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: ${{ vars.TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: name
+        run: echo "flat=${MODULE//\//-}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: gotestsum
+        env:
+          GOTESTSUM_VERSION: ${{ needs.versions.outputs.GOTESTSUM_VERSION }}
+        run: go install "gotest.tools/gotestsum@v${GOTESTSUM_VERSION}"
+      - name: go test (integration, race, coverage, JUnit)
+        working-directory: ${{ matrix.module }}
+        env:
+          FLAT: ${{ steps.name.outputs.flat }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.cover/integration" "$GITHUB_WORKSPACE/.reports/junit"
+          gotestsum --format testname --junitfile "$GITHUB_WORKSPACE/.reports/junit/integration-$FLAT.xml" -- \
+            -race -cover -covermode=atomic -coverpkg="$COVERPKG" ./... \
+            -args -test.gocoverdir="$GITHUB_WORKSPACE/.cover/integration"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cover-integration-${{ steps.name.outputs.flat }}
+          path: .cover/integration
+          retention-days: 1
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: junit-integration-${{ steps.name.outputs.flat }}
+          path: .reports/junit
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The Go e2e suite (e2e/, build tag `e2e`) against cover-instrumented
+  # binaries in .build/ and the real Postgres / Valkey / Redpanda of
+  # docker/deps.yml. `up --wait` fails the step if a dependency never gets
+  # healthy — no poll loop that silently runs on. The binaries write their
+  # counters to E2E_COVER_DIR (the harness sets GOCOVERDIR per child).
+  e2e:
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
-          cache-dependency-path: ${{ matrix.module }}/go.sum
-      - name: go test (integration, coverage)
-        working-directory: ${{ matrix.module }}
+          cache-dependency-path: "**/go.sum"
+      - name: deps (Postgres, Valkey, Redpanda)
+        run: docker compose -f docker/deps.yml up -d --wait --wait-timeout 180
+      - name: build service binaries (cover-instrumented) into .build/
         env:
-          ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
+          VERSION: ${{ github.sha }}
+          GIT_SHA: ${{ github.sha }}
+          COVER: "1"
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/.cover/integration"
-          go test -cover -covermode=atomic -coverpkg=github.com/tracehubmmp/golang-basics/... ./... \
-            -args -test.gocoverdir="$GITHUB_WORKSPACE/.cover/integration"
+          mkdir -p .build
+          for s in $(scripts/touched-modules.sh --services); do scripts/build-service.sh "$s" ".build/$s"; done
+      - name: gotestsum
+        env:
+          GOTESTSUM_VERSION: ${{ needs.versions.outputs.GOTESTSUM_VERSION }}
+        run: go install "gotest.tools/gotestsum@v${GOTESTSUM_VERSION}"
+      - name: go test -tags e2e
+        working-directory: e2e
+        env:
+          E2E_DATABASE_URL: postgres://app:app@127.0.0.1:5432/app?sslmode=disable
+          E2E_VALKEY_URL: valkey://127.0.0.1:6379
+          E2E_KAFKA_BROKERS: 127.0.0.1:9092
+        run: |
+          export E2E_BIN_DIR="$GITHUB_WORKSPACE/.build" E2E_COVER_DIR="$GITHUB_WORKSPACE/.cover/e2e"
+          mkdir -p "$E2E_COVER_DIR" "$GITHUB_WORKSPACE/.reports/junit"
+          gotestsum --format testname --junitfile "$GITHUB_WORKSPACE/.reports/junit/e2e.xml" -- \
+            -tags e2e -count=1 ./...
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cover-integration-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
-          path: .cover/integration
+          name: cover-e2e
+          path: .cover/e2e
           retention-days: 1
           if-no-files-found: ignore
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always() && hashFiles('allure-results/**') != ''
+        if: always()
         with:
-          name: allure-results-integration-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
-          path: allure-results
+          name: junit-e2e
+          path: .reports/junit
           retention-days: 7
+          if-no-files-found: ignore
+      - name: deps logs on failure
+        if: failure()
+        run: docker compose -f docker/deps.yml logs --tail 200
+      - if: always()
+        run: docker compose -f docker/deps.yml down -v
+
+  # Generative API testing: Schemathesis drives the real ping and tasks
+  # binaries with requests generated from their OpenAPI documents and checks
+  # every response against the contract. JUnit → the Allure report.
+  schemathesis:
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SCHEMATHESIS_VERSION: ${{ needs.versions.outputs.SCHEMATHESIS_VERSION }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ needs.versions.outputs.GO_VERSION }}
+          cache-dependency-path: "**/go.sum"
+      - name: deps (Postgres, Valkey, Redpanda)
+        run: docker compose -f docker/deps.yml up -d --wait --wait-timeout 180
+      - run: scripts/schemathesis.sh ping
+      - run: scripts/schemathesis.sh tasks
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: junit-schemathesis
+          path: .reports/junit
+          retention-days: 7
+          if-no-files-found: ignore
+      - if: always()
+        run: docker compose -f docker/deps.yml down -v
 
   # One coverage number for the whole pyramid: the unit, integration and e2e
-  # layers are covdata-merged (counters summed per block, nothing counted
-  # twice) and gated by .testcoverage.yml — the same as `just cov-check`.
+  # layers are covdata-merged (counters summed per block) and gated by
+  # .testcoverage.yml — the same as `just cov-check`. A pull request may not
+  # lower it against master's last breakdown.
   coverage:
     needs: [versions, lint-test, integration, e2e]
+    if: ${{ !cancelled() && needs.lint-test.result == 'success' && needs.e2e.result == 'success' && (needs.integration.result == 'success' || needs.integration.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -240,33 +366,33 @@ jobs:
           pattern: cover-integration-*
           path: .cover/integration
           merge-multiple: true
-      # The e2e upload is `if-no-files-found: ignore`, so this artifact can be
-      # absent (no counters flushed); cover.sh merge then warns and skips the
-      # layer instead of the job failing on the download.
+      # The e2e layer from the Go harness; the upload is if-no-files-found:
+      # ignore, so a missing artifact makes cover.sh merge warn and skip it.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         continue-on-error: true
         with:
           name: cover-e2e
           path: .cover/e2e
-      # master's per-package breakdown, saved by the last push to master (below)
-      # and restored here so a PR is measured against it: no coverage regression.
+      # master's per-package breakdown, saved by the last push to master (below).
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: base
         with:
           path: coverage-breakdown-base.json
           key: coverage-breakdown-master-${{ github.sha }}
           restore-keys: coverage-breakdown-master-
       - name: merge layers and gate
+        env:
+          GOTESTCOV_VERSION: ${{ needs.versions.outputs.GOTESTCOV_VERSION }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -o pipefail # a failed merge must fail the step even through tee
-          go install "github.com/vladopajic/go-test-coverage/v2@v${{ needs.versions.outputs.GOTESTCOV_VERSION }}"
+          go install "github.com/vladopajic/go-test-coverage/v2@v${GOTESTCOV_VERSION}"
           scripts/cover.sh merge | tee coverage-layers.txt
           # The no-regression diff is a pull-request gate; a push to master is
           # the new base, measured against the absolute thresholds only.
           diff_args=()
-          if [ "${{ github.event_name }}" = "pull_request" ] && [ -s coverage-breakdown-base.json ]; then
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -s coverage-breakdown-base.json ]; then
             diff_args=(--diff-base-breakdown-file-name coverage-breakdown-base.json --diff-threshold 0)
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
             echo "no base breakdown for master yet — absolute thresholds only"
           fi
           go-test-coverage --config .testcoverage.yml "${diff_args[@]}" | tee coverage-summary.txt
@@ -287,20 +413,21 @@ jobs:
             coverage-breakdown.json
           retention-days: 7
 
-  # One Allure HTML report from every suite's results (unit + integration +
-  # e2e + schemathesis). allure-commandline is a Node package (root
-  # package.json) and needs a JRE.
+  # One Allure HTML report from every suite's JUnit XML (unit + integration +
+  # e2e + schemathesis) — Allure reads JUnit natively. allure-commandline is
+  # an npm package (root package.json) running on a JRE: the one non-contracts
+  # job with Node, and only to render the report.
   allure-report:
     needs: [versions, lint-test, integration, e2e, schemathesis]
-    if: always()
+    if: always() && needs.versions.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: allure-results-*
-          path: allure-results
+          pattern: junit-*
+          path: .reports/allure-results
           merge-multiple: true
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -310,23 +437,20 @@ jobs:
       - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
-          java-version: "25"
+          java-version: ${{ needs.versions.outputs.JAVA_MAJOR }}
       - run: pnpm install --frozen-lockfile
-      # categories.json + executor.json next to the merged results. The script
-      # reads the runner's default GITHUB_* variables (no github.* context in
-      # run: text) — same as `just allure-report` and the GitLab job.
-      - run: scripts/allure-meta.sh allure-results
-      - run: pnpm exec allure generate --clean --single-file -o allure-report allure-results
+      # categories.json + executor.json next to the results (runner's default
+      # GITHUB_* variables, no github.* context in run: text).
+      - run: scripts/allure-meta.sh .reports/allure-results
+      - run: pnpm exec allure generate --clean --single-file -o allure-report .reports/allure-results
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: allure-report
           path: allure-report/index.html
           retention-days: 14
 
-  # Flakiness hunt — nightly or on demand: every layer three times, shuffled,
-  # under the race detector. A test that passes here 3/3 for weeks and fails
-  # once on a PR is a real flake and gets marked (testo-allure Flaky) with a
-  # ticket, never a silent retry.
+  # Flakiness hunt — nightly or on demand: every module three times, shuffled,
+  # under the race detector. A flake gets a ticket, never a silent retry.
   stress:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: versions
@@ -345,7 +469,7 @@ jobs:
       - working-directory: ${{ matrix.module }}
         run: go test -count=3 -race -shuffle=on ./...
 
-  # Fuzzing — nightly or on demand: every Fuzz* target for a fixed budget, the
+  # Fuzzing — nightly or on demand: every Fuzz* target for a fixed budget; the
   # corpus of any crash is uploaded so the failing input can be replayed.
   fuzz:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -364,11 +488,8 @@ jobs:
           name: fuzz-crashers
           path: "**/testdata/fuzz/**"
 
-  # Micro-benchmarks — nightly or on demand: the Benchmark* functions run with
-  # enough repetitions for benchstat, master's numbers are kept (cache) and
-  # the comparison is printed on the run page. Informational: a regression
-  # is a finding to act on, not an automatic failure — benchmark noise on
-  # shared runners would make a hard gate flaky.
+  # Micro-benchmarks — nightly or on demand; benchstat against master's last
+  # run (cache), printed on the run page. Informational, not a gate.
   bench:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: versions
@@ -379,7 +500,9 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
-      - run: go install "golang.org/x/perf/cmd/benchstat@v${{ needs.versions.outputs.BENCHSTAT_VERSION }}"
+      - env:
+          BENCHSTAT_VERSION: ${{ needs.versions.outputs.BENCHSTAT_VERSION }}
+        run: go install "golang.org/x/perf/cmd/benchstat@v${BENCHSTAT_VERSION}"
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: bench-base.txt
@@ -407,143 +530,66 @@ jobs:
           path: bench-head.txt
           retention-days: 30
 
-  # Mutation testing of the pure-logic modules — nightly or on demand, not per
-  # PR: it re-runs the suite once per mutant. Thresholds live in each
-  # module's .gremlins.yaml; a drop below them fails the job.
+  # Mutation testing — nightly or on demand, never per PR (one suite run per
+  # mutant). The matrix is every module with a .gremlins.yaml; its thresholds
+  # fail the job.
   mutation:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.versions.outputs.MUTATION_MODULES != '[]'
     needs: versions
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        module: [libs/resilient-http-client]
+        module: ${{ fromJSON(needs.versions.outputs.MUTATION_MODULES) }}
+    env:
+      MODULE: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: name
+        run: echo "flat=${MODULE//\//-}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
-      - run: go install "github.com/go-gremlins/gremlins/cmd/gremlins@v${{ needs.versions.outputs.GREMLINS_VERSION }}"
+      - env:
+          GREMLINS_VERSION: ${{ needs.versions.outputs.GREMLINS_VERSION }}
+        run: go install "github.com/go-gremlins/gremlins/cmd/gremlins@v${GREMLINS_VERSION}"
       - working-directory: ${{ matrix.module }}
         env:
           GOFLAGS: -count=1 # timeout is derived from the coverage run; never let it hit the cache
-        run: gremlins unleash --output "$GITHUB_WORKSPACE/gremlins-$(basename "${{ matrix.module }}").json" | tee -a "$GITHUB_STEP_SUMMARY"
+          FLAT: ${{ steps.name.outputs.flat }}
+        run: gremlins unleash --output "$GITHUB_WORKSPACE/gremlins-$FLAT.json" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: gremlins-${{ hashFiles(format('{0}/go.mod', matrix.module)) }}
+          name: gremlins-${{ steps.name.outputs.flat }}
           path: gremlins-*.json
           retention-days: 14
 
-  # The full suite — ping, heartbeat, tasks and consumer against real Postgres
-  # / Valkey / Redpanda from docker/deps.yml — the same scope as the GitLab
-  # job, so the two pipelines prove the same thing.
-  e2e:
-    needs: versions
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      COREPACK_NPM_REGISTRY: ${{ vars.COREPACK_NPM_REGISTRY }}
-      npm_config_registry: ${{ vars.NPM_REGISTRY }}
-      DOCKER_HUB: ${{ vars.DOCKER_HUB || 'docker.io' }}
-      E2E_WITH_DEPS: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: deps (Postgres, Valkey, Redpanda)
-        run: |
-          docker compose -f docker/deps.yml up -d
-          for _ in $(seq 1 60); do
-            docker inspect --format '{{.State.Health.Status}}' golang-basics-redpanda 2>/dev/null | grep -q healthy && break
-            sleep 2
-          done
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ needs.versions.outputs.GO_VERSION }}
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ needs.versions.outputs.NODE_VERSION }}
-          cache: pnpm
-      # Cover-instrumented binaries: the e2e layer contributes to the merged
-      # coverage through GOCOVERDIR, and Playwright reports to Allure like
-      # every other layer.
-      - name: build service binaries (cover-instrumented)
-        env:
-          VERSION: ${{ github.sha }}
-          COVER: "1"
-        run: |
-          for s in ping heartbeat tasks consumer; do scripts/build-service.sh "$s"; done
-      - name: pnpm install
-        run: pnpm install --frozen-lockfile
-      - name: playwright e2e
-        env:
-          GOCOVERDIR: ${{ github.workspace }}/.cover/e2e
-          ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
-        run: |
-          mkdir -p "$GOCOVERDIR"
-          pnpm --filter @golang-basics/e2e test
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: cover-e2e
-          path: .cover/e2e
-          retention-days: 1
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always() && hashFiles('allure-results/**') != ''
-        with:
-          name: allure-results-e2e
-          path: allure-results
-          retention-days: 7
-      - if: always()
-        run: docker compose -f docker/deps.yml down -v
-
-  # Generative API testing: Schemathesis drives the real ping and tasks
-  # binaries with requests generated from their OpenAPI documents (positive,
-  # negative, stateful) and checks every response against the contract. The
-  # deps come from docker/deps.yml, the same stack `just infra-up` runs.
-  schemathesis:
-    needs: versions
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      ALLURE_RESULTS_DIR: ${{ github.workspace }}/allure-results
-      DOCKER_HUB: ${{ vars.DOCKER_HUB || 'docker.io' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ needs.versions.outputs.GO_VERSION }}
-      - name: deps (Postgres, Valkey, Redpanda)
-        run: |
-          docker compose -f docker/deps.yml up -d
-          for _ in $(seq 1 60); do
-            docker inspect --format '{{.State.Health.Status}}' golang-basics-redpanda 2>/dev/null | grep -q healthy && break
-            sleep 2
-          done
-      - run: scripts/schemathesis.sh ping
-      - run: scripts/schemathesis.sh tasks
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always() && hashFiles('allure-results/**') != ''
-        with:
-          name: allure-results-schemathesis
-          path: allure-results
-          retention-days: 7
-      - if: always()
-        run: docker compose -f docker/deps.yml down -v
-
   # Final status check for branch protection — the one required check.
+  # `integration` may be skipped (no Docker-backed module); everything else
+  # must succeed.
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    needs: [fmt, contracts, lint-test, integration, e2e, schemathesis, coverage]
+    needs: [static, contracts, lint-test, integration, e2e, schemathesis, coverage]
     if: always()
     steps:
       - name: verify all jobs passed
+        env:
+          RESULTS: >-
+            static=${{ needs.static.result }}
+            contracts=${{ needs.contracts.result }}
+            lint-test=${{ needs.lint-test.result }}
+            e2e=${{ needs.e2e.result }}
+            schemathesis=${{ needs.schemathesis.result }}
+            coverage=${{ needs.coverage.result }}
+          INTEGRATION: ${{ needs.integration.result }}
         run: |
-          for r in "${{ needs.fmt.result }}" "${{ needs.contracts.result }}" "${{ needs.lint-test.result }}" \
-                   "${{ needs.integration.result }}" "${{ needs.e2e.result }}" "${{ needs.schemathesis.result }}" \
-                   "${{ needs.coverage.result }}"; do
-            [ "$r" = "success" ] || { echo "a required job did not succeed ($r)"; exit 1; }
+          fail=0
+          for r in $RESULTS; do
+            [ "${r#*=}" = "success" ] || { echo "::error::${r%%=*} did not succeed (${r#*=})"; fail=1; }
           done
-          echo "CI gate passed"
+          case "$INTEGRATION" in success|skipped) ;; *) echo "::error::integration: $INTEGRATION"; fail=1 ;; esac
+          [ "$fail" = 0 ] && echo "CI gate passed"
+          exit "$fail"

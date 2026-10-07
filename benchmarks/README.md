@@ -1,8 +1,12 @@
 # benchmarks
 
 k6 load tests for the golang-basics services. The Go analogue of the Rust
-sibling repo's `benchmarks/` — same profile catalogue, minus the cross-store
-invariant checks (these services have no datastores).
+sibling repo's `benchmarks/` — same profile catalogue. `ping` is
+dependency-free; `tasks` runs against real Postgres + Valkey + Kafka
+(`just infra-up`), so its profiles are lighter and its numbers include the
+datastores. There are no cross-store invariant checks here: tasks publishes
+through a transactional outbox, and "the row and the event agree" is asserted
+by the integration and e2e layers, not under load.
 
 ## Layout
 
@@ -10,6 +14,8 @@ invariant checks (these services have no datastores).
 | -------------- | ------------------------------------------------------------- |
 | `k6-ping.js`   | The k6 script: profiles + checks + custom metrics for `/ping` |
 | `run-k6.sh`    | Orchestrator — builds + starts ping, runs k6, tears down      |
+| `k6-tasks.js`  | tasks: POST then GET per iteration (Postgres write + outbox, Valkey cache-aside read) |
+| `run-k6-tasks.sh` | Orchestrator for tasks — needs `just infra-up` first; builds + starts tasks, waits for `/readyz`, runs k6, tears down |
 | `results/`     | Per-run `summary-<profile>.json` + stdout log (gitignored)    |
 
 ## Profiles

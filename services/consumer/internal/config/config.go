@@ -1,103 +1,84 @@
-// Package config loads the consumer worker's settings from the environment
-// (CONSUMER_-prefixed) and projects them into the shared libs' configs. It is
-// env-only, mirroring services/heartbeat — the YAML config-file story is shown
-// in services/tasks instead.
+// Package config loads the consumer worker's settings: an optional YAML file
+// (CONSUMER_CONFIG) overlaid with CONSUMER_-prefixed environment variables,
+// through httpx.LoadYAML. The service config embeds the libs' own Config
+// structs, so every tuning knob a lib grows is configurable here without
+// copying fields.
 package config
 
 import (
+	"errors"
 	"fmt"
-	"time"
-
-	"github.com/caarlos0/env/v11"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
 	"github.com/tracehubmmp/golang-basics/libs/otelx"
 )
 
-// Config is the consumer worker configuration. It carries the shared HTTP
-// fields (for the health/metrics server) plus the broker subscription.
+// Prefix is the environment-variable prefix of every key.
+const Prefix = "CONSUMER_"
+
+// Config is the consumer worker configuration.
 //
-// Keys (all prefixed CONSUMER_):
+// Keys (all prefixed CONSUMER_; YAML keys in parentheses):
 //
-//	CONSUMER_ADMIN_ADDR             health/metrics/pprof listen address (default ":9083")
-//	CONSUMER_ADMIN_TOKEN            bearer token for PUT/DELETE /admin/* (default "": open)
-//	CONSUMER_HTTP_SHUTDOWN_TIMEOUT  graceful-shutdown budget       (default "10s")
-//	CONSUMER_LOG_LEVEL              debug|info|warn|error          (default "info")
-//	CONSUMER_LOG_FORMAT             json|text                      (default "json")
-//	CONSUMER_LOG_SAMPLE_INITIAL     log sampling: first N per msg per second (default 100, 0 = off)
-//	CONSUMER_LOG_SAMPLE_THEREAFTER  … then every M-th              (default 100)
-//	CONSUMER_KAFKA_BROKERS          comma-separated seeds          (default "localhost:9092")
-//	CONSUMER_KAFKA_TOPIC            topic to drain                 (default "tasks.events")
-//	CONSUMER_KAFKA_GROUP            consumer group id              (default "tasks-consumer")
-//	CONSUMER_KAFKA_LAG_INTERVAL     group-lag poll period, 0 = off (default "15s")
-//	CONSUMER_OTEL_ENABLED           export traces                  (default false)
-//	CONSUMER_OTEL_EXPORTER_OTLP_ENDPOINT  collector host:port      (default "localhost:4317")
+//   - the libs/httpx keys (top level, e.g. ADMIN_ADDR, ADMIN_TOKEN,
+//     ADMIN_INSECURE, LOG_LEVEL, LOG_FORMAT); a worker has no API listener,
+//     so HTTP_ADDR is ignored and the admin listener defaults to ":9083";
+//   - the libs/kafka keys (under "kafka:"), e.g. KAFKA_BROKERS, KAFKA_TOPIC,
+//     KAFKA_GROUP, KAFKA_TLS_*, KAFKA_SASL_*, KAFKA_CONSUMER_MAX_RETRIES,
+//     KAFKA_DEAD_LETTER_TOPIC; the client id defaults to "consumer";
+//   - the libs/otelx keys (under "otel:"), e.g. OTEL_ENABLED,
+//     OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_INSECURE;
+//   - DEDUPE_SIZE (dedupe_size): event ids remembered for duplicate
+//     suppression (default 10000).
+//
+// The lib keys already carry their KAFKA_ / OTEL_ namespace, so the nested
+// structs take no extra envPrefix: CONSUMER_KAFKA_BROKERS, not
+// CONSUMER_KAFKA_KAFKA_BROKERS.
 type Config struct {
-	AdminAddr           string        `env:"ADMIN_ADDR" envDefault:":9083"`
-	AdminToken          string        `env:"ADMIN_TOKEN" secret:"true"`
-	ShutdownTimeout     time.Duration `env:"HTTP_SHUTDOWN_TIMEOUT" envDefault:"10s"`
-	LogLevel            string        `env:"LOG_LEVEL" envDefault:"info"`
-	LogFormat           string        `env:"LOG_FORMAT" envDefault:"json"`
-	LogSampleInitial    int           `env:"LOG_SAMPLE_INITIAL" envDefault:"100"`
-	LogSampleThereafter int           `env:"LOG_SAMPLE_THEREAFTER" envDefault:"100"`
-
-	KafkaBrokers []string      `env:"KAFKA_BROKERS" envSeparator:"," envDefault:"localhost:9092"`
-	KafkaTopic   string        `env:"KAFKA_TOPIC" envDefault:"tasks.events"`
-	KafkaGroup   string        `env:"KAFKA_GROUP" envDefault:"tasks-consumer"`
-	KafkaLag     time.Duration `env:"KAFKA_LAG_INTERVAL" envDefault:"15s"`
-
-	OTelEnabled  bool    `env:"OTEL_ENABLED" envDefault:"false"`
-	OTelEndpoint string  `env:"OTEL_EXPORTER_OTLP_ENDPOINT" envDefault:"localhost:4317"`
-	OTelSampler  float64 `env:"OTEL_TRACES_SAMPLER_RATIO" envDefault:"1.0"`
+	httpx.Config `yaml:",inline"`
+	Kafka        kafka.Config `yaml:"kafka"`
+	OTel         otelx.Config `yaml:"otel"`
+	DedupeSize   int          `env:"DEDUPE_SIZE" envDefault:"10000" yaml:"dedupe_size"`
 }
 
-// Load parses the configuration from CONSUMER_-prefixed environment vars.
-func Load() (Config, error) {
+// Load reads the YAML file at path (optional: a missing file means env-only),
+// overlays the CONSUMER_ environment and validates the result. Service-level
+// defaults (name, admin port, client id) are set before loading, so the file
+// and the environment still override them.
+func Load(path string) (Config, error) {
 	var cfg Config
-	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: "CONSUMER_"}); err != nil {
-		return Config{}, fmt.Errorf("consumer: parse config: %w", err)
+	cfg.Service = "consumer"
+	cfg.AdminAddr = ":9083"
+	cfg.Kafka.ClientID = "consumer"
+	cfg.OTel.ServiceName = "consumer"
+	if err := httpx.LoadYAML(path, Prefix, &cfg); err != nil {
+		return Config{}, err
+	}
+	cfg.Addr = "" // a worker serves no API: admin listener only
+	if cfg.OTel.Version == "" {
+		cfg.OTel.Version = httpx.Version
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
 	}
 	return cfg, nil
 }
 
-// HTTP projects the shared fields into a libs/httpx Config: admin listener
-// only (Addr empty), since a worker serves no API.
-func (c Config) HTTP() httpx.Config {
-	return httpx.Config{
-		Service:             "consumer",
-		Addr:                "",
-		AdminAddr:           c.AdminAddr,
-		AdminToken:          c.AdminToken,
-		ShutdownTimeout:     c.ShutdownTimeout,
-		LogLevel:            c.LogLevel,
-		LogFormat:           c.LogFormat,
-		LogSampleInitial:    c.LogSampleInitial,
-		LogSampleThereafter: c.LogSampleThereafter,
+// Validate checks every part and reports all problems at once.
+func (c *Config) Validate() error {
+	var errs []error
+	if err := c.Config.Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("http: %w", err))
 	}
-}
-
-// Kafka projects the subscription into a libs/kafka Config (consumer shape).
-func (c Config) Kafka() kafka.Config {
-	return kafka.Config{
-		Brokers:     c.KafkaBrokers,
-		Topic:       c.KafkaTopic,
-		Topics:      []string{c.KafkaTopic},
-		Group:       c.KafkaGroup,
-		ClientID:    "consumer",
-		DialTimeout: 10 * time.Second,
-		LagInterval: c.KafkaLag,
+	if err := c.Kafka.Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("kafka: %w", err))
 	}
-}
-
-// OTel projects the tracing settings, naming this service in every span.
-func (c Config) OTel() otelx.Config {
-	return otelx.Config{
-		Enabled:      c.OTelEnabled,
-		ServiceName:  "consumer",
-		Version:      httpx.Version,
-		Endpoint:     c.OTelEndpoint,
-		Insecure:     true,
-		SamplerRatio: c.OTelSampler,
+	if c.DedupeSize <= 0 {
+		errs = append(errs, errors.New("DEDUPE_SIZE must be positive"))
 	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("consumer config: %w", err)
+	}
+	return nil
 }

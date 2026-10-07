@@ -8,64 +8,32 @@ import (
 	"time"
 )
 
-func BenchmarkCircuitBreaker_Allow(b *testing.B) {
-	cb := NewCircuitBreaker(0.5, 10, 10*time.Second, 30*time.Second)
+func BenchmarkBreaker_AllowRecord(b *testing.B) {
+	tc := DefaultTarget("t")
+	br := newBreaker(&tc, time.Now, nil)
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			if cb.Allow() {
-				cb.RecordSuccess()
+			if tk, ok := br.allow(); ok {
+				br.record(tk, outcomeSuccess)
 			}
 		}
 	})
 }
 
-func BenchmarkFullJitter(b *testing.B) {
-	for b.Loop() {
-		_ = FullJitter(5, 100*time.Millisecond, 30*time.Second)
-	}
-}
-
-func BenchmarkAdaptive_AcquireRelease(b *testing.B) {
-	l := NewAdaptiveLimiter(256, 1, 1024)
-	ctx := context.Background()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			_ = l.Acquire(ctx)
-			l.OnSuccess()
-			l.Release()
-		}
-	})
-}
-
-func BenchmarkInMemoryCache_GetHit(b *testing.B) {
-	c := NewInMemoryCache(1024, time.Minute)
-	ctx := context.Background()
-	c.Set(ctx, "k", CachedResponse{Status: 200, Body: []byte("payload")}, time.Minute)
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			_, _ = c.Get(ctx, "k")
-		}
-	})
-}
-
 func BenchmarkSend(b *testing.B) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("ok"))
-	}))
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer srv.Close()
-
-	cfg := DefaultConfig()
-	cfg.OutboundTargets = []TargetConfig{{Name: "t", RateLimit: 1_000_000}}
-	c, err := New(cfg)
+	c, err := New(DefaultConfig("api"))
 	if err != nil {
 		b.Fatal(err)
 	}
-	ctx := context.Background()
-	req := Request{Target: "t", URL: srv.URL}
-
-	b.ResetTimer()
+	defer func() { _ = c.Shutdown(context.Background()) }()
+	req, err := http.NewRequestWithContext(b.Context(), http.MethodGet, srv.URL, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
 	for b.Loop() {
-		resp, err := c.Send(ctx, req)
+		resp, err := c.Send("api", req)
 		if err != nil {
 			b.Fatal(err)
 		}

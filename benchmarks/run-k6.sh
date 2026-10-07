@@ -18,7 +18,7 @@ mkdir -p "$RESULTS"
 
 log() { printf '\033[36m▸ %s\033[0m\n' "$*"; }
 
-command -v k6 >/dev/null || { echo "k6 not found — install via mise (pinned in mise.toml)" >&2; exit 1; }
+command -v k6 >/dev/null || { echo "k6 not found — install via mise: just setup-perf (pinned in mise.perf.toml)" >&2; exit 1; }
 
 ADMIN_PORT=$((PORT + 1000))
 
@@ -26,7 +26,7 @@ log "build ping (release)"
 "$ROOT/scripts/build-service.sh" ping "$RESULTS/ping"
 
 log "start ping on :$PORT (admin :$ADMIN_PORT)"
-PING_HTTP_ADDR=":$PORT" PING_ADMIN_ADDR=":$ADMIN_PORT" PING_LOG_LEVEL=warn \
+PING_HTTP_ADDR=":$PORT" PING_ADMIN_ADDR="127.0.0.1:$ADMIN_PORT" PING_LOG_LEVEL=warn \
   "$RESULTS/ping" > "$RESULTS/ping.log" 2>&1 &
 PING_PID=$!
 trap 'kill "$PING_PID" 2>/dev/null || true' EXIT

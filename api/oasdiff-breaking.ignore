@@ -12,3 +12,9 @@
 # title: before the pattern such requests failed with 500, so no client relied
 # on them — the pattern documents behaviour, it does not narrow it.
 POST /tasks added the pattern `^[^\u0000]+$` to the request property `title`
+
+# Remove once master carries the limit. A deliberate tightening from the audit
+# (unbounded titles were a finding: a multi-megabyte title went straight into
+# Postgres, the cache and every event). The service rejects longer titles with
+# a 400 problem now; no known client sends more than a sentence.
+POST /tasks the `title` request property's maxLength was set to `200`

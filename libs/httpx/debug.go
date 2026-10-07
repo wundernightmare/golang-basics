@@ -2,9 +2,7 @@ package httpx
 
 import (
 	"context"
-	"crypto/subtle"
-
-	"github.com/gin-gonic/gin"
+	"crypto/sha256"
 )
 
 // DebugTokenHeader is the request header that turns on debug logging for one
@@ -33,21 +31,9 @@ func DebugLogging(ctx context.Context) bool {
 	return v
 }
 
-// debugToken is the gin middleware behind [Config].DebugToken: a request whose
-// X-Debug-Token equals token (constant-time compare) runs with a context
-// marked by [WithDebugLogging] and gets X-Debug-Logging: on in the response.
-// A missing or wrong token is ignored silently — the API port is public, and
-// answering "wrong token" would make it an oracle and a log-flood vector.
-func debugToken(token string) gin.HandlerFunc {
-	want := []byte(token)
-	return func(c *gin.Context) {
-		got := c.GetHeader(DebugTokenHeader)
-		if got == "" || subtle.ConstantTimeCompare([]byte(got), want) != 1 {
-			c.Next()
-			return
-		}
-		c.Request = c.Request.WithContext(WithDebugLogging(c.Request.Context()))
-		c.Header(DebugLoggingHeader, "on")
-		c.Next()
-	}
+// tokenDigest hashes a token before the constant-time compare, so the
+// comparison neither leaks the token's length nor depends on it.
+func tokenDigest(token string) []byte {
+	sum := sha256.Sum256([]byte(token))
+	return sum[:]
 }

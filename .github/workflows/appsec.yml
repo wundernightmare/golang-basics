@@ -42,7 +42,7 @@ jobs:
           json() { jq -Rsc 'split("\n") | map(select(length > 0))'; }
           {
             echo "MODULES=$(scripts/touched-modules.sh --all | json)"
-            echo "DOCKERFILES=$(find services -mindepth 2 -maxdepth 2 -name Dockerfile | sort | json)"
+            echo "DOCKERFILES=$(find docker -name '*Dockerfile' | sort | json)"
           } >> "$GITHUB_OUTPUT"
 
   # Every scanner below runs from the same version-pinned image the GitLab
@@ -74,6 +74,13 @@ jobs:
       SEMGREP_CONFIG: ${{ vars.SEMGREP_CONFIG || 'p/owasp-top-ten p/golang' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Time-boxed waivers (`Remove after YYYY-MM-DD` in .grype.yaml,
+      # osv-scanner.toml, api/oasdiff-breaking.ignore, pnpm-workspace.yaml, …)
+      # fail once their date has passed — same as `just sec-waivers`.
+      - name: expired waivers
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE" 2>/dev/null || true
+          sh scripts/check-waivers.sh
       - run: |
           set -- ; for c in $SEMGREP_CONFIG; do set -- "$@" --config "$c"; done
           semgrep scan "$@" --error --metrics=off
@@ -93,7 +100,9 @@ jobs:
       # Built from source on the pinned toolchain so Go call-graph reachability
       # analysis runs (the official image bundles an older Go than go.work
       # requires — that is why the GitLab job passes --no-call-analysis=go).
-      - run: go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@v${{ needs.versions.outputs.OSV_VERSION }}"
+      - env:
+          OSV_VERSION: ${{ needs.versions.outputs.OSV_VERSION }}
+        run: go install "github.com/google/osv-scanner/v2/cmd/osv-scanner@v${OSV_VERSION}"
       - run: |
           # shellcheck disable=SC2086 # OSV_SCANNER_FLAGS is a flag list; splitting is intended
           osv-scanner scan --config=osv-scanner.toml --recursive $OSV_SCANNER_FLAGS .
@@ -114,9 +123,11 @@ jobs:
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
           cache-dependency-path: ${{ matrix.module }}/go.sum
-      - run: go install "golang.org/x/vuln/cmd/govulncheck@v${{ needs.versions.outputs.GOVULNCHECK_VERSION }}"
+      - env:
+          GOVULNCHECK_VERSION: ${{ needs.versions.outputs.GOVULNCHECK_VERSION }}
+        run: go install "golang.org/x/vuln/cmd/govulncheck@v${GOVULNCHECK_VERSION}"
       - working-directory: ${{ matrix.module }}
-        run: govulncheck ./...
+        run: govulncheck -tags e2e ./...
 
   hadolint:
     needs: versions
@@ -131,4 +142,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Severity threshold comes from .hadolint.yaml (failure-threshold: warning).
-      - run: hadolint --config .hadolint.yaml "${{ matrix.dockerfile }}"
+      - env:
+          DOCKERFILE: ${{ matrix.dockerfile }}
+        run: hadolint --config .hadolint.yaml "$DOCKERFILE"

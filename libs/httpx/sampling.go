@@ -117,6 +117,9 @@ func (h *samplingHandler) WithGroup(name string) slog.Handler {
 // logDropped finds the sampling handler behind log (if any) and returns its
 // counters for the log_dropped_total metric.
 func logDropped(log *slog.Logger) func() (debug, info uint64) {
+	if log == nil {
+		return nil
+	}
 	h := log.Handler()
 	if lh, ok := h.(levelHandler); ok { // NewLogger's outermost wrapper
 		h = lh.Handler

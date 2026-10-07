@@ -1,0 +1,70 @@
+# e2e justfile — the Go end-to-end suite (real binaries over HTTP)
+# Install: cargo install just | brew install just | mise use just
+# Usage:   just <recipe>      | just --list
+
+# Show all available recipes
+default:
+    @just --list --unsorted
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+
+# Compile the suite without running it (the e2e tag is required to see the tests)
+build:
+    go test -tags e2e -count=1 -run '^$' ./...
+
+# Vet the suite (tagged files included)
+check:
+    go vet -tags e2e ./...
+
+# ── Test ──────────────────────────────────────────────────────────────────────
+
+# Run the suite against the binaries in E2E_BIN_DIR (default ../.build)
+test *args:
+    go test -tags e2e -count=1 ./... {{args}}
+
+# Shuffled, as CI runs it (TZ=UTC, -shuffle=on; no retries)
+test-ci:
+    TZ=UTC go test -tags e2e -count=1 -shuffle=on ./...
+
+# What `just each test-short` expects: without the tag nothing runs (no binaries needed)
+test-short:
+    go test -short ./...
+
+# Verbose run
+test-verbose:
+    go test -tags e2e -count=1 -v ./...
+
+# Run tests matching a name filter
+test-filter FILTER:
+    go test -tags e2e -count=1 -run {{FILTER}} -v ./...
+
+# ── Lint & Format ─────────────────────────────────────────────────────────────
+
+# golangci-lint with the e2e tag (config in repo-root .golangci.yml)
+lint:
+    golangci-lint run --build-tags e2e
+
+# golangci-lint — auto-fix where possible
+lint-fix:
+    golangci-lint run --build-tags e2e --fix
+
+# Format with gofmt + goimports
+fmt:
+    gofmt -w .
+    golangci-lint fmt
+
+# Check formatting without modifying files (CI gate)
+fmt-check:
+    test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+
+# ── Modules ───────────────────────────────────────────────────────────────────
+
+# Tidy go.mod / go.sum
+tidy:
+    go mod tidy
+
+# ── CI ────────────────────────────────────────────────────────────────────────
+
+# Static gates only — the suite itself needs built binaries (root recipe / CI e2e job)
+ci: fmt-check check lint
+    @echo "CI passed"

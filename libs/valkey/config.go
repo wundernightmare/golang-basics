@@ -9,7 +9,9 @@ import (
 )
 
 // Config is the Valkey client configuration, populated from the environment
-// with a per-service prefix (e.g. "TASKS_").
+// with a per-service prefix (e.g. "TASKS_"), or from YAML when a service
+// embeds it in its own config (field `Valkey valkey.Config` tagged yaml:"valkey", no
+// envPrefix: the keys already carry VALKEY_).
 //
 // Two ways to point at a server, in precedence order:
 //
@@ -19,23 +21,23 @@ import (
 //
 // Keys (with the "TASKS_" prefix as an example):
 //
-//	TASKS_VALKEY_URL           connection URL; overrides discrete fields  (default "")
-//	TASKS_VALKEY_ADDR          host:port                                  (default "localhost:6379")
-//	TASKS_VALKEY_PASSWORD      auth password                              (default "")
-//	TASKS_VALKEY_DB            logical database number                    (default 0)
-//	TASKS_VALKEY_OP_TIMEOUT     per-command deadline           (default "500ms")
-//	TASKS_VALKEY_DIAL_TIMEOUT  connection dial timeout                    (default "5s")
+//	TASKS_VALKEY_URL           [url]           connection URL; overrides discrete fields  (default "")
+//	TASKS_VALKEY_ADDR          [addr]          host:port                                  (default "localhost:6379")
+//	TASKS_VALKEY_PASSWORD      [password]      auth password                              (default "")
+//	TASKS_VALKEY_DB            [db]            logical database number                    (default 0)
+//	TASKS_VALKEY_DIAL_TIMEOUT  [dial_timeout]  connection dial timeout                    (default "5s")
+//	TASKS_VALKEY_OP_TIMEOUT    [op_timeout]    per-command deadline                       (default "500ms")
 type Config struct {
-	URL         string        `env:"VALKEY_URL"`
-	Addr        string        `env:"VALKEY_ADDR" envDefault:"localhost:6379"`
-	Password    string        `env:"VALKEY_PASSWORD"`
-	DB          int           `env:"VALKEY_DB" envDefault:"0"`
-	DialTimeout time.Duration `env:"VALKEY_DIAL_TIMEOUT" envDefault:"5s"`
+	URL         string        `env:"VALKEY_URL" yaml:"url"`
+	Addr        string        `env:"VALKEY_ADDR" envDefault:"localhost:6379" yaml:"addr"`
+	Password    string        `env:"VALKEY_PASSWORD" yaml:"password" secret:"true"`
+	DB          int           `env:"VALKEY_DB" envDefault:"0" yaml:"db"`
+	DialTimeout time.Duration `env:"VALKEY_DIAL_TIMEOUT" envDefault:"5s" yaml:"dial_timeout"`
 	// OpTimeout bounds every command (get/set/del). Without it a cache that
 	// refuses connections makes valkey-go retry forever, and a request whose
 	// context has no deadline hangs with it — found by the chaos suite. A
 	// cache is optional: past this, the caller treats it as a miss.
-	OpTimeout time.Duration `env:"VALKEY_OP_TIMEOUT" envDefault:"500ms"`
+	OpTimeout time.Duration `env:"VALKEY_OP_TIMEOUT" envDefault:"500ms" yaml:"op_timeout"`
 }
 
 // LoadConfig parses a [Config] from the environment using the given key prefix

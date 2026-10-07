@@ -4,13 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-
-	"github.com/gin-gonic/gin"
 )
 
-// RequestIDHeader carries the per-request correlation id: honoured when the
-// client (or an ingress) sends one, generated otherwise, always echoed on the
-// response.
+// RequestIDHeader carries the per-request correlation id: honoured when a
+// trusted proxy (Config.TrustedProxies) sends one, generated otherwise, always
+// echoed on the response.
 const RequestIDHeader = "X-Request-Id"
 
 // maxRequestIDLen bounds an inbound id: it is echoed back and logged, so it
@@ -28,33 +26,20 @@ func RequestIDFromContext(ctx context.Context) string {
 	return id
 }
 
-func withRequestID(ctx context.Context, id string) context.Context {
+// WithRequestID attaches id to ctx the way the server does for a request, so
+// a worker can give one unit of work (a consumed message, a job) the same
+// request_id correlation in its logs. [NewRequestID] mints a fresh one.
+func WithRequestID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, requestIDKey{}, id)
 }
 
-// requestID is the outermost API middleware: it settles the request id before
-// tracing, logging or the handler run, so every one of them sees it.
-//
-// Why a request id when there is a trace id: tracing is opt-in here (and
-// sampled where it is on), so trace_id is absent exactly when someone needs
-// to tie a client's "it failed" to a log line. The request id is 100% present,
-// costs eight random bytes, and travels in the response header and in every
-// log record and problem+json body of the request.
-func requestID() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		id := c.GetHeader(RequestIDHeader)
-		if !validRequestID(id) {
-			id = newRequestID()
-		}
-		c.Request = c.Request.WithContext(withRequestID(c.Request.Context(), id))
-		c.Header(RequestIDHeader, id)
-		c.Next()
-	}
-}
+// ValidRequestID reports whether s is usable as a correlation id: 1–128
+// printable, non-space ASCII characters — enough for every id scheme in use
+// (UUID, ULID, hex, base32) and nothing that could break a log line or a
+// header. The server applies it to an inbound X-Request-Id; a consumer can
+// apply it to a message's event id before [WithRequestID].
+func ValidRequestID(s string) bool { return validRequestID(s) }
 
-// validRequestID accepts 1–128 printable, non-space ASCII characters —
-// enough for every id scheme in use (UUID, ULID, hex, base32) and nothing
-// that could break a log line or a header.
 func validRequestID(s string) bool {
 	if s == "" || len(s) > maxRequestIDLen {
 		return false
@@ -67,8 +52,10 @@ func validRequestID(s string) bool {
 	return true
 }
 
-// newRequestID returns 16 hex characters from 8 CSPRNG bytes (2^64 values:
+// NewRequestID returns 16 hex characters from 8 CSPRNG bytes (2^64 values:
 // plenty for correlation, short enough to read out loud).
+func NewRequestID() string { return newRequestID() }
+
 func newRequestID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:]) // crypto/rand.Read does not fail on supported platforms

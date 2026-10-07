@@ -2,63 +2,57 @@ package worker_test
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"testing"
 	"time"
-
-	"github.com/tracehubmmp/golang-basics/libs/testx"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tracehubmmp/golang-basics/libs/httpx"
+	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/services/heartbeat/internal/worker"
 )
 
-func quietLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(noopWriter{}, &slog.HandlerOptions{Level: slog.LevelError}))
-}
-
-type noopWriter struct{}
-
-func (noopWriter) Write(p []byte) (int, error) { return len(p), nil }
-
 func TestWorker_BeatsThenStopsOnCancel(t *testing.T) {
-	testx.Run(t, func(t testx.T) {
-		reg := prometheus.NewRegistry()
-		w := worker.New(20*time.Millisecond, quietLogger(), reg)
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	buf := &testx.LogBuffer{}
+	log := httpx.NewLogger(httpx.LogConfig{Level: "info", Format: "json", Writer: buf})
+	w := worker.New(20*time.Millisecond, log, reg)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		done := make(chan error, 1)
-		go func() { done <- w.Run(ctx) }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
 
-		// Wait for a couple of ticks to be counted, then stop.
-		require.Eventually(t, func() bool { return gatherBeats(t, reg) >= 2 }, 2*time.Second, 5*time.Millisecond)
-		cancel()
+	// Wait for a couple of ticks to be counted, then stop.
+	require.Eventually(t, func() bool { return testx.Metric(t, reg, "heartbeat_beats_total", nil) >= 2 },
+		2*time.Second, 5*time.Millisecond)
+	cancel()
 
-		select {
-		case err := <-done:
-			require.NoError(t, err) // graceful cancel is not an error
-		case <-time.After(time.Second):
-			t.Fatal("worker did not stop after cancel")
-		}
+	select {
+	case err := <-done:
+		require.NoError(t, err, "a graceful cancel is not an error")
+	case <-time.After(time.Second):
+		t.Fatal("worker did not stop after cancel")
+	}
 
-		assert.GreaterOrEqual(t, gatherBeats(t, reg), 2.0, "expected at least a couple of beats")
-	}, "heartbeat", "unit")
+	beats := testx.Metric(t, reg, "heartbeat_beats_total", nil)
+	assert.GreaterOrEqual(t, beats, 2.0)
+	stop := buf.Find(t, map[string]any{"msg": "heartbeat worker stopping"})
+	require.NotNil(t, stop)
+	assert.Equal(t, beats, stop["total_beats"], "the final log line and the counter agree")
+	assert.NotNil(t, buf.Find(t, map[string]any{"msg": "heartbeat", "count": 1.0}))
+	testx.LintMetrics(t, reg)
 }
 
-// gatherBeats reads the heartbeat_beats_total value back through the registry,
-// exactly as the /metrics endpoint would — the Worker keeps the counter private.
-func gatherBeats(t testing.TB, reg *prometheus.Registry) float64 {
-	t.Helper()
-	mfs, err := reg.Gather()
+func TestWorker_CounterOnTheServerRegistry(t *testing.T) {
+	t.Parallel()
+	srv, err := httpx.NewServer(httpx.Config{Service: "heartbeat", AdminAddr: "127.0.0.1:0"}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
-	for _, mf := range mfs {
-		if mf.GetName() == "heartbeat_beats_total" {
-			require.NotEmpty(t, mf.GetMetric())
-			return mf.GetMetric()[0].GetCounter().GetValue()
-		}
-	}
-	t.Fatal("heartbeat_beats_total not found in registry")
-	return 0
+	worker.New(time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)), srv.Metrics.Registry)
+	assert.Equal(t, 0.0, testx.Metric(t, srv.Metrics.Registry, "heartbeat_beats_total", nil),
+		"exported (at zero) on the admin /metrics from the start")
 }

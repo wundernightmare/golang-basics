@@ -32,35 +32,66 @@ pre-commit:
     secrets:
       # Staged-diff secret scan — the same rules CI runs over the whole tree.
       run: mise exec -- gitleaks git --pre-commit --staged --config .gitleaks.toml --no-banner
-    ts-fmt:
-      glob: "e2e/**/*.{ts,json,md}"
-      run: cd e2e && pnpm format:check
-    ts-lint:
-      glob: "e2e/**/*.ts"
-      run: cd e2e && pnpm lint
+    shellcheck:
+      glob: "*.sh"
+      # shellcheck is pinned in mise.toml; skip quietly where neither it nor
+      # mise is installed (CI runs it regardless).
+      run: |
+        if command -v shellcheck >/dev/null 2>&1; then shellcheck {staged_files}
+        elif command -v mise >/dev/null 2>&1 && mise which shellcheck >/dev/null 2>&1; then mise exec -- shellcheck {staged_files}
+        else echo "shellcheck not installed — skipped"; fi
 
 # ── pre-push ────────────────────────────────────────────────────────────────
 # Heavier checks — too slow for every commit, fast enough before a push.
-# Scoped to the modules touched by the commits being pushed.
+# Scoped to the modules touched by the commits being pushed PLUS every module
+# that depends on them, transitively: a change to libs/httpx vets, lints and
+# tests services/* too, because that is where it can break something. The
+# reverse edges come from the go.mod files (a module that requires
+# github.com/tracehubmmp/golang-basics/<m> depends on <m>); the module list
+# comes from go.work via touched-modules.sh --all. A file maps to the longest
+# module path containing it, so libs/testx/containers is not libs/testx.
 pre-push:
   commands:
     tidy:
       glob: "{go.mod,go.sum,go.work,go.work.sum,*.go}"
-      # The same script as the CI vet/lint-test jobs: an untidy go.mod / go.sum
+      # The same script as `just tidy-check` and CI: an untidy go.mod / go.sum
       # or a go.work that `go work sync` would rewrite fails here, not in CI.
       run: scripts/tidy-check.sh $(scripts/touched-modules.sh {push_files})
-    vet:
+    go-checks:
       glob: "*.go"
       run: |
         set -e
-        for m in $(scripts/touched-modules.sh {push_files}); do
-          echo "── vet $m"; (cd "$m" && go vet ./...)
+        all=$(scripts/touched-modules.sh --all)
+        # files → owning module (longest matching module dir)
+        mods=""
+        for f in {push_files}; do
+          best=""
+          for m in $all; do
+            case "$f" in "$m"/*) [ ${#m} -gt ${#best} ] && best=$m ;; esac
+          done
+          [ -n "$best" ] && case " $mods " in *" $best "*) ;; *) mods="$mods $best" ;; esac
         done
-    test:
-      glob: "*.go"
-      # Unit tests only (-short skips the testcontainers suites; CI runs those).
-      run: |
-        set -e
-        for m in $(scripts/touched-modules.sh {push_files}); do
+        # + reverse dependencies, to a fixed point
+        grown=1
+        while [ "$grown" = 1 ]; do
+          grown=0
+          for m in $all; do
+            case " $mods " in *" $m "*) continue ;; esac
+            for d in $mods; do
+              if grep -Eq "github\.com/tracehubmmp/golang-basics/$d[[:space:]]" "$m/go.mod"; then
+                mods="$mods $m"; grown=1; break
+              fi
+            done
+          done
+        done
+        [ -n "$mods" ] || exit 0
+        echo "── modules:$mods"
+        for m in $mods; do
+          # -tags e2e so the e2e module's tagged files are vetted and linted
+          # too; harmless elsewhere. Its tests need built binaries, so the
+          # untagged `go test` below is a no-op there.
+          echo "── vet $m";  (cd "$m" && go vet -tags e2e ./...)
+          echo "── lint $m"; (cd "$m" && golangci-lint run --build-tags e2e)
+          # Unit tests only (-short skips the testcontainers suites; CI runs those).
           echo "── test $m"; (cd "$m" && go test -short ./...)
         done
