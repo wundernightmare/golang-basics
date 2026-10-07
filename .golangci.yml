@@ -15,6 +15,7 @@ linters:
   default: standard # govet, ineffassign, staticcheck, unused, errcheck
   enable:
     - bodyclose      # HTTP response bodies must be closed
+    - depguard       # test-only modules stay out of production code (rule below)
     - errorlint      # correct errors.Is/As usage
     - gocritic       # opinionated correctness/perf/style diagnostics
     - gosec          # security-focused checks (the SAST-ish layer)
@@ -30,6 +31,26 @@ linters:
     - usetesting     # t.Context / t.TempDir / t.Setenv instead of the os/context equivalents
 
   settings:
+    depguard:
+      rules:
+        # The test harness modules and assertion/container libraries are
+        # _test-only: a production import would drag testify / the Docker
+        # client into a service binary (and its SBOM).
+        test-only:
+          files:
+            - "!$test"
+            - "!**/libs/testx/**" # the harness modules themselves are test-only code
+          deny:
+            - pkg: github.com/tracehubmmp/golang-basics/libs/testx
+              desc: test-only harness; import it from _test.go files only
+            - pkg: github.com/tracehubmmp/golang-basics/libs/testx/containers
+              desc: test-only (testcontainers); import it from _test.go files only
+            - pkg: github.com/tracehubmmp/golang-basics/libs/testx/contract
+              desc: test-only (OpenAPI / JSON Schema validation); import it from _test.go files only
+            - pkg: github.com/stretchr/testify
+              desc: assertions belong in _test.go files
+            - pkg: github.com/testcontainers
+              desc: containers belong in _test.go files (via libs/testx/containers)
     revive:
       rules:
         - name: exported          # exported symbols need doc comments
@@ -54,12 +75,6 @@ linters:
           - revive
           - gosec
           - unparam
-      # testx.T is a struct (testo.T + the Allure plugin), not *testing.T; thelper
-      # only recognises the stdlib types, so it is not applied where the handle
-      # is testx.T.
-      - path: _test\.go
-        linters: [thelper]
-        text: "testx\\.T"
 
 formatters:
   enable:

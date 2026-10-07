@@ -1,190 +1,338 @@
 // Package api holds the tasks service's HTTP routes. Handlers stay thin: the
-// cross-cutting concerns (logging, metrics, health, shutdown, tracing) live in
-// the shared libs, and this package only orchestrates store + cache + producer
-// behind a small set of interfaces so the wiring is unit-testable with fakes.
+// cross-cutting concerns (request ids, tracing, logging, metrics, health,
+// shutdown) live in libs/httpx, and this package only orchestrates the store
+// and the cache behind two small interfaces so the wiring is unit-testable
+// with fakes. Events are not published here: the store writes them to the
+// outbox in the same transaction as the change, and the relay publishes them
+// (internal/outbox) — the request never waits on Kafka.
 //
 // The wire types are the generated contracts (libs/contracts/tasksapi from
-// api/tsp/tasks.tsp, libs/contracts/events from api/tsp/events.tsp); the
-// handlers convert to and from the internal domain model at this boundary,
-// and the api tests validate every exchange against the OpenAPI document.
+// api/tsp/tasks.tsp); the handlers convert to and from the internal domain
+// model at this boundary, and the api tests validate every exchange against
+// the OpenAPI document.
 package api
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
-	"time"
+	"strconv"
+	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/tracehubmmp/golang-basics/libs/contracts/events"
 	"github.com/tracehubmmp/golang-basics/libs/contracts/tasksapi"
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/domain"
 )
 
 // Store is the persistence dependency (satisfied by internal/store.Store).
+// Every method that changes a task also records its event, atomically.
 type Store interface {
-	Create(ctx context.Context, t domain.Task) error
+	Create(ctx context.Context, id, title string, idem *domain.IdempotencyKey) (domain.Task, bool, error)
 	Get(ctx context.Context, id string) (domain.Task, error)
-	List(ctx context.Context, limit int) ([]domain.Task, error)
-	Delete(ctx context.Context, id string) error
+	List(ctx context.Context, req domain.PageRequest) (domain.Page, error)
+	Update(ctx context.Context, id string, patch domain.Patch, expect *int64) (domain.Task, error)
+	Delete(ctx context.Context, id string, expect *int64) error
 }
 
-// Cache is the cache-aside dependency (satisfied by libs/valkey.Cache).
+// Cache is the read cache (satisfied by internal/cache.Tasks).
 type Cache interface {
-	Get(ctx context.Context, key string) (string, bool, error)
-	Set(ctx context.Context, key, value string, ttl time.Duration) error
-	Del(ctx context.Context, keys ...string) error
-}
-
-// Publisher is the event dependency (satisfied by libs/kafka.Producer).
-type Publisher interface {
-	Publish(ctx context.Context, topic string, key, value []byte) error
+	Get(ctx context.Context, id string, load func(context.Context) (domain.Task, error)) (domain.Task, bool, error)
+	Warm(ctx context.Context, t domain.Task)
+	Invalidate(ctx context.Context, id string) error
 }
 
 // Deps bundles everything the handlers need.
 type Deps struct {
-	Store     Store
-	Cache     Cache
-	Publisher Publisher
-	Topic     string        // Kafka topic for task.created events
-	CacheTTL  time.Duration // TTL for cached task lookups
-	Logger    *slog.Logger
+	Store  Store
+	Cache  Cache
+	Logger *slog.Logger
+	// Committed, when set, is called after every change has committed —
+	// main wires the outbox relay's Wake so the event goes out at once
+	// instead of on the relay's next poll.
+	Committed func()
 }
 
 type handlers struct{ Deps }
 
-// Register attaches the tasks routes to the shared server engine.
+// Register attaches the tasks routes to the server's mux.
 func Register(srv *httpx.Server, deps Deps) {
+	if deps.Logger == nil {
+		deps.Logger = slog.New(slog.DiscardHandler)
+	}
+	if deps.Committed == nil {
+		deps.Committed = func() {}
+	}
 	h := &handlers{Deps: deps}
-	e := srv.Engine()
-	e.POST("/tasks", h.create)
-	e.GET("/tasks", h.list)
-	e.GET("/tasks/:id", h.get)
-	e.DELETE("/tasks/:id", h.delete)
+	mux := srv.Mux()
+	mux.HandleFunc("POST /tasks", h.create)
+	mux.HandleFunc("GET /tasks", h.list)
+	mux.HandleFunc("GET /tasks/{id}", h.get)
+	mux.HandleFunc("PATCH /tasks/{id}", h.update)
+	mux.HandleFunc("DELETE /tasks/{id}", h.delete)
 }
 
-func cacheKey(id string) string { return "task:" + id }
+// Header names beyond the standard ones.
+const (
+	HeaderIdempotencyKey    = "Idempotency-Key"
+	HeaderIdempotentReplay  = "Idempotent-Replayed"
+	HeaderCache             = "X-Cache"
+	maxIdempotencyKeyLength = 255
+)
 
 // toWire converts the internal model to the contract's Task.
 func toWire(t domain.Task) tasksapi.Task {
-	return tasksapi.Task{Id: t.ID, Title: t.Title, Done: t.Done, CreatedAt: t.CreatedAt}
+	return tasksapi.Task{Id: t.ID, Title: t.Title, Done: t.Done, Version: t.Version, CreatedAt: t.CreatedAt.UTC()}
 }
 
-// create persists a new task, publishes a task.created event and warms the
-// cache. The event and cache writes are best-effort: a task is durable once the
-// row is committed, so a broker/cache hiccup logs a warning rather than failing
-// the request. (Production would close that gap with a transactional outbox.)
-func (h *handlers) create(c *gin.Context) {
+// ETag is the entity tag of a task version: the version number, quoted.
+func ETag(version int64) string { return `"` + strconv.FormatInt(version, 10) + `"` }
+
+// create persists a new task together with its task.created event. The cache
+// is warmed best-effort; the event goes out through the outbox relay.
+func (h *handlers) create(w http.ResponseWriter, r *http.Request) {
 	var req tasksapi.CreateTaskRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		httpx.AbortProblem(c, httpx.NewProblem(http.StatusBadRequest, "invalid JSON body"))
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, r, err)
 		return
 	}
-	if err := domain.ValidateTitle(req.Title); err != nil {
-		httpx.AbortProblem(c, httpx.NewProblem(http.StatusBadRequest, err.Error()))
+	title, err := domain.NormalizeTitle(req.Title)
+	if err != nil {
+		httpx.WriteProblem(w, r, badRequest("invalid_title", err))
+		return
+	}
+	idem, err := idempotencyKey(r, title)
+	if err != nil {
+		httpx.WriteProblem(w, r, badRequest("invalid_idempotency_key", err))
 		return
 	}
 
-	ctx := c.Request.Context()
-	task := domain.Task{ID: uuid.NewString(), Title: req.Title, CreatedAt: time.Now().UTC()}
-	if err := h.Store.Create(ctx, task); err != nil {
-		httpx.AbortProblem(c, httpx.NewProblem(http.StatusInternalServerError, "could not persist task"))
+	ctx := r.Context()
+	task, replayed, err := h.Store.Create(ctx, uuid.NewString(), title, idem)
+	switch {
+	case errors.Is(err, domain.ErrIdempotencyKeyReused):
+		httpx.WriteProblem(w, r, problem(http.StatusUnprocessableEntity, "idempotency_key_reused",
+			"Idempotency-Key was already used for a request with a different body"))
+		return
+	case err != nil:
+		h.fail(w, r, "could not persist task", err)
 		return
 	}
 
-	h.publishCreated(ctx, task)
-	wire := toWire(task)
-	if body, err := json.Marshal(wire); err == nil {
-		if err := h.Cache.Set(ctx, cacheKey(task.ID), string(body), h.CacheTTL); err != nil {
-			h.Logger.WarnContext(ctx, "cache write failed", "key", cacheKey(task.ID), "err", err)
+	w.Header().Set("ETag", ETag(task.Version))
+	if replayed {
+		w.Header().Set(HeaderIdempotentReplay, "true")
+		httpx.WriteJSON(w, http.StatusOK, toWire(task))
+		return
+	}
+	h.Committed()
+	h.Cache.Warm(ctx, task)
+	w.Header().Set("Location", "/tasks/"+task.ID)
+	httpx.WriteJSON(w, http.StatusCreated, toWire(task))
+}
+
+// idempotencyKey reads the optional Idempotency-Key header. The request hash
+// covers what the request asks for — the normalized title — so a retry that
+// differs only in whitespace around the title is still the same request.
+func idempotencyKey(r *http.Request, title string) (*domain.IdempotencyKey, error) {
+	key := r.Header.Get(HeaderIdempotencyKey)
+	if key == "" {
+		if _, sent := r.Header[HeaderIdempotencyKey]; sent {
+			return nil, errors.New("Idempotency-Key must not be empty")
+		}
+		return nil, nil
+	}
+	if len(key) > maxIdempotencyKeyLength {
+		return nil, errors.New("Idempotency-Key must be at most 255 characters")
+	}
+	for i := range len(key) {
+		if c := key[i]; c < 0x20 || c > 0x7e {
+			return nil, errors.New("Idempotency-Key must be printable ASCII")
 		}
 	}
-
-	c.JSON(http.StatusCreated, wire)
+	sum := sha256.Sum256([]byte(title))
+	return &domain.IdempotencyKey{Key: key, Hash: hex.EncodeToString(sum[:])}, nil
 }
 
-func (h *handlers) publishCreated(ctx context.Context, task domain.Task) {
-	evt := events.TaskCreatedEvent{Id: task.ID, Title: task.Title, CreatedAt: task.CreatedAt}
-	payload, err := json.Marshal(evt)
-	if err != nil {
-		h.Logger.WarnContext(ctx, "event marshal failed", "id", task.ID, "err", err)
+// get reads a task through the cache (cache-aside, see internal/cache). A
+// missing task is a 404 problem and is never cached.
+func (h *handlers) get(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	task, hit, err := h.Cache.Get(r.Context(), id, func(ctx context.Context) (domain.Task, error) {
+		return h.Store.Get(ctx, id)
+	})
+	switch {
+	case errors.Is(err, domain.ErrNotFound):
+		httpx.WriteProblem(w, r, notFound(id))
+		return
+	case err != nil:
+		h.fail(w, r, "could not load task", err)
 		return
 	}
-	if err := h.Publisher.Publish(ctx, h.Topic, []byte(task.ID), payload); err != nil {
-		h.Logger.WarnContext(ctx, "event publish failed", "id", task.ID, "topic", h.Topic, "err", err)
+	w.Header().Set("ETag", ETag(task.Version))
+	if hit {
+		w.Header().Set(HeaderCache, "hit")
+	} else {
+		w.Header().Set(HeaderCache, "miss")
 	}
+	httpx.WriteJSON(w, http.StatusOK, toWire(task))
 }
 
-// get reads a task using the cache-aside pattern: serve from Valkey on a hit,
-// otherwise load from Postgres and warm the cache. A missing task is a 404
-// problem and is never cached (the loader returns an error on a miss).
-func (h *handlers) get(c *gin.Context) {
-	ctx := c.Request.Context()
-	id := c.Param("id")
-
-	if raw, ok, err := h.Cache.Get(ctx, cacheKey(id)); err == nil && ok {
-		var t tasksapi.Task // cached in wire shape
-		if json.Unmarshal([]byte(raw), &t) == nil {
-			c.Header("X-Cache", "hit")
-			c.JSON(http.StatusOK, t)
+// list returns one page of tasks, newest first (keyset pagination).
+func (h *handlers) list(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	req := domain.PageRequest{Limit: domain.DefaultPageSize}
+	if raw := q.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > domain.MaxPageSize {
+			httpx.WriteProblem(w, r, problem(http.StatusBadRequest, "invalid_limit",
+				"limit must be an integer from 1 to "+strconv.Itoa(domain.MaxPageSize)))
 			return
 		}
+		req.Limit = n
+	}
+	if raw := q.Get("cursor"); raw != "" {
+		c, err := domain.DecodeCursor(raw)
+		if err != nil {
+			httpx.WriteProblem(w, r, badRequest("invalid_cursor", err))
+			return
+		}
+		req.Cursor = &c
 	}
 
-	task, err := h.Store.Get(ctx, id)
-	if errors.Is(err, domain.ErrNotFound) {
-		httpx.AbortProblem(c, notFound(id))
-		return
-	}
+	page, err := h.Store.List(r.Context(), req)
 	if err != nil {
-		httpx.AbortProblem(c, httpx.NewProblem(http.StatusInternalServerError, "could not load task"))
+		h.fail(w, r, "could not list tasks", err)
 		return
 	}
-
-	wire := toWire(task)
-	if body, err := json.Marshal(wire); err == nil {
-		_ = h.Cache.Set(ctx, cacheKey(id), string(body), h.CacheTTL)
-	}
-	c.Header("X-Cache", "miss")
-	c.JSON(http.StatusOK, wire)
-}
-
-func (h *handlers) list(c *gin.Context) {
-	ctx := c.Request.Context()
-	tasks, err := h.Store.List(ctx, 0)
-	if err != nil {
-		httpx.AbortProblem(c, httpx.NewProblem(http.StatusInternalServerError, "could not list tasks"))
-		return
-	}
-	out := tasksapi.TaskList{Tasks: make([]tasksapi.Task, 0, len(tasks))}
-	for _, t := range tasks {
+	out := tasksapi.TaskList{Tasks: make([]tasksapi.Task, 0, len(page.Tasks))}
+	for _, t := range page.Tasks {
 		out.Tasks = append(out.Tasks, toWire(t))
 	}
-	c.JSON(http.StatusOK, out)
+	if page.Next != nil {
+		next := page.Next.Encode()
+		out.NextCursor = &next
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
-// delete removes a task and evicts its cache entry.
-func (h *handlers) delete(c *gin.Context) {
-	ctx := c.Request.Context()
-	id := c.Param("id")
-
-	if err := h.Store.Delete(ctx, id); errors.Is(err, domain.ErrNotFound) {
-		httpx.AbortProblem(c, notFound(id))
+// update applies a partial update, optionally conditional on If-Match, and
+// invalidates the cached task once the change (and its task.updated event)
+// has committed.
+func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	expect, err := ifMatch(r)
+	if err != nil {
+		httpx.WriteProblem(w, r, badRequest("invalid_if_match", err))
 		return
-	} else if err != nil {
-		httpx.AbortProblem(c, httpx.NewProblem(http.StatusInternalServerError, "could not delete task"))
+	}
+	var req tasksapi.UpdateTaskRequest
+	if err := httpx.DecodeJSON(r, &req); err != nil {
+		httpx.WriteError(w, r, err)
+		return
+	}
+	patch, err := domain.Patch{Title: req.Title, Done: req.Done}.Normalize()
+	switch {
+	case errors.Is(err, domain.ErrEmptyPatch):
+		httpx.WriteProblem(w, r, badRequest("empty_patch", err))
+		return
+	case err != nil:
+		httpx.WriteProblem(w, r, badRequest("invalid_title", err))
 		return
 	}
 
-	if err := h.Cache.Del(ctx, cacheKey(id)); err != nil {
-		h.Logger.WarnContext(ctx, "cache evict failed", "key", cacheKey(id), "err", err)
+	ctx := r.Context()
+	task, err := h.Store.Update(ctx, id, patch, expect)
+	if h.writeChangeError(w, r, id, err, "could not update task") {
+		return
 	}
-	c.Status(http.StatusNoContent)
+	h.Committed()
+	h.invalidate(ctx, id)
+	w.Header().Set("ETag", ETag(task.Version))
+	httpx.WriteJSON(w, http.StatusOK, toWire(task))
+}
+
+// delete removes a task, optionally conditional on If-Match, and invalidates
+// its cache entry once the delete (and its task.deleted event) has committed.
+func (h *handlers) delete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	expect, err := ifMatch(r)
+	if err != nil {
+		httpx.WriteProblem(w, r, badRequest("invalid_if_match", err))
+		return
+	}
+	ctx := r.Context()
+	if h.writeChangeError(w, r, id, h.Store.Delete(ctx, id, expect), "could not delete task") {
+		return
+	}
+	h.Committed()
+	h.invalidate(ctx, id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeChangeError answers a failed update/delete and reports whether it did.
+func (h *handlers) writeChangeError(w http.ResponseWriter, r *http.Request, id string, err error, detail string) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, domain.ErrNotFound):
+		httpx.WriteProblem(w, r, notFound(id))
+	case errors.Is(err, domain.ErrVersionMismatch):
+		httpx.WriteProblem(w, r, problem(http.StatusPreconditionFailed, "version_mismatch",
+			"the task has changed since the version in If-Match; fetch it again"))
+	default:
+		h.fail(w, r, detail, err)
+	}
+	return true
+}
+
+// invalidate tombstones the cached task. A failure leaves the old entry for
+// at most its TTL: logged loudly, not failed — the change is committed.
+func (h *handlers) invalidate(ctx context.Context, id string) {
+	if err := h.Cache.Invalidate(ctx, id); err != nil {
+		h.Logger.WarnContext(ctx, "cache invalidation failed; a stale entry may be served until it expires",
+			"task_id", id, "err", err)
+	}
+}
+
+// ifMatch parses an optional If-Match: a single strong entity tag ("3") or
+// "*". It returns the version to require, or nil for none ("*" requires only
+// that the task exists, which update/delete check anyway).
+func ifMatch(r *http.Request) (*int64, error) {
+	raw := strings.TrimSpace(r.Header.Get("If-Match"))
+	if raw == "" || raw == "*" {
+		return nil, nil
+	}
+	if len(raw) < 3 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return nil, errors.New(`If-Match must be a single strong entity tag such as "3" (weak tags never match)`)
+	}
+	v, err := strconv.ParseInt(raw[1:len(raw)-1], 10, 64)
+	if err != nil || v < 1 {
+		return nil, errors.New(`If-Match must carry a task version such as "3"`)
+	}
+	return &v, nil
+}
+
+// fail answers an unexpected error: 504 when the request's deadline ran out,
+// otherwise a 500 whose cause is logged and recorded on the span.
+func (h *handlers) fail(w http.ResponseWriter, r *http.Request, detail string, err error) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		httpx.WriteError(w, r, err)
+		return
+	}
+	httpx.WriteProblem(w, r, httpx.Internal(detail, err))
+}
+
+func problem(status int, code, detail string) httpx.Problem {
+	return httpx.Problem{Status: status, Detail: detail, Extensions: map[string]any{"code": code}}
+}
+
+func badRequest(code string, err error) httpx.Problem {
+	return problem(http.StatusBadRequest, code, err.Error())
 }
 
 func notFound(id string) httpx.Problem {
@@ -193,7 +341,6 @@ func notFound(id string) httpx.Problem {
 		Title:      "Task not found",
 		Status:     http.StatusNotFound,
 		Detail:     "no task with id " + id,
-		Instance:   "/tasks/" + id,
 		Extensions: map[string]any{"code": "task_not_found"},
 	}
 }

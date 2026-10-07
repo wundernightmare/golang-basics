@@ -1,12 +1,11 @@
 // Package api holds the ping service's HTTP routes. It is deliberately thin:
-// all cross-cutting concerns (logging, metrics, health, shutdown) live in the
-// shared libs/httpx package, so this file is only the service's own surface.
+// all cross-cutting concerns (logging, metrics, tracing, health, shutdown)
+// live in the shared libs/httpx package, so this file is only the service's
+// own surface.
 package api
 
 import (
 	"net/http"
-
-	"github.com/gin-gonic/gin"
 
 	"github.com/tracehubmmp/golang-basics/libs/contracts/pingapi"
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
@@ -21,18 +20,20 @@ type PongResponse = pingapi.PongResponse
 // example of a public "what am I talking to" endpoint.
 type VersionResponse = httpx.BuildInfo
 
-// Register attaches the ping service's routes to the shared server engine.
+// Register attaches the ping service's routes to the server's API mux.
 func Register(srv *httpx.Server) {
-	e := srv.Engine()
-	e.GET("/ping", pong)
-	e.GET("/version", func(c *gin.Context) { c.JSON(http.StatusOK, srv.Build) })
+	mux := srv.Mux()
+	mux.HandleFunc("GET /ping", pong)
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) {
+		httpx.WriteJSON(w, http.StatusOK, srv.Build)
+	})
 }
 
 // pong answers GET /ping with {"message":"pong"}, echoing an optional ?msg=.
-func pong(c *gin.Context) {
+func pong(w http.ResponseWriter, r *http.Request) {
 	resp := PongResponse{Message: pingapi.Pong}
-	if msg := c.Query("msg"); msg != "" {
+	if msg := r.URL.Query().Get("msg"); msg != "" {
 		resp.Echo = &msg
 	}
-	c.JSON(http.StatusOK, resp)
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }

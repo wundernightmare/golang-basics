@@ -17,16 +17,63 @@ paths:
   /tasks:
     post:
       operationId: TasksOps_create
-      description: Create a task. Publishes a `task.created` event (see events.tsp) best-effort.
-      parameters: []
+      description: |-
+        Create a task. The task and its `task.created` event (see events.tsp)
+        are committed together (transactional outbox); the event reaches Kafka
+        shortly after, even if the broker is down at the time of the request.
+
+        With an Idempotency-Key, a retry of the same request returns the task the
+        first one created (200, Idempotent-Replayed: true) instead of creating
+        another; the same key with a different body is a 422. Keys are kept for
+        24 hours.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
       responses:
+        '200':
+          description: The request has succeeded.
+          headers:
+            ETag:
+              required: true
+              schema:
+                type: string
+            Idempotent-Replayed:
+              required: true
+              schema:
+                type: string
+                enum:
+                  - 'true'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
         '201':
           description: The request has succeeded and a new resource has been created as a result.
+          headers:
+            ETag:
+              required: true
+              schema:
+                type: string
+            Location:
+              required: true
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Task'
         '400':
+          description: A problem response with the given status and content type.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
           description: A problem response with the given status and content type.
           content:
             application/problem+json:
@@ -40,8 +87,28 @@ paths:
               $ref: '#/components/schemas/CreateTaskRequest'
     get:
       operationId: TasksOps_list
-      description: List tasks, newest first.
-      parameters: []
+      description: |-
+        List tasks, newest first, one page at a time (keyset pagination: pages
+        do not shift when tasks are added or removed meanwhile).
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 200
+            default: 50
+          explode: false
+        - name: cursor
+          in: query
+          required: false
+          description: The next_cursor of the previous page.
+          schema:
+            type: string
+          explode: false
       responses:
         '200':
           description: The request has succeeded.
@@ -49,6 +116,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TaskList'
+        '400':
+          description: A problem response with the given status and content type.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /tasks/{id}:
     get:
       operationId: TasksOps_get
@@ -63,6 +136,10 @@ paths:
         '200':
           description: The request has succeeded.
           headers:
+            ETag:
+              required: true
+              schema:
+                type: string
             X-Cache:
               required: false
               schema:
@@ -80,19 +157,91 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
-    delete:
-      operationId: TasksOps_delete
-      description: Delete a task and evict its cache entry.
+    patch:
+      operationId: TasksOps_update
+      description: |-
+        Change the title and/or the done flag. With If-Match: "<version>" the
+        change applies only if the task is still at that version — otherwise 412,
+        re-read and retry. Emits `task.updated`.
       parameters:
         - name: id
           in: path
           required: true
           schema:
             type: string
+        - name: If-Match
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The request has succeeded.
+          headers:
+            ETag:
+              required: true
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          description: A problem response with the given status and content type.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: A problem response with the given status and content type.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '412':
+          description: A problem response with the given status and content type.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTaskRequest'
+    delete:
+      operationId: TasksOps_delete
+      description: |-
+        Delete a task (and invalidate its cache entry); If-Match as for PATCH.
+        Emits `task.deleted`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: If-Match
+          in: header
+          required: false
+          schema:
+            type: string
       responses:
         '204':
           description: 'There is no content to send for this request, but the headers may be useful. '
+        '400':
+          description: A problem response with the given status and content type.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '404':
+          description: A problem response with the given status and content type.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '412':
           description: A problem response with the given status and content type.
           content:
             application/problem+json:
@@ -108,11 +257,9 @@ components:
         title:
           type: string
           minLength: 1
-          pattern: ^[^\u0000]+$
-          description: |-
-            Title of the task. Empty, or containing NUL, is rejected with a 400
-            problem — the pattern states what the store can hold, so a generated
-            schema-compliant request is always accepted (found by Schemathesis).
+          maxLength: 200
+          pattern: ^[^\u0000-\u0008\u000A-\u001F\u007F]*[^\s\u0000-\u001F\u007F][^\u0000-\u0008\u000A-\u001F\u007F]*$
+          description: Title of the task; surrounding whitespace is trimmed (rules as Task.title).
       description: Body of POST /tasks.
     Problem:
       type: object
@@ -154,6 +301,7 @@ components:
         - id
         - title
         - done
+        - version
         - created_at
       properties:
         id:
@@ -162,15 +310,29 @@ components:
         title:
           type: string
           minLength: 1
-          pattern: ^[^\u0000]+$
-          description: Human-readable title; never empty, never containing NUL (PostgreSQL TEXT rejects it).
+          maxLength: 200
+          pattern: ^[^\u0000-\u0008\u000A-\u001F\u007F]*[^\s\u0000-\u001F\u007F][^\u0000-\u0008\u000A-\u001F\u007F]*$
+          description: |-
+            Human-readable title, as stored: surrounding whitespace trimmed, 1–200
+            characters, at least one of them not whitespace, no control characters
+            other than tab (NUL in particular — PostgreSQL TEXT rejects it; found by
+            Schemathesis). The pattern states the rules so that a generated,
+            schema-compliant request is always accepted.
         done:
           type: boolean
           description: Completion flag.
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |-
+            Starts at 1 and grows by one with every change. The ETag of the task is
+            this number in quotes; send it back in If-Match to update or delete only
+            the version you read.
         created_at:
           type: string
           format: date-time
-          description: Creation time, RFC 3339 UTC.
+          description: Creation time, RFC 3339 UTC, assigned by the database.
       description: A single to-do item.
     TaskList:
       type: object
@@ -181,7 +343,25 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Task'
-      description: 'Body of GET /tasks: newest first, at most 100 entries.'
+        next_cursor:
+          type: string
+          description: |-
+            Opaque cursor of the next page — pass it as ?cursor= — absent on the
+            last page.
+      description: 'Body of GET /tasks: one page, newest first.'
+    UpdateTaskRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          pattern: ^[^\u0000-\u0008\u000A-\u001F\u007F]*[^\s\u0000-\u001F\u007F][^\u0000-\u0008\u000A-\u001F\u007F]*$
+          description: New title; surrounding whitespace is trimmed (rules as Task.title).
+        done:
+          type: boolean
+          description: New completion flag.
+      description: 'Body of PATCH /tasks/{id}: the fields to change — at least one, or 400.'
 servers:
   - url: http://localhost:8082
     description: local

@@ -2,7 +2,7 @@
 #
 # Runs on coverage-merged.out: the covdata-merged union of the unit layer
 # (`go test -short`), the integration layer (container-backed suites) and the
-# e2e layer (cover-instrumented binaries driven by Playwright) — see
+# e2e layer (cover-instrumented binaries driven by the Go harness in e2e/) — see
 # scripts/cover.sh. One number for the whole pyramid, no layer counted twice.
 # The thresholds are a ratchet: raise them when coverage improves, lower only
 # with a reason in the commit.
@@ -15,15 +15,20 @@ local-prefix: github.com/tracehubmmp/golang-basics
 # That is the ratchet that stops old code's coverage from hiding new code's.
 breakdown-file-name: coverage-breakdown.json
 
+# Three floors: the total alone lets one well-tested package carry an
+# untested one. The package floor catches a package nobody tests; the file
+# floor (lower — a file of glue or a main.go is legitimately thin) catches a
+# forgotten file inside an otherwise healthy package.
 threshold:
-  file: 0
-  package: 0
-  total: 70   # unit + integration + e2e merged (set from the first full run; ratchet up)
+  file: 30      # every file
+  package: 50   # every package (overrides below raise it for pure logic)
+  total: 70     # unit + integration + e2e merged (set from the first full run; ratchet up)
 
 exclude:
   paths:
     - ^libs/[^/]+/doc\.go$
-    - ^libs/testx/      # the harness itself is not a coverage target
+    - ^libs/testx/      # the harness (testx, testx/containers, testx/contract) is not a coverage target
+    - ^e2e/             # the e2e suite drives binaries; it is test code, not a target
     - ^libs/contracts/  # generated from api/tsp — no logic to cover
     - \.gen\.go$
 

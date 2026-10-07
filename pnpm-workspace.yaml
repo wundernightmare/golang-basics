@@ -1,16 +1,16 @@
-# pnpm workspace — the Node layer of this monorepo exists only for the e2e
-# (Playwright) suite and the lefthook git-hook runner; no production Go code
-# depends on it. A catalog pins shared dependency versions in one place, the
-# way the Rust sibling repo's pnpm-workspace.yaml does.
+# pnpm workspace — the Node layer of this monorepo is only the TypeSpec
+# contracts (api/) plus two root dev tools: lefthook (git hooks) and
+# allure-commandline (`just allure`, needs a JRE from the mise "report"
+# profile). No production Go code and no test depends on it. A catalog pins
+# shared dependency versions in one place, the way the Rust sibling repo's
+# pnpm-workspace.yaml does.
 packages:
-  - e2e
   - api
 
 # pnpm 11 turns an ignored build script into a hard install failure, so every
 # postinstall we actually want has to be approved here (`pnpm approve-builds`).
-# esbuild fetches its platform binary; lefthook installs the git hook runner.
+# lefthook installs the git hook runner.
 allowBuilds:
-  esbuild: true
   lefthook: true
 
 # Supply-chain hardening (semgrep p/owasp-top-ten `package_managers.pnpm.*`
@@ -23,22 +23,10 @@ allowBuilds:
 minimumReleaseAge: 10080
 blockExoticSubdeps: true
 trustPolicy: no-downgrade
-# The escape hatch when a release is needed before the window closes: a
-# time-boxed exclusion with the reason and the removal date — the same rule as
-# the CVE and oasdiff waivers. TypeSpec 1.16.0 and allure-playwright 3.12.1
-# (both 2026-09-09) and the transitive @inquirer / @scalar packages TypeSpec
-# pulled in are younger than 7 days, and the frozen install rejects a lockfile
-# that violates the policy. Remove after 2026-09-17 (`pnpm install
-# --frozen-lockfile` then passes without it). Re-checked 2026-09-13 against
-# the registry (`pnpm view <pkg>@<version> time`): the newest pinned release
-# in the four groups is @typespec/openapi@1.16.0 (2026-09-09T19:41Z), so the
-# 7-day window closes 2026-09-16T19:41Z and the date above stands — no
-# extension needed.
-minimumReleaseAgeExclude:
-  - "@typespec/*"
-  - "@inquirer/*"
-  - "@scalar/*"
-  - "allure-*"
+# The escape hatch when a release is needed before the window closes is a
+# time-boxed `minimumReleaseAgeExclude:` list with the reason and a
+# `Remove after YYYY-MM-DD` line — scripts/check-waivers.sh (`just sec`, CI
+# sast) fails once that date has passed. None is needed today.
 
 # Transitive CVEs pinned out. Floors as caret ranges: `pnpm update` still moves
 # them inside the major, and the release-age window still applies. Drop an
@@ -52,10 +40,3 @@ catalog:
   "@typespec/openapi": 1.16.0
   "@typespec/openapi3": 1.16.0
   "@typespec/json-schema": 1.16.0
-  allure-playwright: 3.12.1
-  "@playwright/test": ^1.63.0
-  "@types/node": ^26.4.1
-  typescript: ^7.0.2
-  tsx: ^4.23.13
-  prettier: ^3.9.6
-  oxlint: ^1.81.0

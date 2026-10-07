@@ -1,150 +1,148 @@
 # resilient-http-client
 
-Lock-minimal, policy-per-target **outbound** HTTP client for high-throughput Go
-services — the Go counterpart of the Rust `resilient-http-client` crate and the
-TypeScript `resilient-client` package in the sibling tracehub repos.
+An outbound HTTP client with a resilience policy per logical **target** (a
+dependency). A template library: nothing in this repo imports it yet; copy or
+depend on it when a service calls other services.
 
-Where [`httpx`](../httpx) is the **server** scaffolding (inbound), this is the
-**client** scaffolding (outbound): one shared, concurrency-safe [`Client`] that
-tags every request with a logical *target* and applies that target's own
-rate limiter, circuit breaker and adaptive-concurrency gate.
+One `Client` per process; each request names its target, and the target's
+policy applies:
 
 | Concern | Implementation |
 | --- | --- |
-| Per-target rate limiting | token bucket (`golang.org/x/time/rate`) |
-| Per-target circuit breaker | lock-free atomic sliding window |
-| Adaptive concurrency | AIMD in-flight limit (+1 success / ÷2 failure) |
-| Jittered retry | AWS full-jitter exponential backoff |
-| Response cache | pluggable `CacheAdapter` + built-in LRU+TTL `InMemoryCache` |
-| Request coalescing | single-flight dedup of concurrent GET/HEAD |
-| Graceful degradation | stale-cache → static fallback on transient failure |
-| Connection pool | tuned `http.Transport` + optional TTL DNS cache |
-| Observability | Prometheus metrics on a private registry |
-| Error model | typed transient/fatal — caller owns the retry decision |
-| Graceful shutdown | drains in-flight requests or times out |
+| Transport | `http.DefaultTransport` clone (proxy from env, HTTP/2, dial/TLS timeouts) + pool settings + HTTP/2 PING health check (`net/http`'s `HTTP2Config`, no `x/net`) |
+| Tracing | `otelhttp` transport: `traceparent` injected, client span `"METHOD target"` |
+| Attempt timeout | per target; starts **before** the rate-limiter and bulkhead waits |
+| Rate limit | `golang.org/x/time/rate` token bucket (fractional rates) |
+| Bulkhead | fixed concurrency cap, bounded wait |
+| Circuit breaker | closed / open / half-open, CAS transitions, generation-tagged probes |
+| Retries | `SendWithRetry`: idempotent requests only, full-jitter backoff, `Retry-After`, retry budget |
+| Redirects | same host only, at most 10 (both configurable) |
+| Metrics | Prometheus, on your registerer or a private registry |
+| Shutdown | refuses new requests, waits for in-flight ones, closes idle connections |
 
-## Quick start
+## Use
 
 ```go
-cfg, err := resilient.LoadConfig(yamlBytes) // or resilient.DefaultConfig()
-if err != nil {
-    log.Fatal(err)
-}
+cfg, err := resilient.LoadConfig(yamlBytes) // or resilient.DefaultConfig("billing")
+if err != nil { return err }
+c, err := resilient.New(cfg, resilient.WithLogger(log), resilient.WithRegisterer(prometheus.DefaultRegisterer))
+if err != nil { return err }
+defer c.Shutdown(shutdownCtx)
 
-client, err := resilient.New(cfg,
-    resilient.WithLogger(logger),
-    resilient.WithCache(resilient.NewInMemoryCache(10_000, time.Minute)),
-    resilient.WithFallback("san_api", func() resilient.CachedResponse {
-        return resilient.CachedResponse{Status: 200, Body: []byte(`{}`)}
-    }),
-)
-if err != nil {
-    log.Fatal(err)
-}
-defer func() {
-    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-    defer cancel()
-    _ = client.Shutdown(ctx)
-}()
-
-resp, err := client.Send(ctx, resilient.Request{
-    Target: "meta_events",
-    Method: http.MethodPost,
-    URL:    "https://graph.facebook.com/123/events",
-    Body:   []byte(`{"data":[]}`),
-})
+req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://billing.internal/v1/invoices/42", nil)
+resp, err := c.SendWithRetry("billing", req)
 switch {
 case err == nil:
-    defer resp.Body.Close() // caller owns the body
-    // process resp
-case resilient.IsTransient(err):
-    // network timeout, 5xx, 429, circuit open, rate limited, shutting down:
-    // re-queue for a later retry (e.g. a Kafka retry topic).
-default: // resilient.IsFatal(err)
-    // 4xx (≠429), TLS error, bad request: log and drop.
+    defer resp.Body.Close() // status < 400; Close releases the bulkhead slot and the attempt timeout
+case errors.Is(err, resilient.KindStatus):
+    var oe *resilient.OutboundError
+    errors.As(err, &oe) // oe.StatusCode, oe.RetryAfter, oe.Body (first 4 KiB)
+case errors.Is(err, resilient.KindCircuitOpen), errors.Is(err, resilient.KindRateLimited):
+    // shed load: the dependency is down or we are over our own limit
 }
 ```
 
-## Status → error mapping
+The request's context is the overall deadline; `Send` sends once,
+`SendWithRetry` retries when it is safe to. Every failure is an
+`*OutboundError` whose `Kind` works with `errors.Is`:
+`KindTimeout`, `KindConnection`, `KindStatus` (≥ 400), `KindCircuitOpen`,
+`KindRateLimited`, `KindBulkheadFull`, `KindShutdown`, `KindCanceled`,
+`KindRedirect`, `KindInvalid` (unknown target, relative URL).
 
-| Result | Error | Rationale |
-| --- | --- | --- |
-| 2xx | `nil` (returns `*http.Response`) | success; breaker & limiter recorded |
-| 429 | transient | upstream rate limit — does **not** penalise the breaker |
-| 4xx (other) | fatal | malformed request; retry won't help |
-| 5xx | transient | server-side error; retry after backoff |
-| timeout / connection error | transient | network issue |
-| TLS certificate error | fatal | peer identity won't change on retry |
+## Semantics
 
-Branch with [`resilient.IsTransient`] / [`resilient.IsFatal`]; both unwrap, so
-they see the error through `fmt.Errorf("...: %w", err)` wrapping.
+**Breaker** — counts 5xx, attempt timeouts and connection errors as
+failures. It ignores the caller's cancellation (the parent context ending,
+deadline included), 4xx (429 included: the dependency answered) and local
+rejections. When open for `breaker_open_timeout`, it admits exactly
+`breaker_half_open_probes` probes; all must succeed to close it, any failure
+re-opens it. A probe rejected locally releases its slot; a request admitted
+before the breaker opened cannot decide a probe (results carry the generation
+they were admitted in).
 
-## Send variants
+**Retries** — only GET, HEAD, OPTIONS, PUT, DELETE, or a request with an
+`Idempotency-Key` header, and only with a replayable body (`GetBody`, which
+`http.NewRequest` sets for in-memory bodies). Retried: timeouts, connection
+errors, 408, 425, 429, 5xx except 501/505. Never: local rejections,
+cancellation. The delay is full-jitter backoff or `Retry-After` (seconds or
+HTTP-date), whichever is longer; a `Retry-After` above `retry_max_delay`, or a
+delay past the caller's deadline, ends the retries. The **retry budget** caps
+retries per target at `retry_budget_min_retries + retry_budget_ratio ×
+requests` over a sliding `retry_budget_window`, so an outage cannot multiply
+the load on the dependency.
 
-| Method | Behaviour |
-| --- | --- |
-| `Send` | one attempt; returns `*http.Response` (caller closes the body) |
-| `SendWithRetry` | full-jitter retries on transient errors; fatal returned at once |
-| `SendCached` | read-through cache for GET/HEAD 2xx; returns a buffered `CachedResponse` |
-| `SendCoalesced` | single-flight: concurrent GET/HEAD with the same key share one fetch |
-| `SendWithFallback` | on transient failure: stale cache → static fallback → original error |
+**Shutdown** — a request counts as in flight from before the shutdown check to
+the end of its whole retry loop, or until its body is closed on success; so
+`Shutdown` never returns while a request can still reach the network.
 
 ## Configuration
 
-`LoadConfig` parses YAML (unknown keys rejected); every field has a default, so
-you only set what differs. Durations use Go syntax (`90s`, `1500ms`, `5m`).
+`LoadConfig` overlays the YAML on the defaults (`go.yaml.in/yaml/v3`, unknown
+keys rejected) and runs `Validate`. **Zero means disabled**, never "use the
+default": an omitted key keeps its default, an explicit `0` turns the feature
+off. In code, start from `DefaultConfig(names...)` / `DefaultTarget(name)`.
 
 ```yaml
-pool_max_idle_per_host: 100
-pool_idle_timeout: 90s
-tcp_keepalive: 30s
-default_timeout: 5s
-user_agent: "my-service/1.0"
-dns_cache_enabled: true
-dns_min_ttl: 10s
-dns_max_ttl: 5m
-
-outbound_targets:
-  - name: "meta_events"
-    selector: "://graph.facebook.com/{pixel_id}/events"  # metric label only
-    rate_limit: 5000          # sustained req/sec
-    timeout: 2s
-    cb_threshold: 0.5         # failure ratio that opens the breaker
-    cb_min_requests: 10       # min requests in-window before evaluating
-    cb_window: 10s
-    cb_half_open_timeout: 30s
-    retry_max_attempts: 3     # 0 = no automatic retries
-    retry_base: 100ms
-    retry_cap: 30s
-    adaptive_concurrency_enabled: true
-    adaptive_concurrency_initial: 100
-    adaptive_concurrency_min: 1
-    adaptive_concurrency_max: 1000
+max_idle_conns: 100              # 0 = unlimited
+max_idle_conns_per_host: 32      # 0 = net/http's 2
+max_conns_per_host: 0            # 0 = unlimited
+idle_conn_timeout: 90s           # 0 = never
+response_header_timeout: 0s      # 0 = none
+http2_ping_interval: 30s         # 0 = no HTTP/2 health check
+http2_ping_timeout: 15s
+max_redirects: 10                # 0 = return the 3xx as is
+allow_cross_host_redirects: false
+user_agent: ""
+targets:
+  - name: billing                # required, unique; the metric label
+    timeout: 5s                  # per attempt, waits included; 0 = none
+    rate_limit: 0                # req/s, fractions ok; 0 = off
+    rate_burst: 0                # 0 = max(1, ceil(rate_limit))
+    max_concurrent: 0            # bulkhead; 0 = off
+    max_concurrent_wait: 0s      # 0 = reject at once when full
+    breaker_failure_ratio: 0.5   # (0, 1]; 0 = no breaker
+    breaker_min_requests: 20
+    breaker_window: 10s
+    breaker_open_timeout: 30s
+    breaker_half_open_probes: 1
+    retry_max_attempts: 3        # total, first included; 0/1 = no retries
+    retry_base_delay: 100ms
+    retry_max_delay: 5s
+    retry_budget_ratio: 0.2      # [0, 1]
+    retry_budget_min_retries: 10
+    retry_budget_window: 10s     # 0 = no budget
 ```
 
-A request whose `Target` matches no declared target transparently gets a
-defaulted fallback policy on first use (1000 req/s, 50% breaker threshold).
+An undeclared target name is an error at `Send` — there is no lazily created
+fallback policy.
 
 ## Metrics
 
-A private `*prometheus.Registry` (expose via `client.Metrics().Handler()`):
-
 ```
-http_outbound_requests_total{outbound_target,template_url,method,status,error_type}
-http_outbound_request_duration_seconds{outbound_target,method}
-circuit_breaker_state{outbound_target}                       0=closed 1=open 2=half_open
-http_outbound_coalesce_hits_total{outbound_target}
-http_outbound_fallback_hits_total{outbound_target}
-http_outbound_retry_attempts_total{outbound_target}
-http_outbound_adaptive_concurrency_limit{outbound_target}
+http_client_requests_total{target,method,outcome}      one per attempt
+http_client_request_duration_seconds{target,method}    attempts that reached the network
+http_client_retries_total{target}
+http_client_retry_budget_exhausted_total{target}
+circuit_breaker_state{target}                          0 closed, 1 open, 2 half-open
+circuit_breaker_transitions_total{target,from,to}
+http_client_bulkhead_in_flight{target}
+http_client_bulkhead_rejected_total{target}
 ```
 
-## Concurrency
+`outcome`: `2xx 3xx 4xx 5xx timeout connection redirect circuit_open
+rate_limited bulkhead_full shutdown canceled`. Without `WithRegisterer` they
+live on a private registry, `client.Registry()`.
 
-`Client` is safe for concurrent use; share one across the process. Policy lookup
-is a lock-free `sync.Map` read; the rate limiter and circuit breaker are
-atomic-backed; the adaptive limiter and coalescer take a short mutex only for
-O(1) bookkeeping. The connection pool is the shared `http.Transport`.
+Logs (`WithLogger`) carry scheme, host and path only — never the query string
+or user info — and warnings are rate-limited per target.
+
+## What it does not do
+
+No response cache, request coalescing, fallbacks, DNS cache or adaptive
+concurrency (removed: they were incorrect or not worth their weight). No
+hedged requests, no per-request policy override, no retry of non-idempotent
+requests without an `Idempotency-Key`. `WithHTTPClient` builds on a copy of
+your client, which is never modified; its idle connections are yours to close.
 
 ## Develop
 
@@ -152,6 +150,6 @@ O(1) bookkeeping. The connection pool is the shared `http.Transport`.
 just test          # go test ./...
 just test-verbose  # + race detector
 just lint          # golangci-lint run
-just bench         # micro-benchmarks for the hot paths
-just cov           # coverage summary
+just bench         # breaker and Send micro-benchmarks
+just mutate libs/resilient-http-client   # from the repo root; scope in .gremlins.yaml
 ```

@@ -1,53 +1,43 @@
-// Package resilient is a lock-minimal, policy-per-target HTTP client for
-// high-throughput Go services — the Go analogue of the Rust
-// `resilient-http-client` crate and the TypeScript `resilient-client` package
-// in the sibling tracehub repos.
+// Package resilient is an outbound HTTP client with a resilience policy per
+// logical target (a dependency): a per-attempt timeout, a rate limiter, a
+// bulkhead (fixed concurrency cap), a circuit breaker and budgeted retries.
 //
-// A single [Client] is safe for concurrent use and is meant to be shared across
-// the whole process. Every outbound request is tagged with a logical target
-// (a [ResourceGroup]); each target carries its own independently-tuned policy
-// set — rate limiter, circuit breaker and optional adaptive-concurrency gate —
-// looked up on the hot path without locks.
+// One [Client] serves the whole process. Each request names its target:
 //
-// # Features
+//	cfg, err := resilient.LoadConfig(yamlBytes) // or resilient.DefaultConfig("billing")
+//	c, err := resilient.New(cfg, resilient.WithLogger(log), resilient.WithRegisterer(reg))
+//	defer c.Shutdown(ctx)
 //
-//   - Per-target rate limiting — token-bucket via golang.org/x/time/rate.
-//   - Per-target circuit breaker — lock-free atomic sliding window
-//     (see [CircuitBreaker]).
-//   - Adaptive concurrency — AIMD in-flight limit, +1 on success, ÷2 on
-//     failure (see [AdaptiveLimiter]).
-//   - Jittered exponential backoff retry — AWS "full jitter"
-//     (see [Client.SendWithRetry] and [FullJitter]).
-//   - Read-through response cache — pluggable [CacheAdapter] with a built-in
-//     LRU+TTL [InMemoryCache].
-//   - Request coalescing — single-flight dedup of concurrent GET/HEAD with the
-//     same cache key (see [Client.SendCoalesced]).
-//   - Graceful degradation — stale-cache or static fallback when the circuit is
-//     open or retries are exhausted (see [Client.SendWithFallback]).
-//   - Tuned connection pool with an optional TTL-aware DNS cache.
-//   - Prometheus metrics on a private registry (see [Metrics]).
-//   - Typed transient/fatal errors so callers own the retry decision
-//     (see [OutboundError]).
-//   - Graceful shutdown that drains in-flight requests (see [Client.Shutdown]).
-//
-// # Quick start
-//
-//	cfg, _ := resilient.LoadConfig(yamlBytes)
-//	client, _ := resilient.New(cfg, resilient.WithLogger(log))
-//	defer client.Shutdown(context.Background())
-//
-//	resp, err := client.Send(ctx, resilient.Request{
-//		Target: "meta_events",
-//		Method: http.MethodPost,
-//		URL:    "https://graph.facebook.com/123/events",
-//		Body:   []byte(`{"data":[]}`),
-//	})
+//	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://billing.internal/v1/invoices/42", nil)
+//	resp, err := c.SendWithRetry("billing", req)
 //	switch {
 //	case err == nil:
-//		defer resp.Body.Close() // caller owns the body
-//	case resilient.IsTransient(err):
-//		// re-queue for a later retry
-//	default:
-//		// fatal — log and drop
+//		defer resp.Body.Close() // status < 400; closing releases the slot
+//	case errors.Is(err, resilient.KindCircuitOpen):
+//		// the dependency is down; fail fast
 //	}
+//
+// # Order of an attempt
+//
+// The per-attempt timeout starts, then the breaker admits (or rejects), the
+// rate limiter and the bulkhead are waited on — within the timeout — and the
+// request is sent through an otelhttp transport (traceparent injected, client
+// span "METHOD target"). The caller's context is the overall deadline.
+//
+// # What counts as a failure
+//
+// The breaker counts 5xx, attempt timeouts and connection errors. It ignores
+// the caller cancelling, local rejections (rate limit, bulkhead, open
+// breaker, shutdown) and 4xx — including 429, which is retried but says the
+// dependency is up. Half-open admits breaker_half_open_probes probes, each
+// identified by the generation it was admitted in; results from earlier
+// generations never decide a probe.
+//
+// # What it does not do
+//
+// No response cache, request coalescing, fallbacks, DNS cache or adaptive
+// concurrency: those were removed as incorrect or out of scope. There is no
+// hedging, no per-request policy override, and no retry of non-idempotent
+// requests without an Idempotency-Key. Redirects to another host are refused
+// unless allow_cross_host_redirects is set.
 package resilient

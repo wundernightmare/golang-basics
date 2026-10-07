@@ -13,9 +13,9 @@
 #                    runner's default variables, otherwise "local" with the
 #                    build named by `git describe`.
 #
-# `just allure-report` and both pipelines' allure-report jobs call it after
-# merging every layer's results into one directory, right before
-# `allure generate`. GITHUB_* / CI_* are the runners' default environment —
+# `just allure` and both pipelines' allure-report jobs call it on the
+# directory of JUnit XML files (gotestsum per module, e2e, schemathesis) right
+# before `allure generate`, which reads JUnit natively. GITHUB_* / CI_* are the runners' default environment —
 # no `github.*` context is interpolated into a run: script for this.
 set -euo pipefail
 

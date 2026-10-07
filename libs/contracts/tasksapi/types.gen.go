@@ -9,9 +9,7 @@ import (
 
 // CreateTaskRequest Body of POST /tasks.
 type CreateTaskRequest struct {
-	// Title Title of the task. Empty, or containing NUL, is rejected with a 400
-	// problem — the pattern states what the store can hold, so a generated
-	// schema-compliant request is always accepted (found by Schemathesis).
+	// Title Title of the task; surrounding whitespace is trimmed (rules as Task.title).
 	Title string `json:"title"`
 }
 
@@ -42,7 +40,7 @@ type Problem struct {
 
 // Task A single to-do item.
 type Task struct {
-	// CreatedAt Creation time, RFC 3339 UTC.
+	// CreatedAt Creation time, RFC 3339 UTC, assigned by the database.
 	CreatedAt time.Time `json:"created_at"`
 
 	// Done Completion flag.
@@ -51,14 +49,62 @@ type Task struct {
 	// Id Server-assigned identifier (UUID).
 	Id string `json:"id"`
 
-	// Title Human-readable title; never empty, never containing NUL (PostgreSQL TEXT rejects it).
+	// Title Human-readable title, as stored: surrounding whitespace trimmed, 1–200
+	// characters, at least one of them not whitespace, no control characters
+	// other than tab (NUL in particular — PostgreSQL TEXT rejects it; found by
+	// Schemathesis). The pattern states the rules so that a generated,
+	// schema-compliant request is always accepted.
 	Title string `json:"title"`
+
+	// Version Starts at 1 and grows by one with every change. The ETag of the task is
+	// this number in quotes; send it back in If-Match to update or delete only
+	// the version you read.
+	Version int64 `json:"version"`
 }
 
-// TaskList Body of GET /tasks: newest first, at most 100 entries.
+// TaskList Body of GET /tasks: one page, newest first.
 type TaskList struct {
-	Tasks []Task `json:"tasks"`
+	// NextCursor Opaque cursor of the next page — pass it as ?cursor= — absent on the
+	// last page.
+	NextCursor *string `json:"next_cursor,omitempty"`
+	Tasks      []Task  `json:"tasks"`
+}
+
+// UpdateTaskRequest Body of PATCH /tasks/{id}: the fields to change — at least one, or 400.
+type UpdateTaskRequest struct {
+	// Done New completion flag.
+	Done *bool `json:"done,omitempty"`
+
+	// Title New title; surrounding whitespace is trimmed (rules as Task.title).
+	Title *string `json:"title,omitempty"`
+}
+
+// TasksOpsListParams defines parameters for TasksOpsList.
+type TasksOpsListParams struct {
+	// Limit Page size.
+	Limit *int32 `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Cursor The next_cursor of the previous page.
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+}
+
+// TasksOpsCreateParams defines parameters for TasksOpsCreate.
+type TasksOpsCreateParams struct {
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
+// TasksOpsDeleteParams defines parameters for TasksOpsDelete.
+type TasksOpsDeleteParams struct {
+	IfMatch *string `json:"If-Match,omitempty"`
+}
+
+// TasksOpsUpdateParams defines parameters for TasksOpsUpdate.
+type TasksOpsUpdateParams struct {
+	IfMatch *string `json:"If-Match,omitempty"`
 }
 
 // TasksOpsCreateJSONRequestBody defines body for TasksOpsCreate for application/json ContentType.
 type TasksOpsCreateJSONRequestBody = CreateTaskRequest
+
+// TasksOpsUpdateJSONRequestBody defines body for TasksOpsUpdate for application/json ContentType.
+type TasksOpsUpdateJSONRequestBody = UpdateTaskRequest

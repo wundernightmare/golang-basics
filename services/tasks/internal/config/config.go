@@ -1,11 +1,14 @@
-// Package config loads the tasks service's settings from an optional YAML file
-// overlaid with environment variables (see [httpx.LoadYAML]) and projects them
-// into the per-dependency configs of the shared libs. It is the worked example
-// of the config-file story: one source of truth, env-overridable, defaulted in
-// code (no envDefault tags, so env overlays YAML rather than resetting it).
+// Package config loads the tasks service's settings from an optional YAML
+// file overlaid with TASKS_-prefixed environment variables (see
+// [httpx.LoadYAML]: env > YAML > default). It embeds the shared libs' own
+// Config structs rather than copying their fields, so every tuning knob a lib
+// offers — pool sizes, session timeouts, TLS, sampling — is configurable here
+// under the key the lib documents, with the lib's default.
 package config
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
@@ -15,152 +18,115 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/valkey"
 )
 
-// Config is the tasks service configuration. Connection details are expressed
-// as URLs so one line in config.yaml (or one env var) points each dependency at
-// its server; the per-library tuning knobs keep their own defaults.
+// EnvPrefix is the prefix of every environment key.
+const EnvPrefix = "TASKS_"
+
+// Config is the tasks service configuration.
 //
-// Load from a file with TASKS_CONFIG=/path/config.yaml; every key is also an env
-// var under the TASKS_ prefix (e.g. TASKS_DATABASE_URL, TASKS_KAFKA_BROKERS).
+// The lib sections are embedded without an envPrefix: their keys already
+// carry a namespace (DATABASE_URL / DB_*, VALKEY_*, KAFKA_*, OTEL_*), so the
+// environment keys are the ones each lib documents under TASKS_ —
+// TASKS_DATABASE_URL, TASKS_DB_STATEMENT_TIMEOUT, TASKS_VALKEY_URL,
+// TASKS_KAFKA_BROKERS, TASKS_OTEL_ENABLED… In YAML they are sections:
+//
+//	http_addr: ":8082"          # httpx.Config, inline at the top level
+//	postgres: {url: …}          # pgx.Config
+//	valkey:   {url: …}          # valkey.Config
+//	kafka:    {brokers: […]}    # kafka.Config (topic = where events go)
+//	otel:     {enabled: true}   # otelx.Config
+//	cache:    {ttl: 1m}
+//	outbox:   {poll_interval: 1s}
+//	idempotency: {ttl: 24h}
 type Config struct {
-	HTTPAddr  string `yaml:"http_addr" env:"HTTP_ADDR"`
-	AdminAddr string `yaml:"admin_addr" env:"ADMIN_ADDR"`
-	// AdminToken guards PUT/DELETE /admin/* on the admin listener; DebugToken
-	// is the X-Debug-Token value that turns on debug logging for one request.
-	// Both empty by default (open / off) and tagged secret so /admin/config
-	// never shows them.
-	AdminToken      string        `yaml:"admin_token" env:"ADMIN_TOKEN" secret:"true"`
-	DebugToken      string        `yaml:"debug_token" env:"DEBUG_TOKEN" secret:"true"`
-	ShutdownTimeout time.Duration `yaml:"shutdown_timeout" env:"HTTP_SHUTDOWN_TIMEOUT"`
-	SlowRequest     time.Duration `yaml:"slow_request" env:"HTTP_SLOW_REQUEST"`
-	LogLevel        string        `yaml:"log_level" env:"LOG_LEVEL"`
-	LogFormat       string        `yaml:"log_format" env:"LOG_FORMAT"`
-	// Log sampling of debug/info per message per second: first N, then every
-	// M-th. -1 disables (0 means "unset", which takes the default of 100).
-	LogSampleInitial    int `yaml:"log_sample_initial" env:"LOG_SAMPLE_INITIAL"`
-	LogSampleThereafter int `yaml:"log_sample_thereafter" env:"LOG_SAMPLE_THEREAFTER"`
+	httpx.Config `yaml:",inline"`
 
-	DatabaseURL string        `yaml:"database_url" env:"DATABASE_URL"`
-	ValkeyURL   string        `yaml:"valkey_url" env:"VALKEY_URL"`
-	CacheTTL    time.Duration `yaml:"cache_ttl" env:"CACHE_TTL"`
+	Postgres pgx.Config    `yaml:"postgres"`
+	Valkey   valkey.Config `yaml:"valkey"`
+	Kafka    kafka.Config  `yaml:"kafka"`
+	OTel     otelx.Config  `yaml:"otel"`
 
-	KafkaBrokers []string `yaml:"kafka_brokers" env:"KAFKA_BROKERS" envSeparator:","`
-	KafkaTopic   string   `yaml:"kafka_topic" env:"KAFKA_TOPIC"`
-
-	OTelEnabled  bool    `yaml:"otel_enabled" env:"OTEL_ENABLED"`
-	OTelEndpoint string  `yaml:"otel_endpoint" env:"OTEL_EXPORTER_OTLP_ENDPOINT"`
-	OTelSampler  float64 `yaml:"otel_sampler_ratio" env:"OTEL_TRACES_SAMPLER_RATIO"`
+	Cache       CacheConfig       `yaml:"cache"`
+	Outbox      OutboxConfig      `yaml:"outbox"`
+	Idempotency IdempotencyConfig `yaml:"idempotency"`
 }
 
-// Load reads the config from the file named by TASKS_CONFIG (when set and
-// present) and overlays TASKS_-prefixed environment variables, then fills in
-// code defaults for anything still unset.
+// CacheConfig tunes the task read cache.
+type CacheConfig struct {
+	// TTL of a cached task (±10% jitter is applied).
+	TTL time.Duration `env:"CACHE_TTL" envDefault:"1m" yaml:"ttl"`
+	// TombstoneTTL is how long a PATCH/DELETE keeps the key from being
+	// re-filled, so a read racing the write cannot cache the old task (see
+	// libs/valkey). A few times the slowest store read.
+	TombstoneTTL time.Duration `env:"CACHE_TOMBSTONE_TTL" envDefault:"5s" yaml:"tombstone_ttl"`
+}
+
+// OutboxConfig tunes the outbox relay.
+type OutboxConfig struct {
+	PollInterval time.Duration `env:"OUTBOX_POLL_INTERVAL" envDefault:"1s" yaml:"poll_interval"`
+	BatchSize    int           `env:"OUTBOX_BATCH_SIZE" envDefault:"100" yaml:"batch_size"`
+	MaxBackoff   time.Duration `env:"OUTBOX_MAX_BACKOFF" envDefault:"30s" yaml:"max_backoff"`
+}
+
+// IdempotencyConfig tunes Idempotency-Key retention.
+type IdempotencyConfig struct {
+	TTL           time.Duration `env:"IDEMPOTENCY_KEY_TTL" envDefault:"24h" yaml:"ttl"`
+	PurgeInterval time.Duration `env:"IDEMPOTENCY_PURGE_INTERVAL" envDefault:"10m" yaml:"purge_interval"`
+}
+
+// Load reads the config from the YAML file at yamlPath (optional: a missing
+// file means env-only), overlays TASKS_ environment variables and validates
+// the result. This service's own defaults (name, ports, client id) are set
+// before loading: [httpx.LoadYAML] fills the libs' tag defaults only into
+// fields still at zero, so a preset survives, and the file and the
+// environment override it.
 func Load(yamlPath string) (Config, error) {
-	var cfg Config
-	if err := httpx.LoadYAML(yamlPath, "TASKS_", &cfg); err != nil {
+	cfg := Config{}
+	cfg.Service = "tasks"
+	cfg.Addr = ":8082"
+	cfg.AdminAddr = ":9082"
+	cfg.Kafka.ClientID = "tasks"
+	cfg.OTel.ServiceName = "tasks"
+	cfg.OTel.Version = httpx.Version
+	if err := httpx.LoadYAML(yamlPath, EnvPrefix, &cfg); err != nil {
 		return Config{}, err
 	}
-	cfg.withDefaults()
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 
-// withDefaults fills sensible defaults for any field left unset by both YAML and
-// env. Kept in code (not envDefault tags) so it runs last and never clobbers a
-// value the operator supplied.
-func (c *Config) withDefaults() {
-	if c.HTTPAddr == "" {
-		c.HTTPAddr = ":8082"
+// Validate checks the whole config: the HTTP server's own rules (see
+// [httpx.Config.Validate], which also applies its defaults) and this
+// service's.
+func (c *Config) Validate() error {
+	var errs []error
+	if err := c.Config.Validate(); err != nil {
+		errs = append(errs, err)
 	}
-	if c.AdminAddr == "" {
-		c.AdminAddr = ":9082"
+	if c.Postgres.URL == "" && c.Postgres.Host == "" {
+		errs = append(errs, errors.New("DATABASE_URL or DB_HOST must be set"))
 	}
-	if c.ShutdownTimeout == 0 {
-		c.ShutdownTimeout = 10 * time.Second
+	if len(c.Kafka.Brokers) == 0 {
+		errs = append(errs, errors.New("KAFKA_BROKERS must be set"))
 	}
-	if c.SlowRequest == 0 {
-		c.SlowRequest = time.Second
+	if c.Kafka.Topic == "" {
+		errs = append(errs, errors.New("KAFKA_TOPIC must be set: it is where the task events go"))
 	}
-	if c.LogSampleInitial == 0 {
-		c.LogSampleInitial = 100
+	if c.Cache.TTL <= 0 || c.Cache.TombstoneTTL <= 0 {
+		errs = append(errs, errors.New("CACHE_TTL and CACHE_TOMBSTONE_TTL must be positive"))
 	}
-	if c.LogSampleThereafter == 0 {
-		c.LogSampleThereafter = 100
+	if c.Outbox.PollInterval <= 0 || c.Outbox.MaxBackoff < c.Outbox.PollInterval {
+		errs = append(errs, errors.New("OUTBOX_POLL_INTERVAL must be positive and at most OUTBOX_MAX_BACKOFF"))
 	}
-	if c.LogLevel == "" {
-		c.LogLevel = "info"
+	if c.Outbox.BatchSize < 1 || c.Outbox.BatchSize > 1000 {
+		errs = append(errs, fmt.Errorf("OUTBOX_BATCH_SIZE must be 1..1000, got %d", c.Outbox.BatchSize))
 	}
-	if c.LogFormat == "" {
-		c.LogFormat = "json"
+	if c.Idempotency.TTL <= 0 || c.Idempotency.PurgeInterval <= 0 {
+		errs = append(errs, errors.New("IDEMPOTENCY_KEY_TTL and IDEMPOTENCY_PURGE_INTERVAL must be positive"))
 	}
-	if c.DatabaseURL == "" {
-		c.DatabaseURL = "postgres://app:app@localhost:5432/app?sslmode=disable"
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("config: %w", err)
 	}
-	if c.ValkeyURL == "" {
-		c.ValkeyURL = "valkey://localhost:6379"
-	}
-	if c.CacheTTL == 0 {
-		c.CacheTTL = time.Minute
-	}
-	if len(c.KafkaBrokers) == 0 {
-		c.KafkaBrokers = []string{"localhost:9092"}
-	}
-	if c.KafkaTopic == "" {
-		c.KafkaTopic = "tasks.events"
-	}
-	if c.OTelEndpoint == "" {
-		c.OTelEndpoint = "localhost:4317"
-	}
-	if c.OTelSampler == 0 {
-		c.OTelSampler = 1.0
-	}
-}
-
-// HTTP projects the shared HTTP-server fields into a libs/httpx Config.
-func (c Config) HTTP() httpx.Config {
-	return httpx.Config{
-		Service:             "tasks",
-		Addr:                c.HTTPAddr,
-		AdminAddr:           c.AdminAddr,
-		AdminToken:          c.AdminToken,
-		DebugToken:          c.DebugToken,
-		ShutdownTimeout:     c.ShutdownTimeout,
-		SlowRequest:         c.SlowRequest,
-		LogLevel:            c.LogLevel,
-		LogFormat:           c.LogFormat,
-		LogSampleInitial:    max(c.LogSampleInitial, 0), // -1 → 0 → sampling off
-		LogSampleThereafter: c.LogSampleThereafter,
-	}
-}
-
-// Postgres projects the database settings, keeping libs/pgx's own pool/timeout
-// defaults (zero values are left untouched by pgx.New).
-func (c Config) Postgres() pgx.Config {
-	return pgx.Config{URL: c.DatabaseURL, ConnectTimeout: 5 * time.Second, MaxConns: 10}
-}
-
-// Valkey projects the cache settings.
-func (c Config) Valkey() valkey.Config {
-	return valkey.Config{URL: c.ValkeyURL, DialTimeout: 5 * time.Second}
-}
-
-// Kafka projects the broker settings (producer shape — Topic is the publish
-// target).
-func (c Config) Kafka() kafka.Config {
-	return kafka.Config{
-		Brokers:     c.KafkaBrokers,
-		Topic:       c.KafkaTopic,
-		ClientID:    "tasks",
-		DialTimeout: 10 * time.Second,
-	}
-}
-
-// OTel projects the tracing settings, naming this service in every span.
-func (c Config) OTel() otelx.Config {
-	return otelx.Config{
-		Enabled:      c.OTelEnabled,
-		ServiceName:  "tasks",
-		Version:      httpx.Version,
-		Endpoint:     c.OTelEndpoint,
-		Insecure:     true,
-		SamplerRatio: c.OTelSampler,
-	}
+	return nil
 }

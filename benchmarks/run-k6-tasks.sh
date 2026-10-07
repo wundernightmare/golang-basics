@@ -23,7 +23,7 @@ mkdir -p "$RESULTS"
 
 log() { printf '\033[36m▸ %s\033[0m\n' "$*"; }
 
-command -v k6 >/dev/null || { echo "k6 not found — install via mise (pinned in mise.toml)" >&2; exit 1; }
+command -v k6 >/dev/null || { echo "k6 not found — install via mise: just setup-perf (pinned in mise.perf.toml)" >&2; exit 1; }
 
 ADMIN_PORT=$((PORT + 1000))
 
@@ -31,7 +31,8 @@ log "build tasks (release)"
 "$ROOT/scripts/build-service.sh" tasks "$RESULTS/tasks"
 
 log "start tasks on :$PORT, admin :$ADMIN_PORT (deps on localhost — run 'just infra-up' first)"
-TASKS_HTTP_ADDR=":$PORT" TASKS_ADMIN_ADDR=":$ADMIN_PORT" \
+TASKS_HTTP_ADDR=":$PORT" TASKS_ADMIN_ADDR="127.0.0.1:$ADMIN_PORT" \
+  TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION="${TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION:-true}" \
   TASKS_DATABASE_URL="${TASKS_DATABASE_URL:-postgres://app:app@localhost:5432/app?sslmode=disable}" \
   TASKS_VALKEY_URL="${TASKS_VALKEY_URL:-valkey://localhost:6379}" \
   TASKS_KAFKA_BROKERS="${TASKS_KAFKA_BROKERS:-localhost:9092}" \

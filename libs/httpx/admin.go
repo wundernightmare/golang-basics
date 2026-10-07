@@ -12,7 +12,7 @@ import (
 // newAdminMux builds the operational surface served on Config.AdminAddr:
 //
 //	GET    /healthz           liveness
-//	GET    /livez             liveness (alias of /healthz; Kubernetes-style name, the Node sibling serves both)
+//	GET    /livez             liveness (alias of /healthz; Kubernetes-style name)
 //	GET    /readyz            readiness (gate + registered checks)
 //	GET    /metrics           Prometheus exposition
 //	GET    /version           build identity + start time / uptime (see [Build])
@@ -22,15 +22,19 @@ import (
 //	DELETE /admin/log-level   revert to the base level now
 //	GET    /debug/pprof/…     Go runtime profiles (cpu, heap, goroutine, block, mutex, trace)
 //
-// Everything is read-only except the two log-level mutations, which require
-// `Authorization: Bearer <Config.AdminToken>` when a token is configured; an
-// empty token leaves them open (the local / compose default) and Run says so
-// in its "admin server listening" line.
+// The probes, /metrics and /version are open: they carry nothing an attacker
+// could use and the platform (kubelet, the scraper) calls them without
+// credentials. Everything under /admin/ and /debug/ — the effective config,
+// the log-level switch, pprof (whose cmdline and profile endpoints can leak
+// and can cost CPU) — requires `Authorization: Bearer <Config.AdminToken>`.
+// An empty token leaves them open, which [Config.Validate] only allows on a
+// loopback address or with ADMIN_INSECURE=true, and Run says so in its
+// "admin server listening" line.
 //
-// It is a plain [http.ServeMux] rather than gin: none of the API middleware
-// (access log, request metrics, tracing) applies here, so probes and scrapes
-// never show up as traffic and a runtime agent can poll pprof for free.
-// Keep this listener off the ingress; it is the one that exposes internals.
+// None of the API middleware (access log, request metrics, tracing) applies
+// here, so probes and scrapes never show up as traffic and a runtime agent
+// can poll pprof for free. Keep this listener off the ingress; it is the one
+// that exposes internals.
 func newAdminMux(s *Server) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.Health.LiveHandler())
@@ -38,17 +42,18 @@ func newAdminMux(s *Server) *http.ServeMux {
 	mux.HandleFunc("GET /readyz", s.Health.ReadyHandler())
 	mux.Handle("GET /metrics", s.Metrics.Handler())
 	mux.HandleFunc("GET /version", s.versionHandler)
-	mux.HandleFunc("GET /admin/config", s.configHandler)
-	mux.HandleFunc("GET /admin/log-level", s.getLogLevel)
+
 	guard := requireBearer(s.cfg.AdminToken, s.log)
+	mux.Handle("GET /admin/config", guard(http.HandlerFunc(s.configHandler)))
+	mux.Handle("GET /admin/log-level", guard(http.HandlerFunc(s.getLogLevel)))
 	mux.Handle("PUT /admin/log-level", guard(http.HandlerFunc(s.putLogLevel)))
 	mux.Handle("DELETE /admin/log-level", guard(http.HandlerFunc(s.deleteLogLevel)))
 	// Explicit registration so nothing depends on http.DefaultServeMux.
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/debug/pprof/", guard(http.HandlerFunc(pprof.Index)))
+	mux.Handle("/debug/pprof/cmdline", guard(http.HandlerFunc(pprof.Cmdline)))
+	mux.Handle("/debug/pprof/profile", guard(http.HandlerFunc(pprof.Profile)))
+	mux.Handle("/debug/pprof/symbol", guard(http.HandlerFunc(pprof.Symbol)))
+	mux.Handle("/debug/pprof/trace", guard(http.HandlerFunc(pprof.Trace)))
 	return mux
 }
 
@@ -62,7 +67,7 @@ type versionResponse struct {
 }
 
 func (s *Server) versionHandler(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, versionResponse{
+	WriteJSON(w, http.StatusOK, versionResponse{
 		BuildInfo:     s.Build,
 		StartedAt:     s.startedAt,
 		UptimeSeconds: int64(time.Since(s.startedAt).Seconds()),
@@ -70,7 +75,7 @@ func (s *Server) versionHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) configHandler(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, Redact(s.configView))
+	WriteJSON(w, http.StatusOK, Redact(s.configView))
 }
 
 // logLevelResponse is the body of every /admin/log-level response.
@@ -96,12 +101,15 @@ func (s *Server) logLevelResponse(previous string) logLevelResponse {
 	return resp
 }
 
-func (s *Server) getLogLevel(w http.ResponseWriter, _ *http.Request) {
+var errLoggerNotAdjustable = NewProblem(http.StatusNotImplemented,
+	"the logger was not built by httpx.NewLogger; its level cannot be changed at runtime")
+
+func (s *Server) getLogLevel(w http.ResponseWriter, r *http.Request) {
 	if s.LogLevel == nil {
-		writeProblem(w, NewProblem(http.StatusNotImplemented, "the logger was not built by httpx.NewLogger; its level cannot be changed at runtime"))
+		writeProblem(w, r, errLoggerNotAdjustable)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.logLevelResponse(""))
+	WriteJSON(w, http.StatusOK, s.logLevelResponse(""))
 }
 
 // putLogLevel reads level= and ttl= from the query string or a form body
@@ -110,19 +118,19 @@ func (s *Server) getLogLevel(w http.ResponseWriter, _ *http.Request) {
 // expires, so nobody has to remember to turn debug off.
 func (s *Server) putLogLevel(w http.ResponseWriter, r *http.Request) {
 	if s.LogLevel == nil {
-		writeProblem(w, NewProblem(http.StatusNotImplemented, "the logger was not built by httpx.NewLogger; its level cannot be changed at runtime"))
+		writeProblem(w, r, errLoggerNotAdjustable)
 		return
 	}
 	level, err := parseLevelStrict(r.FormValue("level"))
 	if err != nil {
-		writeProblem(w, NewProblem(http.StatusBadRequest, err.Error()))
+		writeProblem(w, r, NewProblem(http.StatusBadRequest, err.Error()))
 		return
 	}
 	ttl := s.cfg.LogLevelMaxTTL
 	if raw := r.FormValue("ttl"); raw != "" {
 		d, err := time.ParseDuration(raw)
 		if err != nil || d <= 0 {
-			writeProblem(w, NewProblem(http.StatusBadRequest, "ttl must be a positive duration such as 30m or 2h"))
+			writeProblem(w, r, NewProblem(http.StatusBadRequest, "ttl must be a positive duration such as 30m or 2h"))
 			return
 		}
 		ttl = min(d, s.cfg.LogLevelMaxTTL)
@@ -135,12 +143,12 @@ func (s *Server) putLogLevel(w http.ResponseWriter, r *http.Request) {
 	s.log.LogAttrs(WithDebugLogging(r.Context()), slog.LevelWarn, "log level changed",
 		slog.String("from", resp.Previous), slog.String("to", resp.Level),
 		slog.String("ttl", ttl.String()), slog.String("client", r.RemoteAddr))
-	writeJSON(w, http.StatusOK, resp)
+	WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) deleteLogLevel(w http.ResponseWriter, r *http.Request) {
 	if s.LogLevel == nil {
-		writeProblem(w, NewProblem(http.StatusNotImplemented, "the logger was not built by httpx.NewLogger; its level cannot be changed at runtime"))
+		writeProblem(w, r, errLoggerNotAdjustable)
 		return
 	}
 	previous := s.LogLevel.Reset()
@@ -148,26 +156,29 @@ func (s *Server) deleteLogLevel(w http.ResponseWriter, r *http.Request) {
 	s.log.LogAttrs(WithDebugLogging(r.Context()), slog.LevelWarn, "log level reset",
 		slog.String("from", resp.Previous), slog.String("to", resp.Level),
 		slog.String("client", r.RemoteAddr))
-	writeJSON(w, http.StatusOK, resp)
+	WriteJSON(w, http.StatusOK, resp)
 }
 
-// requireBearer guards a mutating admin handler with `Authorization: Bearer
-// <token>` (constant-time compare). An empty token disables the guard.
-// Rejections are logged at warn: on the admin listener they are either an
-// operator with a stale token or something that should not be there at all.
+// requireBearer guards an admin handler with `Authorization: Bearer <token>`.
+// Both sides are hashed before the constant-time compare so neither the
+// length nor the content of the token leaks through timing; the scheme name
+// is matched case-insensitively as RFC 9110 says. An empty token disables
+// the guard. Rejections are logged at warn: on the admin listener they are
+// either an operator with a stale token or something that should not be
+// there at all.
 func requireBearer(token string, log *slog.Logger) func(http.Handler) http.Handler {
 	if token == "" {
 		return func(next http.Handler) http.Handler { return next }
 	}
-	want := []byte(token)
+	want := tokenDigest(token)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if !ok || subtle.ConstantTimeCompare([]byte(got), want) != 1 {
-				log.Warn("admin: rejected unauthenticated mutation",
+			scheme, got, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+			if !strings.EqualFold(scheme, "Bearer") || subtle.ConstantTimeCompare(tokenDigest(strings.TrimSpace(got)), want) != 1 {
+				log.Warn("admin: rejected unauthenticated request",
 					"method", r.Method, "path", r.URL.Path, "client", r.RemoteAddr)
 				w.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
-				writeProblem(w, NewProblem(http.StatusUnauthorized, "a valid Authorization: Bearer <ADMIN_TOKEN> header is required"))
+				writeProblem(w, r, NewProblem(http.StatusUnauthorized, "a valid Authorization: Bearer <ADMIN_TOKEN> header is required"))
 				return
 			}
 			next.ServeHTTP(w, r)

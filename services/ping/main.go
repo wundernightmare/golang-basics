@@ -6,6 +6,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
@@ -14,8 +15,8 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		// run() owns logging on the failure path; main only sets the exit code,
-		// after every deferred cleanup in run() has executed.
+		// run() owns reporting on the failure path; main only sets the exit
+		// code, after every deferred cleanup in run() has executed.
 		os.Exit(1)
 	}
 }
@@ -23,12 +24,19 @@ func main() {
 func run() error {
 	cfg, err := httpx.LoadConfig("PING_")
 	if err != nil {
+		// There is no logger before the config is known: say it on stderr,
+		// or the process exits 1 without a word.
+		fmt.Fprintln(os.Stderr, "ping: "+err.Error())
 		return err
 	}
 	cfg.Service = "ping"
 
 	logger := httpx.NewLogger(cfg.LogConfig())
-	srv := httpx.NewServer(cfg, logger)
+	srv, err := httpx.NewServer(cfg, logger)
+	if err != nil {
+		logger.Error("ping: invalid configuration", "err", err)
+		return err
+	}
 
 	api.Register(srv)
 

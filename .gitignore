@@ -57,3 +57,9 @@ allure-report/
 /.cover/
 /gremlins-*.json
 /bench*.txt
+
+# Build + report outputs of the justfile / CI (e2e binaries, JUnit, Allure)
+/.build/
+/.reports/
+# Personal mise overrides (never read by scripts/mise-pins.sh)
+mise.local.toml

@@ -1,59 +1,75 @@
 # e2e
 
-End-to-end tests for the golang-basics services, using
-[Playwright](https://playwright.dev) as a pure **API** test runner (no browser).
-The Go analogue of the Rust sibling repo's `e2e/` — same "spawn the service
-binaries, drive them over HTTP, assert" shape, minus the Testcontainers infra
-(these services have no datastores).
+End-to-end tests for the golang-basics services: a Go module that spawns the
+real service binaries as child processes and drives them over HTTP. Plain
+`go test` + testify; every test file carries the `e2e` build tag, so
+`go test ./...` without the tag compiles only `doc.go` and runs nothing.
 
-## How it works
+## What it checks
 
-```
-playwright.config.ts   API-only config; baseURL = PING_URL
-global-setup.ts    →   spawn services/{ping,heartbeat}/bin/*  (fixtures/services.ts)
-                       wait for /healthz on the admin port, persist pids to .e2e-state.json
-tests/*.spec.ts        run against the live services
-global-teardown.ts →   SIGTERM every spawned pid
-```
+Only what a real process shows — everything else is owned by a lower layer
+(README → "Tests"):
 
-The harness spawns **pre-built** binaries, so build them first (the `just e2e`
-recipe does this for you via `just e2e-build` → `just release`).
+| Test | Checks |
+|---|---|
+| `TestPing` | ready on the admin port; `/version` build stamp; `GET /ping?msg=x` echoes; `/metrics` is not on the API port; `/admin/config` requires the admin token |
+| `TestHeartbeat` | `/version`; `heartbeat_beats_total` increases (polled); admin token |
+| `TestGracefulShutdown` | SIGTERM → exit 0 within 5s, no error-level log line, `servers stopped cleanly` logged and the last line says stopped cleanly (ping, heartbeat) |
+| `TestTasksPipeline` | tasks + consumer: `/version`, admin token, `POST /tasks` → 201, `GET /tasks/{id}` → 200, the consumer's `consumer_tasks_consumed_total` increases within 30s (outbox relay → Kafka → consumer), then both shut down cleanly |
+
+## Harness (`harness_test.go`)
+
+For every `start(t, spec)`:
+
+- binary `$E2E_BIN_DIR/<name>` (default `../.build/<name>`);
+- **free ports**: the harness listens on `127.0.0.1:0`, closes, and passes the
+  address as `<SVC>_HTTP_ADDR` / `<SVC>_ADMIN_ADDR` — never a fixed port, so
+  runs (and worktrees) do not collide;
+- env: `<SVC>_ADMIN_TOKEN` (random per process; tests use it),
+  `<SVC>_HTTP_SHUTDOWN_DELAY=0s`, `<SVC>_LOG_FORMAT=json`, plus the test's
+  own keys; inherited variables with the service's prefix are dropped so a
+  developer's `PING_HTTP_ADDR` cannot leak in;
+- stdout/stderr captured into a buffer, printed when the test fails;
+- waits for `/readyz` 200 on the admin port (30s deadline), failing at once
+  with the output if the child exits first;
+- asserts `/version` reports `service == <name>` — never passes against a
+  stray process on the port;
+- teardown: SIGTERM, **wait for exit** (15s), then SIGKILL — a cover-built
+  binary writes its counters only on a normal exit.
+
+## Environment
+
+| Variable | Meaning |
+|---|---|
+| `E2E_BIN_DIR` | where the binaries are (default `../.build`) |
+| `E2E_COVER_DIR` | passed to every child as `GOCOVERDIR` (binaries built with `-cover`) |
+| `E2E_DATABASE_URL` | → `TASKS_DATABASE_URL` |
+| `E2E_VALKEY_URL` | → `TASKS_VALKEY_URL` |
+| `E2E_KAFKA_BROKERS` | → `TASKS_KAFKA_BROKERS`, `CONSUMER_KAFKA_BROKERS` |
+
+`TestTasksPipeline` skips unless all three data URLs are set. It uses a topic
+(`e2e.tasks.events.<timestamp>`) and consumer group of its own, so runs
+against the same broker do not interfere, and enables auto topic creation for
+that topic on both sides.
 
 ## Run
 
 ```sh
-# from the workspace root:
-just e2e-install     # pnpm install (once)
-just e2e             # build binaries + run the whole suite
-just e2e-ui          # Playwright UI mode
-just e2e-filter ping # only specs matching "ping"
-just e2e-report      # open the last HTML report
+# from the workspace root: build the binaries (cover-instrumented, like CI)
+for s in ping heartbeat tasks consumer; do COVER=1 scripts/build-service.sh $s .build/$s; done
 
-# smoke subset (tag @smoke):
-pnpm --filter @golang-basics/e2e test:smoke
+cd e2e
+go test -tags e2e -count=1 ./...                  # ping + heartbeat (tasks/consumer skip)
+just test                                         # same
+
+# the data services (docker/deps.yml up: `just infra-up`)
+E2E_DATABASE_URL='postgres://app:app@localhost:5432/app?sslmode=disable' \
+E2E_VALKEY_URL=valkey://localhost:6379 \
+E2E_KAFKA_BROKERS=localhost:9092 \
+  go test -tags e2e -count=1 ./...
+
+# coverage from the child processes
+E2E_COVER_DIR=../.cover/e2e go test -tags e2e -count=1 ./...
 ```
 
-Point the suite at an already-running stack (e.g. `just up`) by overriding the
-URLs:
-
-```sh
-PING_URL=http://localhost:8080 PING_ADMIN_URL=http://localhost:9080 \
-  HEARTBEAT_ADMIN_URL=http://localhost:9081 pnpm test
-```
-
-## TestOps metadata
-
-Every spec carries the same Allure / TestOps identity as the Go suites
-(`libs/testx`): `meta({ feature })` in a `describe` sets epic / feature / owner
-(+ the `layer` label), `await testCase("GB-5xx", story)` first thing in a test
-sets the Allure id, story, severity and a TMS link (`fixtures/meta.ts`; link
-templates in `playwright.config.ts`). The values are placeholders — see
-`libs/testx/meta.go`. One id per test, `GB-5xx` for this layer.
-
-## Specs
-
-| File                      | Covers                                                                                                           |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `tests/ping.spec.ts`      | `/ping`, `?msg=` echo, `/version`, 404 handling                                                                  |
-| `tests/health.spec.ts`    | `/healthz` / `/readyz` / `/metrics` / `/version` / pprof on **both** admin listeners; none of it on the API port |
-| `tests/heartbeat.spec.ts` | `heartbeat_beats_total` increases over time                                                                      |
+`scripts/cover.sh e2e` does the build + coverage run in one step.

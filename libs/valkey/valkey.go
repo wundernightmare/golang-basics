@@ -2,28 +2,35 @@ package valkey
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	valkeygo "github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/valkeyotel"
+	"golang.org/x/sync/singleflight"
+)
+
+// Defaults applied when a hand-built Config leaves a field zero.
+const (
+	defaultOpTimeout   = 500 * time.Millisecond
+	defaultDialTimeout = 5 * time.Second
 )
 
 // Cache wraps a valkey-go client with the conveniences a service needs: string
-// and JSON get/set with TTL, a readiness probe and cache-aside loading. It is
-// safe for concurrent use; construct one with [New] and share it.
+// get/set with TTL, a readiness probe, cache-aside loading ([Aside]) and
+// delete-safe invalidation ([Cache.Tombstone]). It is safe for concurrent
+// use; construct one with [New] and share it.
 //
 // Every command runs under an OpenTelemetry client span (child of the span in
-// the calling context) via valkeyotel, and [Cache.Get] counts hits, misses and
-// errors — register [Cache.Collectors] to export them.
+// the calling context) via valkeyotel, is bounded by Config.OpTimeout, and is
+// measured — register [Cache.Collectors] to export the metrics.
 type Cache struct {
 	client    valkeygo.Client
 	log       *slog.Logger
-	lookup    *prometheus.CounterVec
+	metrics   *metrics
 	opTimeout time.Duration
+	flight    singleflight.Group
 }
 
 // New builds a client from cfg, verifies connectivity with a single PING (so a
@@ -32,6 +39,12 @@ type Cache struct {
 func New(cfg Config, log *slog.Logger) (*Cache, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
+	}
+	if cfg.DialTimeout <= 0 {
+		cfg.DialTimeout = defaultDialTimeout
+	}
+	if cfg.OpTimeout <= 0 {
+		cfg.OpTimeout = defaultOpTimeout
 	}
 	opt, err := cfg.clientOption()
 	if err != nil {
@@ -51,73 +64,82 @@ func New(cfg Config, log *slog.Logger) (*Cache, error) {
 		return nil, fmt.Errorf("valkey: initial ping: %w", err)
 	}
 
-	if cfg.OpTimeout <= 0 {
-		cfg.OpTimeout = 500 * time.Millisecond
+	// The resolved address (the URL's, when one is set), not the discrete field.
+	log.Info("valkey cache ready", "addr", opt.InitAddress, "db", opt.SelectDB, "op_timeout", cfg.OpTimeout.String())
+	return &Cache{client: client, log: log, metrics: newMetrics(), opTimeout: cfg.OpTimeout}, nil
+}
+
+// do runs one command under the per-command deadline and records its latency
+// and (a nil reply — a missing key — is an answer, not an error) its failure.
+func (c *Cache) do(ctx context.Context, op string, cmd valkeygo.Completed) valkeygo.ValkeyResult {
+	ctx, cancel := context.WithTimeout(ctx, c.opTimeout)
+	defer cancel()
+	start := time.Now()
+	res := c.client.Do(ctx, cmd)
+	c.metrics.duration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+	if err := res.Error(); err != nil && !valkeygo.IsValkeyNil(err) {
+		c.metrics.errors.WithLabelValues(op).Inc()
 	}
-	log.Info("valkey cache ready", "addr", cfg.Addr, "db", cfg.DB, "op_timeout", cfg.OpTimeout.String())
-	return &Cache{client: client, log: log, lookup: newLookupCounter(), opTimeout: cfg.OpTimeout}, nil
-}
-
-// bound applies the per-command deadline on top of the caller's context.
-func (c *Cache) bound(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, c.opTimeout)
-}
-
-func newLookupCounter() *prometheus.CounterVec {
-	return prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "cache_lookups_total",
-		Help: "Cache GETs by outcome: hit, miss, or error (lookup itself failed).",
-	}, []string{"result"})
-}
-
-// Collectors returns the cache's Prometheus collectors for the service to
-// register on its metrics registry:
-//
-//	cache_lookups_total{result="hit|miss|error"}
-//
-// The hit ratio is rate(hit) / rate(hit + miss); a rising error rate with a
-// healthy readiness check usually means timeouts under load.
-func (c *Cache) Collectors() []prometheus.Collector {
-	return []prometheus.Collector{c.lookup}
+	return res
 }
 
 // Client exposes the underlying valkey-go client for commands this wrapper does
-// not surface.
+// not surface. Commands sent through it are traced but not measured.
 func (c *Cache) Client() valkeygo.Client { return c.client }
 
 // Get returns the value at key. The boolean is false on a cache miss (a missing
-// key is not an error); a non-nil error means the lookup itself failed.
+// key — or a tombstone, see [Cache.Tombstone] — is not an error); a non-nil
+// error means the lookup itself failed.
 func (c *Cache) Get(ctx context.Context, key string) (string, bool, error) {
-	ctx, cancel := c.bound(ctx)
-	defer cancel()
-	v, err := c.client.Do(ctx, c.client.B().Get().Key(key).Build()).ToString()
-	if valkeygo.IsValkeyNil(err) {
-		c.lookup.WithLabelValues("miss").Inc()
+	v, err := c.do(ctx, "get", c.client.B().Get().Key(key).Build()).ToString()
+	switch {
+	case valkeygo.IsValkeyNil(err):
+		c.metrics.lookups.WithLabelValues("miss").Inc()
+		return "", false, nil
+	case err != nil:
+		c.metrics.lookups.WithLabelValues("error").Inc()
+		return "", false, fmt.Errorf("valkey: get %q: %w", key, err)
+	case v == tombstoneValue:
+		c.metrics.lookups.WithLabelValues("miss").Inc()
 		return "", false, nil
 	}
-	if err != nil {
-		c.lookup.WithLabelValues("error").Inc()
-		return "", false, fmt.Errorf("valkey: get %q: %w", key, err)
-	}
-	c.lookup.WithLabelValues("hit").Inc()
+	c.metrics.lookups.WithLabelValues("hit").Inc()
 	return v, true, nil
 }
 
-// Set writes value at key. A positive ttl sets an expiry; a zero ttl stores the
-// key without one.
+// Set writes value at key unconditionally. A positive ttl sets an expiry; a
+// zero ttl stores the key without one. Prefer [Cache.SetNX] (or [Aside]) to
+// fill a cache from the source of truth: an unconditional write can overwrite
+// a tombstone and resurrect stale data.
 func (c *Cache) Set(ctx context.Context, key, value string, ttl time.Duration) error {
 	var cmd valkeygo.Completed
 	if ttl > 0 {
-		cmd = c.client.B().Set().Key(key).Value(value).Ex(ttl).Build()
+		cmd = c.client.B().Set().Key(key).Value(value).Px(ttl).Build()
 	} else {
 		cmd = c.client.B().Set().Key(key).Value(value).Build()
 	}
-	ctx, cancel := c.bound(ctx)
-	defer cancel()
-	if err := c.client.Do(ctx, cmd).Error(); err != nil {
+	if err := c.do(ctx, "set", cmd).Error(); err != nil {
 		return fmt.Errorf("valkey: set %q: %w", key, err)
 	}
 	return nil
+}
+
+// SetNX writes value at key only when the key does not exist — neither a value
+// nor a tombstone — and reports whether it did. This is how a cache is filled
+// from the source of truth: a concurrent invalidation always wins over a
+// fill that loaded before it. A positive ttl is required.
+func (c *Cache) SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error) {
+	if ttl <= 0 {
+		return false, fmt.Errorf("valkey: setnx %q: ttl must be positive", key)
+	}
+	err := c.do(ctx, "set", c.client.B().Set().Key(key).Value(value).Nx().Px(ttl).Build()).Error()
+	switch {
+	case valkeygo.IsValkeyNil(err):
+		return false, nil // the key exists: not written
+	case err != nil:
+		return false, fmt.Errorf("valkey: setnx %q: %w", key, err)
+	}
+	return true, nil
 }
 
 // Del removes one or more keys, ignoring those that do not exist.
@@ -125,9 +147,7 @@ func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	ctx, cancel := c.bound(ctx)
-	defer cancel()
-	if err := c.client.Do(ctx, c.client.B().Del().Key(keys...).Build()).Error(); err != nil {
+	if err := c.do(ctx, "del", c.client.B().Del().Key(keys...).Build()).Error(); err != nil {
 		return fmt.Errorf("valkey: del: %w", err)
 	}
 	return nil
@@ -148,30 +168,3 @@ func (c *Cache) ReadyCheck() func(ctx context.Context) error {
 
 // Close releases the client's connection pool.
 func (c *Cache) Close() { c.client.Close() }
-
-// Aside is the cache-aside (lazy-loading) pattern as a generic helper: it
-// returns the JSON-decoded value at key on a hit, otherwise calls load, stores
-// the result under key with ttl, and returns it. A corrupt cache entry or a
-// failed write is treated as a miss — the source of truth (load) always wins,
-// so caching never turns a readable value into an error.
-func Aside[T any](ctx context.Context, c *Cache, key string, ttl time.Duration, load func(ctx context.Context) (T, error)) (T, bool, error) {
-	var zero T
-	if raw, ok, err := c.Get(ctx, key); err == nil && ok {
-		var v T
-		if json.Unmarshal([]byte(raw), &v) == nil {
-			return v, true, nil // cache hit
-		}
-		c.log.WarnContext(ctx, "valkey: discarding corrupt cache entry", "key", key)
-	}
-
-	v, err := load(ctx)
-	if err != nil {
-		return zero, false, err
-	}
-	if b, err := json.Marshal(v); err == nil {
-		if err := c.Set(ctx, key, string(b), ttl); err != nil {
-			c.log.WarnContext(ctx, "valkey: cache write failed", "key", key, "err", err)
-		}
-	}
-	return v, false, nil // cache miss, loaded fresh
-}

@@ -15,24 +15,35 @@ import (
 // (scripts/build-service.sh and the Dockerfiles do this from VERSION.)
 var Version = "dev"
 
+// Revision and BuildTime are the VCS revision and build timestamp. They come
+// from the toolchain's embedded VCS info when the binary is built inside a
+// checkout, and from -ldflags (-X …httpx.Revision=<sha>) in a Docker build,
+// whose context has no .git.
+var (
+	Revision  = ""
+	BuildTime = ""
+)
+
 // BuildInfo is the identity of the running binary — what the /version endpoint
 // returns and what the build_info metric carries as labels.
 type BuildInfo struct {
 	Service   string `json:"service"`
 	Version   string `json:"version"`
-	Revision  string `json:"revision"`   // vcs.revision when built from a checkout, else "unknown"
-	BuildTime string `json:"build_time"` // vcs.time, RFC 3339, when known
+	Revision  string `json:"revision"`   // vcs.revision or the injected Revision, else "unknown"
+	BuildTime string `json:"build_time"` // vcs.time or the injected BuildTime, RFC 3339, when known
 	Modified  bool   `json:"modified"`   // vcs.modified: built from a dirty tree
 	GoVersion string `json:"go_version"`
 }
 
 // Build reads the toolchain-embedded build metadata for service. Everything
 // but Service and Version comes from [debug.ReadBuildInfo], which is populated
-// when the binary is built inside a git checkout (`-buildvcs`, on by default).
-// A Docker build has no .git in its context, which is why Version is injected
-// separately via -ldflags.
+// when the binary is built inside a git checkout (`-buildvcs`, on by default),
+// with the injected Revision / BuildTime as the fallback.
 func Build(service string) BuildInfo {
-	bi := BuildInfo{Service: service, Version: Version, Revision: "unknown"}
+	bi := BuildInfo{Service: service, Version: Version, Revision: Revision, BuildTime: BuildTime}
+	if bi.Revision == "" {
+		bi.Revision = "unknown"
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return bi

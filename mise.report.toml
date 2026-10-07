@@ -1,0 +1,6 @@
+# mise profile "report" — layered on mise.toml when MISE_ENV includes report
+# (`just setup-report`). Only `just allure` needs it: allure-commandline (root
+# package.json) renders the HTML report from the JUnit XML and runs on a JRE.
+
+[tools]
+java = "temurin-25"
