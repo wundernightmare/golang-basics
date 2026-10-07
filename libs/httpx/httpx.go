@@ -3,25 +3,32 @@ package httpx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
+	"sync/atomic"
 	"time"
-
-	"github.com/gin-gonic/gin"
 )
 
-// Server wires a [gin.Engine] for the service's API together with the
-// cross-cutting concerns every service shares — request ids, structured,
-// sampled request logging with trace correlation, panic recovery, Prometheus
-// metrics, per-request debug logging — and a second, admin listener for the
-// operational surface (health, metrics, version, config, runtime log level,
-// pprof). Services call [Server.Engine] to register their own routes, then
-// [Server.Run] to serve both listeners with graceful shutdown.
+// Server wires an [http.ServeMux] for the service's API together with the
+// cross-cutting concerns every service shares — request ids, tracing,
+// structured, sampled request logging with trace correlation, Prometheus
+// metrics, panic recovery, body limits, per-request deadlines, per-request
+// debug logging — and a second, admin listener for the operational surface
+// (health, metrics, version, config, runtime log level, pprof). Services call
+// [Server.Mux] to register their own routes, then [Server.Run] to serve both
+// listeners with graceful shutdown.
 type Server struct {
 	cfg        Config
 	log        *slog.Logger
-	engine     *gin.Engine
+	mux        *http.ServeMux
+	handler    http.Handler // the API chain around mux
 	admin      http.Handler
+	proxies    []netip.Prefix
+	apiAddr    atomic.Pointer[string] // bound API address, set by Run
+	adminAddr  atomic.Pointer[string] // bound admin address, set by Run
 	startedAt  time.Time
 	configView any
 	Build      BuildInfo
@@ -36,90 +43,97 @@ type Server struct {
 type Option func(*serverOptions)
 
 type serverOptions struct {
-	outer  []gin.HandlerFunc
+	outer  []Middleware
 	config any
 }
 
-// WithMiddleware installs middleware *outside* the built-in access log and
-// metrics — this is where tracing goes (otelx.GinMiddleware). The tracing
-// middleware puts the span on the request context only for the duration of
-// its own Next(), so anything that must see the span after the handler ran
-// (the access-log line, which needs the status) has to be inside it, not
-// before it. Registering tracing with Engine().Use() after NewServer would
-// put it inside the logger and the access log would lose its trace_id.
-func WithMiddleware(mw ...gin.HandlerFunc) Option {
+// WithMiddleware installs middleware — an authenticator, a tenant resolver, a
+// rate limiter — *inside* the built-in tracing, access log and metrics and
+// outside panic recovery and the body limit. A request it rejects (401, 429)
+// is therefore still traced, logged and counted like any other, and what it
+// adds to the context is visible to the handler; the access-log line is
+// written after it returns. First middleware outermost.
+func WithMiddleware(mw ...Middleware) Option {
 	return func(o *serverOptions) { o.outer = append(o.outer, mw...) }
 }
 
 // WithConfig sets what GET /admin/config shows — normally the service's own
-// config struct, which usually embeds the fields of [Config]. It is passed
-// through [Redact] on every request, so secrets never leave the process as
-// long as they are tagged `secret:"true"` or named like secrets. Without this
-// option the endpoint shows the [Config] the server was built with.
+// config struct, which usually embeds [Config]. It is passed through
+// [Redact] on every request, so secrets never leave the process as long as
+// they are tagged `secret:"true"` or named like secrets. Without this option
+// the endpoint shows the [Config] the server was built with.
 func WithConfig(v any) Option {
 	return func(o *serverOptions) { o.config = v }
 }
 
-// NewServer constructs a server from cfg and log. The API engine applies, in
-// order: request id → debug token (when Config.DebugToken is set) →
-// [WithMiddleware] extras (tracing) → request logging → panic recovery →
-// metrics. The admin handler serves /healthz, /livez, /readyz, /metrics, /version,
-// /admin/config, /admin/log-level and /debug/pprof (see newAdminMux).
-func NewServer(cfg Config, log *slog.Logger, opts ...Option) *Server {
-	gin.SetMode(gin.ReleaseMode)
+// NewServer constructs a server from cfg and log; it validates cfg (see
+// [Config.Validate]) and returns the first problem instead of a server.
+//
+// The API chain applies, in order: request id + deadline → debug token (when
+// Config.DebugToken is set) → tracing → access log → metrics → [WithMiddleware]
+// extras → panic recovery → body limit → routing (404/405 as problem+json) →
+// the service's mux. The admin handler serves /healthz, /livez, /readyz,
+// /metrics, /version, /admin/config, /admin/log-level and /debug/pprof (see
+// newAdminMux).
+func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("httpx: config: %w", err)
+	}
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	var o serverOptions
 	for _, opt := range opts {
 		opt(&o)
 	}
-
-	if cfg.Service == "" {
-		cfg.Service = defaultServiceName()
-	}
-	if cfg.LogLevelMaxTTL <= 0 {
-		cfg.LogLevelMaxTTL = defaultLogLevelMaxTTL
-	}
 	if o.config == nil {
 		o.config = cfg // the effective one, defaults applied
 	}
+	proxies, _ := parsePrefixes(cfg.TrustedProxies) // validated above
 	build := Build(cfg.Service)
 
 	m := NewMetrics(build, log)
 	h := NewHealth(cfg.HealthInterval, cfg.HealthTimeout)
 	m.Registry.MustRegister(h.Collectors()...)
 
-	e := gin.New()
-	e.Use(requestID())
-	if cfg.DebugToken != "" {
-		e.Use(debugToken(cfg.DebugToken))
-	}
-	e.Use(o.outer...)
-	e.Use(requestLogger(log, cfg.SlowRequest), gin.Recovery(), m.Middleware())
-	// Unknown route → 404, known route with the wrong method → 405 (not 404,
-	// which is what gin does by default and what Schemathesis' unsupported-
-	// method check flags). Both as problem+json, so every error the API port
-	// emits has the same shape.
-	e.HandleMethodNotAllowed = true
-	e.NoRoute(func(c *gin.Context) {
-		AbortProblem(c, NewProblem(http.StatusNotFound, "no route for "+c.Request.Method+" "+c.Request.URL.Path))
-	})
-	e.NoMethod(func(c *gin.Context) {
-		AbortProblem(c, NewProblem(http.StatusMethodNotAllowed, c.Request.Method+" is not allowed on "+c.Request.URL.Path))
-	})
-
 	s := &Server{
-		cfg: cfg, log: log, engine: e,
+		cfg: cfg, log: log, mux: http.NewServeMux(),
+		proxies:    proxies,
 		startedAt:  time.Now(),
 		configView: o.config,
 		Build:      build,
 		Metrics:    m, Health: h,
 		LogLevel: LogLevelOf(log),
 	}
+
+	mws := []Middleware{s.entry}
+	if cfg.DebugToken != "" {
+		mws = append(mws, debugToken(cfg.DebugToken))
+	}
+	mws = append(mws,
+		tracing,
+		accessLog(log, cfg.SlowRequest),
+		m.Middleware(),
+	)
+	mws = append(mws, o.outer...)
+	mws = append(mws,
+		s.recovery,
+		bodyLimit(cfg.MaxBodyBytes),
+	)
+	s.handler = chain(route(s.mux), mws...)
 	s.admin = newAdminMux(s)
-	return s
+	return s, nil
 }
 
-// Engine exposes the underlying gin engine so services can add routes.
-func (s *Server) Engine() *gin.Engine { return s.engine }
+// Mux exposes the API mux so services can add routes with the Go 1.22+
+// method-and-pattern syntax:
+//
+//	srv.Mux().HandleFunc("GET /tasks/{id}", h.get)
+func (s *Server) Mux() *http.ServeMux { return s.mux }
+
+// Handler returns the complete API handler (middleware chain + mux), mainly
+// so tests can drive it with httptest without a listener.
+func (s *Server) Handler() http.Handler { return s.handler }
 
 // Admin exposes the admin handler (health, metrics, version, config, log
 // level, pprof), mainly so tests can drive it without a listener.
@@ -128,65 +142,135 @@ func (s *Server) Admin() http.Handler { return s.admin }
 // Logger returns the server's structured logger.
 func (s *Server) Logger() *slog.Logger { return s.log }
 
-// Run starts the listeners and blocks until ctx is cancelled (typically by a
-// SIGINT/SIGTERM context from [SignalContext]) or one of them fails. An empty
-// Config.Addr skips the API listener (a pure worker); an empty AdminAddr skips
-// the admin one. On cancellation it marks the service not-ready, drains the
-// API listener within Config.ShutdownTimeout, then stops the admin listener —
-// so probes keep answering (503) while in-flight requests finish. A clean
-// shutdown returns nil.
+// ListenAddr returns the address the API listener is bound to once [Server.Run]
+// has bound it (a Config.Addr of ":0" picks a free port), "" before that or
+// when there is no API listener. Tests use it instead of fixed ports.
+func (s *Server) ListenAddr() string { return derefString(s.apiAddr.Load()) }
+
+// AdminListenAddr is [Server.ListenAddr] for the admin listener.
+func (s *Server) AdminListenAddr() string { return derefString(s.adminAddr.Load()) }
+
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// Run binds the listeners, evaluates the readiness checks once, opens the
+// readiness gate and serves until ctx is cancelled (typically by a
+// SIGINT/SIGTERM context from [SignalContext]) or a listener fails. An empty
+// Config.Addr skips the API listener (a pure worker); an empty AdminAddr
+// skips the admin one.
+//
+// Shutdown, on cancellation:
+//
+//  1. readiness flips to 503 so load balancers stop sending new connections;
+//  2. Config.ShutdownDelay passes — the time it takes for that to propagate
+//     (endpoint controllers, ingress reloads) — while requests are still
+//     served;
+//  3. the API listener drains within Config.ShutdownTimeout; if requests are
+//     still running when the budget is spent, their contexts are cancelled
+//     and the connections closed, so Run returns and main's deferred cleanup
+//     never races a handler;
+//  4. the admin listener stops last, so probes answered throughout.
+//
+// A clean shutdown returns nil. Binding happens before anything else, so a
+// port in use is returned from Run directly rather than reported from a
+// goroutine.
 func (s *Server) Run(ctx context.Context) error {
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
+
 	var api, admin *http.Server
+	var apiLn, adminLn net.Listener
 	if s.cfg.Addr != "" {
-		api = &http.Server{Addr: s.cfg.Addr, Handler: s.engine, ReadHeaderTimeout: 5 * time.Second}
+		api = &http.Server{
+			Handler:           s.handler,
+			ReadHeaderTimeout: s.cfg.ReadHeaderTimeout,
+			ReadTimeout:       s.cfg.ReadTimeout,
+			WriteTimeout:      s.cfg.WriteTimeout,
+			IdleTimeout:       s.cfg.IdleTimeout,
+			MaxHeaderBytes:    s.cfg.MaxHeaderBytes,
+			BaseContext:       func(net.Listener) context.Context { return baseCtx },
+		}
+		ln, err := net.Listen("tcp", s.cfg.Addr)
+		if err != nil {
+			return fmt.Errorf("httpx: bind API listener %s: %w", s.cfg.Addr, err)
+		}
+		apiLn = ln
+		addr := ln.Addr().String()
+		s.apiAddr.Store(&addr)
 	}
 	if s.cfg.AdminAddr != "" {
 		// No WriteTimeout: /debug/pprof/profile streams for its ?seconds= budget.
-		admin = &http.Server{Addr: s.cfg.AdminAddr, Handler: s.admin, ReadHeaderTimeout: 5 * time.Second}
+		admin = &http.Server{
+			Handler:           s.admin,
+			ReadHeaderTimeout: s.cfg.ReadHeaderTimeout,
+			IdleTimeout:       s.cfg.IdleTimeout,
+			MaxHeaderBytes:    s.cfg.MaxHeaderBytes,
+			BaseContext:       func(net.Listener) context.Context { return baseCtx },
+		}
+		ln, err := net.Listen("tcp", s.cfg.AdminAddr)
+		if err != nil {
+			if apiLn != nil {
+				_ = apiLn.Close()
+			}
+			return fmt.Errorf("httpx: bind admin listener %s: %w", s.cfg.AdminAddr, err)
+		}
+		adminLn = ln
+		addr := ln.Addr().String()
+		s.adminAddr.Store(&addr)
 	}
 	if api == nil && admin == nil {
 		return errors.New("httpx: neither HTTP_ADDR nor ADMIN_ADDR is set")
 	}
 
 	serveErr := make(chan error, 2)
-	serve := func(name string, srv *http.Server, attrs ...any) {
+	serve := func(name string, srv *http.Server, ln net.Listener, attrs ...any) {
 		if srv == nil {
 			return
 		}
 		go func() {
-			s.log.Info(name+" listening", append([]any{"addr", srv.Addr}, attrs...)...)
-			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				serveErr <- err
+			s.log.Info(name+" listening", append([]any{"addr", ln.Addr().String()}, attrs...)...)
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				serveErr <- fmt.Errorf("%s: %w", name, err)
 				return
 			}
 			serveErr <- nil
 		}()
 	}
-	// Say out loud whether the admin mutations are guarded: "off" is fine on
-	// a laptop and a finding in a cluster.
+	// Say out loud whether the admin surface is guarded: "off" is fine on a
+	// laptop and a finding in a cluster (Validate only lets it through on
+	// loopback or with ADMIN_INSECURE).
 	adminAuth := "bearer"
 	if s.cfg.AdminToken == "" {
 		adminAuth = "off"
 	}
-	serve("admin server", admin, "auth", adminAuth)
-	serve("http server", api, "debug_token", s.cfg.DebugToken != "")
+	serve("admin server", admin, adminLn, "auth", adminAuth)
+	serve("http server", api, apiLn, "debug_token", s.cfg.DebugToken != "")
 
-	// Background readiness evaluation for the lifetime of the server; the
-	// first pass runs before the gate opens so /readyz is accurate at once.
+	// Readiness: one synchronous pass so the first probe answers from real
+	// results, then the background loop for the lifetime of the server.
+	s.Health.refresh(ctx)
 	healthCtx, stopHealth := context.WithCancel(ctx)
 	defer stopHealth()
 	go s.Health.Run(healthCtx)
-
 	s.Health.SetReady(true)
 
 	select {
 	case err := <-serveErr:
-		_ = s.shutdown(api, admin) // the listener failure is the error worth returning
+		s.Health.SetReady(false)
+		_ = s.shutdown(api, admin, cancelBase) // the listener failure is the error worth returning
 		return err
 	case <-ctx.Done():
 		s.Health.SetReady(false)
-		s.log.Info("shutdown requested, draining", "timeout", s.cfg.ShutdownTimeout.String())
-		if err := s.shutdown(api, admin); err != nil {
+		s.log.Info("shutdown requested, draining",
+			"delay", s.cfg.ShutdownDelay.String(), "timeout", s.cfg.ShutdownTimeout.String())
+		if s.cfg.ShutdownDelay > 0 {
+			time.Sleep(s.cfg.ShutdownDelay)
+		}
+		if err := s.shutdown(api, admin, cancelBase); err != nil {
 			return err
 		}
 		s.log.Info("servers stopped cleanly")
@@ -194,59 +278,36 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
-func (s *Server) shutdown(api, admin *http.Server) error {
-	shutCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
-	defer cancel()
+// adminShutdownBudget bounds the admin listener's own drain: probes and
+// scrapes are short, and it must not eat into the API's budget.
+const adminShutdownBudget = 2 * time.Second
+
+// shutdown drains the API listener within the budget, forces it closed past
+// it, then stops the admin listener.
+func (s *Server) shutdown(api, admin *http.Server, cancelBase context.CancelFunc) error {
 	var first error
-	for _, srv := range []*http.Server{api, admin} { // API first: probes stay up while draining
-		if srv == nil {
-			continue
-		}
-		if err := srv.Shutdown(shutCtx); err != nil && first == nil {
-			first = err
+	if api != nil {
+		shutCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+		err := api.Shutdown(shutCtx)
+		cancel()
+		if err != nil {
+			s.log.Warn("drain budget exhausted, closing remaining connections", "err", err)
+			cancelBase()    // every in-flight request context is cancelled
+			_ = api.Close() // and its connection closed
+			first = fmt.Errorf("httpx: drain: %w", err)
 		}
 	}
+	if admin != nil {
+		shutCtx, cancel := context.WithTimeout(context.Background(), adminShutdownBudget)
+		err := admin.Shutdown(shutCtx)
+		cancel()
+		if err != nil {
+			_ = admin.Close()
+			if first == nil {
+				first = fmt.Errorf("httpx: admin drain: %w", err)
+			}
+		}
+	}
+	cancelBase()
 	return first
-}
-
-// requestLogger logs one structured line per API request: info for 2xx/3xx,
-// warn for 4xx and for anything slower than slow (when > 0), error for 5xx.
-// The record is emitted with the request context, so trace_id / span_id are
-// attached when tracing middleware is installed, and it goes through the
-// sampling handler — under load only a sample of successful requests is
-// written while every 4xx/5xx/slow line survives. Exact counts live in the
-// http_requests_total metric; the log is for the shape and the outliers.
-func requestLogger(log *slog.Logger, slow time.Duration) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		start := time.Now()
-		c.Next()
-
-		status := c.Writer.Status()
-		latency := time.Since(start)
-		route := c.FullPath()
-		if route == "" {
-			route = "unmatched"
-		}
-		// request_id and trace_id arrive through the context (ctxHandler).
-		attrs := []slog.Attr{
-			slog.String("method", c.Request.Method),
-			slog.String("path", c.Request.URL.Path),
-			slog.String("route", route),
-			slog.Int("status", status),
-			slog.Float64("latency_ms", float64(latency.Microseconds())/1000.0),
-			slog.Int("bytes", max(c.Writer.Size(), 0)), // -1 when nothing was written
-			slog.String("client_ip", c.ClientIP()),
-		}
-
-		level, msg := slog.LevelInfo, "request"
-		switch {
-		case status >= http.StatusInternalServerError:
-			level = slog.LevelError
-		case status >= http.StatusBadRequest:
-			level = slog.LevelWarn
-		case slow > 0 && latency > slow:
-			level, msg = slog.LevelWarn, "slow request"
-		}
-		log.LogAttrs(c.Request.Context(), level, msg, attrs...)
-	}
 }

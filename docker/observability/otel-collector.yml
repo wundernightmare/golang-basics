@@ -1,13 +1,15 @@
-# OpenTelemetry Collector — the single endpoint every service exports to.
+# OpenTelemetry Collector — the single endpoint every service exports traces to.
 #
-#   :4317  OTLP gRPC  (services: *_OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317 / localhost:4317)
-#   :4318  OTLP HTTP  (browsers, curl)
+#   :4318  OTLP over HTTP — libs/otelx's only transport
+#          (*_OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4318 in containers,
+#           localhost:4318 from the host; *_OTEL_EXPORTER_OTLP_INSECURE=true
+#           because this collector is plaintext)
 #   :8888  the collector's own Prometheus metrics (scraped by VictoriaMetrics)
-#   :13133 health_check extension (docker healthcheck)
+#   :13133 health_check extension
 #
-# Traces go to Jaeger. Metrics are scraped from the admin ports, not pushed,
-# so the metrics pipeline only logs what it gets (nothing should). Logs are
-# stdout → Vector → Loki, so the logs pipeline is likewise a debug sink.
+# Traces only. Metrics are Prometheus-only — VictoriaMetrics scrapes /metrics
+# on the admin ports, nothing is pushed over OTLP — and logs are stdout →
+# Vector → Loki, so there is no metrics or logs pipeline here.
 #
 # This is where production-only concerns would go without touching a service:
 # tail_sampling, attribute redaction, a second exporter.
@@ -15,8 +17,6 @@
 receivers:
   otlp:
     protocols:
-      grpc:
-        endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
         cors:
@@ -37,8 +37,6 @@ exporters:
     endpoint: jaeger:4317
     tls:
       insecure: true
-  debug:
-    verbosity: basic
 
 extensions:
   health_check:
@@ -62,11 +60,3 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [otlp/jaeger]
-    metrics:
-      receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [debug]
-    logs:
-      receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [debug]

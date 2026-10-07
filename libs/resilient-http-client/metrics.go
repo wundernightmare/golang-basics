@@ -2,113 +2,102 @@ package resilient
 
 import (
 	"net/http"
-	"strconv"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Metrics holds the Prometheus instruments for one [Client], registered on a
-// private [prometheus.Registry] so multiple clients (or tests) never collide on
-// the global default registry.
+// metrics are the client's Prometheus instruments:
 //
-// Exposed series (all labelled by outbound_target):
+//	http_client_requests_total{target,method,outcome}        one per attempt
+//	http_client_request_duration_seconds{target,method}      attempts that reached the network
+//	http_client_retries_total{target}
+//	http_client_retry_budget_exhausted_total{target}
+//	circuit_breaker_state{target}                            0 closed, 1 open, 2 half-open
+//	circuit_breaker_transitions_total{target,from,to}
+//	http_client_bulkhead_in_flight{target}
+//	http_client_bulkhead_rejected_total{target}
 //
-//	http_outbound_requests_total{outbound_target,template_url,method,status,error_type}
-//	http_outbound_request_duration_seconds{outbound_target,method}
-//	circuit_breaker_state{outbound_target}                  0=closed 1=open 2=half_open
-//	http_outbound_coalesce_hits_total{outbound_target}
-//	http_outbound_fallback_hits_total{outbound_target}
-//	http_outbound_retry_attempts_total{outbound_target}
-//	http_outbound_adaptive_concurrency_limit{outbound_target}
-type Metrics struct {
-	registry *prometheus.Registry
-
-	requestsTotal   *prometheus.CounterVec
-	requestDuration *prometheus.HistogramVec
-	cbState         *prometheus.GaugeVec
-	coalesceHits    *prometheus.CounterVec
-	fallbackHits    *prometheus.CounterVec
-	retryAttempts   *prometheus.CounterVec
-	adaptiveLimit   *prometheus.GaugeVec
+// outcome is 2xx, 3xx, 4xx, 5xx, timeout, connection, redirect,
+// circuit_open, rate_limited, bulkhead_full, shutdown or canceled.
+type metrics struct {
+	requests        *prometheus.CounterVec
+	duration        *prometheus.HistogramVec
+	retries         *prometheus.CounterVec
+	budgetExhausted *prometheus.CounterVec
+	breakerState    *prometheus.GaugeVec
+	transitions     *prometheus.CounterVec
+	bulkheadInUse   *prometheus.GaugeVec
+	bulkheadReject  *prometheus.CounterVec
 }
 
-// NewMetrics builds and registers the instrument set on a fresh registry.
-func NewMetrics() *Metrics {
-	reg := prometheus.NewRegistry()
-
-	m := &Metrics{
-		registry: reg,
-		requestsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "http_outbound_requests_total",
-			Help: "Total outbound HTTP requests, by target, method, status and error type.",
-		}, []string{"outbound_target", "template_url", "method", "status", "error_type"}),
-		requestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "http_outbound_request_duration_seconds",
-			Help:    "Outbound HTTP request latency in seconds, by target and method.",
-			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
-		}, []string{"outbound_target", "method"}),
-		cbState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+func newMetrics(reg prometheus.Registerer) (*metrics, error) {
+	m := &metrics{
+		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "http_client_requests_total",
+			Help: "Outbound HTTP attempts by target, method and outcome.",
+		}, []string{"target", "method", "outcome"}),
+		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "http_client_request_duration_seconds",
+			Help:    "Duration of outbound HTTP attempts that reached the network, until response headers.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"target", "method"}),
+		retries: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "http_client_retries_total",
+			Help: "Retries sent (attempts after the first).",
+		}, []string{"target"}),
+		budgetExhausted: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "http_client_retry_budget_exhausted_total",
+			Help: "Retries not sent because the target's retry budget was spent.",
+		}, []string{"target"}),
+		breakerState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "circuit_breaker_state",
-			Help: "Circuit breaker state (0=closed, 1=open, 2=half_open).",
-		}, []string{"outbound_target"}),
-		coalesceHits: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "http_outbound_coalesce_hits_total",
-			Help: "Requests served from an in-flight coalesced result.",
-		}, []string{"outbound_target"}),
-		fallbackHits: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "http_outbound_fallback_hits_total",
-			Help: "Requests served from a stale-cache or static fallback.",
-		}, []string{"outbound_target"}),
-		retryAttempts: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "http_outbound_retry_attempts_total",
-			Help: "Retry attempts (excludes the initial attempt).",
-		}, []string{"outbound_target"}),
-		adaptiveLimit: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "http_outbound_adaptive_concurrency_limit",
-			Help: "Current AIMD adaptive-concurrency limit.",
-		}, []string{"outbound_target"}),
+			Help: "Circuit breaker state: 0 closed, 1 open, 2 half-open.",
+		}, []string{"target"}),
+		transitions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "circuit_breaker_transitions_total",
+			Help: "Circuit breaker state transitions.",
+		}, []string{"target", "from", "to"}),
+		bulkheadInUse: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "http_client_bulkhead_in_flight",
+			Help: "Requests holding a bulkhead slot.",
+		}, []string{"target"}),
+		bulkheadReject: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "http_client_bulkhead_rejected_total",
+			Help: "Requests rejected because the bulkhead stayed full.",
+		}, []string{"target"}),
 	}
-
-	reg.MustRegister(
-		m.requestsTotal,
-		m.requestDuration,
-		m.cbState,
-		m.coalesceHits,
-		m.fallbackHits,
-		m.retryAttempts,
-		m.adaptiveLimit,
-	)
-	return m
+	for _, c := range []prometheus.Collector{
+		m.requests, m.duration, m.retries, m.budgetExhausted,
+		m.breakerState, m.transitions, m.bulkheadInUse, m.bulkheadReject,
+	} {
+		if err := reg.Register(c); err != nil {
+			return nil, err
+		}
+	}
+	return m, nil
 }
 
-// Registry returns the private registry backing these metrics, for wiring into
-// a /metrics handler or merging into a process-wide gatherer.
-func (m *Metrics) Registry() *prometheus.Registry { return m.registry }
-
-// Handler serves the registry in the Prometheus text exposition format.
-func (m *Metrics) Handler() http.Handler {
-	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+// methodLabel bounds the method label to the standard methods.
+func methodLabel(m string) string {
+	switch m {
+	case "":
+		return http.MethodGet
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodOptions, http.MethodConnect, http.MethodTrace:
+		return m
+	}
+	return "OTHER"
 }
 
-// --- recording helpers (called from the send path) ---
-
-func (m *Metrics) recordRequest(target, template, method string, status int, errorType string, elapsed time.Duration) {
-	m.requestsTotal.WithLabelValues(target, template, method, strconv.Itoa(status), errorType).Inc()
-	m.requestDuration.WithLabelValues(target, method).Observe(elapsed.Seconds())
-}
-
-func (m *Metrics) recordCBState(target string, state CBState) {
-	m.cbState.WithLabelValues(target).Set(float64(state))
-}
-
-func (m *Metrics) recordCoalesceHit(target string) { m.coalesceHits.WithLabelValues(target).Inc() }
-
-func (m *Metrics) recordFallbackHit(target string) { m.fallbackHits.WithLabelValues(target).Inc() }
-
-func (m *Metrics) recordRetryAttempt(target string) { m.retryAttempts.WithLabelValues(target).Inc() }
-
-func (m *Metrics) recordAdaptiveLimit(target string, limit int) {
-	m.adaptiveLimit.WithLabelValues(target).Set(float64(limit))
+// statusOutcome is the outcome label of an answered request.
+func statusOutcome(code int) string {
+	switch {
+	case code >= 500:
+		return "5xx"
+	case code >= 400:
+		return "4xx"
+	case code >= 300:
+		return "3xx"
+	}
+	return "2xx"
 }

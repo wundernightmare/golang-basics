@@ -6,6 +6,7 @@
 // rather than a published version. Run `go work sync` after adding a module.
 //
 // Members:
+//   e2e                         — end-to-end suite: spawns the service binaries (go test -tags e2e)
 //   libs/contracts              — generated Go types of the TypeSpec contracts (api/): tasks HTTP API + Kafka events
 //   libs/httpx                  — shared HTTP server scaffolding (the example common lib)
 //   libs/resilient-http-client  — policy-per-target outbound HTTP client (rate limit, CB, retry…)
@@ -13,7 +14,9 @@
 //   libs/valkey                 — shared Valkey cache (valkey-go)
 //   libs/kafka                  — shared Kafka producer/consumer (franz-go)
 //   libs/otelx                  — shared OpenTelemetry tracing setup
-//   libs/testx                  — shared test harness (Allure, shared containers, signal helpers; _test only)
+//   libs/testx                  — shared test harness (signal helpers, unique names; _test only, no Docker)
+//   libs/testx/containers       — shared containers + chaos helpers (testcontainers, Toxiproxy; _test only)
+//   libs/testx/contract         — OpenAPI / JSON Schema validation of exchanges (_test only)
 //   services/ping               — ping/pong HTTP service
 //   services/heartbeat          — background heartbeat worker (+ health/metrics HTTP)
 //   services/tasks              — Tasks CRUD over Postgres + Valkey + Kafka + OTel
@@ -21,6 +24,7 @@
 go 1.27.0
 
 use (
+	./e2e
 	./libs/contracts
 	./libs/httpx
 	./libs/kafka
@@ -28,6 +32,8 @@ use (
 	./libs/pgx
 	./libs/resilient-http-client
 	./libs/testx
+	./libs/testx/containers
+	./libs/testx/contract
 	./libs/valkey
 	./services/consumer
 	./services/heartbeat

@@ -1,0 +1,19 @@
+# mise profile "ide" — VS Code Go tooling, layered on mise.toml when MISE_ENV
+# includes ide (`just setup-ide`; export MISE_ENV=ide in the shell VS Code
+# starts from so the shims resolve them).
+#
+# The Go extension otherwise `go install`s these into GOPATH/bin at whatever
+# version happens to be latest that day, per machine. `.vscode-example/
+# settings.json` points the extension at these shims with autoUpdate off.
+#
+# `go:` backend — built from source against the pinned Go, so the first
+# install takes a few minutes. staticcheck is deliberately absent: the
+# golangci-lint `standard` set already runs it. goplay is absent too: its only
+# release (v1.0.0, 2016) has no go.mod and cannot be `go install`ed by version.
+
+[tools]
+"go:golang.org/x/tools/gopls"          = "0.23.0" # language server
+"go:github.com/go-delve/delve/cmd/dlv" = "1.27.1" # debugger (F5 / test debugging)
+"go:github.com/cweill/gotests/gotests" = "1.9.0"  # Go: Generate Unit Tests
+"go:github.com/fatih/gomodifytags"     = "1.17.0" # Go: Add/Remove Struct Tags
+"go:github.com/josharian/impl"         = "1.5.0"  # Go: Generate Interface Stubs

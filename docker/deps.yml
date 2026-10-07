@@ -6,13 +6,21 @@
 #   redpanda   — Redpanda (Kafka API broker)   localhost:9092
 #
 # Usage (from the master worktree root):
-#   just infra-up      |  docker compose -f docker/deps.yml up -d
+#   just infra-up      |  docker compose -f docker/deps.yml up -d --wait
 #   just infra-down    |  docker compose -f docker/deps.yml down -v
 #
-# App config for HOST processes (e.g. `just tasks run`):
+# `--wait` returns once every healthcheck below passes and fails (non-zero)
+# if one does not — CI and `just e2e` rely on that instead of a poll loop.
+# Every port is published on 127.0.0.1 only: dev credentials (app/app) must
+# not be reachable from the LAN.
+#
+# App config for HOST processes (e.g. `just mod services/tasks run`):
 #   TASKS_DATABASE_URL  postgres://app:app@localhost:5432/app?sslmode=disable
 #   TASKS_VALKEY_URL    valkey://localhost:6379
 #   TASKS_KAFKA_BROKERS localhost:9092
+#   *_KAFKA_ALLOW_AUTO_TOPIC_CREATION=true  (the kafka lib defaults to false;
+#                       the broker below allows it, so tasks.events and the
+#                       consumer's tasks.events.dlq appear on first use)
 #
 # Containers on this network reach the broker at redpanda:29092 (the INTERNAL
 # listener); host processes use the localhost:9092 HOST listener. The two
@@ -32,7 +40,7 @@ services:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: app
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       # Postgres 18 wants a single mount at /var/lib/postgresql (it places the
       # data in a versioned subdirectory itself).
@@ -49,7 +57,7 @@ services:
     restart: unless-stopped
     command: ["valkey-server", "--save", "60", "1", "--loglevel", "notice"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - valkey_data:/data
     healthcheck:
@@ -88,7 +96,7 @@ services:
       - --reserve-memory=0M
       - --overprovisioned
     ports:
-      - "9092:9092" # host → HOST listener (advertised as localhost:9092)
+      - "127.0.0.1:9092:9092" # host → HOST listener (advertised as localhost:9092)
     volumes:
       - redpanda_data:/var/lib/redpanda/data
     healthcheck:

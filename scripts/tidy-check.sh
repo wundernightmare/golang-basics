@@ -29,8 +29,9 @@ fi
 rc=0
 for m in $modules; do
   echo "── tidy-check $m"
-  # -diff prints the change and exits 1 instead of rewriting go.mod / go.sum.
-  if ! (cd "$m" && go mod tidy -diff); then
+  # -diff prints the change and exits 1 instead of rewriting go.mod / go.sum;
+  # GOWORK=off: each module is tidy on its own (its go.mod replaces).
+  if ! (cd "$m" && GOWORK=off go mod tidy -diff); then
     echo "tidy-check: $m/go.mod or go.sum is not tidy — run 'just tidy' and commit" >&2
     rc=1
   fi

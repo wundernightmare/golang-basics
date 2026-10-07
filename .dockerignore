@@ -1,24 +1,25 @@
-# Keep the Docker build context lean — only source + manifests are needed.
-.git
-.github
+# Allowlist: nothing enters the build context unless listed here.
+# docker/service.Dockerfile copies go.work*, libs/ and services/<SERVICE>/.
+*
+
+!go.work
+!go.work.sum
+!libs
+!services
+# Contracts source: not compiled into any binary today (libs/contracts holds
+# the generated Go); allowed so a service can go:embed a spec without a
+# .dockerignore change.
+!api
+
+# …and, inside those, never:
+**/node_modules
 **/bin
-**/coverage.out
+**/testdata
+**/*_test.go
+**/coverage*.out
 **/*.test
-
-# Node / e2e tooling never goes into a Go service image.
-e2e/node_modules
-e2e/playwright-report
-e2e/test-results
-benchmarks/results
-benchmarks/node_modules
-
-# Proxy / registry credentials live in .env — never part of an image.
-.env
-.env.*
-!.env.example
-
-# Local tooling / editor cruft
-.vscode
-.idea
+**/.gremlins.yaml
 **/.DS_Store
-*.log
+**/*.log
+**/.env
+**/.env.*

@@ -1,0 +1,35 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "TaskUpdatedEvent",
+    "type": "object",
+    "properties": {
+        "event_id": {
+            "type": "string",
+            "description": "Unique id of this event (UUID), also the event_id header."
+        },
+        "id": {
+            "type": "string",
+            "description": "Task identifier (UUID), also the record key."
+        },
+        "title": {
+            "type": "string",
+            "description": "Title after the change."
+        },
+        "done": {
+            "type": "boolean",
+            "description": "Completion flag after the change."
+        },
+        "version": {
+            "type": "integer",
+            "description": "The task's version after the change; a consumer can drop an older one than it has seen."
+        }
+    },
+    "required": [
+        "event_id",
+        "id",
+        "title",
+        "done",
+        "version"
+    ],
+    "description": "Published when a task's title or done flag changes (event_type task.updated)."
+}

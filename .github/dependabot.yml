@@ -1,22 +1,64 @@
-# Keeps the SHA-pinned `uses:` references in .github/workflows current: every
-# action is pinned to a full commit (semgrep `github-actions-mutable-action-tag`
-# blocks tags, which the owner can repoint), so without a bot the pins rot.
-# Dependabot rewrites the SHA and the `# vX.Y.Z` comment together.
+# Dependabot — weekly, grouped, with a 7-day cooldown on every ecosystem (the
+# same window as the pnpm `minimumReleaseAge` / .npmrc `min-release-age`: a
+# freshly published release is not proposed until it has been out a week).
 #
-# Only the actions ecosystem is here on purpose: Go modules and the pnpm
-# workspace are bumped by hand with `just deps` so the mise pins, the go.work
-# sum and the lockfile move in one reviewed commit. On a self-hosted GitLab
-# there are no actions to pin; Renovate (self-hostable) covers the same job.
+# What is NOT here, on purpose:
+# - tool pins (mise*.toml) — bumped by hand; scripts/mise-pins.sh feeds CI;
+# - base-image digests in docker/service.Dockerfile — the FROM lines carry a
+#   `${DOCKER_HUB}` / `${GCR}` registry variable Dependabot cannot resolve,
+#   so the `docker` entry below will not bump them; they carry `# renovate:`
+#   comments for a Renovate regex manager (what a self-hosted GitLab runs)
+#   and the refresh command is documented in the Dockerfile header.
 version: 2
 updates:
+  # Every `uses:` is pinned to a full commit SHA (semgrep blocks tags);
+  # Dependabot rewrites the SHA and the `# vX.Y.Z` comment together.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    # Same 7-day window as the pnpm `minimumReleaseAge`: a freshly cut action
-    # release is not proposed until it has been out for a week.
     cooldown:
       default-days: 7
     groups:
       actions:
+        patterns: ["*"]
+
+  # Every Go module of go.work, by glob — a new module under these trees is
+  # picked up without editing this file. One grouped PR per week; run
+  # `just tidy` (go work sync) on the branch if go.work.sum needs to follow.
+  - package-ecosystem: gomod
+    directories:
+      - /libs/*
+      - /libs/testx/*
+      - /services/*
+      - /e2e
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      go:
+        patterns: ["*"]
+
+  # The pnpm workspace: root (lefthook, allure-commandline) and api/ (TypeSpec).
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /api
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      npm:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      docker:
         patterns: ["*"]

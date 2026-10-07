@@ -15,6 +15,14 @@
             "type": "string",
             "format": "date-time",
             "description": "Creation time, RFC 3339 UTC."
+        },
+        "event_id": {
+            "type": "string",
+            "description": "Unique id of this event (UUID), also the event_id header — the\nconsumer's de-duplication key. Optional for compatibility with events\npublished before it existed."
+        },
+        "version": {
+            "type": "integer",
+            "description": "The task's version after the change (1 for a new task). Optional, as event_id."
         }
     },
     "required": [
@@ -22,5 +30,5 @@
         "title",
         "created_at"
     ],
-    "description": "Published to the `tasks.events` topic when a task is created; key = task id."
+    "description": "Published when a task is created (event_type task.created)."
 }

@@ -3,8 +3,12 @@
 #
 #   scripts/cover.sh unit          # go test -short   → .cover/unit
 #   scripts/cover.sh integration   # go test (Docker) → .cover/integration
-#   scripts/cover.sh e2e           # cover-built binaries + Playwright → .cover/e2e
+#   scripts/cover.sh e2e           # cover-built binaries + the Go e2e suite → .cover/e2e
 #   scripts/cover.sh merge         # .cover/* → .cover/merged, coverage-merged.out, per-layer %
+#
+# merge is strict under CI (CI set): every layer must have data, or the gate
+# would pass on a partial profile. Locally a missing layer is a loud warning
+# and the merged total is that much lower.
 #
 # Every layer writes Go's binary coverage format (GOCOVERDIR / -test.gocoverdir,
 # Go ≥ 1.20), which `go tool covdata` merges exactly — counters summed per
@@ -43,26 +47,42 @@ case "${1:?usage: cover.sh unit|integration|e2e|merge}" in
     ;;
   e2e)
     dir="$(layer_dir e2e)"
-    # Cover-instrumented binaries write their counters to GOCOVERDIR when they
-    # exit normally — the harness stops them with SIGTERM, which the services
-    # turn into a graceful shutdown, so the data is flushed.
-    for s in ping heartbeat tasks consumer; do COVER=1 "$root/scripts/build-service.sh" "$s"; done
-    (cd "$root" && GOCOVERDIR="$dir" pnpm --filter @golang-basics/e2e test)
+    bin="${E2E_BIN_DIR:-$root/.build}"
+    # Cover-instrumented release binaries (COVER=1: -cover -covermode=atomic
+    # over every workspace package) into $bin, where the harness looks.
+    mkdir -p "$bin"
+    for s in ping heartbeat tasks consumer; do COVER=1 "$root/scripts/build-service.sh" "$s" "$bin/$s"; done
+    # The harness passes E2E_COVER_DIR to every child as GOCOVERDIR and stops
+    # it with SIGTERM + wait, so each graceful exit flushes its counters.
+    # tasks/consumer run only when E2E_DATABASE_URL / E2E_VALKEY_URL /
+    # E2E_KAFKA_BROKERS are set (just infra-up); otherwise they skip.
+    (cd "$root/e2e" && E2E_BIN_DIR="$bin" E2E_COVER_DIR="$dir" go test -tags e2e -count=1 ./...)
     ;;
   merge)
-    inputs=""
+    inputs="" missing=""
     for l in unit integration e2e; do
       if [ -d "$cover/$l" ] && [ -n "$(ls -A "$cover/$l")" ]; then
         # Per-layer total, computed the same way as the gate (statements).
         go tool covdata textfmt -i="$cover/$l" -o "$cover/$l.out"
         printf '%-12s %s\n' "$l" "$(gotestcov --profile "$cover/$l.out" --threshold-total 0 2>/dev/null | sed -n 's/^Total test coverage: //p')"
         inputs="${inputs:+$inputs,}$cover/$l"
+      elif [ -n "${CI:-}" ]; then
+        # In CI a missing layer is a broken pipeline (an artifact that was
+        # not uploaded, a job that silently ran nothing), not a smaller
+        # number: gating on the partial profile would hide it.
+        echo "cover.sh merge: error: no data for layer '$l' under $cover/$l (CI is set; every layer must be present)" >&2
+        missing=1
       else
-        # Not fatal: a layer that did not run (e.g. the e2e artifact is absent
-        # in CI) is skipped, and the merged number is that much lower.
-        echo "cover.sh merge: warning: no data for layer '$l' under $cover/$l — skipping it (the merged total is partial)" >&2
+        # Locally: lenient, but loud — the merged total is partial.
+        {
+          echo "################################################################"
+          echo "cover.sh merge: WARNING: no data for layer '$l' under $cover/$l"
+          echo "  skipping it — the merged total is PARTIAL (run: scripts/cover.sh $l)"
+          echo "################################################################"
+        } >&2
       fi
     done
+    [ -z "${missing:-}" ] || exit 1
     [ -n "$inputs" ] || { echo "cover.sh merge: no layer data under $cover" >&2; exit 1; }
     rm -rf "$cover/merged" "$root/coverage-merged.out" && mkdir -p "$cover/merged"
     # covdata reports some failures (e.g. a counter-mode clash) as "error:" on

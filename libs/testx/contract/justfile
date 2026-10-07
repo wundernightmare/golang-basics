@@ -1,0 +1,107 @@
+# contract justfile — OpenAPI / JSON Schema exchange validation (_test only)
+#
+# One of the per-module justfiles; every module has the same recipes (plus
+# release/run for services), so `just each <recipe>` from the root works
+# everywhere. From the root: `just mod libs/testx/contract <recipe>`.
+# Install: mise install (just is pinned in the root mise.toml)
+
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+# `mise exec --` when mise is installed (pinned tools), PATH otherwise (CI).
+MISE := `command -v mise >/dev/null 2>&1 && echo "mise exec --" || true`
+
+# Show all available recipes
+default:
+    @just --list --unsorted
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+
+# Compile the packages (also surfaces type errors fast)
+build:
+    go build ./...
+
+# go vet (fastest feedback)
+check:
+    go vet ./...
+
+# ── Test ──────────────────────────────────────────────────────────────────────
+
+# Full suite
+test *args:
+    go test -shuffle=on ./... {{args}}
+
+# Unit tests only (-short: Docker-backed suites skip) — what `ci` runs
+test-short *args:
+    go test -short -shuffle=on ./... {{args}}
+
+# Race detector + verbose output
+test-verbose *args:
+    go test -race -v ./... {{args}}
+
+# Tests matching a name filter
+test-filter FILTER:
+    go test -run '{{FILTER}}' -v ./...
+
+# JUnit XML into ../../.reports/junit (gotestsum), like the root test-junit
+test-junit *args:
+    mkdir -p "{{justfile_directory()}}/../../../.reports/junit"
+    {{MISE}} gotestsum --format testname --junitfile "{{justfile_directory()}}/../../../.reports/junit/libs-testx-contract.xml" -- -shuffle=on ./... {{args}}
+
+# Go micro-benchmarks
+bench:
+    go test -run='^$' -bench=. -benchmem ./...
+
+# ── Coverage ──────────────────────────────────────────────────────────────────
+
+# Per-function coverage summary
+cov:
+    go test -covermode=atomic -coverprofile=coverage.out ./...
+    go tool cover -func=coverage.out
+
+# HTML coverage report in the browser
+cov-html:
+    go test -covermode=atomic -coverprofile=coverage.out ./...
+    go tool cover -html=coverage.out
+
+# ── Lint & Format ─────────────────────────────────────────────────────────────
+
+# golangci-lint (config: repo-root .golangci.yml)
+lint:
+    {{MISE}} golangci-lint run
+
+# golangci-lint, auto-fixing where possible
+lint-fix:
+    {{MISE}} golangci-lint run --fix
+
+# Format in place (gofmt + golangci-lint fmt import grouping)
+fmt:
+    gofmt -w .
+    {{MISE}} golangci-lint fmt
+
+# Formatting gate
+fmt-check:
+    out="$(gofmt -l .)"; if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
+
+# ── Modules & Security ────────────────────────────────────────────────────────
+
+# go mod tidy
+tidy:
+    go mod tidy
+
+# Gate: go.mod / go.sum tidy on their own (GOWORK=off, via the go.mod replaces)
+tidy-check:
+    GOWORK=off go mod tidy -diff
+
+# govulncheck (appsec profile: just setup-appsec at the root)
+audit:
+    MISE_ENV="${MISE_ENV:+$MISE_ENV,}appsec" {{MISE}} govulncheck ./...
+
+# Direct + transitive module list
+deps:
+    go list -m all
+
+# ── CI ────────────────────────────────────────────────────────────────────────
+
+# This module's slice of the root `just ci`: fmt-check → tidy-check → vet → lint → test-short
+ci: fmt-check tidy-check check lint test-short
+    @echo "CI passed"

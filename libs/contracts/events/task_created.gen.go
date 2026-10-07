@@ -4,14 +4,22 @@ package events
 
 import "time"
 
-// Published to the `tasks.events` topic when a task is created; key = task id.
+// Published when a task is created (event_type task.created).
 type TaskCreatedEvent struct {
 	// Creation time, RFC 3339 UTC.
 	CreatedAt time.Time `json:"created_at" yaml:"created_at" mapstructure:"created_at"`
+
+	// Unique id of this event (UUID), also the event_id header — the
+	// consumer's de-duplication key. Optional for compatibility with events
+	// published before it existed.
+	EventId *string `json:"event_id,omitempty,omitzero" yaml:"event_id,omitempty" mapstructure:"event_id,omitempty"`
 
 	// Task identifier (UUID), also the record key.
 	Id string `json:"id" yaml:"id" mapstructure:"id"`
 
 	// Task title at creation time.
 	Title string `json:"title" yaml:"title" mapstructure:"title"`
+
+	// The task's version after the change (1 for a new task). Optional, as event_id.
+	Version *int `json:"version,omitempty,omitzero" yaml:"version,omitempty" mapstructure:"version,omitempty"`
 }

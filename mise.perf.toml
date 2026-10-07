@@ -1,0 +1,14 @@
+# mise profile "perf" — load, benchmark, mutation and coverage-gate tools,
+# layered on mise.toml when MISE_ENV includes perf (`just setup-perf`).
+
+[tools]
+# k6 load tests (`just bench-*`, benchmarks/).
+k6 = "2.2.0"
+# Micro-benchmark comparison (`just bench-compare`, nightly CI job).
+"go:golang.org/x/perf/cmd/benchstat" = "0.0.0-20260908200009-22c9c6c9d4da"
+# Mutation testing of the pure-logic modules (`just mutate`; .gremlins.yaml per module).
+"go:github.com/go-gremlins/gremlins/cmd/gremlins" = "0.6.0"
+# Coverage gate on the merged profile (.testcoverage.yml, `just cov-check`).
+"go:github.com/vladopajic/go-test-coverage/v2" = "2.19.0"
+# Go coverage profile → Cobertura XML (GitLab per-line MR annotations).
+"go:github.com/boumenot/gocover-cobertura" = "1.5.0"

@@ -1,605 +1,457 @@
 package resilient
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/time/rate"
 )
 
-// maxDrainOnError caps how much of an error response body we drain before
-// closing, so the keep-alive connection can be reused without reading an
-// unbounded body.
-const maxDrainOnError = 1 << 16
+const (
+	errBodyKeep  = 4 << 10  // bytes of an error response kept in OutboundError.Body
+	errBodyDrain = 64 << 10 // bytes of an error response drained so the connection is reused
+)
 
-// Request is a single outbound HTTP request to be executed by a [Client].
-//
-// The zero Method is treated as GET. Body, when non-nil, is sent as-is and is
-// safe to replay across retries (it is re-read from a fresh reader each attempt).
-type Request struct {
-	// Target is the logical policy group. It selects the rate limiter, circuit
-	// breaker and adaptive limiter; an unknown target gets a defaulted fallback
-	// policy on first use.
-	Target string
-	// Method is the HTTP method (default GET).
-	Method string
-	// URL is the fully-rendered request URL.
-	URL string
-	// Header carries request headers (copied onto the outbound request).
-	Header http.Header
-	// Body is the request body; nil for GET/HEAD.
-	Body []byte
-	// Timeout overrides the target/default timeout for this request (0 = inherit).
-	Timeout time.Duration
-	// UserAgent overrides the client-level User-Agent for this request only.
-	UserAgent string
+var errUnknownTarget = errors.New("unknown target")
+
+// Option configures a [Client].
+type Option func(*options)
+
+type options struct {
+	hc  *http.Client
+	log *slog.Logger
+	reg prometheus.Registerer
 }
 
-// FallbackFunc returns a static response to serve when the upstream is
-// unavailable. Registered per-target via [WithFallback].
-type FallbackFunc func() CachedResponse
+// WithHTTPClient builds on a copy of hc (its Transport, Jar, Timeout and
+// CheckRedirect, which runs after the redirect policy) instead of a client
+// built from the pool settings of [Config]. hc itself is not modified, and
+// [Client.Shutdown] does not close its idle connections.
+func WithHTTPClient(hc *http.Client) Option { return func(o *options) { o.hc = hc } }
 
-// policySet bundles the per-target resilience policies.
-type policySet struct {
-	limiter  *rate.Limiter
-	breaker  *CircuitBreaker
-	adaptive *AdaptiveLimiter // nil when adaptive concurrency is disabled
+// WithLogger sets the logger (default: discard).
+func WithLogger(l *slog.Logger) Option { return func(o *options) { o.log = l } }
+
+// WithRegisterer registers the metrics on r instead of a private registry.
+// Two clients on one registerer collide; wrap it with
+// prometheus.WrapRegistererWith to tell them apart.
+func WithRegisterer(r prometheus.Registerer) Option { return func(o *options) { o.reg = r } }
+
+// policy is one target's resilience policy.
+type policy struct {
+	name     string
 	cfg      TargetConfig
-	timeout  time.Duration
+	limiter  *rate.Limiter // nil: no rate limit
+	breaker  *breaker      // nil: no breaker
+	bulkhead *bulkhead     // nil: no concurrency cap
+	budget   *retryBudget  // nil: no retry budget
+	logLimit *rate.Limiter // bounds warn logs per target
 }
 
-// Client is a concurrency-safe, policy-per-target HTTP client. Construct one
-// with [New] and share it across the whole process; clone-free reuse of the
-// connection pool is automatic.
+// Client sends HTTP requests under a per-target policy. It is safe for
+// concurrent use; build one per process with [New].
 type Client struct {
-	hc             *http.Client
-	defaultTimeout time.Duration
-	userAgent      string
-	metrics        *Metrics
-	log            *slog.Logger
-	cache          CacheAdapter
-	fallbacks      map[string]FallbackFunc
-
-	policies sync.Map // target string -> *policySet
-
-	coalesceMu sync.Mutex
-	coalesce   map[string]*coalesceCall
-
-	shuttingDown atomic.Bool
-	inFlight     atomic.Int64
-	idle         chan struct{}
-}
-
-type coalesceCall struct {
-	done chan struct{}
-	resp CachedResponse
-	err  error
-}
-
-// Option customizes a [Client] at construction.
-type Option func(*clientOptions)
-
-type clientOptions struct {
-	metrics   *Metrics
-	log       *slog.Logger
-	cache     CacheAdapter
-	fallbacks map[string]FallbackFunc
 	hc        *http.Client
-	transport http.RoundTripper
+	closeIdle func() // nil when the transport is the caller's
+	userAgent string
+	log       *slog.Logger
+	m         *metrics
+	reg       *prometheus.Registry
+	targets   map[string]*policy
+
+	inFlight atomic.Int64
+	closing  atomic.Bool
+	idle     chan struct{}
 }
 
-// WithMetrics attaches a pre-built [Metrics] (e.g. to share a registry). When
-// omitted, a fresh private registry is created.
-func WithMetrics(m *Metrics) Option { return func(o *clientOptions) { o.metrics = m } }
-
-// WithLogger sets the structured logger. When omitted, logging is discarded.
-func WithLogger(l *slog.Logger) Option { return func(o *clientOptions) { o.log = l } }
-
-// WithCache attaches a read-through cache backend used by [Client.SendCached],
-// [Client.SendCoalesced] and [Client.SendWithFallback].
-func WithCache(c CacheAdapter) Option { return func(o *clientOptions) { o.cache = c } }
-
-// WithFallback registers a static fallback response for target, served by
-// [Client.SendWithFallback] when the upstream fails transiently.
-func WithFallback(target string, fn FallbackFunc) Option {
-	return func(o *clientOptions) {
-		if o.fallbacks == nil {
-			o.fallbacks = make(map[string]FallbackFunc)
-		}
-		o.fallbacks[target] = fn
-	}
-}
-
-// WithHTTPClient supplies a fully-configured *http.Client, bypassing the
-// pool/DNS settings in [Config]. Its Timeout is ignored — per-request timeouts
-// are applied via context. Mutually exclusive with [WithTransport].
-func WithHTTPClient(hc *http.Client) Option { return func(o *clientOptions) { o.hc = hc } }
-
-// WithTransport supplies a custom [http.RoundTripper], bypassing the pool/DNS
-// settings in [Config].
-func WithTransport(rt http.RoundTripper) Option { return func(o *clientOptions) { o.transport = rt } }
-
-// New builds a [Client] from cfg and the given options.
+// New builds a Client; cfg must pass [Config.Validate].
 func New(cfg Config, opts ...Option) (*Client, error) {
-	cfg.withDefaults()
-
-	var o clientOptions
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	var o options
 	for _, opt := range opts {
 		opt(&o)
 	}
-
-	hc := o.hc
-	if hc == nil {
-		rt := o.transport
-		if rt == nil {
-			rt = newTransport(cfg)
-		}
-		hc = &http.Client{Transport: rt}
+	c := &Client{userAgent: cfg.UserAgent, log: o.log, targets: make(map[string]*policy, len(cfg.Targets)), idle: make(chan struct{}, 1)}
+	if c.log == nil {
+		c.log = slog.New(slog.DiscardHandler)
 	}
-	// Per-request timeouts are enforced via context, never the client-level
-	// Timeout (which would also abort an in-progress body read by the caller).
-	hc.Timeout = 0
-
-	metrics := o.metrics
-	if metrics == nil {
-		metrics = NewMetrics()
+	if o.reg == nil {
+		c.reg = prometheus.NewRegistry()
+		o.reg = c.reg
 	}
-	logger := o.log
-	if logger == nil {
-		logger = slog.New(slog.DiscardHandler)
+	m, err := newMetrics(o.reg)
+	if err != nil {
+		return nil, fmt.Errorf("resilient: register metrics: %w", err)
 	}
+	c.m = m
 
-	c := &Client{
-		hc:             hc,
-		defaultTimeout: cfg.DefaultTimeout,
-		userAgent:      cfg.UserAgent,
-		metrics:        metrics,
-		log:            logger,
-		cache:          o.cache,
-		fallbacks:      o.fallbacks,
-		coalesce:       make(map[string]*coalesceCall),
-		idle:           make(chan struct{}, 1),
+	var hc http.Client
+	if o.hc != nil {
+		hc = *o.hc // a copy: the caller's client is never modified
+	} else {
+		t := newTransport(&cfg)
+		hc.Transport = t
+		c.closeIdle = t.CloseIdleConnections
 	}
+	hc.Transport = instrument(hc.Transport)
+	hc.CheckRedirect = redirectPolicy(cfg.MaxRedirects, cfg.AllowCrossHostRedirects, hc.CheckRedirect)
+	c.hc = &hc
 
-	for i := range cfg.OutboundTargets {
-		tc := cfg.OutboundTargets[i]
-		c.policies.Store(tc.Name, buildPolicy(tc, cfg.DefaultTimeout))
+	for i := range cfg.Targets {
+		c.targets[cfg.Targets[i].Name] = c.newPolicy(cfg.Targets[i])
 	}
 	return c, nil
 }
 
-// newTransport builds a tuned [http.Transport] from cfg, optionally fronted by
-// the TTL-aware DNS cache.
-func newTransport(cfg Config) *http.Transport {
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: cfg.TCPKeepAlive}
+func (c *Client) newPolicy(tc TargetConfig) *policy {
+	p := &policy{name: tc.Name, cfg: tc, logLimit: rate.NewLimiter(1, 10)}
+	if tc.RateLimit > 0 {
+		burst := tc.RateBurst
+		if burst == 0 {
+			burst = int(max(1, math.Ceil(tc.RateLimit)))
+		}
+		p.limiter = rate.NewLimiter(rate.Limit(tc.RateLimit), burst)
+	}
+	p.breaker = newBreaker(&tc, time.Now, func(from, to BreakerState) {
+		c.m.transitions.WithLabelValues(tc.Name, from.String(), to.String()).Inc()
+		// The current state, not `to`: concurrent notifications may run out
+		// of order, but each reads the state after its own transition.
+		c.m.breakerState.WithLabelValues(tc.Name).Set(float64(p.breaker.state()))
+		c.log.Info("resilient: circuit breaker "+to.String(), "target", tc.Name, "from", from.String())
+	})
+	p.bulkhead = newBulkhead(&tc)
+	p.budget = newRetryBudget(&tc, time.Now)
 
-	dialContext := dialer.DialContext
-	if cfg.DNSCacheEnabled {
-		dialContext = newDNSCache(dialer, cfg.DNSMinTTL, cfg.DNSMaxTTL).dialContext
+	c.m.breakerState.WithLabelValues(tc.Name).Set(0)
+	if p.bulkhead != nil {
+		c.m.bulkheadInUse.WithLabelValues(tc.Name).Set(0)
+	}
+	return p
+}
+
+// Registry is the private metrics registry, or nil under [WithRegisterer].
+func (c *Client) Registry() *prometheus.Registry { return c.reg }
+
+// BreakerState is target's circuit-breaker state (closed when it has none).
+func (c *Client) BreakerState(target string) (BreakerState, error) {
+	p, ok := c.targets[target]
+	if !ok {
+		return 0, &OutboundError{Kind: KindInvalid, Target: target, Err: errUnknownTarget}
+	}
+	return p.breaker.state(), nil
+}
+
+// Send sends req once under target's policy. req's context is the overall
+// deadline; the target's timeout bounds the attempt, waiting for the rate
+// limiter and bulkhead included.
+//
+// A response with status < 400 is returned with a nil error; the caller must
+// close its body (that releases the bulkhead slot and the attempt's timeout).
+// Everything else is an [*OutboundError] and a nil response.
+func (c *Client) Send(target string, req *http.Request) (*http.Response, error) {
+	return c.send(target, req, false)
+}
+
+// SendWithRetry is [Client.Send] with retries, for requests that are safe to
+// repeat: methods GET, HEAD, OPTIONS, PUT, DELETE, or any request carrying an
+// Idempotency-Key header, and whose body is replayable (nil, http.NoBody or
+// GetBody set — http.NewRequest sets it for in-memory bodies). Anything else
+// is sent once.
+//
+// It retries timeouts, connection errors and statuses 408, 425, 429 and 5xx
+// but 501/505, up to the target's retry_max_attempts, waiting full-jitter
+// backoff or the response's Retry-After, whichever is longer. It stops
+// early when the caller's context would expire during the wait, when a
+// Retry-After exceeds retry_max_delay, or when the target's retry budget is
+// spent; the last error is returned then.
+func (c *Client) SendWithRetry(target string, req *http.Request) (*http.Response, error) {
+	return c.send(target, req, true)
+}
+
+func (c *Client) send(target string, req *http.Request, retry bool) (*http.Response, error) {
+	p, ok := c.targets[target]
+	if !ok {
+		return nil, &OutboundError{Kind: KindInvalid, Target: target, Err: errUnknownTarget}
+	}
+	if req.URL == nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") || req.URL.Host == "" {
+		return nil, &OutboundError{Kind: KindInvalid, Target: target, Err: errors.New("request URL must be absolute http(s)")}
+	}
+	ctx := req.Context()
+	method := methodLabel(req.Method)
+
+	if !c.enter() {
+		c.count(p, method, KindShutdown.String())
+		return nil, &OutboundError{Kind: KindShutdown, Target: target}
+	}
+	leave := c.leave // handed over to the response body on success
+	defer func() {
+		if leave != nil {
+			leave()
+		}
+	}()
+
+	p.budget.request()
+	attempts := 1
+	if retry && p.cfg.RetryMaxAttempts > 1 && idempotent(req) &&
+		(req.Body == nil || req.Body == http.NoBody || req.GetBody != nil) {
+		attempts = p.cfg.RetryMaxAttempts
 	}
 
-	maxIdle := cfg.PoolMaxIdlePerHost * 4
-	if maxIdle < 100 {
-		maxIdle = 100
-	}
-	return &http.Transport{
-		DialContext:           dialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          maxIdle,
-		MaxIdleConnsPerHost:   cfg.PoolMaxIdlePerHost,
-		IdleConnTimeout:       cfg.PoolIdleTimeout,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
+	for n := 1; ; n++ {
+		if err := ctx.Err(); err != nil {
+			c.count(p, method, KindCanceled.String())
+			return nil, &OutboundError{Kind: KindCanceled, Target: target, Err: err}
+		}
+		resp, release, oe := c.attempt(ctx, p, req, n, method)
+		if oe == nil {
+			l := leave
+			leave = nil
+			resp.Body = &releaseBody{ReadCloser: resp.Body, release: func() { release(); l() }}
+			return resp, nil
+		}
+		if n >= attempts || !retryable(oe) {
+			return nil, oe
+		}
+		delay := max(fullJitter(n, p.cfg.RetryBaseDelay, p.cfg.RetryMaxDelay), oe.RetryAfter)
+		if oe.RetryAfter > p.cfg.RetryMaxDelay {
+			return nil, oe
+		}
+		if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= delay {
+			return nil, oe
+		}
+		if !p.budget.tryRetry() {
+			c.m.budgetExhausted.WithLabelValues(target).Inc()
+			c.warn(ctx, p, "resilient: retry budget exhausted", "url", logURL(req.URL))
+			return nil, oe
+		}
+		if !sleep(ctx, delay) {
+			c.count(p, method, KindCanceled.String())
+			return nil, &OutboundError{Kind: KindCanceled, Target: target, Err: ctx.Err()}
+		}
+		c.m.retries.WithLabelValues(target).Inc()
+		c.log.DebugContext(ctx, "resilient: retrying", "target", target, "attempt", n+1, "after", oe.Kind.String())
 	}
 }
 
-// Metrics returns the client's metrics handle (for exposing /metrics).
-func (c *Client) Metrics() *Metrics { return c.metrics }
-
-// Send executes req under its target's rate-limiter, circuit-breaker and
-// adaptive-concurrency policies.
-//
-// On success it returns the *http.Response and the caller owns the body (close
-// it). A non-2xx status is returned as an [OutboundError]: 4xx (except 429) is
-// fatal, everything else (429, 5xx, timeouts, connection errors, circuit open,
-// rate limited, shutting down) is transient. Use [IsTransient] / [IsFatal] to
-// branch.
-func (c *Client) Send(ctx context.Context, req Request) (*http.Response, error) {
-	if c.shuttingDown.Load() {
-		return nil, transient("client is shutting down", nil)
+// attempt sends req once. On success it returns the response and the release
+// func the caller must run when done with it; on failure an error, with
+// everything already released.
+func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n int, method string) (*http.Response, func(), *OutboundError) {
+	// The attempt timeout starts before the waits, so they count against it.
+	actx, cancel := ctx, context.CancelFunc(func() {})
+	if p.cfg.Timeout > 0 {
+		actx, cancel = context.WithTimeout(ctx, p.cfg.Timeout)
+	}
+	fail := func(kind Kind, err error) (*http.Response, func(), *OutboundError) {
+		cancel()
+		c.count(p, method, kind.String())
+		oe := &OutboundError{Kind: kind, Target: p.name, Err: err}
+		if kind != KindCanceled {
+			c.warn(ctx, p, "resilient: request rejected", "url", logURL(req.URL), "reason", kind.String())
+		}
+		return nil, nil, oe
 	}
 
+	tk, ok := p.breaker.allow()
+	if !ok {
+		return fail(KindCircuitOpen, nil)
+	}
+	// From here the breaker must hear how the attempt ended. A local
+	// rejection is "ignored": it releases a half-open probe slot.
+	if p.limiter != nil {
+		if err := p.limiter.Wait(actx); err != nil {
+			p.breaker.record(tk, outcomeIgnored)
+			if ctx.Err() != nil {
+				return fail(KindCanceled, ctx.Err())
+			}
+			return fail(KindRateLimited, err)
+		}
+	}
+	if !p.bulkhead.acquire(actx) {
+		p.breaker.record(tk, outcomeIgnored)
+		if ctx.Err() != nil {
+			return fail(KindCanceled, ctx.Err())
+		}
+		c.m.bulkheadReject.WithLabelValues(p.name).Inc()
+		return fail(KindBulkheadFull, nil)
+	}
+	if p.bulkhead != nil {
+		c.m.bulkheadInUse.WithLabelValues(p.name).Inc()
+	}
+	release := func() {
+		if p.bulkhead != nil {
+			p.bulkhead.release()
+			c.m.bulkheadInUse.WithLabelValues(p.name).Dec()
+		}
+		cancel()
+	}
+
+	r := req.Clone(context.WithValue(actx, targetKey{}, p.name))
+	if n > 1 && req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			release()
+			p.breaker.record(tk, outcomeIgnored)
+			return nil, nil, &OutboundError{Kind: KindInvalid, Target: p.name, Err: fmt.Errorf("replay body: %w", err)}
+		}
+		r.Body = body
+	}
+	if c.userAgent != "" && r.Header.Get("User-Agent") == "" {
+		r.Header.Set("User-Agent", c.userAgent)
+	}
+
+	start := time.Now()
+	resp, err := c.hc.Do(r) //nolint:gosec // G704: sending the caller's request is this package's purpose; redirects are host-pinned
+	c.m.duration.WithLabelValues(p.name, method).Observe(time.Since(start).Seconds())
+
+	if err != nil {
+		kind, o := classify(ctx, actx, err) // before release cancels actx
+		release()
+		p.breaker.record(tk, o)
+		c.count(p, method, kind.String())
+		if kind != KindCanceled {
+			c.warn(ctx, p, "resilient: request failed", "url", logURL(req.URL), "reason", kind.String(), "err", err)
+		}
+		return nil, nil, &OutboundError{Kind: kind, Target: p.name, Err: err}
+	}
+
+	code := resp.StatusCode
+	if code >= 500 {
+		p.breaker.record(tk, outcomeFailure)
+	} else {
+		p.breaker.record(tk, outcomeSuccess)
+	}
+	c.count(p, method, statusOutcome(code))
+	if code < 400 {
+		return resp, release, nil
+	}
+
+	oe := &OutboundError{Kind: KindStatus, Target: p.name, StatusCode: code}
+	if d, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
+		oe.RetryAfter = d
+	}
+	oe.Body, _ = io.ReadAll(io.LimitReader(resp.Body, errBodyKeep))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, errBodyDrain))
+	_ = resp.Body.Close()
+	release()
+	if code >= 500 {
+		c.warn(ctx, p, "resilient: server error", "url", logURL(req.URL), "status", code)
+	} else {
+		c.log.DebugContext(ctx, "resilient: client error", "target", p.name, "url", logURL(req.URL), "status", code)
+	}
+	return nil, nil, oe
+}
+
+// classify maps a transport error to its kind and what it tells the breaker.
+func classify(parent, attempt context.Context, err error) (Kind, outcome) {
+	var ne net.Error
+	switch {
+	case isRedirectError(err):
+		return KindRedirect, outcomeSuccess
+	case parent.Err() != nil:
+		return KindCanceled, outcomeIgnored
+	case errors.Is(attempt.Err(), context.DeadlineExceeded), errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return KindTimeout, outcomeFailure
+	}
+	return KindConnection, outcomeFailure
+}
+
+func (c *Client) count(p *policy, method, outcome string) {
+	c.m.requests.WithLabelValues(p.name, method, outcome).Inc()
+}
+
+// warn logs at warn level, at most about once a second per target.
+func (c *Client) warn(ctx context.Context, p *policy, msg string, args ...any) {
+	if p.logLimit.Allow() {
+		c.log.WarnContext(ctx, msg, append([]any{"target", p.name}, args...)...)
+	}
+}
+
+// logURL is u without user info, query or fragment: those carry secrets.
+func logURL(u *url.URL) string {
+	return u.Scheme + "://" + u.Host + u.EscapedPath()
+}
+
+// sleep waits d or until ctx is done, reporting whether it waited d.
+func sleep(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// releaseBody runs release once, on the first Close.
+type releaseBody struct {
+	io.ReadCloser
+	once    sync.Once
+	release func()
+}
+
+func (b *releaseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.release)
+	return err
+}
+
+// enter counts a request in flight, or refuses it once shutdown began. The
+// count goes up before the check, so Shutdown either sees the request or the
+// request sees Shutdown — none slips between.
+func (c *Client) enter() bool {
 	c.inFlight.Add(1)
-	resp, err := c.execute(ctx, req)
-	if c.inFlight.Add(-1) == 0 && c.shuttingDown.Load() {
-		// Non-blocking notify; buffered so a missed select still drains.
+	if c.closing.Load() {
+		c.leave()
+		return false
+	}
+	return true
+}
+
+func (c *Client) leave() {
+	if c.inFlight.Add(-1) == 0 && c.closing.Load() {
 		select {
 		case c.idle <- struct{}{}:
 		default:
 		}
 	}
-	return resp, err
 }
 
-//nolint:gocyclo // a single linear status-classification switch; splitting it hurts readability.
-func (c *Client) execute(ctx context.Context, req Request) (*http.Response, error) {
-	policy := c.getPolicy(req.Target)
-	method := req.Method
-	if method == "" {
-		method = http.MethodGet
-	}
-	start := time.Now()
-	target := req.Target
-	template := policy.cfg.Selector
-
-	state := policy.breaker.State()
-	c.metrics.recordCBState(target, state)
-
-	// 1. Circuit breaker.
-	if !policy.breaker.Allow() {
-		c.log.Warn("circuit breaker open — request rejected", "target", target, "url", req.URL)
-		c.metrics.recordRequest(target, template, method, 0, "circuit_breaker_open", time.Since(start))
-		return nil, transient("circuit breaker open", nil)
-	}
-
-	// 2. Rate limiter (non-blocking GCRA-style check).
-	if !policy.limiter.Allow() {
-		c.log.Warn("local rate limit exceeded — request rejected", "target", target, "url", req.URL)
-		c.metrics.recordRequest(target, template, method, 0, "rate_limited", time.Since(start))
-		return nil, transient("rate limit exceeded", nil)
-	}
-
-	// 3. Adaptive concurrency gate.
-	if policy.adaptive != nil {
-		if err := policy.adaptive.Acquire(ctx); err != nil {
-			c.metrics.recordRequest(target, template, method, 0, "concurrency_wait_canceled", time.Since(start))
-			return nil, transient("adaptive concurrency wait canceled", err)
-		}
-		defer policy.adaptive.Release()
-	}
-
-	// 4. Resolve timeout and build the request.
-	timeout := req.Timeout
-	if timeout <= 0 {
-		timeout = policy.timeout
-	}
-	reqCtx := ctx
-	var cancel context.CancelFunc
-	if timeout > 0 {
-		reqCtx, cancel = context.WithTimeout(ctx, timeout)
-	}
-
-	var bodyReader io.Reader
-	if len(req.Body) > 0 {
-		bodyReader = bytes.NewReader(req.Body)
-	}
-	httpReq, err := http.NewRequestWithContext(reqCtx, method, req.URL, bodyReader)
-	if err != nil {
-		if cancel != nil {
-			cancel()
-		}
-		policy.breaker.RecordFailure()
-		c.metrics.recordRequest(target, template, method, 0, "build_error", time.Since(start))
-		return nil, fatal("invalid request", err)
-	}
-	for k, vs := range req.Header {
-		for _, v := range vs {
-			httpReq.Header.Add(k, v)
-		}
-	}
-	switch {
-	case req.UserAgent != "":
-		httpReq.Header.Set("User-Agent", req.UserAgent)
-	case c.userAgent != "":
-		httpReq.Header.Set("User-Agent", c.userAgent)
-	}
-
-	c.log.Debug("→ outbound request", "method", method, "url", req.URL, "target", target, "bytes", len(req.Body))
-
-	resp, err := c.hc.Do(httpReq)
-	elapsed := time.Since(start)
-
-	// 5. Transport-level error.
-	if err != nil {
-		if cancel != nil {
-			cancel()
-		}
-		policy.breaker.RecordFailure()
-		if policy.adaptive != nil {
-			policy.adaptive.OnFailure()
-			c.metrics.recordAdaptiveLimit(target, policy.adaptive.CurrentLimit())
-		}
-		label, oe := classifyTransport(err)
-		c.metrics.recordRequest(target, template, method, 0, label, elapsed)
-		c.log.Error("← outbound request failed", "target", target, "err", err, "latency_ms", elapsed.Milliseconds())
-		return nil, oe
-	}
-
-	status := resp.StatusCode
-
-	// 6. Classify by status.
-	switch {
-	case status >= 200 && status < 300:
-		policy.breaker.RecordSuccess()
-		if policy.adaptive != nil {
-			policy.adaptive.OnSuccess()
-			c.metrics.recordAdaptiveLimit(target, policy.adaptive.CurrentLimit())
-		}
-		c.metrics.recordRequest(target, template, method, status, "ok", elapsed)
-		c.log.Debug("← outbound response OK", "target", target, "status", status, "latency_ms", elapsed.Milliseconds())
-		if cancel != nil {
-			resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
-		}
-		return resp, nil
-
-	case status == http.StatusTooManyRequests:
-		// Upstream rate limit — transient, but do not penalise our CB or limiter.
-		drainClose(resp)
-		if cancel != nil {
-			cancel()
-		}
-		c.metrics.recordRequest(target, template, method, status, "rate_limited_upstream", elapsed)
-		c.log.Warn("← upstream 429 Too Many Requests", "target", target, "latency_ms", elapsed.Milliseconds())
-		return nil, transient("HTTP 429 Too Many Requests", nil)
-
-	case status >= 500:
-		policy.breaker.RecordFailure()
-		if policy.adaptive != nil {
-			policy.adaptive.OnFailure()
-			c.metrics.recordAdaptiveLimit(target, policy.adaptive.CurrentLimit())
-		}
-		drainClose(resp)
-		if cancel != nil {
-			cancel()
-		}
-		c.metrics.recordRequest(target, template, method, status, "server_error", elapsed)
-		c.log.Error("← outbound server error (5xx)", "target", target, "status", status, "latency_ms", elapsed.Milliseconds())
-		return nil, transient(fmt.Sprintf("HTTP %d", status), nil)
-
-	default:
-		// 4xx (except 429) — malformed request; fatal. CB counts it; adaptive
-		// limiter does not (it is a request bug, not a capacity signal).
-		policy.breaker.RecordFailure()
-		drainClose(resp)
-		if cancel != nil {
-			cancel()
-		}
-		c.metrics.recordRequest(target, template, method, status, "client_error", elapsed)
-		c.log.Error("← outbound client error (4xx)", "target", target, "status", status, "latency_ms", elapsed.Milliseconds())
-		return nil, fatal(fmt.Sprintf("HTTP %d", status), nil)
-	}
-}
-
-// SendCached wraps [Client.Send] with a read-through cache. For GET/HEAD the
-// cache is consulted first; on a successful (2xx) response the buffered body is
-// stored under cacheKey with the given ttl. Without a cache configured it simply
-// buffers and returns the body.
-func (c *Client) SendCached(ctx context.Context, req Request, cacheKey string, ttl time.Duration) (CachedResponse, error) {
-	cacheable := isCacheableMethod(req.Method)
-	if cacheable && c.cache != nil {
-		if hit, ok := c.cache.Get(ctx, cacheKey); ok {
-			return hit, nil
-		}
-	}
-
-	resp, err := c.Send(ctx, req)
-	if err != nil {
-		return CachedResponse{}, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return CachedResponse{}, transient("failed to read response body", err)
-	}
-	out := CachedResponse{Status: resp.StatusCode, Body: body}
-
-	if cacheable && c.cache != nil {
-		c.cache.Set(ctx, cacheKey, out, ttl)
-	}
-	return out, nil
-}
-
-// SendWithRetry executes req with full-jitter exponential-backoff retries on
-// transient errors. maxAttempts ≤ 0 uses the target's RetryMaxAttempts (clamped
-// to at least 1). Fatal errors are returned immediately. Each retry increments
-// the retry-attempts metric.
-func (c *Client) SendWithRetry(ctx context.Context, req Request, maxAttempts int) (*http.Response, error) {
-	policy := c.getPolicy(req.Target)
-	if maxAttempts <= 0 {
-		maxAttempts = policy.cfg.RetryMaxAttempts
-	}
-	if maxAttempts < 1 {
-		maxAttempts = 1
-	}
-
-	var attempt int
-	for {
-		if attempt > 0 {
-			if delay := FullJitter(attempt, policy.cfg.RetryBase, policy.cfg.RetryCap); delay > 0 {
-				t := time.NewTimer(delay)
-				select {
-				case <-t.C:
-				case <-ctx.Done():
-					t.Stop()
-					return nil, transient("retry canceled", ctx.Err())
-				}
-			}
-			c.metrics.recordRetryAttempt(req.Target)
-		}
-
-		resp, err := c.Send(ctx, req)
-		if err == nil {
-			return resp, nil
-		}
-		if IsFatal(err) {
-			return nil, err
-		}
-		attempt++
-		if attempt >= maxAttempts {
-			return nil, err
-		}
-	}
-}
-
-// SendCoalesced deduplicates concurrent GET/HEAD requests sharing cacheKey: the
-// first caller (leader) performs the upstream fetch while concurrent callers
-// (followers) await its result without hitting the upstream. A fresh cache hit
-// short-circuits before coalescing; non-GET/HEAD requests bypass it entirely.
-func (c *Client) SendCoalesced(ctx context.Context, req Request, cacheKey string, ttl time.Duration) (CachedResponse, error) {
-	if !isCacheableMethod(req.Method) {
-		return c.SendCached(ctx, req, cacheKey, ttl)
-	}
-	if c.cache != nil {
-		if hit, ok := c.cache.Get(ctx, cacheKey); ok {
-			return hit, nil
-		}
-	}
-
-	c.coalesceMu.Lock()
-	if call, ok := c.coalesce[cacheKey]; ok {
-		c.coalesceMu.Unlock()
-		c.metrics.recordCoalesceHit(req.Target)
-		select {
-		case <-call.done:
-			return call.resp, call.err
-		case <-ctx.Done():
-			return CachedResponse{}, transient("coalesced wait canceled", ctx.Err())
-		}
-	}
-	call := &coalesceCall{done: make(chan struct{})}
-	c.coalesce[cacheKey] = call
-	c.coalesceMu.Unlock()
-
-	call.resp, call.err = c.SendCached(ctx, req, cacheKey, ttl)
-	close(call.done)
-
-	c.coalesceMu.Lock()
-	delete(c.coalesce, cacheKey)
-	c.coalesceMu.Unlock()
-
-	return call.resp, call.err
-}
-
-// SendWithFallback wraps [Client.SendCached], substituting a fallback on a
-// transient failure. The fallback chain is: stale cache entry (backend-
-// dependent), then the static fallback registered via [WithFallback], then the
-// original error. Fatal errors bypass the fallback.
-func (c *Client) SendWithFallback(ctx context.Context, req Request, cacheKey string, ttl time.Duration) (CachedResponse, error) {
-	resp, err := c.SendCached(ctx, req, cacheKey, ttl)
-	if err == nil {
-		return resp, nil
-	}
-	if IsFatal(err) {
-		return CachedResponse{}, err
-	}
-
-	if c.cache != nil {
-		if stale, ok := c.cache.Get(ctx, cacheKey); ok {
-			c.metrics.recordFallbackHit(req.Target)
-			return stale, nil
-		}
-	}
-	if fn, ok := c.fallbacks[req.Target]; ok {
-		c.metrics.recordFallbackHit(req.Target)
-		return fn(), nil
-	}
-	return CachedResponse{}, err
-}
-
-// ShutdownError is returned by [Client.Shutdown] when in-flight requests do not
-// drain before the deadline.
-type ShutdownError struct {
-	// InFlight is the number of requests still running when the deadline fired.
-	InFlight int
-}
-
-func (e *ShutdownError) Error() string {
-	return fmt.Sprintf("shutdown timed out with %d requests still in flight", e.InFlight)
-}
-
-// Shutdown begins a graceful shutdown: new requests are rejected with a
-// transient error, and the call blocks until in-flight requests drain or ctx is
-// done. A drained shutdown returns nil; a deadline returns a [*ShutdownError].
+// Shutdown refuses new requests ([KindShutdown]) and waits until every
+// request in flight is done — a successful one when its body is closed — or
+// ctx ends. Then it closes idle connections (of a transport the client
+// built). Safe to call more than once.
 func (c *Client) Shutdown(ctx context.Context) error {
-	c.shuttingDown.Store(true)
-	c.log.Info("resilient: shutdown initiated, draining in-flight requests")
-
-	if c.inFlight.Load() == 0 {
-		return nil
+	c.closing.Store(true)
+	if c.closeIdle != nil {
+		defer c.closeIdle()
 	}
 	for {
+		n := c.inFlight.Load()
+		if n == 0 {
+			return nil
+		}
 		select {
 		case <-c.idle:
-			if c.inFlight.Load() == 0 {
-				return nil
-			}
 		case <-ctx.Done():
-			n := int(c.inFlight.Load())
-			c.log.Warn("resilient: shutdown timed out", "in_flight", n)
-			return &ShutdownError{InFlight: n}
+			return fmt.Errorf("resilient: shutdown with %d requests in flight: %w", n, ctx.Err())
 		}
 	}
-}
-
-// getPolicy returns the policy set for target, lazily creating a defaulted
-// fallback policy on first use of an undeclared target.
-func (c *Client) getPolicy(target string) *policySet {
-	if v, ok := c.policies.Load(target); ok {
-		return v.(*policySet)
-	}
-	c.log.Warn("no config for outbound target — using fallback policy", "target", target)
-	p := buildPolicy(fallbackTarget(target), c.defaultTimeout)
-	actual, _ := c.policies.LoadOrStore(target, p)
-	return actual.(*policySet)
-}
-
-func buildPolicy(cfg TargetConfig, defaultTimeout time.Duration) *policySet {
-	burst := cfg.RateLimit
-	if burst < 1 {
-		burst = 1
-	}
-	var adaptive *AdaptiveLimiter
-	if cfg.AdaptiveConcurrencyEnabled {
-		adaptive = NewAdaptiveLimiter(cfg.AdaptiveConcurrencyInitial, cfg.AdaptiveConcurrencyMin, cfg.AdaptiveConcurrencyMax)
-	}
-	return &policySet{
-		limiter:  rate.NewLimiter(rate.Limit(cfg.RateLimit), burst),
-		breaker:  NewCircuitBreaker(cfg.CBThreshold, cfg.CBMinRequests, cfg.CBWindow, cfg.CBHalfOpenTimeout),
-		adaptive: adaptive,
-		cfg:      cfg,
-		timeout:  cfg.resolveTimeout(defaultTimeout),
-	}
-}
-
-func isCacheableMethod(method string) bool {
-	return method == "" || method == http.MethodGet || method == http.MethodHead
-}
-
-// drainClose drains a bounded prefix of an error response body then closes it,
-// so the keep-alive connection can be reused.
-func drainClose(resp *http.Response) {
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainOnError))
-	_ = resp.Body.Close()
-}
-
-// cancelBody ties a context's cancel func to the response body's lifetime: the
-// per-request timeout stays armed until the caller closes the body.
-type cancelBody struct {
-	io.ReadCloser
-	cancel context.CancelFunc
-}
-
-func (b *cancelBody) Close() error {
-	err := b.ReadCloser.Close()
-	b.cancel()
-	return err
 }

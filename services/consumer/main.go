@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
@@ -26,14 +27,18 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.Load()
+	// CONSUMER_CONFIG names an optional YAML file; the environment overrides it.
+	cfg, err := config.Load(os.Getenv(config.Prefix + "CONFIG"))
 	if err != nil {
+		// No logger yet (its settings are part of what failed): say why on
+		// stderr, where a crash-looping pod's last words are read.
+		fmt.Fprintf(os.Stderr, "consumer: %v\n", err)
 		return err
 	}
 
-	logger := httpx.NewLogger(cfg.HTTP().LogConfig())
+	logger := httpx.NewLogger(cfg.LogConfig())
 
-	shutdownTracing, err := otelx.Init(context.Background(), cfg.OTel(), logger)
+	shutdownTracing, err := otelx.Init(context.Background(), cfg.OTel, logger)
 	if err != nil {
 		logger.Error("tracing init failed", "err", err)
 		return err
@@ -47,24 +52,28 @@ func run() error {
 	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelBoot()
 
-	consumer, err := kafka.NewConsumer(bootCtx, cfg.Kafka(), logger)
+	consumer, err := kafka.NewConsumer(bootCtx, cfg.Kafka, logger)
 	if err != nil {
 		logger.Error("kafka consumer init failed", "err", err)
 		return err
 	}
-	defer consumer.Close()
+	defer consumer.Close() // Run closes it too; this covers an early return
 
-	srv := httpx.NewServer(cfg.HTTP(), logger, httpx.WithConfig(cfg))
+	srv, err := httpx.NewServer(cfg.Config, logger, httpx.WithConfig(cfg))
+	if err != nil {
+		logger.Error("admin server init failed", "err", err)
+		return err
+	}
 	srv.Health.Register("kafka", consumer.ReadyCheck())
-	// Records / handler latency / group lag from the lib, the worker's own
+	// Consume outcomes / retries / DLQ / lag from the lib, the worker's own
 	// counters next to them — one /metrics on the admin listener has it all.
 	srv.Metrics.Registry.MustRegister(consumer.Collectors()...)
-	w := worker.New(consumer, logger, srv.Metrics.Registry)
+	w := worker.New(consumer, logger, srv.Metrics.Registry, worker.Options{DedupeSize: cfg.DedupeSize})
 
 	ctx, stop := httpx.SignalContext()
 	defer stop()
 
-	logger.Info("consumer starting", "admin_addr", cfg.AdminAddr, "topic", cfg.KafkaTopic, "group", cfg.KafkaGroup, "version", httpx.Version)
+	logger.Info("consumer starting", "admin_addr", cfg.AdminAddr, "topics", cfg.Kafka.Topics, "group", cfg.Kafka.Group, "version", httpx.Version)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return srv.Run(gctx) })

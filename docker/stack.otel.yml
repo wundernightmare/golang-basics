@@ -1,25 +1,42 @@
-# Overlay that points the containerised services at the local OTel Collector
-# (which forwards to Jaeger).
+# Overlay that points the containerised services at the local OpenTelemetry
+# Collector (docker/observability.yml), which forwards traces to Jaeger.
 #
-# Tracing is off by default (otelx installs only the W3C propagators and a no-op
-# provider), so exporting is an explicit opt-in rather than a silent dependency
-# on a collector being up. Bring the observability stack up first:
+# Tracing is off by default (otelx installs only the W3C propagators and a
+# no-op provider), so exporting is an explicit opt-in rather than a silent
+# dependency on a collector being up. otelx speaks OTLP over HTTP (:4318) and
+# uses TLS unless told otherwise — the local collector is plaintext, hence
+# *_OTEL_EXPORTER_OTLP_INSECURE. Metrics are not exported over OTLP at all:
+# VictoriaMetrics scrapes /metrics on the admin ports.
 #
 #   just infra-up && just obs-up && just stack-up-otel
 #
 # Then create a task and find the trace at http://localhost:16686.
 
 services:
+  ping:
+    environment:
+      PING_OTEL_ENABLED: "true"
+      PING_OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4318
+      PING_OTEL_EXPORTER_OTLP_INSECURE: "true"
+      PING_OTEL_DEPLOYMENT_ENVIRONMENT: local
+
+  heartbeat:
+    environment:
+      HEARTBEAT_OTEL_ENABLED: "true"
+      HEARTBEAT_OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4318
+      HEARTBEAT_OTEL_EXPORTER_OTLP_INSECURE: "true"
+      HEARTBEAT_OTEL_DEPLOYMENT_ENVIRONMENT: local
+
   tasks:
     environment:
       TASKS_OTEL_ENABLED: "true"
-      TASKS_OTEL_SERVICE_NAME: tasks
-      TASKS_OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      TASKS_OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4318
       TASKS_OTEL_EXPORTER_OTLP_INSECURE: "true"
+      TASKS_OTEL_DEPLOYMENT_ENVIRONMENT: local
 
   consumer:
     environment:
       CONSUMER_OTEL_ENABLED: "true"
-      CONSUMER_OTEL_SERVICE_NAME: consumer
-      CONSUMER_OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      CONSUMER_OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4318
       CONSUMER_OTEL_EXPORTER_OTLP_INSECURE: "true"
+      CONSUMER_OTEL_DEPLOYMENT_ENVIRONMENT: local

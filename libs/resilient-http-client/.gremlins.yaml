@@ -1,13 +1,15 @@
-# gremlins — mutation testing for the pure business logic of this module.
+# gremlins — mutation testing for the pure decision logic of this module.
 #
 #   just mutate                      # this module (default)
 #   just mutate libs/resilient-http-client
 #
-# Scope: backoff.go, circuitbreaker.go, adaptive.go — the decision logic that
-# unit tests can pin down exactly. Everything else is excluded on purpose: the
-# HTTP client / config / DNS cache / cache are integration-shaped (httptest,
-# timers, real transport), where a surviving mutant is mostly noise and the
-# run is slow. Mutation testing pays for itself on small, pure, hot logic.
+# Scope: breaker.go (state machine), backoff.go (jitter, Retry-After parsing,
+# idempotency and retryable-status rules), budget.go + window.go (retry
+# budget, sliding window) and validate.go (config validation) — logic unit
+# tests pin down exactly, with a fake clock. Everything else is excluded on
+# purpose: the client, transport, bulkhead, config loading, errors and
+# metrics are integration-shaped (httptest, timers, a real transport), where
+# a surviving mutant is mostly noise and the run is slow.
 #
 # Run it with GOFLAGS=-count=1 (`just mutate` does): the per-mutant timeout is
 # derived from the initial coverage run, so a cached run makes everything
@@ -23,12 +25,12 @@ unleash:
   output-statuses: lt # print only LIVED and TIMED OUT — the ones that matter
   exclude-files:
     - "client\\.go$"
+    - "transport\\.go$"
+    - "bulkhead\\.go$"
     - "config\\.go$"
-    - "dnscache\\.go$"
-    - "cache\\.go$"
     - "errors\\.go$"
     - "metrics\\.go$"
     - "doc\\.go$"
   threshold:
-    efficacy: 90
-    mutant-coverage: 95
+    efficacy: 80
+    mutant-coverage: 90

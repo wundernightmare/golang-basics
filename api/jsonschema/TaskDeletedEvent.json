@@ -1,0 +1,25 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "TaskDeletedEvent",
+    "type": "object",
+    "properties": {
+        "event_id": {
+            "type": "string",
+            "description": "Unique id of this event (UUID), also the event_id header."
+        },
+        "id": {
+            "type": "string",
+            "description": "Task identifier (UUID), also the record key."
+        },
+        "version": {
+            "type": "integer",
+            "description": "The last version the task had."
+        }
+    },
+    "required": [
+        "event_id",
+        "id",
+        "version"
+    ],
+    "description": "Published when a task is deleted (event_type task.deleted)."
+}

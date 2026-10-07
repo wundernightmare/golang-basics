@@ -10,8 +10,9 @@
 # for every operation, checking that no request yields a 5xx and that every
 # response — status, content type, headers, body — matches the contract.
 # This is the generative layer of the pyramid: it finds inputs no hand-written
-# test thought of. Results go to Allure (native reporter) under
-# ALLURE_RESULTS_DIR, next to every other layer.
+# test thought of. Results are JUnit XML (JUNIT_DIR, default .reports/junit —
+# schemathesis-<svc>.xml), next to every Go module's, so `just allure` and the
+# CI allure-report jobs render them together.
 #
 # Schemathesis runs from its pinned image (DOCKER_HUB for a closed network)
 # unless a `schemathesis` binary is on PATH (the GitLab job runs inside the
@@ -21,7 +22,7 @@ set -euo pipefail
 svc="${1:?usage: schemathesis.sh <ping|tasks>}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${DOCKER_HUB:-docker.io}/schemathesis/schemathesis:${SCHEMATHESIS_VERSION:-4.27.0}"
-results="${ALLURE_RESULTS_DIR:-$root/services/$svc/allure-results}"
+results="${JUNIT_DIR:-$root/.reports/junit}"
 spec="api/openapi3/$svc.openapi.yaml"
 max_examples="${SCHEMATHESIS_MAX_EXAMPLES:-100}"
 mkdir -p "$results" "$root/.run"
@@ -44,21 +45,31 @@ if [ -z "$bin" ]; then
 fi
 
 log "start $svc on :$port (admin :$admin)"
-env "${upper}_HTTP_ADDR=:$port" "${upper}_ADMIN_ADDR=:$admin" "${upper}_LOG_LEVEL=warn" \
+# Admin on loopback (httpx requires a token for any other address); the API
+# binds all interfaces because the Schemathesis container reaches it through
+# host.docker.internal. tasks may create its topics on the local broker.
+env "${upper}_HTTP_ADDR=:$port" "${upper}_ADMIN_ADDR=127.0.0.1:$admin" "${upper}_LOG_LEVEL=warn" \
+  "${upper}_KAFKA_ALLOW_AUTO_TOPIC_CREATION=${KAFKA_ALLOW_AUTO_TOPIC_CREATION:-true}" \
   "$bin" > "$root/.run/schemathesis-$svc.log" 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true' EXIT
 
+ready=""
 for _ in $(seq 1 100); do
-  if command -v curl >/dev/null; then curl -fsS -o /dev/null "http://localhost:$admin/readyz" 2>/dev/null && break
-  else wget -q -O /dev/null "http://localhost:$admin/readyz" 2>/dev/null && break; fi
+  if command -v curl >/dev/null; then curl -fsS -o /dev/null "http://127.0.0.1:$admin/readyz" 2>/dev/null && { ready=1; break; }
+  else wget -q -O /dev/null "http://127.0.0.1:$admin/readyz" 2>/dev/null && { ready=1; break; }; fi
   sleep 0.2
 done
+if [ -z "$ready" ]; then
+  echo "schemathesis.sh: $svc never became ready on :$admin (deps up? just infra-up)" >&2
+  cat "$root/.run/schemathesis-$svc.log" >&2
+  exit 1
+fi
 
 log "schemathesis run — $spec against :$port ($max_examples examples/operation)"
 if command -v schemathesis >/dev/null; then
   schemathesis run "$root/$spec" --url "http://localhost:$port" \
-    --checks all --max-examples "$max_examples" --report allure --report-allure-path "$results"
+    --checks all --max-examples "$max_examples" --report junit --report-junit-path "$results/schemathesis-$svc.xml"
 else
   # host.docker.internal: Docker Desktop / OrbStack resolve it; Linux needs the
   # host-gateway alias.
@@ -67,5 +78,5 @@ else
   docker run --rm --add-host=host.docker.internal:host-gateway --user "$(id -u):$(id -g)" \
     -v "$root/api:/api:ro" -v "$results:/results" "$image" \
     run "/$spec" --url "http://host.docker.internal:$port" \
-    --checks all --max-examples "$max_examples" --report allure --report-allure-path /results
+    --checks all --max-examples "$max_examples" --report junit --report-junit-path "/results/schemathesis-$svc.xml"
 fi

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"golang.org/x/sync/errgroup"
@@ -25,11 +26,18 @@ func main() {
 func run() error {
 	cfg, err := config.Load()
 	if err != nil {
+		// There is no logger before the config is known: say it on stderr,
+		// or the process exits 1 without a word.
+		fmt.Fprintln(os.Stderr, err)
 		return err
 	}
 
-	logger := httpx.NewLogger(cfg.HTTP().LogConfig())
-	srv := httpx.NewServer(cfg.HTTP(), logger, httpx.WithConfig(cfg))
+	logger := httpx.NewLogger(cfg.LogConfig())
+	srv, err := httpx.NewServer(cfg.HTTP(), logger, httpx.WithConfig(cfg))
+	if err != nil {
+		logger.Error("heartbeat: invalid configuration", "err", err)
+		return err
+	}
 
 	// The worker registers its counter on the server's registry, so beats
 	// show up on /metrics alongside the HTTP metrics.
