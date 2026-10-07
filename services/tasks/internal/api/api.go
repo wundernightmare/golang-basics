@@ -16,7 +16,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -185,9 +187,21 @@ func (h *handlers) get(w http.ResponseWriter, r *http.Request) {
 // list returns one page of tasks, newest first (keyset pagination).
 func (h *handlers) list(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	for name, values := range q {
+		switch {
+		case name != "limit" && name != "cursor":
+			httpx.WriteProblem(w, r, problem(http.StatusBadRequest, "unknown_parameter",
+				"unknown query parameter "+strconv.Quote(name)+"; only limit and cursor are accepted"))
+			return
+		case len(values) > 1:
+			httpx.WriteProblem(w, r, problem(http.StatusBadRequest, "repeated_parameter",
+				"query parameter "+strconv.Quote(name)+" given more than once"))
+			return
+		}
+	}
 	req := domain.PageRequest{Limit: domain.DefaultPageSize}
-	if raw := q.Get("limit"); raw != "" {
-		n, err := strconv.Atoi(raw)
+	if _, sent := q["limit"]; sent {
+		n, err := strconv.Atoi(q.Get("limit"))
 		if err != nil || n < 1 || n > domain.MaxPageSize {
 			httpx.WriteProblem(w, r, problem(http.StatusBadRequest, "invalid_limit",
 				"limit must be an integer from 1 to "+strconv.Itoa(domain.MaxPageSize)))
@@ -195,8 +209,8 @@ func (h *handlers) list(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Limit = n
 	}
-	if raw := q.Get("cursor"); raw != "" {
-		c, err := domain.DecodeCursor(raw)
+	if _, sent := q["cursor"]; sent {
+		c, err := domain.DecodeCursor(q.Get("cursor"))
 		if err != nil {
 			httpx.WriteProblem(w, r, badRequest("invalid_cursor", err))
 			return
@@ -230,9 +244,14 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, badRequest("invalid_if_match", err))
 		return
 	}
-	var req tasksapi.UpdateTaskRequest
-	if err := httpx.DecodeJSON(r, &req); err != nil {
+	var raw map[string]json.RawMessage
+	if err := httpx.DecodeJSON(r, &raw); err != nil {
 		httpx.WriteError(w, r, err)
+		return
+	}
+	req, err := decodePatch(raw)
+	if err != nil {
+		httpx.WriteProblem(w, r, badRequest("invalid_patch", err))
 		return
 	}
 	patch, err := domain.Patch{Title: req.Title, Done: req.Done}.Normalize()
@@ -274,6 +293,31 @@ func (h *handlers) delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// decodePatch reads a PATCH body field by field: a field the contract does not
+// know, or an explicit null, is a 400 instead of being dropped silently —
+// {"done": null} must not read as "leave done alone" (found by Schemathesis).
+func decodePatch(raw map[string]json.RawMessage) (tasksapi.UpdateTaskRequest, error) {
+	var req tasksapi.UpdateTaskRequest
+	for name, v := range raw {
+		var dst any
+		switch name {
+		case "title":
+			dst = &req.Title
+		case "done":
+			dst = &req.Done
+		default:
+			return req, fmt.Errorf("unknown field %q; a patch sets title and/or done", name)
+		}
+		if string(v) == "null" {
+			return req, fmt.Errorf("%s must not be null", name)
+		}
+		if err := json.Unmarshal(v, dst); err != nil {
+			return req, fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	return req, nil
+}
+
 // writeChangeError answers a failed update/delete and reports whether it did.
 func (h *handlers) writeChangeError(w http.ResponseWriter, r *http.Request, id string, err error, detail string) bool {
 	switch {
@@ -302,12 +346,15 @@ func (h *handlers) invalidate(ctx context.Context, id string) {
 // ifMatch parses an optional If-Match: a single strong entity tag ("3") or
 // "*". It returns the version to require, or nil for none ("*" requires only
 // that the task exists, which update/delete check anyway).
+// maxIfMatchLength bounds If-Match as the contract does: 18 digits in quotes.
+const maxIfMatchLength = 20
+
 func ifMatch(r *http.Request) (*int64, error) {
 	raw := strings.TrimSpace(r.Header.Get("If-Match"))
-	if raw == "" || raw == "*" {
+	if _, sent := r.Header["If-Match"]; !sent || raw == "*" {
 		return nil, nil
 	}
-	if len(raw) < 3 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+	if len(raw) < 3 || len(raw) > maxIfMatchLength || raw[0] != '"' || raw[len(raw)-1] != '"' {
 		return nil, errors.New(`If-Match must be a single strong entity tag such as "3" (weak tags never match)`)
 	}
 	v, err := strconv.ParseInt(raw[1:len(raw)-1], 10, 64)

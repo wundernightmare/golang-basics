@@ -31,7 +31,8 @@ pre-commit:
         done
     secrets:
       # Staged-diff secret scan — the same rules CI runs over the whole tree.
-      run: mise exec -- gitleaks git --pre-commit --staged --config .gitleaks.toml --no-banner
+      # gitleaks lives in the appsec profile (mise.appsec.toml).
+      run: MISE_ENV=appsec mise exec -- gitleaks git --pre-commit --staged --config .gitleaks.toml --no-banner
     shellcheck:
       glob: "*.sh"
       # shellcheck is pinned in mise.toml; skip quietly where neither it nor

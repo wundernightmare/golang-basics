@@ -56,7 +56,12 @@ model CreateTaskRequest {
   title: string;
 }
 
-/** Body of PATCH /tasks/{id}: the fields to change — at least one, or 400. */
+/**
+ * Body of PATCH /tasks/{id}: the fields to change — at least one, no others
+ * and no nulls, or 400.
+ */
+@OpenAPI.extension("minProperties", 1)
+@OpenAPI.extension("additionalProperties", false)
 model UpdateTaskRequest {
   /** New title; surrounding whitespace is trimmed (rules as Task.title). */
   @minLength(1)
@@ -122,7 +127,11 @@ interface TasksOps {
    */
   @post
   create(
-    @header("Idempotency-Key") @minLength(1) @maxLength(255) idempotencyKey?: string,
+    /** Printable ASCII, 1–255 characters, no surrounding spaces. */
+    @header("Idempotency-Key")
+    @maxLength(255)
+    @pattern("^[!-~]([ -~]*[!-~])?$")
+    idempotencyKey?: string,
     @body body: CreateTaskRequest,
   ): {
     @statusCode _: 201;
@@ -138,14 +147,15 @@ interface TasksOps {
 
   /**
    * List tasks, newest first, one page at a time (keyset pagination: pages
-   * do not shift when tasks are added or removed meanwhile).
+   * do not shift when tasks are added or removed meanwhile). Query parameters
+   * other than limit and cursor are a 400.
    */
   @get
   list(
     /** Page size. */
     @query @minValue(1) @maxValue(200) limit?: int32 = 50,
-    /** The next_cursor of the previous page. */
-    @query cursor?: string,
+    /** The next_cursor of the previous page; anything else is a 400. */
+    @query @pattern("^[A-Za-z0-9_-]+$") cursor?: string,
   ): TaskList | ProblemResponse<400>;
 
   /** Fetch one task; served from the cache when warm (X-Cache: hit|miss). */
@@ -165,7 +175,11 @@ interface TasksOps {
   @patch
   update(
     @path id: string,
-    @header("If-Match") ifMatch?: string,
+    /** "<version>" (strong ETag of the task) or *; weak tags never match. */
+    @header("If-Match")
+    @maxLength(20)
+    @pattern("^(\\*|\"[1-9][0-9]*\")$")
+    ifMatch?: string,
     @body body: UpdateTaskRequest,
   ): {
     @statusCode _: 200;
@@ -178,7 +192,11 @@ interface TasksOps {
    * Emits `task.deleted`.
    */
   @delete
-  delete(@path id: string, @header("If-Match") ifMatch?: string): {
+  delete(@path id: string, /** "<version>" (strong ETag of the task) or *; weak tags never match. */
+    @header("If-Match")
+    @maxLength(20)
+    @pattern("^(\\*|\"[1-9][0-9]*\")$")
+    ifMatch?: string): {
     @statusCode _: 204;
   } | ProblemResponse<400> | ProblemResponse<404> | ProblemResponse<412>;
 }
