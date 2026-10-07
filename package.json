@@ -12,7 +12,7 @@
     "contracts": "pnpm --filter @golang-basics/api compile"
   },
   "devDependencies": {
-    "allure-commandline": "2.43.0",
-    "lefthook": "^2.1.12"
+    "allure-commandline": "2.46.1",
+    "lefthook": "^2.1.14"
   }
 }
