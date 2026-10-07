@@ -8,8 +8,8 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/containers v0.0.0
-	github.com/valkey-io/valkey-go v1.0.77
-	github.com/valkey-io/valkey-go/valkeyotel v1.0.77
+	github.com/valkey-io/valkey-go v1.0.78
+	github.com/valkey-io/valkey-go/valkeyotel v1.0.78
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
 	golang.org/x/sync v0.23.0

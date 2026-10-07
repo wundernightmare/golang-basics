@@ -26,7 +26,7 @@ require (
 	github.com/tracehubmmp/golang-basics/libs/testx/containers v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/contract v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/valkey v0.0.0-00010101000000-000000000000
-	github.com/twmb/franz-go v1.21.6
+	github.com/twmb/franz-go v1.22.1
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
 	golang.org/x/sync v0.23.0
@@ -82,7 +82,7 @@ require (
 	github.com/oasdiff/yaml3 v0.0.14 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
-	github.com/pierrec/lz4/v4 v4.1.29 // indirect
+	github.com/pierrec/lz4/v4 v4.1.30 // indirect
 	github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
 	github.com/prometheus/common v0.71.0 // indirect
@@ -97,11 +97,11 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/valkey v0.44.0 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
-	github.com/twmb/franz-go/pkg/kadm v1.18.0 // indirect
-	github.com/twmb/franz-go/pkg/kmsg v1.13.1 // indirect
-	github.com/twmb/franz-go/plugin/kotel v1.7.0 // indirect
-	github.com/valkey-io/valkey-go v1.0.77 // indirect
-	github.com/valkey-io/valkey-go/valkeyotel v1.0.77 // indirect
+	github.com/twmb/franz-go/pkg/kadm v1.19.0 // indirect
+	github.com/twmb/franz-go/pkg/kmsg v1.14.0 // indirect
+	github.com/twmb/franz-go/plugin/kotel v1.7.1 // indirect
+	github.com/valkey-io/valkey-go v1.0.78 // indirect
+	github.com/valkey-io/valkey-go/valkeyotel v1.0.78 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0 // indirect
