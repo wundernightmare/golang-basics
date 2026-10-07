@@ -30,9 +30,10 @@ paths:
         - name: Idempotency-Key
           in: header
           required: false
+          description: Printable ASCII, 1–255 characters, no surrounding spaces.
           schema:
             type: string
-            minLength: 1
+            pattern: ^[!-~]([ -~]*[!-~])?$
             maxLength: 255
       responses:
         '200':
@@ -89,7 +90,8 @@ paths:
       operationId: TasksOps_list
       description: |-
         List tasks, newest first, one page at a time (keyset pagination: pages
-        do not shift when tasks are added or removed meanwhile).
+        do not shift when tasks are added or removed meanwhile). Query parameters
+        other than limit and cursor are a 400.
       parameters:
         - name: limit
           in: query
@@ -105,9 +107,10 @@ paths:
         - name: cursor
           in: query
           required: false
-          description: The next_cursor of the previous page.
+          description: The next_cursor of the previous page; anything else is a 400.
           schema:
             type: string
+            pattern: ^[A-Za-z0-9_-]+$
           explode: false
       responses:
         '200':
@@ -172,8 +175,11 @@ paths:
         - name: If-Match
           in: header
           required: false
+          description: '"<version>" (strong ETag of the task) or *; weak tags never match.'
           schema:
             type: string
+            pattern: ^(\*|"[1-9][0-9]*")$
+            maxLength: 20
       responses:
         '200':
           description: The request has succeeded.
@@ -224,8 +230,11 @@ paths:
         - name: If-Match
           in: header
           required: false
+          description: '"<version>" (strong ETag of the task) or *; weak tags never match.'
           schema:
             type: string
+            pattern: ^(\*|"[1-9][0-9]*")$
+            maxLength: 20
       responses:
         '204':
           description: 'There is no content to send for this request, but the headers may be useful. '
@@ -361,7 +370,11 @@ components:
         done:
           type: boolean
           description: New completion flag.
-      description: 'Body of PATCH /tasks/{id}: the fields to change — at least one, or 400.'
+      description: |-
+        Body of PATCH /tasks/{id}: the fields to change — at least one, no others
+        and no nulls, or 400.
+      additionalProperties: false
+      minProperties: 1
 servers:
   - url: http://localhost:8082
     description: local

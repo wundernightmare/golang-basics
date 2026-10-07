@@ -9,6 +9,7 @@
 # (api/openapi3/<svc>.openapi.yaml): generated positive and negative requests
 # for every operation, checking that no request yields a 5xx and that every
 # response — status, content type, headers, body — matches the contract.
+# api/schemathesis.toml lists the few 4xx the contract gives a valid request.
 # This is the generative layer of the pyramid: it finds inputs no hand-written
 # test thought of. Results are JUnit XML (JUNIT_DIR, default .reports/junit —
 # schemathesis-<svc>.xml), next to every Go module's, so `just allure` and the
@@ -68,7 +69,7 @@ fi
 
 log "schemathesis run — $spec against :$port ($max_examples examples/operation)"
 if command -v schemathesis >/dev/null; then
-  schemathesis run "$root/$spec" --url "http://localhost:$port" \
+  schemathesis --config-file "$root/api/schemathesis.toml" run "$root/$spec" --url "http://localhost:$port" \
     --checks all --max-examples "$max_examples" --report junit --report-junit-path "$results/schemathesis-$svc.xml"
 else
   # host.docker.internal: Docker Desktop / OrbStack resolve it; Linux needs the
@@ -77,6 +78,6 @@ else
   # image's default user could not write into it (found on the GitHub runner).
   docker run --rm --add-host=host.docker.internal:host-gateway --user "$(id -u):$(id -g)" \
     -v "$root/api:/api:ro" -v "$results:/results" "$image" \
-    run "/$spec" --url "http://host.docker.internal:$port" \
+    --config-file /api/schemathesis.toml run "/$spec" --url "http://host.docker.internal:$port" \
     --checks all --max-examples "$max_examples" --report junit --report-junit-path "/results/schemathesis-$svc.xml"
 fi

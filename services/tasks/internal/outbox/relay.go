@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
+	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- poll-backoff jitter is not security-sensitive; a CSPRNG (crypto/rand) is unnecessary here.
 	"strings"
 	"time"
 

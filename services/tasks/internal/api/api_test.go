@@ -271,14 +271,24 @@ func TestList_KeysetPagesChainAndEnd(t *testing.T) {
 
 func TestList_RejectsBadLimitsAndForeignCursors(t *testing.T) {
 	h := newHarness(t)
-	for _, q := range []string{"limit=0", "limit=201", "limit=ten"} {
+	for _, q := range []string{"limit=0", "limit=201", "limit=ten", "limit="} {
 		r := h.do(t, http.MethodGet, "/tasks?"+q, "")
 		require.Equal(t, http.StatusBadRequest, r.status, q)
 		assert.Equal(t, "invalid_limit", r.problem(t)["code"], q)
 	}
-	r := h.do(t, http.MethodGet, "/tasks?cursor=not-a-cursor", "")
+	for _, c := range []string{"not-a-cursor", ""} {
+		r := h.do(t, http.MethodGet, "/tasks?cursor="+c, "")
+		require.Equal(t, http.StatusBadRequest, r.status, c)
+		assert.Equal(t, "invalid_cursor", r.problem(t)["code"], c)
+	}
+
+	r := h.do(t, http.MethodGet, "/tasks?limit=5&page=2", "")
 	require.Equal(t, http.StatusBadRequest, r.status)
-	assert.Equal(t, "invalid_cursor", r.problem(t)["code"])
+	assert.Equal(t, "unknown_parameter", r.problem(t)["code"])
+
+	r = h.do(t, http.MethodGet, "/tasks?limit=5&limit=6", "")
+	require.Equal(t, http.StatusBadRequest, r.status)
+	assert.Equal(t, "repeated_parameter", r.problem(t)["code"])
 }
 
 // --- update ------------------------------------------------------------------
@@ -321,7 +331,7 @@ func TestUpdate_IfMatch(t *testing.T) {
 	r = h.do(t, http.MethodPatch, "/tasks/"+task.Id, `{"title":"any version"}`, "If-Match", "*")
 	assert.Equal(t, http.StatusOK, r.status)
 
-	for _, bad := range []string{`2`, `W/"2"`, `"two"`, `"0"`, `"1", "2"`} {
+	for _, bad := range []string{``, `"1000000000000000000"`, `2`, `W/"2"`, `"two"`, `"0"`, `"1", "2"`} {
 		r = h.do(t, http.MethodPatch, "/tasks/"+task.Id, `{"done":true}`, "If-Match", bad)
 		require.Equal(t, http.StatusBadRequest, r.status, bad)
 		assert.Equal(t, "invalid_if_match", r.problem(t)["code"], bad)
@@ -332,10 +342,13 @@ func TestUpdate_RejectsEmptyAndInvalidPatches(t *testing.T) {
 	h := newHarness(t)
 	task := h.create(t, "x")
 	for body, code := range map[string]string{
-		`{}`:                  "empty_patch",
-		`{"unknown":1}`:       "empty_patch",
-		`{"title":"   "}`:     "invalid_title",
-		`{"title":"a\u0000"}`: "invalid_title",
+		`{}`:                        "empty_patch",
+		`{"unknown":1}`:             "invalid_patch",
+		`{"done":null}`:             "invalid_patch",
+		`{"title":"x","done":null}`: "invalid_patch",
+		`{"done":"yes"}`:            "invalid_patch",
+		`{"title":"   "}`:           "invalid_title",
+		`{"title":"a\u0000"}`:       "invalid_title",
 	} {
 		r := h.do(t, http.MethodPatch, "/tasks/"+task.Id, body)
 		require.Equal(t, http.StatusBadRequest, r.status, body)

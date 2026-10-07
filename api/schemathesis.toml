@@ -1,0 +1,23 @@
+# Schemathesis configuration for scripts/schemathesis.sh.
+#
+# Positive requests (schema-compliant) are expected to succeed, except where
+# the contract itself answers a valid request with a 4xx that no schema can
+# rule out. Each exception below is scoped to the one operation it is about.
+
+# A schema-compliant cursor (base64url) that is not a next_cursor this server
+# issued is a 400 — the cursor is opaque, its content cannot be in the schema.
+[[operations]]
+include-operation-id = "TasksOps_list"
+checks.positive_data_acceptance.expected-statuses = ["2xx", "400"]
+
+# Idempotency-Key reused with a different body: 422, by contract.
+[[operations]]
+include-operation-id = "TasksOps_create"
+checks.positive_data_acceptance.expected-statuses = ["2xx", "422"]
+
+# If-Match with a version the task is no longer at: 412, by contract. 400:
+# Schemathesis 4.27's coverage phase sends `If-Match: 0` as a value of the
+# quoted-ETag pattern, which it does not match — the 400 is right.
+[[operations]]
+include-operation-id = ["TasksOps_update", "TasksOps_delete"]
+checks.positive_data_acceptance.expected-statuses = ["2xx", "400", "404", "412"]
