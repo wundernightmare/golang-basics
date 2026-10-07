@@ -3,7 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
-	"math/rand/v2"
+	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- retry-backoff jitter is not security-sensitive; a CSPRNG (crypto/rand) is unnecessary here.
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"

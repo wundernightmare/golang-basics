@@ -70,7 +70,8 @@ type TaskList struct {
 	Tasks      []Task  `json:"tasks"`
 }
 
-// UpdateTaskRequest Body of PATCH /tasks/{id}: the fields to change — at least one, or 400.
+// UpdateTaskRequest Body of PATCH /tasks/{id}: the fields to change — at least one, no others
+// and no nulls, or 400.
 type UpdateTaskRequest struct {
 	// Done New completion flag.
 	Done *bool `json:"done,omitempty"`
@@ -84,22 +85,25 @@ type TasksOpsListParams struct {
 	// Limit Page size.
 	Limit *int32 `form:"limit,omitempty" json:"limit,omitempty"`
 
-	// Cursor The next_cursor of the previous page.
+	// Cursor The next_cursor of the previous page; anything else is a 400.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 }
 
 // TasksOpsCreateParams defines parameters for TasksOpsCreate.
 type TasksOpsCreateParams struct {
+	// IdempotencyKey Printable ASCII, 1–255 characters, no surrounding spaces.
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // TasksOpsDeleteParams defines parameters for TasksOpsDelete.
 type TasksOpsDeleteParams struct {
+	// IfMatch "<version>" (strong ETag of the task) or *; weak tags never match.
 	IfMatch *string `json:"If-Match,omitempty"`
 }
 
 // TasksOpsUpdateParams defines parameters for TasksOpsUpdate.
 type TasksOpsUpdateParams struct {
+	// IfMatch "<version>" (strong ETag of the task) or *; weak tags never match.
 	IfMatch *string `json:"If-Match,omitempty"`
 }
 
