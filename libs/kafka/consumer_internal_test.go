@@ -339,3 +339,11 @@ func (s *safeBuffer) Write(p []byte) (int, error) {
 }
 
 func (s *safeBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return string(s.b) }
+
+// One provider per binary: a second registration is a link error, said loudly.
+func TestRegister_SecondProviderPanics(t *testing.T) {
+	assert.Equal(t, "fake", Provider())
+	assert.PanicsWithValue(t,
+		`kafka: provider "fake" registered while "fake" already is: link exactly one of libs/kafka-rdkafka, libs/kafka-franz`,
+		func() { Register(&fakeDriver{}) })
+}

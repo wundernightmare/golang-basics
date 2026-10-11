@@ -1,8 +1,10 @@
 package rdkafka
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,4 +91,23 @@ func TestNewConsumer_Errors(t *testing.T) {
 	require.Error(t, err)
 	_, err = Driver{}.NewProducer(cfg, slog.New(slog.DiscardHandler))
 	require.Error(t, err)
+}
+
+// Repeats within the fold window are counted, not logged; the next line
+// after the window carries the count. Unparseable statistics are ignored.
+func TestPumpLogs_FoldsRepeats(t *testing.T) {
+	var buf bytes.Buffer
+	logs := make(chan ckafka.LogEvent, 4)
+	ev := ckafka.LogEvent{Level: 3, Tag: "FAIL", Name: "rdkafka#producer-1", Message: "Connect to 127.0.0.1:1 failed"}
+	logs <- ev
+	logs <- ev
+	logs <- ev
+	close(logs)
+	pumpLogs(logs, slog.New(slog.NewJSONHandler(&buf, nil)), "producer")
+	assert.Equal(t, 1, strings.Count(buf.String(), "Connect to"), buf.String())
+	assert.Contains(t, buf.String(), `"level":"WARN"`)
+
+	h := &statsHolder{}
+	h.update("not json")
+	assert.False(t, h.clientStats(kafka.Config{}).Valid)
 }
