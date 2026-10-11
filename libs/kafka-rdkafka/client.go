@@ -46,7 +46,11 @@ const logFoldWindow = time.Minute
 
 // pumpLogs forwards librdkafka's log lines (go.logs.channel.enable) to slog
 // until the channel closes. Levels are syslog's: 0–3 error, 4 warn, 5–6
-// info, 7 debug. A line repeated within logFoldWindow is counted instead of
+// info, 7 debug — except facility FAIL: a broker connection that failed or
+// dropped, which librdkafka retries on its own (reconnect.backoff.ms), is a
+// warning. Whether the service is actually cut off shows in readiness and
+// kafka_client_brokers_up, not in one connect attempt (librdkafka tries every
+// resolved address, so `localhost` alone fails over [::1] first). A line repeated within logFoldWindow is counted instead of
 // logged; the next one after the window carries the count.
 func pumpLogs(logs <-chan ckafka.LogEvent, log *slog.Logger, role string) {
 	type seen struct {
@@ -69,17 +73,24 @@ func pumpLogs(logs <-chan ckafka.LogEvent, log *slog.Logger, role string) {
 		if len(last) > 1000 { // a stream of distinct lines: start over rather than grow
 			last = map[string]*seen{key: last[key]}
 		}
-		level := slog.LevelDebug
-		switch {
-		case ev.Level <= 3:
-			level = slog.LevelError
-		case ev.Level == 4:
-			level = slog.LevelWarn
-		case ev.Level <= 6:
-			level = slog.LevelInfo
-		}
-		log.Log(context.Background(), level, "librdkafka: "+ev.Message, attrs...)
+		log.Log(context.Background(), logLevel(ev), "librdkafka: "+ev.Message, attrs...)
 	}
+}
+
+// logLevel maps a librdkafka log line to slog (see pumpLogs).
+func logLevel(ev ckafka.LogEvent) slog.Level {
+	level := slog.LevelDebug
+	switch {
+	case ev.Level <= 3 && ev.Tag == "FAIL":
+		level = slog.LevelWarn
+	case ev.Level <= 3:
+		level = slog.LevelError
+	case ev.Level == 4:
+		level = slog.LevelWarn
+	case ev.Level <= 6:
+		level = slog.LevelInfo
+	}
+	return level
 }
 
 // rdStats is the subset of librdkafka's statistics JSON (STATISTICS.md)

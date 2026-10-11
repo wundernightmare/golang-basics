@@ -1,6 +1,7 @@
 package rdkafka
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -108,4 +109,24 @@ func TestParseStats(t *testing.T) {
 	assert.Equal(t, int64(12), s.lagSum, "the UA partition and unknown lag are skipped")
 	_, err = parseStats("{")
 	require.Error(t, err)
+}
+
+// A broker connection failure is retried by librdkafka itself: a warning, not
+// an error (localhost resolves to [::1] first, so it shows up on every boot).
+// Every other level-3 line stays an error.
+func TestLogLevel(t *testing.T) {
+	cases := []struct {
+		ev   ckafka.LogEvent
+		want slog.Level
+	}{
+		{ckafka.LogEvent{Level: 3, Tag: "FAIL"}, slog.LevelWarn},
+		{ckafka.LogEvent{Level: 3, Tag: "ERROR"}, slog.LevelError},
+		{ckafka.LogEvent{Level: 0, Tag: "SSL"}, slog.LevelError},
+		{ckafka.LogEvent{Level: 4, Tag: "MAXPOLL"}, slog.LevelWarn},
+		{ckafka.LogEvent{Level: 6, Tag: "CONFWARN"}, slog.LevelInfo},
+		{ckafka.LogEvent{Level: 7, Tag: "BROKER"}, slog.LevelDebug},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, logLevel(c.ev), "%d/%s", c.ev.Level, c.ev.Tag)
+	}
 }

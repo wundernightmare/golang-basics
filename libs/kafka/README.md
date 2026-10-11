@@ -430,7 +430,10 @@ context travels in the record headers. When a record already carries a
 consumer's work joins the request that wrote the event.
 
 **Logs** — librdkafka's own lines go to slog (`facility`, `kafka_client`),
-repeats folded for a minute with a `suppressed` count.
+repeats folded for a minute with a `suppressed` count. Syslog levels 0–3 are
+errors except facility `FAIL` (a broker connection failed or dropped), which
+librdkafka retries itself and is logged as a warning; a broker that stays
+unreachable shows in readiness and `kafka_client_brokers_up`.
 
 ## Tests
 
