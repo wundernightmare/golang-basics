@@ -128,6 +128,61 @@ func TestRequestTimeoutHeader_ShortensNeverExtends(t *testing.T) {
 	}
 }
 
+// A caller cannot ask for less than HTTP_REQUEST_TIMEOUT_MIN: a 1 ms budget
+// would make every request a 504 the server is blamed (and paged) for.
+func TestRequestTimeoutHeader_NotBelowTheFloor(t *testing.T) {
+	remaining := func(cfg, floor time.Duration, header string) time.Duration {
+		srv, _ := loggedServer(t, httpx.Config{RequestTimeout: cfg, RequestTimeoutMin: floor})
+		var left time.Duration
+		srv.Mux().HandleFunc("GET /dl", func(_ http.ResponseWriter, r *http.Request) {
+			dl, ok := r.Context().Deadline()
+			assert.True(t, ok)
+			left = time.Until(dl)
+		})
+		req := httptest.NewRequest(http.MethodGet, "/dl", nil)
+		req.Header.Set(httpx.RequestTimeoutHeader, header)
+		do(srv.Handler(), req)
+		return left
+	}
+	assert.Greater(t, remaining(time.Minute, time.Second, "1"), 900*time.Millisecond, "1 ms is raised to the floor")
+	assert.LessOrEqual(t, remaining(time.Minute, time.Second, "1"), time.Second)
+	assert.LessOrEqual(t, remaining(time.Minute, time.Second, "5000"), 5*time.Second, "above the floor the header still shortens")
+	assert.Greater(t, remaining(time.Minute, time.Second, "5000"), 4*time.Second)
+	assert.LessOrEqual(t, remaining(500*time.Millisecond, 0, "60000"), 500*time.Millisecond, "never extends")
+
+	slow := func(cfg, floor time.Duration) int {
+		srv, _ := loggedServer(t, httpx.Config{RequestTimeout: cfg, RequestTimeoutMin: floor})
+		srv.Mux().HandleFunc("GET /slow", func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+				httpx.WriteError(w, r, r.Context().Err())
+			case <-time.After(150 * time.Millisecond):
+				w.WriteHeader(http.StatusNoContent)
+			}
+		})
+		req := httptest.NewRequest(http.MethodGet, "/slow", nil)
+		req.Header.Set(httpx.RequestTimeoutHeader, "1")
+		return do(srv.Handler(), req).Code
+	}
+	assert.Equal(t, http.StatusNoContent, slow(time.Minute, time.Second), "a 1 ms ask cannot turn a 150 ms request into a 504")
+	assert.Equal(t, http.StatusGatewayTimeout, slow(time.Minute, 0), "without a floor it would")
+}
+
+func TestValidate_RequestTimeoutMin(t *testing.T) {
+	base := func() httpx.Config {
+		return httpx.Config{Addr: ":0", ShutdownTimeout: time.Second, MaxBodyBytes: 1, MaxHeaderBytes: 1, RequestTimeout: time.Second}
+	}
+	c := base()
+	c.RequestTimeoutMin = -time.Millisecond
+	require.ErrorContains(t, c.Validate(), "HTTP_REQUEST_TIMEOUT_MIN must not be negative")
+	c = base()
+	c.RequestTimeoutMin = 2 * time.Second
+	require.ErrorContains(t, c.Validate(), "must not exceed HTTP_REQUEST_TIMEOUT")
+	c = base()
+	c.RequestTimeoutMin = time.Second
+	require.NoError(t, c.Validate())
+}
+
 func TestNewServer_NilLoggerIsDiscarded(t *testing.T) {
 	srv, err := httpx.NewServer(httpx.Config{Addr: ":0"}, nil)
 	require.NoError(t, err)
