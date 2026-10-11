@@ -8,12 +8,14 @@ import (
 	"time"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
 	_ "github.com/tracehubmmp/golang-basics/libs/kafka-rdkafka"
 	"github.com/tracehubmmp/golang-basics/libs/kafka/kafkatest"
+	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/libs/testx/containers"
 )
 
@@ -107,4 +109,47 @@ func TestValidate_PassthroughCannotOverrideNamedKeys(t *testing.T) {
 	assert.NotContains(t, err.Error(), "hunter2", "values are never echoed")
 	assert.NotContains(t, err.Error(), "debug")
 	assert.NotContains(t, err.Error(), "batch.size")
+}
+
+// A static member fenced by another instance with its group.instance.id is a
+// fatal librdkafka error: Run ends with kafka.ErrClientFailed (the service
+// exits and restarts) and readiness fails — the loop no longer polls a dead
+// client while /readyz stays green.
+func TestFencedStaticMemberStopsTheLoop(t *testing.T) {
+	topic := testx.Unique("fenced")
+	harness.CreateTopic(t, 1, topic)
+	cfg := func() kafka.Config {
+		return kafka.Config{
+			Brokers: containers.Kafka(t), Topics: []string{topic}, Group: "g-" + topic,
+			ClientID: testx.Unique("cons"), StatisticsInterval: -1, SessionTimeoutMs: 10_000,
+			ConsumerExtraProperties: kafka.Properties{"group.instance.id": "member-1"},
+		}
+	}
+	handle := func(context.Context, kafka.Message) error { return nil }
+
+	first, err := kafka.NewConsumer(t.Context(), cfg(), nil)
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() { done <- first.Run(context.Background(), handle) }()
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(first.Collectors()...)
+	require.Eventually(t, func() bool { return testx.Metric(t, reg, "kafka_consumer_assigned_partitions", nil) == 1 },
+		30*time.Second, 100*time.Millisecond, "the first member joins")
+
+	second, err := kafka.NewConsumer(t.Context(), cfg(), nil)
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = second.Run(ctx, handle) }()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, kafka.ErrClientFailed)
+		t.Logf("first member stopped: %v", err)
+	case <-time.After(60 * time.Second):
+		t.Fatal("the fenced member kept polling")
+	}
+	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer rcancel()
+	require.Error(t, first.ReadyCheck()(rctx), "readiness fails on the dead client")
 }

@@ -61,7 +61,8 @@ type ProducerClient interface {
 type ConsumerClient interface {
 	// Poll returns up to max records, waiting while there are none until
 	// ctx ends. Fetch errors that do not stop the client are returned next
-	// to the records (errors.Join); [ErrClientClosed] once it is closed.
+	// to the records (errors.Join); [ErrClientClosed] once it is closed;
+	// an error wrapping [ErrClientFailed] when the client failed for good.
 	// Records of a partition revoked during the call are not returned.
 	Poll(ctx context.Context, max int) ([]Message, error)
 	// Commit commits the given next offsets (last processed + 1)
@@ -120,6 +121,13 @@ type ClientStats struct {
 // ErrClientClosed is what [ConsumerClient.Poll] returns once the client is
 // closed.
 var ErrClientClosed = errors.New("kafka: client closed")
+
+// ErrClientFailed marks an error the client cannot recover from (librdkafka's
+// fatal errors: a static group member fenced by another instance with its
+// group.instance.id, lost idempotent-producer state). A consumer's Poll
+// returning it ends [Consumer.Run] with that error — the loop must not keep
+// polling a dead client while readiness stays green.
+var ErrClientFailed = errors.New("kafka: client failed")
 
 var (
 	driverMu sync.Mutex
