@@ -110,8 +110,10 @@ func run(cfg config.Config) error {
 		taskCache = cache.New(vk, cfg.Cache.TTL, cfg.Cache.TombstoneTTL, logger)
 	}
 
-	// Without Kafka there is no relay: events wait in the outbox.
-	var relay *outbox.Relay
+	// Without Kafka the relay publishes nothing — events wait in the outbox —
+	// but still keeps outbox_pending / outbox_relay_lag_seconds current, so
+	// the backlog of a deploy that lost its broker address is visible.
+	var pub outbox.Publisher // nil interface: no Kafka
 	committed := func() {}
 	if cfg.KafkaEnabled() {
 		producer, err := kafka.NewProducer(bootCtx, cfg.Kafka, logger)
@@ -120,16 +122,20 @@ func run(cfg config.Config) error {
 			return err
 		}
 		defer producer.Close()
-		relay = outbox.NewRelay(db.Pool(), producer, outbox.Config{
-			Topic:        cfg.Kafka.Topic,
-			PollInterval: cfg.Outbox.PollInterval,
-			BatchSize:    cfg.Outbox.BatchSize,
-			MaxBackoff:   cfg.Outbox.MaxBackoff,
-			MaxAttempts:  cfg.Outbox.MaxAttempts,
-		}, logger)
 		srv.Health.Register("kafka", producer.ReadyCheck(), httpx.Optional())
 		srv.Metrics.Registry.MustRegister(producer.Collectors()...)
-		srv.Metrics.Registry.MustRegister(relay.Collectors()...)
+		pub = producer
+	}
+	relay := outbox.NewRelay(db.Pool(), pub, outbox.Config{
+		Topic:         cfg.Kafka.Topic,
+		PollInterval:  cfg.Outbox.PollInterval,
+		BatchSize:     cfg.Outbox.BatchSize,
+		MaxBackoff:    cfg.Outbox.MaxBackoff,
+		MaxAttempts:   cfg.Outbox.MaxAttempts,
+		RejectBackoff: cfg.Outbox.RejectBackoff,
+	}, logger)
+	srv.Metrics.Registry.MustRegister(relay.Collectors()...)
+	if pub != nil {
 		committed = relay.Wake
 	}
 
@@ -152,7 +158,7 @@ func run(cfg config.Config) error {
 	return nil
 }
 
-// serve runs the HTTP server, the outbox relay (nil without Kafka) and the
+// serve runs the HTTP server, the outbox relay (watching only, without Kafka) and the
 // idempotency-key janitor until ctx is cancelled or one of them fails. Shutdown order: the
 // server drains first (no new writes), then the relay and the janitor stop —
 // the relay finishing its batch so what the broker acknowledged is not sent
@@ -168,9 +174,7 @@ func serve(ctx context.Context, srv *httpx.Server, relay *outbox.Relay, st *stor
 		defer stopWorkers()
 		return srv.Run(gctx)
 	})
-	if relay != nil {
-		g.Go(func() error { return relay.Run(workers) })
-	}
+	g.Go(func() error { return relay.Run(workers) })
 	g.Go(func() error {
 		return st.RunJanitor(workers, cfg.Idempotency.TTL, cfg.Idempotency.PurgeInterval, log)
 	})

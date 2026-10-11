@@ -78,6 +78,9 @@ type OutboxConfig struct {
 	// the table (outbox_dead) and stops blocking the rest. Outages are never
 	// counted.
 	MaxAttempts int `env:"OUTBOX_MAX_ATTEMPTS" envDefault:"10" yaml:"max_attempts"`
+	// RejectBackoff is the wait before a rejected event is tried again,
+	// doubled per rejection (capped at an hour): ten tries span minutes.
+	RejectBackoff time.Duration `env:"OUTBOX_REJECT_BACKOFF" envDefault:"1s" yaml:"reject_backoff"`
 }
 
 // IdempotencyConfig tunes Idempotency-Key retention.
@@ -181,6 +184,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Outbox.MaxAttempts < 1 {
 		errs = append(errs, fmt.Errorf("OUTBOX_MAX_ATTEMPTS must be at least 1, got %d", c.Outbox.MaxAttempts))
+	}
+	if c.Outbox.RejectBackoff <= 0 {
+		errs = append(errs, fmt.Errorf("OUTBOX_REJECT_BACKOFF must be positive, got %s", c.Outbox.RejectBackoff))
 	}
 	if c.Idempotency.TTL <= 0 || c.Idempotency.PurgeInterval <= 0 {
 		errs = append(errs, errors.New("IDEMPOTENCY_KEY_TTL and IDEMPOTENCY_PURGE_INTERVAL must be positive"))

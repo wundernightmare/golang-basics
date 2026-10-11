@@ -173,6 +173,10 @@ func TestPostgresOnly(t *testing.T) {
 	var n int
 	require.NoError(t, w.db.Pool().QueryRow(context.Background(), `SELECT count(*) FROM outbox`).Scan(&n))
 	assert.Equal(t, 2, n, "created + updated wait in the outbox")
+	require.Eventually(t, func() bool {
+		return testx.Metric(t, w.srv.Metrics.Registry, "outbox_pending", nil) == 2
+	}, 5*time.Second, 50*time.Millisecond, "the backlog is visible on /metrics without a broker")
+	assert.Positive(t, testx.Metric(t, w.srv.Metrics.Registry, "outbox_relay_lag_seconds", nil), "and it ages")
 }
 
 func TestIdempotentCreateOverHTTP(t *testing.T) {
