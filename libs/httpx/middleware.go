@@ -173,7 +173,7 @@ func (s *Server) entry(next http.Handler) http.Handler {
 		info := &reqInfo{id: id, rw: rw, log: s.log, clientIP: s.clientIP(r, peer, trusted)}
 		ctx := context.WithValue(r.Context(), reqInfoKey{}, info)
 		ctx = WithRequestID(ctx, id)
-		if budget := requestBudget(s.cfg.RequestTimeout, r.Header.Get(RequestTimeoutHeader)); budget > 0 {
+		if budget := requestBudget(s.cfg.RequestTimeout, s.cfg.RequestTimeoutMin, r.Header.Get(RequestTimeoutHeader)); budget > 0 {
 			var cancel context.CancelFunc
 			ctx, cancel = context.WithTimeout(ctx, budget)
 			defer cancel()
@@ -186,14 +186,16 @@ func (s *Server) entry(next http.Handler) http.Handler {
 // RequestTimeoutHeader lets a caller with less time than HTTP_REQUEST_TIMEOUT
 // say so: the request's deadline becomes the shorter of the two, so the work
 // stops (504) when the caller has given up rather than when the server would.
-// It never extends the server's budget. Any client may send it — shortening
-// its own request harms no one.
+// It never extends the server's budget, and never shortens it below
+// HTTP_REQUEST_TIMEOUT_MIN: any client may send it, and a budget it cannot
+// meet would only turn its own requests into 5xx on the server's dashboards.
 const RequestTimeoutHeader = "X-Request-Timeout-Ms"
 
 // requestBudget is the deadline of one request: the configured timeout (≤ 0 =
-// none), shortened by a valid X-Request-Timeout-Ms. A value that is not 1 to 9
-// decimal digits, or is zero, is ignored, as if it were absent.
-func requestBudget(configured time.Duration, header string) time.Duration {
+// none), shortened by a valid X-Request-Timeout-Ms but not below floor. A
+// value that is not 1 to 9 decimal digits, or is zero, is ignored, as if it
+// were absent.
+func requestBudget(configured, floor time.Duration, header string) time.Duration {
 	if header == "" || len(header) > 9 || strings.Trim(header, "0123456789") != "" {
 		return configured
 	}
@@ -201,7 +203,7 @@ func requestBudget(configured time.Duration, header string) time.Duration {
 	if ms <= 0 {
 		return configured
 	}
-	asked := time.Duration(ms) * time.Millisecond
+	asked := max(time.Duration(ms)*time.Millisecond, floor)
 	if configured > 0 && configured < asked {
 		return configured
 	}
