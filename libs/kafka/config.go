@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -399,12 +400,64 @@ func (c *Config) validateSecurity() []error {
 	if (c.SSLCertificateLocation == "") != (c.SSLKeyLocation == "") {
 		errs = append(errs, errors.New("KAFKA_SSL_CERTIFICATE_LOCATION and KAFKA_SSL_KEY_LOCATION must be set together"))
 	}
+	errs = append(errs, c.validateFiles()...)
 	switch c.SSLEndpointIdentificationAlgorithm {
 	case "", "https", "none":
 	default:
 		errs = append(errs, fmt.Errorf("KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: want https|none, got %q", c.SSLEndpointIdentificationAlgorithm))
 	}
 	return errs
+}
+
+// validateFiles checks that every file the security keys name is there and
+// readable (the password file also not empty), so a missing secret or
+// certificate mount fails the boot — and --check-config — with the key's
+// name instead of a TLS or SASL error from the client later.
+// KAFKA_SSL_CA_LOCATION may also be a directory of certificates, or
+// librdkafka's "probe" (find the system's).
+func (c *Config) validateFiles() []error {
+	var errs []error
+	if c.SASLPasswordFile != "" {
+		b, err := os.ReadFile(c.SASLPasswordFile)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("KAFKA_SASL_PASSWORD_FILE: %w", err))
+		case strings.TrimRight(string(b), "\r\n") == "":
+			errs = append(errs, fmt.Errorf("KAFKA_SASL_PASSWORD_FILE: %s is empty", c.SASLPasswordFile))
+		}
+	}
+	for key, path := range map[string]string{
+		"KAFKA_SSL_CA_LOCATION":          c.SSLCALocation,
+		"KAFKA_SSL_CERTIFICATE_LOCATION": c.SSLCertificateLocation,
+		"KAFKA_SSL_KEY_LOCATION":         c.SSLKeyLocation,
+	} {
+		if path == "" || (key == "KAFKA_SSL_CA_LOCATION" && path == "probe") {
+			continue
+		}
+		if err := readable(path, key == "KAFKA_SSL_CA_LOCATION"); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", key, err))
+		}
+	}
+	slices.SortFunc(errs, func(a, b error) int { return strings.Compare(a.Error(), b.Error()) })
+	return errs
+}
+
+// readable reports why path cannot be read: missing, unreadable, or a
+// directory where a file is wanted.
+func readable(path string, dirOK bool) error {
+	f, err := os.Open(path) //nolint:gosec // operator-supplied config path
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.IsDir() && !dirOK {
+		return fmt.Errorf("%s is a directory", path)
+	}
+	return nil
 }
 
 // validateBuffers checks the memory bounds against each other the way

@@ -223,7 +223,8 @@ func TestProducer_FullBufferWaitsWithinBudget(t *testing.T) {
 
 func TestDriver_ClientsFailOnBadSecurity(t *testing.T) {
 	cfg := kafka.Config{Brokers: []string{"127.0.0.1:1"}, SecurityProtocol: "ssl", SSLCALocation: "/nonexistent/ca.crt"}
-	require.NoError(t, cfg.Validate())
+	require.ErrorContains(t, cfg.Validate(), "KAFKA_SSL_CA_LOCATION", "the boot catches it first…")
+	// …and a client built without Validate still refuses it.
 	_, err := Driver{}.NewProducer(cfg, nil)
 	require.Error(t, err)
 	_, err = Driver{}.NewConsumer(cfg, nil, kafka.Rebalance{})
