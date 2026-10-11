@@ -127,3 +127,32 @@ func TestConfigReference_HidesSecrets(t *testing.T) {
 	assert.Regexp(t, `SVC_ADMIN_TOKEN\s+admin_token\s+\(secret\)`, out.String())
 	assert.Regexp(t, `SVC_DEBUG_TOKEN\s+debug_token\s+-`, out.String())
 }
+
+func TestBoot_UnexpectedArgumentIsUsage(t *testing.T) {
+	b := testBoot(func() (bootConfig, error) { return bootConfig{}, nil })
+	_, code, ok, _, errOut := runBoot(b, "serve")
+	assert.False(t, ok)
+	assert.Equal(t, httpx.ExitUsage, code)
+	assert.Contains(t, errOut, `unexpected argument "serve"`)
+}
+
+// The reference skips unexported fields, shows a key kept out of YAML as
+// "-", and never prints a secret that has a value.
+func TestConfigReference_HiddenAndSecretFields(t *testing.T) {
+	type cfg struct {
+		hidden   string        //nolint:unused // proves unexported fields are skipped
+		Token    string        `env:"TOKEN" secret:"true" yaml:"token"`
+		EnvOnly  string        `env:"ENV_ONLY" yaml:"-"`
+		Empty    string        `env:"EMPTY" yaml:"empty"`
+		Duration time.Duration `env:"WAIT" yaml:"wait"`
+	}
+	var out bytes.Buffer
+	httpx.ConfigReference(&out, "SVC_", cfg{Token: "s3cret", EnvOnly: "x", Duration: time.Second})
+	ref := out.String()
+	assert.NotContains(t, ref, "s3cret")
+	assert.Regexp(t, `SVC_TOKEN\s+token\s+\(secret\)`, ref)
+	assert.Regexp(t, `SVC_ENV_ONLY\s+-\s+x`, ref)
+	assert.Regexp(t, `SVC_EMPTY\s+empty\s+-`, ref)
+	assert.Regexp(t, `SVC_WAIT\s+wait\s+1s`, ref)
+	assert.NotContains(t, ref, "hidden")
+}

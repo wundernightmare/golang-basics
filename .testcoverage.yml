@@ -28,6 +28,7 @@ exclude:
   paths:
     - ^libs/[^/]+/doc\.go$
     - ^libs/testx/      # the harness (testx, testx/containers, testx/contract) is not a coverage target
+    - ^libs/kafka/kafkatest/  # the Kafka provider conformance suite: harness too, run by both providers' tests
     - ^e2e/             # the e2e suite drives binaries; it is test code, not a target
     - ^libs/contracts/  # generated from api/tsp — no logic to cover
     - \.gen\.go$
