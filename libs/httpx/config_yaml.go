@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"reflect"
 	"time"
@@ -20,10 +19,12 @@ import (
 //
 //	environment variable  >  YAML file value  >  envDefault tag  >  zero value
 //
-// A missing file at path is not an error (the service falls back to env-only),
-// so the same binary runs from a mounted config.yaml in production and from
-// bare env vars in a test or container. Unknown YAML keys are an error: a
-// typo must not silently become a default.
+// An empty path is env-only configuration, so the same binary runs from a
+// mounted config.yaml in production and from bare env vars in a test or
+// container. A path that is set must name a readable file: a typo in it (or
+// a ConfigMap that was not mounted) is an error, not a silent fall-back to
+// the defaults. Unknown YAML keys are an error too: a typo must not silently
+// become a default.
 //
 // Defaults come from the envDefault tags, so a service config can embed the
 // libs' Config structs directly instead of copying fields by hand:
@@ -53,17 +54,13 @@ func LoadYAML[T any](path, prefix string, dst *T) error {
 	// 2. The file, when there is one: yaml only touches the keys it finds.
 	if path != "" {
 		data, err := os.ReadFile(path) //nolint:gosec // path is operator-supplied config, not user input
-		switch {
-		case err == nil:
-			dec := yaml.NewDecoder(bytes.NewReader(data))
-			dec.KnownFields(true)
-			if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) { // an empty file is an empty config
-				return fmt.Errorf("httpx: parse yaml %q: %w", path, err)
-			}
-		case errors.Is(err, fs.ErrNotExist):
-			// No file — env-only configuration, which is valid.
-		default:
+		if err != nil {
 			return fmt.Errorf("httpx: read yaml %q: %w", path, err)
+		}
+		dec := yaml.NewDecoder(bytes.NewReader(data))
+		dec.KnownFields(true)
+		if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) { // an empty file is an empty config
+			return fmt.Errorf("httpx: parse yaml %q: %w", path, err)
 		}
 	}
 

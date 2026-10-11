@@ -58,8 +58,10 @@ func TestProperties_SecurityAndPassthrough(t *testing.T) {
 	dir := t.TempDir()
 	pw := filepath.Join(dir, "password")
 	require.NoError(t, os.WriteFile(pw, []byte("s3cret\n"), 0o600))
+	ca := filepath.Join(dir, "ca.crt")
+	require.NoError(t, os.WriteFile(ca, []byte("x"), 0o600))
 	cfg := defaulted(t, kafka.Config{Brokers: []string{"b:9093"}, SecurityProtocol: "SASL_SSL", SASLMechanism: "scram-sha-512",
-		SASLUsername: "app", SASLPasswordFile: pw, SSLCALocation: "/certs/ca.crt",
+		SASLUsername: "app", SASLPasswordFile: pw, SSLCALocation: ca,
 		ExtraProperties: kafka.Properties{"socket.timeout.ms": "30000"}, ConsumerExtraProperties: kafka.Properties{"fetch.wait.max.ms": "100"}})
 	c, err := consumerProperties(cfg)
 	require.NoError(t, err)
@@ -67,7 +69,7 @@ func TestProperties_SecurityAndPassthrough(t *testing.T) {
 	assert.Equal(t, "SCRAM-SHA-512", c["sasl.mechanism"])
 	assert.Equal(t, "app", c["sasl.username"])
 	assert.Equal(t, "s3cret", c["sasl.password"], "read from the file, trailing newline dropped")
-	assert.Equal(t, "/certs/ca.crt", c["ssl.ca.location"])
+	assert.Equal(t, ca, c["ssl.ca.location"])
 	assert.Equal(t, "30000", c["socket.timeout.ms"])
 	assert.Equal(t, "100", c["fetch.wait.max.ms"])
 	p, err := producerProperties(cfg)

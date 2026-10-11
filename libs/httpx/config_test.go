@@ -1,6 +1,7 @@
 package httpx_test
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -210,15 +211,22 @@ func TestLoadYAML_EnvOverlaysFile(t *testing.T) {
 	assert.Equal(t, 4, cfg.Workers, "…but a field without an env override keeps its YAML value")
 }
 
-func TestLoadYAML_MissingFileIsEnvOnly(t *testing.T) {
+func TestLoadYAML_NoPathIsEnvOnly(t *testing.T) {
 	t.Setenv(envPrefix+"HTTP_ADDR", ":8080")
 
 	var cfg sampleConfig
-	require.NoError(t, httpx.LoadYAML(filepath.Join(t.TempDir(), "absent.yaml"), envPrefix, &cfg))
-	assert.Equal(t, ":8080", cfg.Addr, "a missing file is not an error; env-only config still loads")
+	require.NoError(t, httpx.LoadYAML("", envPrefix, &cfg), "no path: env-only")
+	assert.Equal(t, ":8080", cfg.Addr)
 	assert.Equal(t, 0, cfg.Workers)
+}
 
-	require.NoError(t, httpx.LoadYAML("", envPrefix, &cfg), "no path at all is env-only too")
+// A path that is set but names no file is a mistake (a typo, a ConfigMap that
+// was not mounted) — never a silent fall-back to the defaults.
+func TestLoadYAML_MissingFileIsAnError(t *testing.T) {
+	var cfg sampleConfig
+	err := httpx.LoadYAML(filepath.Join(t.TempDir(), "absent.yaml"), envPrefix, &cfg)
+	require.ErrorIs(t, err, fs.ErrNotExist)
+	assert.ErrorContains(t, err, "absent.yaml")
 }
 
 func TestLoadYAML_PrecedenceEnvThenYAMLThenDefault(t *testing.T) {

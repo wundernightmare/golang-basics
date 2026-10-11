@@ -165,6 +165,9 @@ func (c *Config) Validate() error {
 	if c.Postgres.URL == "" && c.Postgres.Host == "" {
 		errs = append(errs, errors.New("DATABASE_URL or DB_HOST must be set"))
 	}
+	if err := c.Postgres.Validate(); err != nil {
+		errs = append(errs, err)
+	}
 	if c.KafkaEnabled() {
 		if c.Kafka.Topic == "" {
 			errs = append(errs, errors.New("KAFKA_TOPIC must be set: it is where the task events go"))

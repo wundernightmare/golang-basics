@@ -2,6 +2,7 @@ package kafka
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -72,14 +73,17 @@ func TestConfig_LoadYAMLNested(t *testing.T) {
 	type svc struct {
 		Kafka Config `yaml:"kafka"`
 	}
-	path := filepath.Join(t.TempDir(), "config.yaml")
+	dir := t.TempDir()
+	ca := filepath.Join(dir, "ca.crt")
+	require.NoError(t, os.WriteFile(ca, []byte("-----BEGIN CERTIFICATE-----\n"), 0o600))
+	path := filepath.Join(dir, "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`kafka:
   brokers: [b:9092]
   topic: from-yaml
   security_protocol: sasl_ssl
   sasl_mechanism: SCRAM-SHA-512
   sasl_username: u
-  ssl_ca_location: /etc/kafka/ca.crt
+  ssl_ca_location: `+ca+`
   consumer_max_retries: 2
   producer_queue_max_kbytes: 32768
   extra_properties:
@@ -105,10 +109,13 @@ func TestConfig_LoadYAMLNested(t *testing.T) {
 	assert.Equal(t, "[redacted]", k["sasl_password"], "the password never reaches /admin/config")
 	assert.Equal(t, "[redacted]", k["extra_properties"].(map[string]any)["sasl.oauthbearer.client.secret"], "nor a secret property")
 	assert.Equal(t, "30000", k["extra_properties"].(map[string]any)["socket.timeout.ms"])
-	assert.Equal(t, "/etc/kafka/ca.crt", k["ssl_ca_location"])
+	assert.Equal(t, ca, k["ssl_ca_location"])
 }
 
 func TestConfig_Validate(t *testing.T) {
+	dir := t.TempDir()
+	pw := filepath.Join(dir, "pw")
+	require.NoError(t, os.WriteFile(pw, []byte("s3cret\n"), 0o600))
 	cases := map[string]struct {
 		cfg  Config
 		want string
@@ -116,8 +123,8 @@ func TestConfig_Validate(t *testing.T) {
 		"defaults are valid":           {cfg: Config{}},
 		"no brokers":                   {cfg: Config{Brokers: []string{}}, want: "KAFKA_BROKERS must be set"},
 		"unknown protocol":             {cfg: Config{SecurityProtocol: "tls"}, want: "unknown protocol"},
-		"sasl password and its file":   {cfg: Config{SecurityProtocol: "sasl_ssl", SASLMechanism: "PLAIN", SASLUsername: "u", SASLPassword: "p", SASLPasswordFile: "/run/pw"}, want: "pick one"},
-		"sasl password from a file":    {cfg: Config{SecurityProtocol: "sasl_ssl", SASLMechanism: "PLAIN", SASLUsername: "u", SASLPasswordFile: "/run/pw"}},
+		"sasl password and its file":   {cfg: Config{SecurityProtocol: "sasl_ssl", SASLMechanism: "PLAIN", SASLUsername: "u", SASLPassword: "p", SASLPasswordFile: pw}, want: "pick one"},
+		"sasl password from a file":    {cfg: Config{SecurityProtocol: "sasl_ssl", SASLMechanism: "PLAIN", SASLUsername: "u", SASLPasswordFile: pw}},
 		"unknown sasl":                 {cfg: Config{SecurityProtocol: "sasl_ssl", SASLMechanism: "gssapi"}, want: "unknown mechanism"},
 		"sasl without a mechanism":     {cfg: Config{SecurityProtocol: "sasl_plaintext"}, want: "needs KAFKA_SASL_MECHANISM"},
 		"sasl without credentials":     {cfg: Config{SecurityProtocol: "sasl_ssl", SASLMechanism: "PLAIN"}, want: "needs KAFKA_SASL_USERNAME"},
@@ -151,6 +158,50 @@ func TestConfig_Validate(t *testing.T) {
 	}
 }
 
+// Every file a security key names is checked at Validate — what boot and
+// --check-config run — so a missing secret or certificate mount is a config
+// error with the key's name, not a TLS/SASL failure once the client dials.
+func TestConfig_ValidateChecksTheFilesItNames(t *testing.T) {
+	dir := t.TempDir()
+	file := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(p, []byte(body), 0o600))
+		return p
+	}
+	ca, cert, key, pw, empty := file("ca.pem", "x"), file("c.pem", "x"), file("k.pem", "x"), file("pw", "s3cret\n"), file("empty", "\n")
+	missing := filepath.Join(dir, "nope")
+	tls := func(c Config) Config {
+		c.Brokers, c.SecurityProtocol = []string{"b:9092"}, "ssl"
+		return c
+	}
+	sasl := func(file string) Config {
+		return Config{Brokers: []string{"b:9092"}, SecurityProtocol: "sasl_ssl", SASLMechanism: "PLAIN", SASLUsername: "u", SASLPasswordFile: file}
+	}
+	for name, tc := range map[string]struct {
+		cfg  Config
+		want string
+	}{
+		"all present":           {cfg: tls(Config{SSLCALocation: ca, SSLCertificateLocation: cert, SSLKeyLocation: key})},
+		"CA directory":          {cfg: tls(Config{SSLCALocation: dir})},
+		"CA probe":              {cfg: tls(Config{SSLCALocation: "probe"})},
+		"missing CA":            {cfg: tls(Config{SSLCALocation: missing}), want: "KAFKA_SSL_CA_LOCATION: open " + missing},
+		"missing client key":    {cfg: tls(Config{SSLCertificateLocation: cert, SSLKeyLocation: missing}), want: "KAFKA_SSL_KEY_LOCATION"},
+		"client cert directory": {cfg: tls(Config{SSLCertificateLocation: dir, SSLKeyLocation: key}), want: "KAFKA_SSL_CERTIFICATE_LOCATION: " + dir + " is a directory"},
+		"password file":         {cfg: sasl(pw)},
+		"missing password file": {cfg: sasl(missing), want: "KAFKA_SASL_PASSWORD_FILE: open " + missing},
+		"empty password file":   {cfg: sasl(empty), want: "KAFKA_SASL_PASSWORD_FILE: " + empty + " is empty"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if tc.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
 func TestDeadLetterTopic(t *testing.T) {
 	assert.Equal(t, "orders.dlq", Config{DeadLetterTopic: "{topic}.dlq"}.deadLetterTopic("orders"))
 	assert.Equal(t, "parked", Config{DeadLetterTopic: "parked"}.deadLetterTopic("orders"))
@@ -169,4 +220,42 @@ func TestSendError(t *testing.T) {
 		"a spent deadline is never the record's fault")
 	assert.False(t, Rejected(errors.New("plain")))
 	assert.False(t, Rejected(nil))
+}
+
+// Pass-through properties reach GET /admin/config through httpx.Redact: every
+// librdkafka property that carries a secret inline must come out redacted,
+// paths and plain settings must not.
+func TestConfig_RedactsSecretPassThroughProperties(t *testing.T) {
+	t.Parallel()
+	secrets := []string{
+		"sasl.password",
+		"sasl.oauthbearer.config",
+		"sasl.oauthbearer.client.secret",
+		"sasl.oauthbearer.assertion.private.key.pem",
+		"sasl.oauthbearer.assertion.private.key.passphrase",
+		"ssl.key.pem",
+		"ssl.key.password",
+		"ssl.keystore.password",
+	}
+	plain := map[string]string{"ssl.key.location": "/etc/kafka/client.key", "linger.ms": "5", "debug": "broker"}
+	props := Properties{}
+	for _, k := range secrets {
+		props[k] = "s3cret-" + k
+	}
+	for k, v := range plain {
+		props[k] = v
+	}
+	out, err := json.Marshal(httpx.Redact(Config{ExtraProperties: props}))
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(out, &got))
+	extra, ok := got["extra_properties"].(map[string]any)
+	require.True(t, ok, "%s", out)
+	for _, k := range secrets {
+		assert.Equal(t, "[redacted]", extra[k], k)
+	}
+	for k, v := range plain {
+		assert.Equal(t, v, extra[k], k)
+	}
+	assert.NotContains(t, string(out), "s3cret")
 }

@@ -15,7 +15,10 @@ const redactedValue = "[redacted]"
 // secretFieldName matches field / map-key names that are secrets by
 // convention, so a config struct is safe to expose even where its author
 // forgot the tag. Explicit `secret:"true"` / `secret:"false"` tags override.
-var secretFieldName = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|credential|dsn|auth|cert)`)
+// It covers pass-through client properties too, where a key holds inline key
+// material rather than a path: librdkafka's ssl.key.pem, ssl.keystore.*,
+// sasl.oauthbearer.assertion.private.key.{pem,passphrase}.
+var secretFieldName = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|api[_-]?key|private[_.-]?key|credential|dsn|auth|cert|key[_.-]?pem|keystore|passphrase)`)
 
 // secretParam matches URL query parameters and keyword-DSN keys whose value
 // is a secret (?sslpassword=…, ?token=…, "host=db password=x").

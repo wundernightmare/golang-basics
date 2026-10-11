@@ -252,6 +252,20 @@ func TestNew_PasswordFile(t *testing.T) {
 	}
 }
 
+// Validate checks the password file without connecting, so --check-config
+// and the boot catch a missing secret mount before the first dial.
+func TestConfig_ValidatePasswordFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(dir+"/pw", []byte("s3cret\n"), 0o600))
+	require.NoError(t, os.WriteFile(dir+"/empty", []byte("\n"), 0o600))
+
+	require.NoError(t, pgx.Config{}.Validate(), "no file: nothing to check")
+	require.NoError(t, pgx.Config{PasswordFile: dir + "/pw"}.Validate())
+	require.ErrorContains(t, pgx.Config{PasswordFile: dir + "/nope"}.Validate(), "DB_PASSWORD_FILE: open "+dir+"/nope")
+	require.ErrorContains(t, pgx.Config{PasswordFile: dir + "/empty"}.Validate(), "DB_PASSWORD_FILE: "+dir+"/empty is empty")
+}
+
 func TestReadyCheckFailsWhenClosed(t *testing.T) {
 	cfg, _ := schemaConfig(t)
 	ctx := context.Background()
