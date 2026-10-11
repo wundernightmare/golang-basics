@@ -23,6 +23,7 @@ import (
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/outbox"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/store"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/testsupport"
+	"github.com/tracehubmmp/golang-basics/services/tasks/migrations"
 )
 
 func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }
@@ -305,5 +306,7 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	db := testsupport.MigratedDB(t, dsn)
 	var n int
 	require.NoError(t, db.Pool().QueryRow(context.Background(), `SELECT count(*) FROM schema_migrations`).Scan(&n))
-	assert.Equal(t, 4, n)
+	all, err := pgx.LoadMigrations(migrations.FS)
+	require.NoError(t, err)
+	assert.Equal(t, len(all), n, "each embedded migration applied once")
 }

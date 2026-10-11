@@ -57,7 +57,7 @@ type wired struct {
 	srv   *httpx.Server
 	db    *pgx.DB
 	store *store.Store
-	relay *outbox.Relay // nil without brokers
+	relay *outbox.Relay // publishes nothing without brokers
 	log   *testx.LogBuffer
 	topic string
 }
@@ -96,7 +96,7 @@ func wire(t testing.TB, d deps) *wired {
 		taskCache = cache.New(vk, time.Minute, 2*time.Second, log)
 	}
 
-	var relay *outbox.Relay
+	var pub outbox.Publisher // nil without brokers: the relay only watches the backlog
 	committed := func() {}
 	if len(d.brokers) > 0 {
 		producer, err := kafka.NewProducer(ctx, kafka.Config{
@@ -105,12 +105,15 @@ func wire(t testing.TB, d deps) *wired {
 		}, log)
 		require.NoError(t, err)
 		t.Cleanup(producer.Close)
-		relay = outbox.NewRelay(db.Pool(), producer, outbox.Config{
-			Topic: topic, PollInterval: 200 * time.Millisecond, MaxBackoff: time.Second,
-		}, log)
 		srv.Health.Register("kafka", producer.ReadyCheck(), httpx.Optional())
 		srv.Metrics.Registry.MustRegister(producer.Collectors()...)
-		srv.Metrics.Registry.MustRegister(relay.Collectors()...)
+		pub = producer
+	}
+	relay := outbox.NewRelay(db.Pool(), pub, outbox.Config{
+		Topic: topic, PollInterval: 200 * time.Millisecond, MaxBackoff: time.Second,
+	}, log)
+	srv.Metrics.Registry.MustRegister(relay.Collectors()...)
+	if pub != nil {
 		committed = relay.Wake
 	}
 
@@ -120,11 +123,7 @@ func wire(t testing.TB, d deps) *wired {
 	runCtx, stop := context.WithCancel(ctx)
 	serverDone, relayDone := make(chan error, 1), make(chan error, 1)
 	go func() { serverDone <- srv.Run(runCtx) }()
-	if relay != nil {
-		go func() { relayDone <- relay.Run(runCtx) }()
-	} else {
-		relayDone <- nil
-	}
+	go func() { relayDone <- relay.Run(runCtx) }()
 	t.Cleanup(func() {
 		stop()
 		<-serverDone
