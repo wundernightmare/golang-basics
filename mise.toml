@@ -63,8 +63,12 @@ pnpm = "11.28.4"
 # Schemathesis is not a mise tool but a pinned image (scripts/schemathesis.sh
 # runs it with docker; the GitLab job uses it as the job image). The tag lives
 # here so scripts/mise-pins.sh reads it like every other pin and `mise env`
-# exports it locally.
-SCHEMATHESIS_VERSION = "4.29.1"
+# exports it locally. Held at 4.27: 4.29's stateful phase sends an
+# Idempotency-Key of 255 characters plus a trailing space as "too long", but
+# HTTP strips the surrounding whitespace before the server sees the value
+# (RFC 9110 §5.5, net/http does), so the 255-character key is accepted and
+# Schemathesis reports a violation that cannot exist on the wire.
+SCHEMATHESIS_VERSION = "4.27.0"
 # Load the (gitignored) .env so the mise shims see the same proxy / registry /
 # GOPROXY settings `just` loads via `set dotenv-load`. Silently skipped when
 # the file is absent — an open-network clone needs no .env at all. Every knob
