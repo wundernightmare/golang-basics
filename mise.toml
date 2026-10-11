@@ -30,11 +30,12 @@
 # and hands the pins to both pipelines (image tags, `go install …@vX`).
 
 [tools]
-# Pinned to the latest 1.27.x. The module `go` directives (go.mod / go.work)
-# target the same version to match; golangci-lint must be built with a Go at
-# least as new (see CLAUDE.md "Go version").
-go            = "1.27.0"
-golangci-lint = "2.13.2"
+# Pinned to the latest 1.27.x patch (stdlib security fixes reach the binaries
+# through it). The module `go` directives (go.mod / go.work) stay at 1.27.0:
+# golangci-lint must be built with a Go at least as new as the directive, and
+# the pinned release is built with go1.27.0 (see CLAUDE.md "Go version").
+go            = "1.27.2"
+golangci-lint = "2.14.0"
 # just: CI installs the same version — GitHub via extractions/setup-just,
 # GitLab from the npm registry (`rust-just`, the just README's npm package,
 # so a closed network gets it through its npm mirror). Only bump to a version
@@ -43,8 +44,8 @@ just          = "1.57.0"
 shellcheck    = "0.11.0" # `just lint` runs it over scripts/ and benchmarks/
 # TypeSpec (api/) only. Full semver: CI derives image tags from it. pnpm is
 # kept equal to package.json's packageManager (corepack is not used).
-node = "26.8.2"
-pnpm = "11.25.0"
+node = "26.10.0"
+pnpm = "11.28.4"
 
 # `go:` backend = `go install` from source against the Go pinned above; the
 # first `mise install` compiles them, afterwards they are cached.
@@ -56,14 +57,14 @@ pnpm = "11.25.0"
 # turn the emitted OpenAPI / JSON Schema into Go types and check compatibility.
 "go:github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen" = "2.8.0"
 "go:github.com/atombender/go-jsonschema"                      = "0.24.1"
-"go:github.com/oasdiff/oasdiff"                               = "1.31.0"
+"go:github.com/oasdiff/oasdiff"                               = "1.33.0"
 
 [env]
 # Schemathesis is not a mise tool but a pinned image (scripts/schemathesis.sh
 # runs it with docker; the GitLab job uses it as the job image). The tag lives
 # here so scripts/mise-pins.sh reads it like every other pin and `mise env`
 # exports it locally.
-SCHEMATHESIS_VERSION = "4.27.0"
+SCHEMATHESIS_VERSION = "4.29.1"
 # Load the (gitignored) .env so the mise shims see the same proxy / registry /
 # GOPROXY settings `just` loads via `set dotenv-load`. Silently skipped when
 # the file is absent — an open-network clone needs no .env at all. Every knob

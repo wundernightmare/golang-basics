@@ -126,7 +126,7 @@ services:
   # Log store, single binary on local disk (7d retention). Grafana's built-in
   # Loki datasource means no plugin download — works in a closed network.
   loki:
-    image: ${DOCKER_HUB:-docker.io}/grafana/loki:3.5.3
+    image: ${DOCKER_HUB:-docker.io}/grafana/loki:3.5.12
     container_name: golang-basics-loki
     restart: unless-stopped
     command: ["-config.file=/etc/loki/config.yml"]
