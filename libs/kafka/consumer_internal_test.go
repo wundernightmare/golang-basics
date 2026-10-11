@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -95,13 +96,20 @@ type fakeConsumer struct {
 	dlq     *fakeProducer
 	pingErr error
 
-	mu      sync.Mutex
-	commits [][]Offset
-	closed  bool
+	mu        sync.Mutex
+	commits   [][]Offset
+	commitErr error // every Commit fails with it while set
+	pollErr   error // every Poll returns it while set
+	closed    bool
 }
 
 func (c *fakeConsumer) Poll(ctx context.Context, _ int) ([]Message, error) {
 	c.mu.Lock()
+	if c.pollErr != nil {
+		err := c.pollErr
+		c.mu.Unlock()
+		return nil, err
+	}
 	if len(c.batches) > 0 {
 		b := c.batches[0]
 		c.batches = c.batches[1:]
@@ -116,9 +124,14 @@ func (c *fakeConsumer) Poll(ctx context.Context, _ int) ([]Message, error) {
 func (c *fakeConsumer) Commit(_ context.Context, offsets []Offset) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.commitErr != nil {
+		return c.commitErr
+	}
 	c.commits = append(c.commits, offsets)
 	return nil
 }
+
+func (c *fakeConsumer) failCommits(err error)      { c.mu.Lock(); c.commitErr = err; c.mu.Unlock() }
 func (*fakeConsumer) AllowRebalance()              {}
 func (c *fakeConsumer) DeadLetter() ProducerClient { return c.dlq }
 func (c *fakeConsumer) Ping(context.Context) error { return c.pingErr }
@@ -195,6 +208,74 @@ func TestConsumer_LostDropsPendingRevokedCommitsOnlyItsOwn(t *testing.T) {
 	assert.False(t, c.owns(Message{Topic: "t", Partition: 1}))
 	assert.True(t, c.owns(Message{Topic: "t", Partition: 2}))
 	assert.Equal(t, map[TopicPartition]int64{p2: 9}, c.pending)
+}
+
+// A revoke whose commit fails still forgets the revoked partitions' offsets:
+// the next commit must never include a partition another member now reads —
+// the broker would accept it and move that member's position back.
+func TestConsumer_FailedRevokeCommitIsNeverRetriedForAMovedPartition(t *testing.T) {
+	fc := &fakeConsumer{}
+	use(t, fc, nil, nil)
+	c, err := NewConsumer(context.Background(), testConfig(), nil)
+	require.NoError(t, err)
+	defer c.Close()
+
+	ctx := context.Background()
+	p0, p1 := TopicPartition{"t", 0}, TopicPartition{"t", 1}
+	fc.rb.Assigned(ctx, []TopicPartition{p0, p1})
+	c.markDone(Message{Topic: "t", Partition: 0, Offset: 4})
+	c.markDone(Message{Topic: "t", Partition: 1, Offset: 7})
+
+	fc.failCommits(errors.New("coordinator not available"))
+	fc.rb.Revoked(ctx, []TopicPartition{p0})
+	assert.Empty(t, fc.committed(), "the revoke's commit failed")
+
+	fc.failCommits(nil)
+	c.commitPending(ctx)
+	require.Len(t, fc.committed(), 1)
+	assert.Equal(t, []Offset{{TopicPartition: p1, Next: 8}}, fc.committed()[0], "p0 moved: its offset is not committed later")
+	assert.Empty(t, c.pending)
+}
+
+// A record finished after its partition was revoked (or lost) is not
+// committed: the partition is someone else's now.
+func TestConsumer_NeverCommitsAPartitionItDoesNotOwn(t *testing.T) {
+	fc := &fakeConsumer{}
+	use(t, fc, nil, nil)
+	c, err := NewConsumer(context.Background(), testConfig(), nil)
+	require.NoError(t, err)
+	defer c.Close()
+
+	ctx := context.Background()
+	p0, p1 := TopicPartition{"t", 0}, TopicPartition{"t", 1}
+	fc.rb.Assigned(ctx, []TopicPartition{p0, p1})
+	fc.rb.Revoked(ctx, []TopicPartition{p0})
+	c.markDone(Message{Topic: "t", Partition: 0, Offset: 4}) // in flight across the revoke
+	c.markDone(Message{Topic: "t", Partition: 1, Offset: 7})
+
+	c.commitPending(ctx)
+	require.Len(t, fc.committed(), 1)
+	assert.Equal(t, []Offset{{TopicPartition: p1, Next: 8}}, fc.committed()[0])
+	assert.Empty(t, c.pending, "the stray offset is dropped, not kept for a later commit")
+}
+
+// A client that failed for good ends Run with its error; a fetch error that
+// the client retries does not.
+func TestConsumer_RunStopsWhenTheClientFails(t *testing.T) {
+	fc := &fakeConsumer{pollErr: fmt.Errorf("%w: FENCED_INSTANCE_ID", ErrClientFailed)}
+	use(t, fc, nil, nil)
+	c, err := NewConsumer(context.Background(), testConfig(), nil)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- c.Run(context.Background(), func(context.Context, Message) error { return nil }) }()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrClientFailed)
+		require.ErrorContains(t, err, "FENCED_INSTANCE_ID")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run kept polling a failed client")
+	}
 }
 
 // A record that fails and cannot be dead-lettered stops the loop with both

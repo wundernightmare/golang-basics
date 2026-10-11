@@ -18,25 +18,23 @@ type metadataClient interface {
 	GetMetadata(topic *string, allTopics bool, timeoutMs int) (*ckafka.Metadata, error)
 }
 
+// pingTimeout bounds a connectivity check whose ctx has no deadline.
+const pingTimeout = 10 * time.Second
+
 // ping asks the brokers for cluster metadata: answered means connected and
-// authenticated. It returns when ctx does even if librdkafka is still
-// waiting (the request then finishes in the background).
+// authenticated. It waits for librdkafka's answer, bounded by ctx's deadline
+// (pingTimeout without one) passed down as the request timeout — it never
+// leaves a call running inside a client that may be closed next.
 func ping(ctx context.Context, cl metadataClient) error {
-	timeout := 10 * time.Second
-	if dl, ok := ctx.Deadline(); ok {
-		timeout = time.Until(dl)
-	}
-	done := make(chan error, 1)
-	go func() {
-		_, err := cl.GetMetadata(nil, false, max(int(timeout.Milliseconds()), 1))
-		done <- err
-	}()
-	select {
-	case err := <-done:
+	if err := ctx.Err(); err != nil {
 		return err
-	case <-ctx.Done():
-		return ctx.Err()
 	}
+	timeout := pingTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		timeout = min(time.Until(dl), timeout)
+	}
+	_, err := cl.GetMetadata(nil, false, max(int(timeout.Milliseconds()), 1))
+	return err
 }
 
 // logFoldWindow folds identical librdkafka log lines: a broker that is down

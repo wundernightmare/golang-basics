@@ -16,6 +16,7 @@ package rdkafka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -116,13 +117,18 @@ func newProducer(cfg kafka.Config, log *slog.Logger, role string) (*producer, er
 	if err != nil {
 		return nil, err
 	}
-	p.cl.Store(cl)
+	p.cl = cl
 	return p, nil
 }
 
 // producer is a librdkafka producer. A fatal error (lost idempotence state)
 // replaces the client underneath; librdkafka reconnects on its own
 // otherwise.
+//
+// Every call into the client holds mu for reading and finds the client in
+// p.cl under it; replacing or closing the client takes mu for writing. So a
+// client is never closed (rd_kafka_destroy) while a call is still inside it,
+// and nothing is created after Close.
 type producer struct {
 	cfg   kafka.Config
 	props ckafka.ConfigMap
@@ -130,14 +136,19 @@ type producer struct {
 	role  string
 	stats *statsHolder
 
-	cl        atomic.Pointer[ckafka.Producer]
-	replacing atomic.Bool
-	wg        sync.WaitGroup // event and log pumps
-	closeOnce sync.Once
+	mu     sync.RWMutex
+	cl     *ckafka.Producer
+	closed bool
+	wg     sync.WaitGroup // event and log pumps, replacements under way
 }
 
+// testHookNewClient, when set (tests), sees every client the producer
+// creates.
+var testHookNewClient func(*ckafka.Producer)
+
 // newClient creates a librdkafka producer and starts draining its events
-// (statistics, errors) and logs.
+// (statistics, errors) and logs. It runs before the producer is shared or
+// with mu held for writing and closed false — never after Close began.
 func (p *producer) newClient() (*ckafka.Producer, error) {
 	props := ckafka.ConfigMap{}
 	for k, v := range p.props {
@@ -146,6 +157,9 @@ func (p *producer) newClient() (*ckafka.Producer, error) {
 	cl, err := ckafka.NewProducer(&props)
 	if err != nil {
 		return nil, err
+	}
+	if testHookNewClient != nil {
+		testHookNewClient(cl)
 	}
 	p.wg.Add(2)
 	go func() { defer p.wg.Done(); pumpLogs(cl.Logs(), p.log, p.role) }()
@@ -164,7 +178,7 @@ func (p *producer) pumpEvents(cl *ckafka.Producer) {
 		case ckafka.Error:
 			if e.IsFatal() {
 				p.log.Error("kafka producer failed fatally; replacing the client", "kafka_client", p.role, "err", e)
-				go p.replace(cl)
+				p.startReplace(cl)
 			}
 			// Non-fatal errors are librdkafka's to retry; its log line
 			// (folded) already says what happened.
@@ -172,24 +186,42 @@ func (p *producer) pumpEvents(cl *ckafka.Producer) {
 	}
 }
 
-// replace swaps a fatally failed client for a new one. Records queued on the
-// old one fail with a retryable error.
-func (p *producer) replace(failed *ckafka.Producer) {
-	if p.cl.Load() != failed || !p.replacing.CompareAndSwap(false, true) {
+// startReplace replaces failed in the background, unless the producer is
+// closing. The replacement is counted in wg, so Close waits for it.
+func (p *producer) startReplace(failed *ckafka.Producer) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
 		return
 	}
-	defer p.replacing.Store(false)
+	p.wg.Add(1)
+	go p.replace(failed)
+}
+
+// replace swaps a fatally failed client for a new one, then closes the old
+// one. Records queued on the old one fail with a retryable error. A second
+// fatal error of the same client finds it already replaced and does
+// nothing; a replacement that lost the race with Close does nothing either.
+func (p *producer) replace(failed *ckafka.Producer) {
+	defer p.wg.Done()
+	p.mu.Lock()
+	if p.closed || p.cl != failed {
+		p.mu.Unlock()
+		return
+	}
 	cl, err := p.newClient()
 	if err != nil {
+		p.mu.Unlock()
 		p.log.Error("kafka producer could not be replaced; readiness stays failed", "err", err)
 		return
 	}
-	if !p.cl.CompareAndSwap(failed, cl) {
-		cl.Close()
-		return
-	}
-	failed.Close()
+	p.cl = cl
+	p.mu.Unlock()
+	failed.Close() // no call is inside it: each one took the read lock and found the new client
 }
+
+// errProducerClosed is a Send or Ping after Close.
+var errProducerClosed = ckafka.NewError(ckafka.ErrState, "producer closed", false)
 
 // Send implements kafka.ProducerClient: enqueue (waiting out a full local
 // queue within ctx), then await the delivery report. librdkafka fails the
@@ -207,7 +239,7 @@ func (p *producer) Send(ctx context.Context, msg kafka.Message) error {
 	delivery := make(chan ckafka.Event, 1)
 	var err error
 	for {
-		err = p.cl.Load().Produce(m, delivery)
+		err = p.produce(m, delivery)
 		var kerr ckafka.Error
 		if !errors.As(err, &kerr) || kerr.Code() != ckafka.ErrQueueFull {
 			break
@@ -235,22 +267,47 @@ func (p *producer) Send(ctx context.Context, msg kafka.Message) error {
 	}
 }
 
+// produce enqueues m on the current client, under the read lock.
+func (p *producer) produce(m *ckafka.Message, delivery chan ckafka.Event) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed {
+		return errProducerClosed
+	}
+	return p.cl.Produce(m, delivery)
+}
+
 // Ping implements kafka.ProducerClient.
-func (p *producer) Ping(ctx context.Context) error { return ping(ctx, p.cl.Load()) }
+func (p *producer) Ping(ctx context.Context) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed {
+		return errProducerClosed
+	}
+	return ping(ctx, p.cl)
+}
 
 // Stats implements kafka.ProducerClient.
 func (p *producer) Stats() kafka.ClientStats { return p.stats.clientStats(p.cfg) }
 
-// Close implements kafka.ProducerClient.
+// Close implements kafka.ProducerClient: no call is inside the client once
+// it holds the write lock, and none starts after; then it flushes what is
+// queued, closes the client and waits for its pumps and for a replacement
+// that was under way.
 func (p *producer) Close() {
-	p.closeOnce.Do(func() {
-		cl := p.cl.Load()
-		if left := cl.Flush(int(flushOnClose.Milliseconds())); left > 0 {
-			p.log.Warn("kafka producer closed with records still queued; they were not delivered", "kafka_client", p.role, "records", left)
-		}
-		cl.Close()
-		p.wg.Wait()
-	})
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.closed = true
+	cl := p.cl
+	p.mu.Unlock()
+	if left := cl.Flush(int(flushOnClose.Milliseconds())); left > 0 {
+		p.log.Warn("kafka producer closed with records still queued; they were not delivered", "kafka_client", p.role, "records", left)
+	}
+	cl.Close()
+	p.wg.Wait()
 }
 
 // NewConsumer implements kafka.Driver.
@@ -289,9 +346,23 @@ type consumer struct {
 	dlqOnce  sync.Once
 	dlq      *producer
 	dlqErr   error
-	closed   atomic.Bool
 	logsDone chan struct{}
+	failed   atomic.Pointer[error] // the fatal error that ended the client
+
+	// Calls into the client from outside the loop (Ping from readiness,
+	// Commit, whose wait ctx may end before librdkafka returns) are counted
+	// in calls, so Close destroys the client only once none is inside it.
+	mu      sync.Mutex
+	closing bool // Close has begun: no new Ping; a Commit runs to the end
+	closed  bool // the client is gone (or abandoned): nothing may call it
+	calls   sync.WaitGroup
 }
+
+// closeWait bounds how long Close waits for a call still inside librdkafka
+// (a commit waiting on an unreachable coordinator) before giving up on the
+// client: destroying it under a running call would crash the process, so
+// past this the handle is left to the exiting process instead.
+var closeWait = 30 * time.Second // a variable for tests
 
 func toPartitions(tps []ckafka.TopicPartition) []kafka.TopicPartition {
 	out := make([]kafka.TopicPartition, 0, len(tps))
@@ -330,7 +401,10 @@ func (c *consumer) rebalance(cl *ckafka.Consumer, ev ckafka.Event) error {
 // Poll implements kafka.ConsumerClient: wait (in short slices, to notice
 // ctx) for a first record, then take whatever is already queued up to max.
 func (c *consumer) Poll(ctx context.Context, max int) ([]kafka.Message, error) {
-	if c.closed.Load() {
+	c.mu.Lock()
+	closing := c.closing
+	c.mu.Unlock()
+	if closing {
 		return nil, kafka.ErrClientClosed
 	}
 	c.revoked = map[kafka.TopicPartition]struct{}{}
@@ -358,7 +432,11 @@ func (c *consumer) Poll(ctx context.Context, max int) ([]kafka.Message, error) {
 			c.stats.update(e.String())
 		case ckafka.Error:
 			if e.IsFatal() {
-				return out, e
+				// The client is finished (e.g. FENCED_INSTANCE_ID): what
+				// was polled is left for the group's next owner.
+				err := fmt.Errorf("%w: %w", kafka.ErrClientFailed, e)
+				c.failed.Store(&err)
+				return nil, err
 			}
 			errs = append(errs, e)
 		}
@@ -393,22 +471,32 @@ func toMessage(e *ckafka.Message) kafka.Message {
 }
 
 // Commit implements kafka.ConsumerClient. librdkafka's commit takes no
-// context; ctx bounds only the wait for it.
+// context; ctx bounds only the wait for it — the call itself is counted until
+// it returns, so Close never destroys the client under it. During Close (the
+// revoke callback commits what was processed) it waits for the call: the
+// client is destroyed right after the callback.
 func (c *consumer) Commit(ctx context.Context, offsets []kafka.Offset) error {
 	tps := make([]ckafka.TopicPartition, len(offsets))
 	for i, o := range offsets {
 		topic := o.Topic
 		tps[i] = ckafka.TopicPartition{Topic: &topic, Partition: o.Partition, Offset: ckafka.Offset(o.Next)}
 	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return kafka.ErrClientClosed
+	}
+	closing := c.closing
+	c.calls.Add(1)
+	c.mu.Unlock()
+	if closing {
+		defer c.calls.Done()
+		return commitOffsets(c.cl, tps)
+	}
 	done := make(chan error, 1)
 	go func() {
-		res, err := c.cl.CommitOffsets(tps)
-		for _, tp := range res {
-			if tp.Error != nil {
-				err = errors.Join(err, tp.Error)
-			}
-		}
-		done <- err
+		defer c.calls.Done()
+		done <- commitOffsets(c.cl, tps)
 	}()
 	select {
 	case err := <-done:
@@ -416,6 +504,16 @@ func (c *consumer) Commit(ctx context.Context, offsets []kafka.Offset) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func commitOffsets(cl *ckafka.Consumer, tps []ckafka.TopicPartition) error {
+	res, err := cl.CommitOffsets(tps)
+	for _, tp := range res {
+		if tp.Error != nil {
+			err = errors.Join(err, tp.Error)
+		}
+	}
+	return err
 }
 
 // AllowRebalance implements kafka.ConsumerClient: librdkafka rebalances
@@ -433,25 +531,70 @@ func (c *consumer) DeadLetter() kafka.ProducerClient {
 	return c.dlq
 }
 
-// Ping implements kafka.ConsumerClient.
-func (c *consumer) Ping(ctx context.Context) error { return ping(ctx, c.cl) }
+// Ping implements kafka.ConsumerClient: the fatal error once the client has
+// failed (readiness must not stay green on a dead client), else a metadata
+// request.
+func (c *consumer) Ping(ctx context.Context) error {
+	if err := c.failed.Load(); err != nil {
+		return *err
+	}
+	c.mu.Lock()
+	if c.closing || c.closed {
+		c.mu.Unlock()
+		return kafka.ErrClientClosed
+	}
+	c.calls.Add(1)
+	c.mu.Unlock()
+	defer c.calls.Done()
+	return ping(ctx, c.cl)
+}
 
 // Stats implements kafka.ConsumerClient.
 func (c *consumer) Stats() kafka.ClientStats { return c.stats.clientStats(c.cfg) }
 
-// Close implements kafka.ConsumerClient: leaving the group revokes the
-// partitions through the rebalance callback (committing their processed
-// offsets) before the client is destroyed.
+// Close implements kafka.ConsumerClient: no new Ping starts, the calls
+// already inside the client finish (within closeWait), then leaving the group
+// revokes the partitions through the rebalance callback (committing their
+// processed offsets) before the client is destroyed.
 func (c *consumer) Close() {
-	if !c.closed.CompareAndSwap(false, true) {
+	c.mu.Lock()
+	if c.closing {
+		c.mu.Unlock()
+		return
+	}
+	c.closing = true
+	c.mu.Unlock()
+	if !waitTimeout(&c.calls, closeWait) {
+		c.mu.Lock()
+		c.closed = true
+		c.mu.Unlock()
+		c.log.Error("kafka consumer: a call into librdkafka did not return; leaving the client to the exiting process",
+			"waited", closeWait.String())
 		return
 	}
 	if err := c.cl.Close(); err != nil {
 		c.log.Warn("kafka consumer close", "err", err)
 	}
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
 	<-c.logsDone
 	if c.dlq != nil {
 		c.dlq.Close()
+	}
+}
+
+// waitTimeout waits for wg up to d and reports whether it got to zero.
+func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
 	}
 }
 

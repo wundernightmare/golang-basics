@@ -320,7 +320,11 @@ handler timeout or the retries before raising the interval.
   providers can share a group as long as the strategy is the same.
 - **Commit on revoke.** The loop commits before it lets a rebalance happen;
   the revoke callback commits anything still pending (a commit that failed
-  earlier, or on shutdown) before the partitions move. Lost partitions
+  earlier, or on shutdown) before the partitions move. That is the last
+  commit for those partitions: if it fails, their offsets are forgotten all
+  the same (the new owner re-reads from the last commit — at-least-once), and
+  no commit ever names a partition the member does not own — the broker
+  would accept it and move the new owner's position back. Lost partitions
   (session expired) are dropped, never committed — they already belong to
   someone else.
 - **How each client holds a rebalance back.** franz-go: `BlockRebalanceOnPoll`
@@ -392,6 +396,21 @@ kinds as nodejs-basics' `KAFKA_SEND_ERRORS`, mapped from each client's codes:
 `kafka.Rejected(err)` is the one question a caller asks: the outbox relay
 counts rejections towards `OUTBOX_MAX_ATTEMPTS` and retries everything else.
 The kind is also the `result` label of `kafka_publish_total`.
+
+**A consumer client that failed for good** (librdkafka's fatal errors — a
+static member, `group.instance.id` via the passthrough, fenced by another
+instance with the same id) ends `Consumer.Run` with an error wrapping
+`kafka.ErrClientFailed`, and its readiness check fails: the service exits and
+is restarted instead of polling a dead client behind a green `/readyz`. (The
+franz-go provider has no static membership here, so it has no such error.)
+
+**Closing never races a call.** The librdkafka producer replaces a failed
+client and closes the old one only when no call is inside it, and creates
+nothing once `Close` began. The consumer counts the calls made from outside
+its loop (readiness pings, commits whose caller stopped waiting) and destroys
+the client only once they returned; a call stuck past 30 s makes `Close` give
+up and leave the client to the exiting process — destroying it under the
+call would crash it.
 
 ## Observability
 

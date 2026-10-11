@@ -161,6 +161,12 @@ func (c *Consumer) Run(ctx context.Context, handler Handler) error {
 		if errors.Is(err, ErrClientClosed) {
 			return nil
 		}
+		if errors.Is(err, ErrClientFailed) {
+			// Nothing of this poll is processed: the records go to the
+			// group's next owner from the last commit.
+			c.log.ErrorContext(ctx, "kafka consumer client failed; stopping the loop", "err", err)
+			return err
+		}
 		if err != nil && ctx.Err() == nil {
 			c.fetchError(ctx, err)
 		}
@@ -407,11 +413,18 @@ func (c *Consumer) commitPending(ctx context.Context) {
 
 // commitLocked commits the pending offsets of the given partitions (all of
 // them when only is nil) and forgets the ones committed. The committed
-// position is the next offset to read: last processed + 1. c.mu must be
+// position is the next offset to read: last processed + 1. Only partitions
+// this member owns are committed: an offset left over for one that moved
+// (a record finished after its revoke) is dropped — committing it would
+// rewind the new owner's position, which the broker accepts. c.mu must be
 // held.
 func (c *Consumer) commitLocked(ctx context.Context, only []TopicPartition) {
 	var offsets []Offset
 	for tp, off := range c.pending {
+		if _, ok := c.owned[tp]; !ok {
+			delete(c.pending, tp)
+			continue
+		}
 		if only == nil || containsPartition(only, tp) {
 			offsets = append(offsets, Offset{TopicPartition: tp, Next: off + 1})
 		}
@@ -459,10 +472,17 @@ func (c *Consumer) onAssigned(ctx context.Context, parts []TopicPartition) {
 // onRevoked commits what was processed on the revoked partitions before they
 // move (normally nothing: the loop commits before it allows a rebalance; it
 // matters when that commit failed, and on Close), then stops owning them.
+// Their offsets are forgotten whether or not that commit went through: this
+// is the last chance to commit them, and a later commit of a partition now
+// read by another member would move its position back. Records the failed
+// commit did not cover are redelivered to the new owner (at-least-once).
 func (c *Consumer) onRevoked(ctx context.Context, parts []TopicPartition) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.commitLocked(ctx, parts)
+	for _, p := range parts {
+		delete(c.pending, p)
+	}
 	c.forgetLocked(parts)
 	if len(parts) > 0 {
 		c.metrics.rebalances.WithLabelValues("revoked").Inc()
