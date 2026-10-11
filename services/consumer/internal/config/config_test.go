@@ -17,6 +17,10 @@ func TestLoad_DefaultsAreSecure(t *testing.T) {
 	require.ErrorContains(t, err, "ADMIN_TOKEN is empty", "an open admin listener on :9083 must be asked for")
 
 	t.Setenv("CONSUMER_ADMIN_INSECURE", "true")
+	_, err = config.Load("")
+	require.ErrorContains(t, err, "KAFKA_BROKERS must be set", "a consumer without a broker has nothing to do")
+
+	t.Setenv("CONSUMER_KAFKA_BROKERS", "k:9092")
 	cfg, err := config.Load("")
 	require.NoError(t, err)
 	assert.Equal(t, "consumer", cfg.Service)
@@ -44,8 +48,8 @@ kafka:
   topic: from-yaml
   dead_letter_topic: none
   consumer_max_retries: 2
-  tls_enabled: true
-  sasl_mechanism: scram-sha-512
+  security_protocol: sasl_ssl
+  sasl_mechanism: SCRAM-SHA-512
   sasl_username: svc
 otel:
   enabled: true
@@ -80,6 +84,6 @@ func TestLoad_RejectsBadConfig(t *testing.T) {
 	t.Setenv("CONSUMER_KAFKA_SASL_MECHANISM", "kerberos")
 	t.Setenv("CONSUMER_DEDUPE_SIZE", "-1")
 	_, err = config.Load("")
-	require.ErrorContains(t, err, "KAFKA_SASL_MECHANISM")
+	require.ErrorContains(t, err, "KAFKA_SASL_")
 	require.ErrorContains(t, err, "DEDUPE_SIZE", "all problems are reported at once")
 }

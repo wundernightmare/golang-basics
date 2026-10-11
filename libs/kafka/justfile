@@ -1,4 +1,4 @@
-# kafka justfile — Kafka producer/consumer (franz-go)
+# kafka justfile — Kafka producer/consumer core (provider-neutral; the providers are libs/kafka-rdkafka, libs/kafka-franz)
 #
 # One of the per-module justfiles; every module has the same recipes (plus
 # release/run for services), so `just each <recipe>` from the root works

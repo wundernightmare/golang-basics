@@ -55,8 +55,8 @@ it.
 
 | Env (`TASKS_` prefix) | YAML | Default | |
 | --- | --- | --- | --- |
-| `TASKS_VALKEY_URL` | `url` | — | `valkey://[:pw@]host:6379[/db]`; wins over the discrete fields |
-| `TASKS_VALKEY_ADDR` / `_PASSWORD` / `_DB` | `addr` / `password` / `db` | `localhost:6379` / — / `0` | |
+| `TASKS_VALKEY_URL` | `url` | — | `valkey://[:pw@]host:6379[/db]`; wins over the discrete fields. No default address: `Config.Configured()` is false until URL or ADDR is set |
+| `TASKS_VALKEY_ADDR` / `_PASSWORD` / `_DB` | `addr` / `password` / `db` | — / — / `0` | |
 | `TASKS_VALKEY_DIAL_TIMEOUT` | `dial_timeout` | `5s` | also bounds the boot PING |
 | `TASKS_VALKEY_OP_TIMEOUT` | `op_timeout` | `500ms` | every command; past it the caller treats the cache as a miss |
 

@@ -48,9 +48,16 @@ fi
 log "start $svc on :$port (admin :$admin)"
 # Admin on loopback (httpx requires a token for any other address); the API
 # binds all interfaces because the Schemathesis container reaches it through
-# host.docker.internal. tasks may create its topics on the local broker.
+# host.docker.internal. tasks runs against the local deps (Valkey and Kafka
+# are on by their addresses) and may create its topic on the broker.
+deps=()
+if [ "$svc" = tasks ]; then
+  deps=("TASKS_VALKEY_URL=${TASKS_VALKEY_URL:-valkey://localhost:6379}"
+        "TASKS_KAFKA_BROKERS=${TASKS_KAFKA_BROKERS:-localhost:9092}"
+        "TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION=${KAFKA_ALLOW_AUTO_TOPIC_CREATION:-true}")
+fi
 env "${upper}_HTTP_ADDR=:$port" "${upper}_ADMIN_ADDR=127.0.0.1:$admin" "${upper}_LOG_LEVEL=warn" \
-  "${upper}_KAFKA_ALLOW_AUTO_TOPIC_CREATION=${KAFKA_ALLOW_AUTO_TOPIC_CREATION:-true}" \
+  "${deps[@]}" \
   "$bin" > "$root/.run/schemathesis-$svc.log" 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true' EXIT

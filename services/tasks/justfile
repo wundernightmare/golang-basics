@@ -24,9 +24,9 @@ build:
 release:
     ../../scripts/build-service.sh tasks
 
-# Build and run locally; admin listener on loopback unless TASKS_ADMIN_ADDR is set (TASKS_* env apply; needs `just infra-up`)
+# Build and run locally against `just infra-up` (Valkey and Kafka on: their addresses are set here); admin listener on loopback unless TASKS_ADMIN_ADDR is set (TASKS_* env apply)
 run *args:
-    TASKS_ADMIN_ADDR="${TASKS_ADMIN_ADDR:-127.0.0.1:9082}" TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION="${TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION:-true}" go run . {{args}}
+    TASKS_ADMIN_ADDR="${TASKS_ADMIN_ADDR:-127.0.0.1:9082}" TASKS_VALKEY_URL="${TASKS_VALKEY_URL:-valkey://localhost:6379}" TASKS_KAFKA_BROKERS="${TASKS_KAFKA_BROKERS:-localhost:9092}" TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION="${TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION:-true}" go run . {{args}}
 
 # go vet (fastest feedback)
 check:

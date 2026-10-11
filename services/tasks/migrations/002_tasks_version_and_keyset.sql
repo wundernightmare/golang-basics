@@ -1,3 +1,6 @@
+-- migration-safety: reviewed — the index below is built inside the
+-- migration's transaction (writes to tasks wait for it); it shipped while the
+-- table was small. On a large table build it CONCURRENTLY by hand first.
 -- Optimistic concurrency: every change bumps version; If-Match / ETag carry it.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 1;
 

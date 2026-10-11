@@ -229,6 +229,29 @@ func TestSessionTimeoutsAreApplied(t *testing.T) {
 	assert.Contains(t, err.Error(), "statement timeout")
 }
 
+// DB_PASSWORD_FILE wins over the URL's password; a bad file fails the boot.
+func TestNew_PasswordFile(t *testing.T) {
+	cfg, _ := schemaConfig(t)
+	u, err := url.Parse(cfg.URL)
+	require.NoError(t, err)
+	right, _ := u.User.Password()
+	u.User = url.UserPassword(u.User.Username(), "wrong")
+	cfg.URL = u.String()
+
+	dir := t.TempDir()
+	cfg.PasswordFile = dir + "/pw"
+	require.NoError(t, os.WriteFile(cfg.PasswordFile, []byte(right+"\n"), 0o600))
+	db := newDB(t, cfg)
+	require.NoError(t, db.ReadyCheck()(context.Background()), "the file's password (trailing newline dropped) is used")
+
+	for name, path := range map[string]string{"missing": dir + "/nope", "empty": dir + "/empty"} {
+		require.NoError(t, os.WriteFile(dir+"/empty", []byte("\n"), 0o600))
+		cfg.PasswordFile = path
+		_, err := pgx.New(context.Background(), cfg, nil)
+		require.ErrorContains(t, err, "DB_PASSWORD_FILE", name)
+	}
+}
+
 func TestReadyCheckFailsWhenClosed(t *testing.T) {
 	cfg, _ := schemaConfig(t)
 	ctx := context.Background()

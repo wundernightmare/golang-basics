@@ -49,7 +49,7 @@ STAMP := "VERSION='" + VERSION + "' GIT_SHA='" + GIT_SHA + "' BUILD_TIME='" + BU
 # Every `docker build`: the required GO_VERSION + build stamp, then the
 # closed-network knobs in value-less form (taken from the environment, skipped
 # when unset, so an open-network build sees the Dockerfile defaults).
-DOCKER_BUILD_ARGS := "--build-arg GO_VERSION=" + GO_VERSION + " --build-arg VERSION=" + VERSION + " --build-arg GIT_SHA=" + GIT_SHA + " --build-arg BUILD_TIME=" + BUILD_TIME + " --build-arg DOCKER_HUB --build-arg GCR --build-arg GOPROXY --build-arg GOSUMDB --build-arg GONOSUMDB --build-arg GOFLAGS --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY"
+DOCKER_BUILD_ARGS := "--build-arg GO_VERSION=" + GO_VERSION + " --build-arg VERSION=" + VERSION + " --build-arg GIT_SHA=" + GIT_SHA + " --build-arg BUILD_TIME=" + BUILD_TIME + " --build-arg KAFKA_PROVIDER --build-arg ALPINE_MIRROR --build-arg DOCKER_HUB --build-arg GCR --build-arg GOPROXY --build-arg GOSUMDB --build-arg GONOSUMDB --build-arg GOFLAGS --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY"
 
 # Scanner inputs that a closed network points at vendored rules / offline DBs.
 SEMGREP_CONFIG := env("SEMGREP_CONFIG", "p/owasp-top-ten p/golang")
@@ -350,6 +350,28 @@ infra-down:
 # Tail the backing-service logs
 infra-logs:
     docker compose -f docker/deps.yml logs -f
+
+# `up --wait` only the broker: with the one-shot init in the project, --wait
+# would return 1 once init exits, so init runs on its own.
+# A SASL_SSL broker with a private CA on localhost:29094 (examples/kafka-sasl-ssl)
+kafka-sasl-ssl-up:
+    examples/kafka-sasl-ssl/gen-certs.sh
+    docker compose -f examples/kafka-sasl-ssl/compose.yml up -d --wait redpanda
+    docker compose -f examples/kafka-sasl-ssl/compose.yml run --rm init
+
+# Stop and remove the SASL_SSL example broker
+kafka-sasl-ssl-down:
+    docker compose -f examples/kafka-sasl-ssl/compose.yml down -v
+
+# Produce + consume through the SASL_SSL broker with both Kafka providers
+kafka-sasl-ssl-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export KAFKA_SASL_SSL_BROKERS=localhost:29094 KAFKA_SASL_SSL_USERNAME=app \
+      KAFKA_SASL_SSL_CA_LOCATION="$PWD/examples/kafka-sasl-ssl/certs/ca.crt" \
+      KAFKA_SASL_SSL_PASSWORD_FILE="$PWD/examples/kafka-sasl-ssl/certs/app.password"
+    (cd libs/kafka-rdkafka && go test -count=1 -run TestSASLSSL -v ./...)
+    (cd libs/kafka-franz && CGO_ENABLED=0 go test -count=1 -run TestSASLSSL -v ./...)
 
 # Deps + all four service images (built with the stamp), waiting for every /readyz
 stack-up: infra-up

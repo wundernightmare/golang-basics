@@ -65,6 +65,19 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+// Defaults is the configuration with nothing set: what --config-reference
+// prints.
+func Defaults() (Config, error) {
+	cfg := Config{}
+	cfg.Service = "heartbeat"
+	cfg.AdminAddr = defaultAdminAddr
+	if err := httpx.Defaults(Prefix, &cfg); err != nil {
+		return Config{}, err
+	}
+	cfg.Addr = "" // as Load: no API listener
+	return cfg, nil
+}
+
 // Validate checks the shared server settings (see [httpx.Config.Validate])
 // and the tick interval.
 func (c *Config) Validate() error {

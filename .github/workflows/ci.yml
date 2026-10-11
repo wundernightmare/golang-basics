@@ -170,6 +170,11 @@ jobs:
       - name: go vet
         working-directory: ${{ matrix.module }}
         run: go vet -tags e2e ./...
+      # A service with Kafka links one provider per build (internal/
+      # kafkaprovider): the default build above is rdkafka, this is franz.
+      - name: go vet (franz-go build)
+        working-directory: ${{ matrix.module }}
+        run: if [ -d internal/kafkaprovider ]; then CGO_ENABLED=0 go vet -tags kafka_franz ./...; fi
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
@@ -240,6 +245,16 @@ jobs:
           gotestsum --format testname --junitfile "$GITHUB_WORKSPACE/.reports/junit/integration-$FLAT.xml" -- \
             -race -cover -covermode=atomic -coverpkg="$COVERPKG" ./... \
             -args -test.gocoverdir="$GITHUB_WORKSPACE/.cover/integration"
+      # The providers' conformance suites are modules of their own (above);
+      # a service's integration suite also runs against the other provider.
+      - name: go test (integration, franz-go build)
+        working-directory: ${{ matrix.module }}
+        env:
+          FLAT: ${{ steps.name.outputs.flat }}
+        run: |
+          [ -d internal/kafkaprovider ] || exit 0
+          CGO_ENABLED=0 gotestsum --format testname --junitfile "$GITHUB_WORKSPACE/.reports/junit/integration-$FLAT-franz.xml" -- \
+            -tags kafka_franz ./...
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cover-integration-${{ steps.name.outputs.flat }}
@@ -259,10 +274,19 @@ jobs:
   # docker/deps.yml. `up --wait` fails the step if a dependency never gets
   # healthy — no poll loop that silently runs on. The binaries write their
   # counters to E2E_COVER_DIR (the harness sets GOCOVERDIR per child).
+  #
+  # Once per Kafka provider: rdkafka (the default) feeds the coverage merge,
+  # franz proves the same binaries behave the same.
   e2e:
     needs: versions
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [rdkafka, franz]
+    env:
+      KAFKA_PROVIDER: ${{ matrix.provider }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -292,9 +316,10 @@ jobs:
         run: |
           export E2E_BIN_DIR="$GITHUB_WORKSPACE/.build" E2E_COVER_DIR="$GITHUB_WORKSPACE/.cover/e2e"
           mkdir -p "$E2E_COVER_DIR" "$GITHUB_WORKSPACE/.reports/junit"
-          gotestsum --format testname --junitfile "$GITHUB_WORKSPACE/.reports/junit/e2e.xml" -- \
+          gotestsum --format testname --junitfile "$GITHUB_WORKSPACE/.reports/junit/e2e-$KAFKA_PROVIDER.xml" -- \
             -tags e2e -count=1 ./...
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: matrix.provider == 'rdkafka'
         with:
           name: cover-e2e
           path: .cover/e2e
@@ -303,7 +328,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: junit-e2e
+          name: junit-e2e-${{ matrix.provider }}
           path: .reports/junit
           retention-days: 7
           if-no-files-found: ignore

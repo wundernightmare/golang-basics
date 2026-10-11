@@ -42,7 +42,7 @@ func TestTasksPipeline(t *testing.T) { //nolint:tparallel // ordered sub-tests o
 		"KAFKA_TOPIC":                     topic,
 		"KAFKA_TOPICS":                    topic,
 		"KAFKA_GROUP":                     "e2e-" + run,
-		"KAFKA_LAG_INTERVAL":              "1s",
+		"KAFKA_STATISTICS_INTERVAL_MS":    "1000",
 		"KAFKA_ALLOW_AUTO_TOPIC_CREATION": "true",
 	}})
 	tasks := start(t, spec{name: "tasks", prefix: "TASKS_", api: true, env: map[string]string{

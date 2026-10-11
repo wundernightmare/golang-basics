@@ -85,6 +85,7 @@ jobs:
           build-args: |
             SERVICE=${{ matrix.service }}
             GO_VERSION=${{ needs.versions.outputs.GO_VERSION }}
+            KAFKA_PROVIDER=${{ vars.KAFKA_PROVIDER || 'rdkafka' }}
             VERSION=${{ steps.stamp.outputs.version }}
             GIT_SHA=${{ github.sha }}
             BUILD_TIME=${{ steps.stamp.outputs.build_time }}

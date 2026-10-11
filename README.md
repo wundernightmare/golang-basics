@@ -22,15 +22,17 @@ easy-to-miss conventions, [`CONTRIBUTING.md`](CONTRIBUTING.md) the workflow.
 | --- | --- | --- | --- |
 | [`services/ping`](services/ping) | HTTP service | `:8080` API, `:9080` admin | `GET /ping` → `pong`, `?msg=` echo. |
 | [`services/heartbeat`](services/heartbeat) | Worker | `:9081` admin | Ticker worker — a beat + `heartbeat_beats_total` every interval. |
-| [`services/tasks`](services/tasks) | HTTP service | `:8082` API, `:9082` admin | Tasks CRUD over **Postgres + Valkey**; `task.created` goes through a **transactional outbox** (row + event in one transaction, a relay publishes to Kafka); traced end to end, `problem+json` errors. |
+| [`services/tasks`](services/tasks) | HTTP service | `:8082` API, `:9082` admin | Tasks CRUD over **Postgres** (+ a **Valkey** read cache); `task.created` goes through a **transactional outbox** (row + event in one transaction, a relay publishes to Kafka; a rejected event steps aside and is dead after a few tries); Valkey and Kafka are on when their address is set — the service runs on Postgres alone; traced end to end, `problem+json` errors. |
 | [`services/consumer`](services/consumer) | Worker | `:9083` admin | Drains `tasks.events`: continues the producer's trace, idempotent by `event_id`, retries with backoff, dead-letters to `tasks.events.dlq`; exports group lag. |
 | [`api`](api) | Contracts | — | TypeSpec source of the ping + tasks HTTP APIs and the Kafka events → OpenAPI 3 + JSON Schema (committed). Node lives only here. |
 | [`libs/contracts`](libs/contracts) | Library | — | Generated Go types of those contracts (`pingapi`, `tasksapi`, `events`). Never edited by hand. |
 | [`libs/httpx`](libs/httpx) | Library | — | **net/http** (Go 1.22 ServeMux, no framework) server scaffolding: request ids, tracing, sampled trace-correlated logs, RED metrics (`route` label), admin listener (health / metrics / version / config / runtime log level / pprof, token-guarded), graceful shutdown, env + YAML config, RFC 9457 `Problem`. |
-| [`libs/resilient-http-client`](libs/resilient-http-client) | Library | — | Policy-per-target **outbound** client: rate limit, circuit breaker, adaptive concurrency, jittered retry, cache, coalescing, fallbacks, metrics. |
+| [`libs/resilient-http-client`](libs/resilient-http-client) | Library | — | Policy-per-target **outbound** client: per-attempt timeout, rate limit, bulkhead, circuit breaker, budgeted jittered retry (Retry-After aware), traceparent injection, metrics. Not used by a service yet — copy it in when one calls out. |
 | [`libs/pgx`](libs/pgx) | Library | — | PostgreSQL pool (`jackc/pgx`): config, readiness, migrations, pool metrics. |
 | [`libs/valkey`](libs/valkey) | Library | — | Valkey cache (`valkey-go`): get/set/del, readiness, cache-aside helper. |
-| [`libs/kafka`](libs/kafka) | Library | — | Kafka (`franz-go`): producer, at-least-once consumer group, TLS / SASL, lag metrics; no auto topic creation unless allowed. |
+| [`libs/kafka`](libs/kafka) | Library | — | Kafka, provider-neutral (no cgo): synchronous producer with an error taxonomy, at-least-once consumer group (commit-after-handle, retries, DLQ, drain), TLS / SASL / mTLS, every buffer a named key, one set of metric names; a conformance suite (`kafkatest`). **[Read its README](libs/kafka/README.md)** — provider comparison and every safe default. |
+| [`libs/kafka-rdkafka`](libs/kafka-rdkafka) | Library | — | Kafka provider: **librdkafka** via confluent-kafka-go — the default; cgo, a static musl binary in the image; any librdkafka property through `KAFKA_*_EXTRA_PROPERTIES`. |
+| [`libs/kafka-franz`](libs/kafka-franz) | Library | — | Kafka provider: **franz-go**, pure Go (`KAFKA_PROVIDER=franz`, `CGO_ENABLED=0`). |
 | [`libs/otelx`](libs/otelx) | Library | — | OpenTelemetry tracing: OTLP over HTTP (TLS by default), W3C propagation; opt-in. |
 | [`libs/testx`](libs/testx) | Test helpers | — | `_test`-only, no Docker: span recorder, log buffer, metric helpers, unique names. |
 | [`libs/testx/containers`](libs/testx/containers) | Test helpers | — | `_test`-only: one shared Postgres / Valkey / Kafka per test binary (testcontainers), Toxiproxy chaos. A module needs Docker exactly when it requires this. |
@@ -42,7 +44,10 @@ listener** from `httpx` (`/healthz` = `/livez`, `/readyz`, `/metrics`,
 `/version`, `/admin/*`, `/debug/pprof`; API port + 1000), so the API port never
 carries operational routes. A non-loopback admin address needs
 `*_ADMIN_TOKEN` (or `*_ADMIN_INSECURE=true`, what the local compose stack
-sets); `just up` / `run` bind it to `127.0.0.1`.
+sets); `just up` / `run` bind it to `127.0.0.1`. Every binary takes
+`--check-config` (exit 0, or 78 with the problems — the exit code of any
+config error) and `--config-reference` (every key, YAML path, default), via
+`httpx.Boot`.
 
 ## Layout
 
@@ -218,13 +223,45 @@ just stack-down
 processes, `redpanda:29092` for containers) is a singleton shared by every
 worktree. Every compose file publishes on `127.0.0.1` only.
 
+## Kafka: two clients, one API
+
+`libs/kafka` is the API and the policy (commit after handling, retries,
+`Permanent`, dead-letter topic, drain, trace propagation, metric names,
+error kinds); the client library is a build-time choice:
+
+| `KAFKA_PROVIDER` | Client | Build |
+| --- | --- | --- |
+| `rdkafka` (default) | librdkafka via confluent-kafka-go — the engine nodejs-basics uses | cgo; the image is a static musl binary on `distroless/static` |
+| `franz` | franz-go | `CGO_ENABLED=0 -tags kafka_franz` |
+
+```sh
+KAFKA_PROVIDER=franz scripts/build-service.sh tasks   # or just docker-build / docker/stack.yml
+```
+
+Every buffer a client keeps is a named key with a bounded default
+(`KAFKA_PRODUCER_QUEUE_MAX_KBYTES`, `KAFKA_PRODUCER_QUEUE_MAX_MESSAGES`,
+`KAFKA_MESSAGE_MAX_BYTES`, `KAFKA_CONSUMER_QUEUE_MAX_KBYTES`,
+`KAFKA_CONSUMER_FETCH_MAX_BYTES`, `KAFKA_CONSUMER_PARTITION_FETCH_MAX_BYTES` —
+the same names and defaults as nodejs-basics), compression is `lz4`, the
+assignment strategy `cooperative-sticky`; with librdkafka any other property
+goes through `KAFKA_*_EXTRA_PROPERTIES` (a JSON object in env, a mapping in
+the config file — a ConfigMap). Both providers pass the same conformance
+suite and connect to the SASL_SSL + private CA example
+([`examples/kafka-sasl-ssl`](examples/kafka-sasl-ssl)).
+
+**[libs/kafka/README.md](libs/kafka/README.md)** is the reference: when to
+pick which client, every key → librdkafka property → franz-go option →
+default and why it is safe, worst-case memory per client, compression,
+delivery guarantees, rebalancing, commit semantics and the DLQ, TLS / SASL /
+mTLS, topics as broker policy, the error taxonomy and the metrics.
+
 ## Observability
 
 | Signal | Where | What |
 | --- | --- | --- |
 | Logs | stdout, JSON | `service`, `trace_id`/`span_id`, `request_id`, one access-log line per request (`route`, `status`, `latency_ms`); debug/info sampled (`*_LOG_SAMPLE_*`), warn/error never dropped |
 | Traces | OTLP over **HTTP** to `*_OTEL_EXPORTER_OTLP_ENDPOINT` (TLS unless `*_OTEL_EXPORTER_OTLP_INSECURE`) | server span → pgx / Valkey spans → outbox relay publish; record headers carry the context, so the consumer's span continues the trace |
-| Metrics | `/metrics` on the admin port — Prometheus only, nothing pushed | `build_info`, RED per `route`, `health_check_up`, `pgxpool_*`, `cache_lookups_total`, `kafka_producer_*` / `kafka_consumer_*` incl. `kafka_consumer_group_lag`, outbox backlog |
+| Metrics | `/metrics` on the admin port — Prometheus only, nothing pushed | `build_info`, RED per `route`, `health_check_up`, `pgxpool_*`, `cache_lookups_total`, `kafka_publish_*` / `kafka_consumer_*` / `kafka_client_*` incl. `kafka_consumer_lag`, outbox backlog |
 | Profiles | `/debug/pprof/` on the admin port | for a runtime agent or `go tool pprof` |
 | Identity / debugging | admin port | `/version` (version, revision, build time), `PUT /admin/log-level?level=debug&ttl=30m`, `GET /admin/config` (redacted), `X-Debug-Token` per request — see [`libs/httpx`](libs/httpx#runtime-debugging) |
 
@@ -261,7 +298,7 @@ number, and every behaviour is checked at exactly one layer.
 |---|---|---|---|
 | **Unit** | `*_test.go` next to the code, `-short` | pure logic, config parsing, handlers behind small interfaces with fakes, readiness cache semantics, log sampling arithmetic, route ↔ listener wiring | anything that needs a real dependency |
 | **Contract** | telemetry: `libs/otelx/telemetry_test.go`, `*/metrics_test.go`; API: exchanges validated with `libs/testx/contract` | the access-log line, the span and the counters describe the same request; every exposition is promlint-clean; every request/response and every published event conforms to the TypeSpec-generated OpenAPI / JSON Schema | route behaviour (unit), real dependencies (integration) |
-| **Integration** | `libs/{pgx,valkey,kafka}`, `services/tasks/internal/integration`, `services/consumer/internal/worker` — one shared container per test binary | the libs against real Postgres / Valkey / Kafka (spans, trace propagation through the broker, pool / hit-miss / lag metrics); the tasks vertical wired as `main.go` wires it, including the outbox relay | route contracts proven with fakes; process-level behaviour |
+| **Integration** | `libs/{pgx,valkey}`, `libs/kafka-{rdkafka,franz}` (the shared `kafka/kafkatest` conformance suite, once per provider), `services/tasks/internal/integration`, `services/consumer/internal/worker` — one shared container per test binary | the libs against real Postgres / Valkey / Kafka (spans, trace propagation through the broker, pool / hit-miss / lag metrics); the tasks vertical wired as `main.go` wires it, including the outbox relay | route contracts proven with fakes; process-level behaviour |
 | **Chaos** | `services/tasks/internal/integration/chaos_test.go` (`containers.Proxied`, `containers.Pause`) | what the design promises when a dependency fails, slows down or hangs: cache bypassed, outbox catches up, readiness degrades only for the critical dependency, probes stay fast, everything recovers | happy-path behaviour (integration) |
 | **E2E** | `e2e/` (Go, real binaries, `-tags e2e`) | what only a real process shows: it boots from env, is ready on its admin listener, `/version` carries the build stamp, the admin surface is token-guarded, SIGTERM exits 0 with "servers stopped cleanly", and tasks → outbox → Kafka → consumer across processes | per-route behaviour, error bodies (unit), the CRUD flow (integration) |
 | **Generative** | `just schemathesis <svc>` | "bad input → 4xx problem", no 5xx, every response in the contract's shape | business semantics (unit), effects on dependencies (integration) |
@@ -346,15 +383,15 @@ merging.
   that passes there and fails on a PR is a real flake: `t.Skip("flaky: GB-123 …")`
   with a ticket (the report buckets it as a quarantined flake), then fix or
   delete it.
-- Time-based tests inject the clock (the circuit breaker's `nowMS`, the
-  cache's `cacheNow`) or observe state (`require.Eventually`); a `time.Sleep`
+- Time-based tests inject the clock (the circuit breaker's `now func()
+  time.Time`) or observe state (`require.Eventually`); a `time.Sleep`
   in a test is a review finding unless it *is* the behaviour under test.
 
 ### Fuzzing
 
 Everything that parses bytes from outside the process has a `Fuzz*` target:
-`problem+json` rendering, the YAML config loader, the retry jitter, the
-circuit-breaker state machine. `just fuzz` runs each for a budget locally; the
+`problem+json` rendering, the YAML config loader, secret redaction, the
+`Retry-After` parser and the consumer's event handler. `just fuzz` runs each for a budget locally; the
 nightly `fuzz` job does the same in CI. A crash writes its input to
 `testdata/fuzz/<Target>/` — it is committed and runs as a plain regression
 test from then on.
@@ -437,12 +474,12 @@ small, pure, decision-heavy code:
 
 ```sh
 just mutate                             # libs/resilient-http-client (default)
-just mutate libs/resilient-http-client  # backoff.go, circuitbreaker.go, adaptive.go
+just mutate libs/resilient-http-client  # breaker.go, backoff.go, budget.go, window.go, validate.go
 ```
 
 Scope and thresholds live in the module's [`.gremlins.yaml`](libs/resilient-http-client/.gremlins.yaml);
-the run fails below them. `libs/resilient-http-client/mutation_test.go` is the
-worked example: each test names the mutant that survived before it existed.
+the run fails below them; the file says why the rest of the module is left
+out (integration-shaped code, where a surviving mutant is mostly noise).
 CI runs it nightly and on demand (`mutation` job), never per PR. The run must
 not hit the `go test` cache (`GOFLAGS=-count=1`, the recipe sets it).
 
@@ -490,7 +527,7 @@ shared across worktrees; so is the `docker/deps.yml` stack.
   with a Go at least as new, so the linter moves first (CLAUDE.md).
 - **net/http** (Go 1.22 ServeMux, no framework), **log/slog**,
   **prometheus/client_golang**, **caarlos0/env** + YAML, **testify**; pure-Go
-  drivers **pgx**, **valkey-go**, **franz-go**; **OpenTelemetry** over OTLP/HTTP.
+  drivers **pgx**, **valkey-go**, Kafka through **librdkafka** (confluent-kafka-go) or **franz-go** (see [libs/kafka](libs/kafka/README.md)); **OpenTelemetry** over OTLP/HTTP.
 - **testcontainers-go** only behind `libs/testx/containers`.
 - **VS Code**: the extension's helpers (gopls, dlv, gotests, gomodifytags,
   impl) are the **ide** profile — `just setup-ide`, export `MISE_ENV=ide`, and

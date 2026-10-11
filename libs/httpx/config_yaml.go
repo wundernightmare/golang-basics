@@ -46,11 +46,9 @@ func LoadYAML[T any](path, prefix string, dst *T) error {
 	//    SLOW_REQUEST=0) is a value, not "unset"; only into zero fields so a
 	//    service can pre-set its own defaults (":9082", "tasks") before the
 	//    call and have the operator's values layered on top of them.
-	var defaults T
-	if err := env.ParseWithOptions(&defaults, env.Options{Prefix: prefix, Environment: map[string]string{}}); err != nil {
-		return fmt.Errorf("httpx: env defaults (prefix %q): %w", prefix, err)
+	if err := Defaults(prefix, dst); err != nil {
+		return err
 	}
-	fillZero(reflect.ValueOf(dst).Elem(), reflect.ValueOf(&defaults).Elem())
 
 	// 2. The file, when there is one: yaml only touches the keys it finds.
 	if path != "" {
@@ -74,6 +72,21 @@ func LoadYAML[T any](path, prefix string, dst *T) error {
 	if err := env.ParseWithOptions(dst, env.Options{Prefix: prefix, DefaultValueTagName: "envDefaultDisabled"}); err != nil {
 		return fmt.Errorf("httpx: env overlay (prefix %q): %w", prefix, err)
 	}
+	return nil
+}
+
+// Defaults fills every field of dst that is still at its zero value from the
+// struct's envDefault tags — the first step of [LoadYAML], without the file or
+// the environment. A service presets its own defaults in dst, calls this, and
+// has the effective defaults: what --config-reference prints, and what a
+// loaded config is compared with to tell an explicitly set key from an
+// untouched one.
+func Defaults[T any](prefix string, dst *T) error {
+	var defaults T
+	if err := env.ParseWithOptions(&defaults, env.Options{Prefix: prefix, Environment: map[string]string{}}); err != nil {
+		return fmt.Errorf("httpx: env defaults (prefix %q): %w", prefix, err)
+	}
+	fillZero(reflect.ValueOf(dst).Elem(), reflect.ValueOf(&defaults).Elem())
 	return nil
 }
 

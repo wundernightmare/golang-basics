@@ -91,3 +91,20 @@ func (t *Tasks) Warm(ctx context.Context, task domain.Task) {
 func (t *Tasks) Invalidate(ctx context.Context, id string) error {
 	return t.c.Tombstone(ctx, Key(id), t.tombstoneTTL)
 }
+
+// None is the cache when Valkey is not configured (TASKS_VALKEY_URL and
+// TASKS_VALKEY_ADDR unset): every read is a miss served by the store, and a
+// write has nothing to invalidate.
+type None struct{}
+
+// Get loads the task; it is never a hit.
+func (None) Get(ctx context.Context, _ string, load func(context.Context) (domain.Task, error)) (domain.Task, bool, error) {
+	task, err := load(ctx)
+	return task, false, err
+}
+
+// Warm does nothing.
+func (None) Warm(context.Context, domain.Task) {}
+
+// Invalidate does nothing.
+func (None) Invalidate(context.Context, string) error { return nil }

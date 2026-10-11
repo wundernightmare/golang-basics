@@ -65,11 +65,11 @@ groups:
     rules:
       # Kafka consumer lag (the consumer's own view of the partitions it owns).
       - alert: KafkaConsumerLagHigh
-        expr: sum by (service, topic) (kafka_consumer_group_lag) > 1000
+        expr: sum by (service) (kafka_consumer_lag) > 1000
         for: 10m
         labels: { severity: ticket }
         annotations:
-          summary: "{{ $labels.service }}: {{ $value }} records behind on {{ $labels.topic }}"
+          summary: "{{ $labels.service }}: {{ $value }} records behind"
 
       # Transactional outbox: rows written with the task but not yet published
       # by the relay. Growth means Kafka is unreachable or the relay is stuck.

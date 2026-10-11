@@ -78,7 +78,9 @@ started; never a fixed port.
 In order, outermost first:
 
 1. **entry** — request id, client address, per-request deadline
-   (`HTTP_REQUEST_TIMEOUT`), `X-Request-Id` on the response;
+   (`HTTP_REQUEST_TIMEOUT`, shortened — never extended — by a caller's
+   `X-Request-Timeout-Ms`; a value that is not 1–9 digits is ignored),
+   `X-Request-Id` on the response;
 2. **debug token** — when `DEBUG_TOKEN` is set (see below);
 3. **tracing** — a server span per request (see *Traces* below);
 4. **access log** — one line per request;
@@ -266,6 +268,23 @@ type Config struct {
 Either way `Config.Validate` (also run by `NewServer`) rejects a config the
 server cannot run safely with, reporting every problem at once.
 
+### The command line every binary shares
+
+`httpx.Boot` is the config half of a service's `main`: it loads the config
+and handles three flags, so every binary answers the same questions the same
+way (see `services/tasks/main.go`):
+
+| Flag | Does | Exit |
+| --- | --- | --- |
+| `--help` | what configures the binary (prefix, YAML variable) and the flags | 0 |
+| `--check-config` | load + validate, print `config ok` or every problem — a deploy pre-flight | 0 / 78 |
+| `--config-reference` | every key: env name, YAML path, default (`(secret)` for secrets), from the struct tags | 0 |
+
+A config that does not load exits **78** (`EX_CONFIG`) with the reason on
+stderr — "fix the deployment", not "restart me"; a bad command line exits
+**64** (`EX_USAGE`). `httpx.Defaults(prefix, &cfg)` gives the tag defaults
+over a service's presets — what the reference prints.
+
 With prefix `PING_`:
 
 | Variable                         | YAML key                | Default          | Meaning                                                    |
@@ -280,7 +299,7 @@ With prefix `PING_`:
 | `PING_HTTP_READ_TIMEOUT`         | `read_timeout`          | `30s`            | time to read the whole request                             |
 | `PING_HTTP_WRITE_TIMEOUT`        | `write_timeout`         | `30s`            | time to write the response                                 |
 | `PING_HTTP_IDLE_TIMEOUT`         | `idle_timeout`          | `120s`           | keep-alive idle limit                                      |
-| `PING_HTTP_REQUEST_TIMEOUT`      | `request_timeout`       | `30s`            | per-request context deadline (≤ 0 = none)                  |
+| `PING_HTTP_REQUEST_TIMEOUT`      | `request_timeout`       | `30s`            | per-request context deadline (≤ 0 = none); `X-Request-Timeout-Ms` may shorten it |
 | `PING_HTTP_MAX_HEADER_BYTES`     | `max_header_bytes`      | `1048576`        | request header limit                                       |
 | `PING_HTTP_MAX_BODY_BYTES`       | `max_body_bytes`        | `1048576`        | request body limit (larger → 413)                          |
 | `PING_HTTP_SHUTDOWN_DELAY`       | `shutdown_delay`        | `2s`             | serve on after readiness flips, before draining            |

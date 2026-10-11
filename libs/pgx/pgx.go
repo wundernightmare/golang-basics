@@ -57,6 +57,13 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*DB, error) {
 	if cfg.MaxConnIdleTime > 0 {
 		poolCfg.MaxConnIdleTime = cfg.MaxConnIdleTime
 	}
+	if cfg.PasswordFile != "" {
+		pw, err := readSecretFile(cfg.PasswordFile)
+		if err != nil {
+			return nil, fmt.Errorf("pgx: DB_PASSWORD_FILE: %w", err)
+		}
+		poolCfg.ConnConfig.Password = pw // over the URL's and DB_PASSWORD
+	}
 	connectTimeout := cfg.ConnectTimeout
 	if connectTimeout <= 0 {
 		connectTimeout = defaultConnectTimeout

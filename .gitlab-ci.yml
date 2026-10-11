@@ -316,6 +316,8 @@ lint:
       for m in $(scripts/touched-modules.sh --all); do
         echo "── $m"
         (cd "$m" && go vet -tags e2e ./... && golangci-lint run --build-tags e2e) || status=1
+        # A service with Kafka links one provider per build: also vet the franz-go one.
+        if [ -d "$m/internal/kafkaprovider" ]; then (cd "$m" && CGO_ENABLED=0 go vet -tags kafka_franz ./...) || status=1; fi
       done
       test "$status" = 0
 
@@ -380,6 +382,11 @@ integration:
         (cd "$m" && gotestsum --format testname --junitfile "$CI_PROJECT_DIR/.reports/junit/integration-$flat.xml" -- \
           -race -cover -covermode=atomic -coverpkg="$COVERPKG" ./... \
           -args -test.gocoverdir="$CI_PROJECT_DIR/.cover/integration") || status=1
+        # A service's integration suite runs against the other Kafka provider too.
+        if [ -d "$m/internal/kafkaprovider" ]; then
+          (cd "$m" && CGO_ENABLED=0 gotestsum --format testname --junitfile "$CI_PROJECT_DIR/.reports/junit/integration-$flat-franz.xml" -- \
+            -tags kafka_franz ./...) || status=1
+        fi
       done
       test "$status" = 0
   artifacts:
@@ -425,6 +432,31 @@ e2e:
       - .reports/junit/
     reports:
       junit: .reports/junit/e2e.xml
+
+# The same e2e suite with the services built against franz-go (the default
+# build above links librdkafka). No coverage: the default build feeds it.
+e2e-franz:
+  extends: e2e
+  variables:
+    COVER: ""
+    KAFKA_PROVIDER: franz
+    E2E_COVER_DIR: ""
+  script:
+    - mkdir -p .build .reports/junit
+    - for s in $(scripts/touched-modules.sh --services); do scripts/build-service.sh "$s" ".build/$s"; done
+    - |
+      for hp in postgres:5432 valkey:6379 redpanda:9092; do
+        timeout 120 bash -c "until (: > /dev/tcp/${hp%%:*}/${hp##*:}) 2>/dev/null; do sleep 1; done" \
+          || { echo "dependency $hp not reachable after 120s" >&2; exit 1; }
+      done
+    - cd e2e && gotestsum --format testname --junitfile "$CI_PROJECT_DIR/.reports/junit/e2e-franz.xml" -- -tags e2e -count=1 ./...
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - .reports/junit/
+    reports:
+      junit: .reports/junit/e2e-franz.xml
 
 # Plain (not cover-instrumented) binaries for Schemathesis, whose image has no Go.
 build-services:
@@ -718,7 +750,7 @@ docker-build-scan:
         docker build --build-arg SERVICE="$s" --build-arg GO_VERSION="$GO_VERSION" \
           --build-arg VERSION="${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}" --build-arg GIT_SHA="$CI_COMMIT_SHA" \
           --build-arg BUILD_TIME="$CI_COMMIT_TIMESTAMP" \
-          --build-arg DOCKER_HUB --build-arg GCR --build-arg GOPROXY --build-arg GOSUMDB --build-arg GONOSUMDB \
+          --build-arg KAFKA_PROVIDER --build-arg ALPINE_MIRROR --build-arg DOCKER_HUB --build-arg GCR --build-arg GOPROXY --build-arg GOSUMDB --build-arg GONOSUMDB \
           --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY \
           -f docker/service.Dockerfile -t "golang-basics-$s:ci" .
         docker save -o "image-$s.tar" "golang-basics-$s:ci"

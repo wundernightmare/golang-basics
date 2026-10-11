@@ -47,8 +47,8 @@ committed, the rest is redelivered to the next group member.
 | `consumer_events_rejected_total{reason}` | `undecodable` \| `unknown_type` (dead-lettered) |
 | `kafka_consume_total{topic,result}` | `ok` \| `retried` \| `dead_lettered` \| `failed` (from `libs/kafka`) |
 | `kafka_consumer_dlq_total{topic}`, `kafka_consumer_commit_errors_total`, `kafka_consumer_handler_duration_seconds` | dead-lettering, commits, handler latency |
-| `kafka_consumer_group_lag{topic,partition}` | records not yet committed, for the partitions this replica owns (every `CONSUMER_KAFKA_LAG_INTERVAL`, default 15s) — the worker's availability indicator |
-| `kafka_consumer_assigned_partitions`, `kafka_consumer_rebalances_total`, `kafka_consumer_lag_*` | group membership and lag-poll health |
+| `kafka_consumer_lag`, `kafka_consumer_lag_max` | records behind, total and worst, over the partitions this replica owns (every `CONSUMER_KAFKA_STATISTICS_INTERVAL_MS`, default 15000) — the worker's availability indicator |
+| `kafka_consumer_assigned_partitions`, `kafka_consumer_rebalances_total`, `kafka_client_*` | group membership, broker connections, which Kafka client (`kafka_client_info{provider}`) |
 | `build_info`, `log_dropped_total`, `health_*`, `go_*`, `process_*` | from `httpx` |
 
 ## Endpoints (admin listener only — a worker has no API port)
@@ -77,7 +77,7 @@ READMEs; the ones you are most likely to set:
 | `CONSUMER_ADMIN_TOKEN` | *(empty)* | required on a non-loopback address… |
 | `CONSUMER_ADMIN_INSECURE` | `false` | …unless this is `true` (local compose / e2e) |
 | `CONSUMER_LOG_LEVEL` / `_FORMAT` | `info` / `json` | |
-| `CONSUMER_KAFKA_BROKERS` | `localhost:9092` | |
+| `CONSUMER_KAFKA_BROKERS` | **required** | a consumer without a broker has nothing to do |
 | `CONSUMER_KAFKA_TOPIC` | `tasks.events` | |
 | `CONSUMER_KAFKA_GROUP` | `tasks-consumer` | |
 | `CONSUMER_KAFKA_CONSUMER_MAX_RETRIES` | `5` | negative = none |
@@ -87,19 +87,21 @@ READMEs; the ones you are most likely to set:
 | `CONSUMER_KAFKA_CONSUMER_DRAIN_TIMEOUT` | `10s` | |
 | `CONSUMER_KAFKA_CONSUMER_MAX_POLL_RECORDS` | `100` | |
 | `CONSUMER_KAFKA_ALLOW_AUTO_TOPIC_CREATION` | `false` | the DLQ topic must exist unless `true` |
-| `CONSUMER_KAFKA_TLS_ENABLED`, `_TLS_CA_CERT`, `_TLS_CLIENT_CERT`, `_TLS_CLIENT_KEY`, `_TLS_INSECURE_SKIP_VERIFY` | off | broker TLS / mTLS (PEM files) |
-| `CONSUMER_KAFKA_SASL_MECHANISM`, `_SASL_USERNAME`, `_SASL_PASSWORD` | off | `plain` \| `scram-sha-256` \| `scram-sha-512` |
+| `CONSUMER_KAFKA_SECURITY_PROTOCOL`, `_SASL_*`, `_SSL_CA_LOCATION`, `_SSL_CERTIFICATE_LOCATION`, `_SSL_KEY_LOCATION` | `plaintext` | broker TLS / SASL / mTLS (PEM files) — [examples/kafka-sasl-ssl](../../examples/kafka-sasl-ssl) |
+| `CONSUMER_KAFKA_CONSUMER_QUEUE_MAX_KBYTES`, `_FETCH_MAX_BYTES`, … | 4 MiB, 4 MiB | every client buffer, bounded; all keys and both Kafka clients: [libs/kafka](../../libs/kafka/README.md) |
+| `CONSUMER_KAFKA_SASL_MECHANISM`, `_SASL_USERNAME`, `_SASL_PASSWORD` (or `_SASL_PASSWORD_FILE`) | off | `plain` \| `scram-sha-256` \| `scram-sha-512` |
 | `CONSUMER_DEDUPE_SIZE` | `10000` | event ids remembered |
 | `CONSUMER_OTEL_ENABLED` | `false` | trace export (OTLP/HTTP, TLS unless `CONSUMER_OTEL_EXPORTER_OTLP_INSECURE=true`) |
 
-A config error is printed to stderr and the process exits non-zero before
-anything starts.
+A config error is printed to stderr and the process exits 78 before
+anything starts; `consumer --check-config` does only that check,
+`consumer --config-reference` lists every key with its default.
 
 ## Run
 
 ```sh
 just infra-up             # bring up Kafka (repo root)
-CONSUMER_ADMIN_INSECURE=true CONSUMER_KAFKA_ALLOW_AUTO_TOPIC_CREATION=true just consumer run
+just consumer run         # sets CONSUMER_KAFKA_BROKERS=localhost:9092 unless set
 
 # in another shell, create a task so an event flows:
 just tasks run &

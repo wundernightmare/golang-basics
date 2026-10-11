@@ -93,9 +93,20 @@ README; this file is only the high-signal, easy-to-miss bits.
 - **Secure by default.** `*_ADMIN_TOKEN` guards `/admin/*` and `/debug/*`;
   `httpx.Config.Validate()` refuses an empty token on a non-loopback admin
   address unless `*_ADMIN_INSECURE=true` (local compose / e2e set it). Kafka
-  has `*_KAFKA_TLS_*` / `*_KAFKA_SASL_*`; auto topic creation is off unless
-  `*_KAFKA_ALLOW_AUTO_TOPIC_CREATION=true`. Never hard-code `Insecure: true`
-  in a service — it comes from config.
+  has `*_KAFKA_SECURITY_PROTOCOL` / `*_KAFKA_SASL_*` / `*_KAFKA_SSL_*`; auto
+  topic creation is off unless `*_KAFKA_ALLOW_AUTO_TOPIC_CREATION=true`.
+  Never hard-code `Insecure: true` in a service — it comes from config.
+- **Kafka has two providers behind one API.** `libs/kafka` is pure Go (API,
+  config, commit/retry/DLQ policy, metrics); `libs/kafka-rdkafka`
+  (librdkafka, cgo — the default) and `libs/kafka-franz` (franz-go) implement
+  its `Driver` and register on import. Services link one through
+  `internal/kafkaprovider` (build tag `kafka_franz`; `KAFKA_PROVIDER` in
+  `scripts/build-service.sh` and the Dockerfile). Never import a provider
+  anywhere else, never add behaviour to one provider only — put it in
+  `libs/kafka` and prove it in `libs/kafka/kafkatest`, which both run. Every
+  client buffer is a named key (never a client default), and
+  `KAFKA_*_EXTRA_PROPERTIES` may not override a named key. Building the
+  rdkafka provider (and `go test -race` anywhere) needs cgo / gcc.
 - **Local cross-module deps** resolve via `go.work`; each service `go.mod` also
   has a `replace … => ../../libs/httpx` so `go build` works outside the
   workspace too (e.g. inside the per-service Docker build).
@@ -108,7 +119,8 @@ README; this file is only the high-signal, easy-to-miss bits.
   testcontainers through `libs/testx/containers`, so `just mod <m> test` needs
   a Docker daemon and the suites skip under `-short`. A module needs Docker
   exactly when its `go.mod` requires `libs/testx/containers`; CI derives the
-  integration matrix from that. `ping`, `heartbeat`, `httpx` and
+  integration matrix from that (and runs a service with internal/kafkaprovider
+  once more with `-tags kafka_franz`). `ping`, `heartbeat`, `httpx` and
   `resilient-http-client` stay dependency-free — and so do their module
   graphs: `libs/testx` (the light harness) pulls no Docker client.
 
