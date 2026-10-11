@@ -34,6 +34,7 @@ the `TASKS_` prefix the keys are:
 | --- | --- | --- | --- |
 | `TASKS_DATABASE_URL` | `url` | — | full DSN; wins over the discrete fields |
 | `TASKS_DB_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_NAME` / `_SSLMODE` | `host` … `sslmode` | `localhost` / `5432` / `app` / `app` / `app` / `disable` | |
+| `TASKS_DB_PASSWORD_FILE` | `password_file` | — | a mounted secret, read once at boot; wins over `DB_PASSWORD` and the URL's password (trailing newline dropped) |
 | `TASKS_DB_MAX_CONNS` / `_MIN_CONNS` | `max_conns` / `min_conns` | `10` / `0` | pool size |
 | `TASKS_DB_MAX_CONN_LIFETIME` / `_MAX_CONN_IDLE` | … | `1h` / `30m` | recycling |
 | `TASKS_DB_CONNECT_TIMEOUT` | `connect_timeout` | `5s` | dial + boot ping (zero → 5s, never "expire at once") |

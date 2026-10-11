@@ -6,30 +6,40 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/services/ping/internal/api"
 )
 
+const prefix = "PING_"
+
 func main() {
-	if err := run(); err != nil {
+	boot := httpx.Boot[httpx.Config]{
+		Name: "ping", Prefix: prefix,
+		Load: func() (httpx.Config, error) {
+			cfg, err := httpx.LoadConfig(prefix)
+			cfg.Service = "ping"
+			return cfg, err
+		},
+		Defaults: func() (httpx.Config, error) {
+			cfg := httpx.Config{Service: "ping"}
+			err := httpx.Defaults(prefix, &cfg)
+			return cfg, err
+		},
+	}
+	cfg, code, ok := boot.Config(os.Args[1:], os.Stdout, os.Stderr)
+	if !ok {
+		os.Exit(code)
+	}
+	if err := run(cfg); err != nil {
 		// run() owns reporting on the failure path; main only sets the exit
 		// code, after every deferred cleanup in run() has executed.
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	cfg, err := httpx.LoadConfig("PING_")
-	if err != nil {
-		// There is no logger before the config is known: say it on stderr,
-		// or the process exits 1 without a word.
-		fmt.Fprintln(os.Stderr, "ping: "+err.Error())
-		return err
-	}
-	cfg.Service = "ping"
+func run(cfg httpx.Config) error {
 
 	logger := httpx.NewLogger(cfg.LogConfig())
 	srv, err := httpx.NewServer(cfg, logger)

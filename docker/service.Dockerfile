@@ -5,6 +5,7 @@
 #   docker build -f docker/service.Dockerfile \
 #     --build-arg SERVICE=ping \
 #     --build-arg GO_VERSION="$(scripts/mise-pins.sh | sed -n 's/^GO_VERSION=//p')" \
+#     --build-arg KAFKA_PROVIDER=rdkafka \          ← or franz (tasks, consumer)
 #     --build-arg VERSION="$(git describe --tags --always --dirty)" \
 #     --build-arg GIT_SHA="$(git rev-parse HEAD)" \
 #     --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -23,8 +24,15 @@
 #
 # Final image
 # ───────────
-#   • distroless/static, non-root (uid 65532), fully static (CGO_ENABLED=0 —
-#     pgx, valkey-go and franz-go are pure Go: no libpq / librdkafka)
+#   • distroless/static, non-root (uid 65532), fully static whichever Kafka
+#     provider is linked (KAFKA_PROVIDER, see libs/kafka/README.md):
+#       rdkafka (default) — librdkafka via confluent-kafka-go needs cgo: the
+#                           bundled musl librdkafka.a is linked into a static
+#                           musl binary (-tags musl, -extldflags -static),
+#                           which is why the builder is Alpine;
+#       franz             — franz-go, pure Go: CGO_ENABLED=0 -tags kafka_franz.
+#     Services without Kafka (ping, heartbeat) build with CGO_ENABLED=0
+#     either way; pgx and valkey-go are pure Go.
 #   • -trimpath -s -w; Version / Revision / BuildTime stamped into libs/httpx
 #     (build_info, /version, OTel service.version) from VERSION / GIT_SHA /
 #     BUILD_TIME, mirrored in the OCI labels
@@ -63,21 +71,26 @@
 # mise-pins.sh → GO_VERSION). No default so an image can never be built on a
 # Go the rest of the repo does not use.
 ARG GO_VERSION
-ARG DEBIAN_CODENAME=bookworm
+ARG ALPINE_VERSION=3.24
 ARG DOCKER_HUB=docker.io
 ARG GCR=gcr.io
 # renovate: datasource=docker depName=golang versioning=docker
-ARG GOLANG_DIGEST=sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452
+ARG GOLANG_DIGEST=sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc
 # renovate: datasource=docker depName=gcr.io/distroless/static-debian12 currentValue=nonroot
 ARG DISTROLESS_DIGEST=sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 
 # ── Stage 1 – builder ────────────────────────────────────────────────────────
-FROM ${DOCKER_HUB}/library/golang:${GO_VERSION}-${DEBIAN_CODENAME}@${GOLANG_DIGEST} AS builder
+FROM ${DOCKER_HUB}/library/golang:${GO_VERSION}-alpine${ALPINE_VERSION}@${GOLANG_DIGEST} AS builder
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
 ARG GO_VERSION
 ARG SERVICE
+# rdkafka (default) | franz — which Kafka client tasks / consumer link.
+ARG KAFKA_PROVIDER=rdkafka
+# The Alpine package mirror (a closed network's proxy), for the C toolchain
+# the rdkafka build needs.
+ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
 # Module proxy / checksum-db settings, forwarded from the environment
 # (`--build-arg GOPROXY` with no value; unset = the Go defaults).
 # HTTP_PROXY / HTTPS_PROXY / NO_PROXY are predefined build args.
@@ -92,10 +105,15 @@ ARG BUILD_TIME=
 # Fail fast on a missing SERVICE (COPY services/ would otherwise copy them
 # all) and on a builder image that is not the pinned Go (stale GOLANG_DIGEST).
 RUN test -n "${SERVICE}" || { echo "build-arg SERVICE is required (ping, heartbeat, tasks, consumer)" >&2; exit 1; } \
- && test "$(go env GOVERSION)" = "go${GO_VERSION}" \
-    || { echo "builder is $(go env GOVERSION), GO_VERSION is ${GO_VERSION}: update GOLANG_DIGEST" >&2; exit 1; }
+ && { test "$(go env GOVERSION)" = "go${GO_VERSION}" \
+    || { echo "builder is $(go env GOVERSION), GO_VERSION is ${GO_VERSION}: update GOLANG_DIGEST" >&2; exit 1; }; } \
+ && case "${KAFKA_PROVIDER}" in rdkafka|franz) ;; *) echo "KAFKA_PROVIDER: rdkafka or franz, not '${KAFKA_PROVIDER}'" >&2; exit 1 ;; esac
 
-ENV CGO_ENABLED=0 GOTOOLCHAIN=local
+# The C toolchain for cgo (librdkafka): gcc and the musl headers.
+RUN sed -i "s#https\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#" /etc/apk/repositories \
+ && apk add --no-cache gcc=~15 musl-dev=~1.2
+
+ENV GOTOOLCHAIN=local
 WORKDIR /src
 
 COPY go.work go.work.sum ./
@@ -111,12 +129,18 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       [ -f "$d/go.mod" ] || go work edit -dropuse="$d"; \
     done \
  && cd "services/${SERVICE}" \
- && go build -trimpath -buildvcs=false \
-      -ldflags="-s -w \
+ && cgo=0 tags="" extld="" \
+ && if [ -d internal/kafkaprovider ]; then \
+      if [ "${KAFKA_PROVIDER}" = franz ]; then tags=kafka_franz; \
+      else cgo=1 tags=musl,netgo,osusergo extld='-linkmode external -extldflags "-static"'; fi; \
+    fi \
+ && CGO_ENABLED="$cgo" go build -trimpath -buildvcs=false -tags "$tags" \
+      -ldflags="-s -w $extld \
         -X github.com/tracehubmmp/golang-basics/libs/httpx.Version=${VERSION} \
         -X github.com/tracehubmmp/golang-basics/libs/httpx.Revision=${GIT_SHA} \
         -X github.com/tracehubmmp/golang-basics/libs/httpx.BuildTime=${BUILD_TIME}" \
-      -o /out/service .
+      -o /out/service . \
+ && if [ "$cgo" = 1 ]; then ! ldd /out/service >/dev/null 2>&1 || { echo "not a static binary" >&2; ldd /out/service; exit 1; }; fi
 
 # ── Stage 2 – runtime ────────────────────────────────────────────────────────
 # distroless/static: ca-certificates, tzdata and /etc/passwd — no shell, no
@@ -124,12 +148,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM ${GCR}/distroless/static-debian12:nonroot@${DISTROLESS_DIGEST} AS runtime
 
 ARG SERVICE
+ARG KAFKA_PROVIDER=rdkafka
 ARG VERSION=dev
 ARG GIT_SHA=
 ARG BUILD_TIME=
 
 LABEL org.opencontainers.image.title="${SERVICE}" \
-      org.opencontainers.image.description="golang-basics ${SERVICE} service" \
+      org.opencontainers.image.description="golang-basics ${SERVICE} service (kafka provider: ${KAFKA_PROVIDER})" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.created="${BUILD_TIME}" \

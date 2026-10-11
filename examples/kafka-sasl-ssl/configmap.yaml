@@ -1,0 +1,70 @@
+# The client side of the example on Kubernetes: settings in a ConfigMap (the
+# service's config.yaml), credentials in a Secret, both mounted as files.
+#
+#   kubectl create secret generic consumer-kafka \
+#     --from-file=ca.crt=certs/ca.crt --from-literal=sasl-password=app-secret
+#   kubectl apply -f configmap.yaml
+#
+# Only what the service reads lives here; every key, its env name and
+# default: `consumer --config-reference` (libs/kafka Config). Buffer sizes
+# and the assignment strategy are named keys — the *_extra_properties may
+# not set them. The extra properties are librdkafka's (the default build);
+# a franz-go build (KAFKA_PROVIDER=franz) refuses them: leave them out there.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: consumer-config
+data:
+  config.yaml: |
+    kafka:
+      brokers: [kafka-0.kafka:9093, kafka-1.kafka:9093, kafka-2.kafka:9093]
+      security_protocol: sasl_ssl
+      sasl_mechanism: SCRAM-SHA-512
+      sasl_username: app
+      sasl_password_file: /etc/kafka-secret/sasl-password    # read once at start
+      ssl_ca_location: /etc/kafka-secret/ca.crt              # the private CA
+      ssl_endpoint_identification_algorithm: https           # verify the broker's hostname
+      # mTLS, when the broker also requires a client certificate:
+      # ssl_certificate_location: /etc/kafka-secret/client.crt
+      # ssl_key_location: /etc/kafka-secret/client.key
+      message_max_bytes: 1000000
+      producer_queue_max_kbytes: 65536
+      producer_queue_max_messages: 100000
+      consumer_queue_max_kbytes: 4096
+      consumer_fetch_max_bytes: 4194304
+      consumer_partition_fetch_max_bytes: 1048576
+      consumer_assignment_strategy: cooperative-sticky
+      # Any other librdkafka property — a mapping, applied after the named keys.
+      producer_extra_properties:
+        batch.size: 262144
+      consumer_extra_properties:
+        fetch.wait.max.ms: 100
+---
+# The part of the consumer's Deployment that wires the two in.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer
+spec:
+  selector:
+    matchLabels: { app: consumer }
+  template:
+    metadata:
+      labels: { app: consumer }
+    spec:
+      securityContext:
+        fsGroup: 65532 # distroless `nonroot`: the Secret's files are group-readable
+      containers:
+        - name: consumer
+          image: registry.example.com/golang-basics-consumer:1.0.0
+          env:
+            - name: CONSUMER_CONFIG
+              value: /etc/app/config.yaml
+          volumeMounts:
+            - { name: config, mountPath: /etc/app, readOnly: true }
+            - { name: kafka-secret, mountPath: /etc/kafka-secret, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: consumer-config }
+        - name: kafka-secret
+          secret: { secretName: consumer-kafka, defaultMode: 0440 }

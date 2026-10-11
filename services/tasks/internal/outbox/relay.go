@@ -25,7 +25,7 @@ import (
 
 // Publisher sends one record (satisfied by libs/kafka.Producer).
 type Publisher interface {
-	Publish(ctx context.Context, topic string, key, value []byte, headers ...kafka.Header) error
+	Send(ctx context.Context, msg kafka.Message) error
 }
 
 // Config tunes a [Relay]. Zero fields take the defaults.
@@ -34,6 +34,7 @@ type Config struct {
 	PollInterval time.Duration // idle poll period (default 1s); Wake cuts it short
 	BatchSize    int           // rows per batch (default 100)
 	MaxBackoff   time.Duration // cap on the retry delay after a failed batch (default 30s)
+	MaxAttempts  int           // rejections after which a row is dead: kept, no longer sent (default 10)
 }
 
 func (c *Config) withDefaults() {
@@ -45,6 +46,9 @@ func (c *Config) withDefaults() {
 	}
 	if c.MaxBackoff <= 0 {
 		c.MaxBackoff = 30 * time.Second
+	}
+	if c.MaxAttempts <= 0 {
+		c.MaxAttempts = 10
 	}
 }
 
@@ -64,6 +68,7 @@ type Relay struct {
 
 type relayMetrics struct {
 	pending   prometheus.Gauge
+	dead      prometheus.Gauge
 	lag       prometheus.Gauge
 	published *prometheus.CounterVec
 }
@@ -84,13 +89,17 @@ func NewRelay(pool *pgxpool.Pool, pub Publisher, cfg Config, log *slog.Logger) *
 				Name: "outbox_pending",
 				Help: "Outbox events not yet published to Kafka (as of the relay's last pass).",
 			}),
+			dead: prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "outbox_dead",
+				Help: "Outbox events the broker rejected OUTBOX_MAX_ATTEMPTS times; kept for an operator, no longer sent.",
+			}),
 			lag: prometheus.NewGauge(prometheus.GaugeOpts{
 				Name: "outbox_relay_lag_seconds",
 				Help: "Age of the oldest unpublished outbox event in seconds (0 when the outbox is empty).",
 			}),
 			published: prometheus.NewCounterVec(prometheus.CounterOpts{
 				Name: "outbox_published_total",
-				Help: "Outbox events the relay tried to publish, by result (ok, error).",
+				Help: "Outbox events the relay tried to publish, by result (ok, rejected, error).",
 			}, []string{"result"}),
 		},
 	}
@@ -98,14 +107,17 @@ func NewRelay(pool *pgxpool.Pool, pub Publisher, cfg Config, log *slog.Logger) *
 
 // Collectors returns the relay's metrics for the service's registry:
 //
-//	outbox_pending                   backlog size
-//	outbox_relay_lag_seconds         age of the oldest unpublished event
-//	outbox_published_total{result}   publish attempts, ok | error
+//	outbox_pending                   backlog size (rows still being sent)
+//	outbox_dead                      rows given up on (rejected OUTBOX_MAX_ATTEMPTS times)
+//	outbox_relay_lag_seconds         age of the oldest pending event
+//	outbox_published_total{result}   publish attempts, ok | rejected | error
 //
 // Alert on the lag, not on the count: a steady backlog that moves is fine, an
-// event older than a minute means the broker (or the relay) is stuck.
+// event older than a minute means the broker (or the relay) is stuck. Any
+// dead row needs a person: fix and re-arm it (UPDATE outbox SET attempts = 0)
+// or delete it.
 func (r *Relay) Collectors() []prometheus.Collector {
-	return []prometheus.Collector{r.metrics.pending, r.metrics.lag, r.metrics.published}
+	return []prometheus.Collector{r.metrics.pending, r.metrics.dead, r.metrics.lag, r.metrics.published}
 }
 
 // Wake asks the relay to run a pass now. It never blocks.
@@ -200,10 +212,20 @@ type pending struct {
 const batchBudget = 30 * time.Second
 
 // RelayOnce publishes one batch of pending events and deletes the rows the
-// broker acknowledged, returning how many it published. The batch stops at
-// the first failed publish (so events keep their order); that row's attempts
-// and last_error are recorded and the error is returned. Another replica
-// holding the relay lock is not an error: the pass publishes nothing.
+// broker acknowledged, returning how many it published. A failed publish is
+// judged by [kafka.Rejected]:
+//
+//   - an outage (broker down, timeout, topic not provisioned, auth): the
+//     batch stops there so events keep their order, the row records
+//     last_error, and the error is returned (the caller backs off). Never
+//     counted: no outage can make a row dead.
+//   - a rejection (too large, malformed — the record itself is the problem):
+//     attempts + 1 and last_error, and the batch goes on without it. After
+//     MaxAttempts the row is dead: left in the table, skipped by every pass.
+//     A rejected row gives up its order relative to later events of its task.
+//
+// Another replica holding the relay lock is not an error: the pass publishes
+// nothing.
 //
 // The pass runs detached from ctx's cancellation (bounded by its own budget)
 // so a shutdown lets it finish and delete what it published instead of
@@ -230,7 +252,7 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 
 	rows, err := tx.Query(bctx,
 		`SELECT id, event_id::text, aggregate_id, event_type, payload, headers
-		   FROM outbox ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED`, r.cfg.BatchSize)
+		   FROM outbox WHERE attempts < $2 ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED`, r.cfg.BatchSize, r.cfg.MaxAttempts)
 	if err != nil {
 		return 0, fmt.Errorf("outbox: select batch: %w", err)
 	}
@@ -257,9 +279,22 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 			break // shutting down: commit what is done
 		}
 		if err := r.publish(bctx, x); err != nil {
+			if kafka.Rejected(err) {
+				r.metrics.published.WithLabelValues("rejected").Inc()
+				var attempts int
+				if uerr := tx.QueryRow(bctx, `UPDATE outbox SET attempts = attempts + 1, last_error = $2 WHERE id = $1 RETURNING attempts`,
+					x.id, truncate(err.Error(), 1000)).Scan(&attempts); uerr != nil {
+					pubErr = fmt.Errorf("outbox: record rejection: %w", uerr)
+					break
+				}
+				r.log.WarnContext(ctx, "outbox event rejected by the broker", "event_id", x.eventID,
+					"event_type", x.eventType, "attempts", attempts, "max_attempts", r.cfg.MaxAttempts,
+					"dead", attempts >= r.cfg.MaxAttempts, "err", err)
+				continue // the record is the problem, not the broker: the rest can go
+			}
 			r.metrics.published.WithLabelValues("error").Inc()
 			pubErr = fmt.Errorf("outbox: publish %s %s (event %s): %w", x.eventType, x.aggregateID, x.eventID, err)
-			if _, uerr := tx.Exec(bctx, `UPDATE outbox SET attempts = attempts + 1, last_error = $2 WHERE id = $1`,
+			if _, uerr := tx.Exec(bctx, `UPDATE outbox SET last_error = $2 WHERE id = $1`,
 				x.id, truncate(err.Error(), 1000)); uerr != nil {
 				pubErr = errors.Join(pubErr, fmt.Errorf("outbox: record failure: %w", uerr))
 			}
@@ -304,7 +339,7 @@ func (r *Relay) publish(ctx context.Context, x pending) error {
 			headers = append(headers, kafka.Header{Key: k, Value: []byte(v)})
 		}
 	}
-	if err := r.pub.Publish(ctx, r.cfg.Topic, []byte(x.aggregateID), x.payload, headers...); err != nil {
+	if err := r.pub.Send(ctx, kafka.Message{Topic: r.cfg.Topic, Key: []byte(x.aggregateID), Value: x.payload, Headers: headers}); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "publish failed")
 		return err
@@ -312,28 +347,34 @@ func (r *Relay) publish(ctx context.Context, x pending) error {
 	return nil
 }
 
-// refreshGauges updates outbox_pending and outbox_relay_lag_seconds.
+// statsSQL counts pending and dead rows and the age of the oldest pending one.
+const statsSQL = `SELECT count(*) FILTER (WHERE attempts < $1),
+       count(*) FILTER (WHERE attempts >= $1),
+       coalesce(extract(epoch FROM now() - min(created_at) FILTER (WHERE attempts < $1)), 0)::float8
+  FROM outbox`
+
+// refreshGauges updates outbox_pending, outbox_dead and outbox_relay_lag_seconds.
 func (r *Relay) refreshGauges(ctx context.Context) {
 	qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	var n int64
+	var n, dead int64
 	var lag float64
-	err := r.pool.QueryRow(pgxlib.WithOperation(qctx, "outbox.stats"),
-		`SELECT count(*), coalesce(extract(epoch FROM now() - min(created_at)), 0)::float8 FROM outbox`).Scan(&n, &lag)
+	err := r.pool.QueryRow(pgxlib.WithOperation(qctx, "outbox.stats"), statsSQL, r.cfg.MaxAttempts).Scan(&n, &dead, &lag)
 	if err != nil {
 		r.log.DebugContext(ctx, "outbox stats unavailable", "err", err)
 		return
 	}
 	r.metrics.pending.Set(float64(n))
+	r.metrics.dead.Set(float64(dead))
 	r.metrics.lag.Set(max(lag, 0))
 }
 
-// Stats returns the backlog size and the age of its oldest event, for tests
-// and tooling.
+// Stats returns the backlog size (dead rows aside) and the age of its oldest
+// event, for tests and tooling.
 func (r *Relay) Stats(ctx context.Context) (pending int64, oldest time.Duration, err error) {
+	var dead int64
 	var lag float64
-	err = r.pool.QueryRow(ctx,
-		`SELECT count(*), coalesce(extract(epoch FROM now() - min(created_at)), 0)::float8 FROM outbox`).Scan(&pending, &lag)
+	err = r.pool.QueryRow(ctx, statsSQL, r.cfg.MaxAttempts).Scan(&pending, &dead, &lag)
 	return pending, time.Duration(lag * float64(time.Second)), err
 }
 

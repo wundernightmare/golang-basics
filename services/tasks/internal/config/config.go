@@ -9,6 +9,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
@@ -22,6 +23,13 @@ import (
 const EnvPrefix = "TASKS_"
 
 // Config is the tasks service configuration.
+//
+// Postgres is required. Valkey and Kafka are optional and switched on by
+// their address alone — TASKS_VALKEY_URL (or TASKS_VALKEY_ADDR) and
+// TASKS_KAFKA_BROKERS, which have no default. Without Valkey every read goes
+// to Postgres; without Kafka the outbox keeps the events until a release with
+// brokers relays them. A Valkey or Kafka key set while its address is not is
+// a config error, never a silently ignored setting.
 //
 // The lib sections are embedded without an envPrefix: their keys already
 // carry a namespace (DATABASE_URL / DB_*, VALKEY_*, KAFKA_*, OTEL_*), so the
@@ -65,6 +73,11 @@ type OutboxConfig struct {
 	PollInterval time.Duration `env:"OUTBOX_POLL_INTERVAL" envDefault:"1s" yaml:"poll_interval"`
 	BatchSize    int           `env:"OUTBOX_BATCH_SIZE" envDefault:"100" yaml:"batch_size"`
 	MaxBackoff   time.Duration `env:"OUTBOX_MAX_BACKOFF" envDefault:"30s" yaml:"max_backoff"`
+	// MaxAttempts is how many times the broker may reject an event (too
+	// large, malformed) before the relay gives up on it: the row stays in
+	// the table (outbox_dead) and stops blocking the rest. Outages are never
+	// counted.
+	MaxAttempts int `env:"OUTBOX_MAX_ATTEMPTS" envDefault:"10" yaml:"max_attempts"`
 }
 
 // IdempotencyConfig tunes Idempotency-Key retention.
@@ -73,13 +86,10 @@ type IdempotencyConfig struct {
 	PurgeInterval time.Duration `env:"IDEMPOTENCY_PURGE_INTERVAL" envDefault:"10m" yaml:"purge_interval"`
 }
 
-// Load reads the config from the YAML file at yamlPath (optional: a missing
-// file means env-only), overlays TASKS_ environment variables and validates
-// the result. This service's own defaults (name, ports, client id) are set
-// before loading: [httpx.LoadYAML] fills the libs' tag defaults only into
-// fields still at zero, so a preset survives, and the file and the
-// environment override it.
-func Load(yamlPath string) (Config, error) {
+// preset is this service's own defaults (name, ports, client id).
+// [httpx.LoadYAML] fills the libs' tag defaults only into fields still at
+// zero, so a preset survives, and the file and the environment override it.
+func preset() Config {
 	cfg := Config{}
 	cfg.Service = "tasks"
 	cfg.Addr = ":8082"
@@ -87,6 +97,23 @@ func Load(yamlPath string) (Config, error) {
 	cfg.Kafka.ClientID = "tasks"
 	cfg.OTel.ServiceName = "tasks"
 	cfg.OTel.Version = httpx.Version
+	return cfg
+}
+
+// Defaults is the configuration with nothing set: what --config-reference
+// prints, and what [Config.Validate] compares with to tell a key that was
+// set from one that was not.
+func Defaults() (Config, error) {
+	cfg := preset()
+	err := httpx.Defaults(EnvPrefix, &cfg)
+	return cfg, err
+}
+
+// Load reads the config from the YAML file at yamlPath (optional: a missing
+// file means env-only), overlays TASKS_ environment variables and validates
+// the result.
+func Load(yamlPath string) (Config, error) {
+	cfg := preset()
 	if err := httpx.LoadYAML(yamlPath, EnvPrefix, &cfg); err != nil {
 		return Config{}, err
 	}
@@ -96,22 +123,52 @@ func Load(yamlPath string) (Config, error) {
 	return cfg, nil
 }
 
-// Validate checks the whole config: the HTTP server's own rules (see
-// [httpx.Config.Validate], which also applies its defaults) and this
-// service's.
-func (c *Config) Validate() error {
+// ValkeyEnabled reports whether the cache is on: its address is set.
+func (c Config) ValkeyEnabled() bool { return c.Valkey.Configured() }
+
+// KafkaEnabled reports whether events are relayed: brokers are set.
+func (c Config) KafkaEnabled() bool { return len(c.Kafka.Brokers) > 0 }
+
+// strayKeys reports an optional integration with a key set while its
+// address is not — a setting that would otherwise be silently ignored. A
+// key counts as set when its value differs from the default.
+func (c Config) strayKeys(def Config) []error {
 	var errs []error
+	if !c.ValkeyEnabled() && !reflect.DeepEqual(c.Valkey, def.Valkey) {
+		errs = append(errs, errors.New("VALKEY_* keys are set but neither VALKEY_URL nor VALKEY_ADDR: set the address to turn the cache on, or drop the keys"))
+	}
+	if !c.KafkaEnabled() {
+		k := c.Kafka
+		k.Brokers = def.Kafka.Brokers // nil or [] alike
+		if !reflect.DeepEqual(k, def.Kafka) {
+			errs = append(errs, errors.New("KAFKA_* keys are set but KAFKA_BROKERS is not: set the brokers to turn the event relay on, or drop the keys"))
+		}
+	}
+	return errs
+}
+
+// Validate checks the whole config: the HTTP server's own rules (see
+// [httpx.Config.Validate], which also applies its defaults), Kafka's when it
+// is on, and this service's.
+func (c *Config) Validate() error {
+	def, err := Defaults()
+	if err != nil {
+		return err
+	}
+	errs := c.strayKeys(def)
 	if err := c.Config.Validate(); err != nil {
 		errs = append(errs, err)
 	}
 	if c.Postgres.URL == "" && c.Postgres.Host == "" {
 		errs = append(errs, errors.New("DATABASE_URL or DB_HOST must be set"))
 	}
-	if len(c.Kafka.Brokers) == 0 {
-		errs = append(errs, errors.New("KAFKA_BROKERS must be set"))
-	}
-	if c.Kafka.Topic == "" {
-		errs = append(errs, errors.New("KAFKA_TOPIC must be set: it is where the task events go"))
+	if c.KafkaEnabled() {
+		if c.Kafka.Topic == "" {
+			errs = append(errs, errors.New("KAFKA_TOPIC must be set: it is where the task events go"))
+		}
+		if err := c.Kafka.Validate(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if c.Cache.TTL <= 0 || c.Cache.TombstoneTTL <= 0 {
 		errs = append(errs, errors.New("CACHE_TTL and CACHE_TOMBSTONE_TTL must be positive"))
@@ -121,6 +178,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Outbox.BatchSize < 1 || c.Outbox.BatchSize > 1000 {
 		errs = append(errs, fmt.Errorf("OUTBOX_BATCH_SIZE must be 1..1000, got %d", c.Outbox.BatchSize))
+	}
+	if c.Outbox.MaxAttempts < 1 {
+		errs = append(errs, fmt.Errorf("OUTBOX_MAX_ATTEMPTS must be at least 1, got %d", c.Outbox.MaxAttempts))
 	}
 	if c.Idempotency.TTL <= 0 || c.Idempotency.PurgeInterval <= 0 {
 		errs = append(errs, errors.New("IDEMPOTENCY_KEY_TTL and IDEMPOTENCY_PURGE_INTERVAL must be positive"))

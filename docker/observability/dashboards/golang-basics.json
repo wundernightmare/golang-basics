@@ -523,8 +523,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (service, topic) (kafka_consumer_group_lag)",
-          "legendFormat": "{{service}} {{topic}}"
+          "expr": "sum by (service) (kafka_consumer_lag)",
+          "legendFormat": "{{service}}"
         }
       ],
       "fieldConfig": {

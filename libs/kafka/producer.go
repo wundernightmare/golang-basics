@@ -7,181 +7,189 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/twmb/franz-go/pkg/kerr"
-	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/plugin/kotel"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// Producer publishes records to Kafka synchronously (one network round-trip per
-// Publish, waiting for every in-sync replica to acknowledge). The idempotent
-// producer is on (franz-go's default), so a retried produce does not
-// duplicate a record within a partition. It is safe for concurrent use;
-// construct one with [NewProducer] and share it.
+// instrumentationName names this library's tracer.
+const instrumentationName = "github.com/tracehubmmp/golang-basics/libs/kafka"
+
+func tracer() trace.Tracer { return otel.Tracer(instrumentationName) }
+
+// Producer publishes records synchronously: [Producer.Send] returns once
+// every in-sync replica acknowledged the record (acks=all, idempotent: a
+// retried send never duplicates or reorders a record within a partition).
+// It is safe for concurrent use — concurrent sends share batches
+// (KAFKA_PRODUCER_LINGER_MS) and their compression; construct one with
+// [NewProducer] and share it.
 //
-// Each Publish is a producer span and the W3C trace context travels in the
-// record headers, so the consumer on the other side continues the same trace.
-// Register [Producer.Collectors] for metrics.
+// Each Send is a producer span and the W3C trace context travels in the
+// record headers, so the consumer on the other side continues the same
+// trace. Register [Producer.Collectors] for metrics.
 type Producer struct {
-	cl      *kgo.Client
+	cl      ProducerClient
 	cfg     Config
 	log     *slog.Logger
 	metrics *producerMetrics
 }
 
-// NewProducer builds a producer from cfg and verifies broker connectivity with
-// a ping (so a misconfigured broker fails fast at boot). Records default to
-// cfg.Topic when [Producer.Publish] is given an empty topic. The caller owns it
-// and must call [Producer.Close].
+// NewProducer builds a producer from cfg with the linked provider (see
+// [Driver]) and verifies broker connectivity (so a misconfigured broker or
+// credential fails fast at boot). The caller owns it and must call
+// [Producer.Close].
 func NewProducer(ctx context.Context, cfg Config, log *slog.Logger) (*Producer, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("kafka: producer config: %w", err)
-	}
-	opts, err := cfg.commonOpts()
+	d, err := mustDriver()
 	if err != nil {
 		return nil, err
 	}
-	opts = append(opts, cfg.producerOpts()...)
-	opts = append(opts, kgo.WithHooks(kotel.NewKotel(kotel.WithTracer(kotel.NewTracer(kotel.ClientID(cfg.ClientID)))).Hooks()...))
-	cl, err := kgo.NewClient(opts...)
-	if err != nil {
-		return nil, fmt.Errorf("kafka: new producer client: %w", err)
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("kafka: producer config: %w", err)
 	}
-
+	cl, err := d.NewProducer(cfg, log)
+	if err != nil {
+		return nil, fmt.Errorf("kafka: new %s producer: %w", d.Name(), err)
+	}
 	pingCtx, cancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer cancel()
 	if err := cl.Ping(pingCtx); err != nil {
 		cl.Close()
-		return nil, fmt.Errorf("kafka: producer ping: %w", err)
+		return nil, fmt.Errorf("kafka: producer: brokers unreachable: %w", err)
 	}
 	warnPlaintextSASL(ctx, cfg, log)
-
-	log.InfoContext(ctx, "kafka producer ready", "brokers", cfg.brokersString(), "default_topic", cfg.Topic,
-		"tls", cfg.TLSEnabled, "sasl", cfg.SASLMechanism, "auto_topic_creation", cfg.AllowAutoTopicCreation)
-	return &Producer{cl: cl, cfg: cfg, log: log, metrics: newProducerMetrics()}, nil
+	log.InfoContext(ctx, "kafka producer ready", "provider", d.Name(), "brokers", cfg.brokersString(),
+		"default_topic", cfg.Topic, "security_protocol", cfg.SecurityProtocol, "sasl", cfg.SASLMechanism,
+		"compression", cfg.CompressionType, "queue_max_kbytes", cfg.ProducerQueueMaxKBytes,
+		"auto_topic_creation", cfg.AllowAutoTopicCreation)
+	return &Producer{cl: cl, cfg: cfg, log: log, metrics: newProducerMetrics(cl.Stats, d.Name())}, nil
 }
 
-// Publish sends one record and blocks until the broker acknowledges it or
-// PublishTimeout passes. An empty topic falls back to the configured default
-// Topic. key may be nil; it determines partitioning (records with the same
-// key keep their relative order).
+// Send publishes msg and blocks until the brokers acknowledge it or
+// KAFKA_PUBLISH_TIMEOUT passes (or ctx ends first). An empty msg.Topic falls
+// back to the configured default Topic; msg.Key may be nil and determines
+// the partition (records with the same key keep their relative order).
+// Every error is a *[SendError] (see [Rejected]).
 //
-// Trace context: when headers carry a traceparent (an outbox relay replaying
-// the context stored with the event), the publish span continues that trace;
-// otherwise it is a child of the span in ctx. Either way the record leaves
-// with a traceparent for the consumer.
-func (p *Producer) Publish(ctx context.Context, topic string, key, value []byte, headers ...Header) error {
-	if topic == "" {
-		topic = p.cfg.Topic
+// Trace context: when msg.Headers carry a traceparent (an outbox relay
+// replaying the context stored with the event), the publish span continues
+// that trace; otherwise it is a child of the span in ctx. Either way the
+// record leaves with a traceparent for the consumer.
+func (p *Producer) Send(ctx context.Context, msg Message) error {
+	if msg.Topic == "" {
+		msg.Topic = p.cfg.Topic
 	}
-	ctx, cancel := context.WithTimeout(ctx, p.cfg.PublishTimeout)
-	defer cancel()
-
 	start := time.Now()
-	err := produce(ctx, p.cl, newRecord(ctx, topic, key, value, headers))
-	result := publishResult(err)
-	p.metrics.duration.WithLabelValues(topic).Observe(time.Since(start).Seconds())
-	p.metrics.records.WithLabelValues(topic, result).Inc()
-	if err != nil {
-		return fmt.Errorf("kafka: publish to %q (%s): %w", topic, result, err)
+	err := send(ctx, p.cl, p.cfg.PublishTimeout, msg)
+	result := "ok"
+	var se *SendError
+	if errors.As(err, &se) {
+		result = se.Kind
 	}
-	p.log.DebugContext(ctx, "kafka record published", "topic", topic, "bytes", len(value))
+	p.metrics.duration.WithLabelValues(msg.Topic).Observe(time.Since(start).Seconds())
+	p.metrics.records.WithLabelValues(msg.Topic, result).Inc()
+	if err != nil {
+		return fmt.Errorf("kafka: send to %q: %w", msg.Topic, err)
+	}
+	p.log.DebugContext(ctx, "kafka record sent", "topic", msg.Topic, "bytes", len(msg.Value))
 	return nil
 }
 
-// newRecord builds the record, with the context the kotel produce hook reads
-// to parent the publish span and inject the trace headers.
-func newRecord(ctx context.Context, topic string, key, value []byte, headers []Header) *kgo.Record {
-	rec := &kgo.Record{Topic: topic, Key: key, Value: value}
-	if len(headers) > 0 {
-		rec.Headers = make([]kgo.RecordHeader, len(headers))
-		for i, h := range headers {
-			rec.Headers[i] = kgo.RecordHeader{Key: h.Key, Value: h.Value}
-		}
-		if _, ok := headerValue(rec.Headers, HeaderTraceparent); ok {
-			// The stored context wins over the caller's: extract it as the
-			// remote parent of the publish span.
-			ctx = otel.GetTextMapPropagator().Extract(ctx, kotel.NewRecordCarrier(rec))
-		}
+// send is the traced, bounded send both the [Producer] and the consumer's
+// dead-letter publishing use. The wait is bounded by budget plus a second
+// of slack: the client itself fails the record at the budget.
+func send(ctx context.Context, cl ProducerClient, budget time.Duration, msg Message) error {
+	msg.Headers = append([]Header(nil), msg.Headers...) // the caller's slice is not ours to grow
+	parent := ctx
+	if _, ok := headerValue(msg.Headers, HeaderTraceparent); ok {
+		// The stored context wins over the caller's: it is the remote parent.
+		parent = otel.GetTextMapPropagator().Extract(ctx, headerCarrier{&msg.Headers})
 	}
-	rec.Context = ctx
-	return rec
-}
+	ctx, span := tracer().Start(parent, "publish "+msg.Topic,
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "kafka"),
+			attribute.String("messaging.operation.type", "send"),
+			attribute.String("messaging.operation.name", "publish"),
+			attribute.String("messaging.destination.name", msg.Topic),
+			attribute.Int("messaging.message.body.size", len(msg.Value)),
+		))
+	defer span.End()
+	otel.GetTextMapPropagator().Inject(ctx, headerCarrier{&msg.Headers})
 
-// produce is the synchronous produce both the [Producer] and the consumer's
-// dead-letter publishing use.
-func produce(ctx context.Context, cl *kgo.Client, rec *kgo.Record) error {
-	return cl.ProduceSync(ctx, rec).FirstErr()
-}
-
-// Publish results: a bounded set, so the metric label cannot explode.
-const (
-	resultOK           = "ok"
-	resultTimeout      = "timeout"
-	resultTooLarge     = "too_large"
-	resultAuth         = "auth"
-	resultUnknownTopic = "unknown_topic"
-	resultOther        = "other"
-)
-
-// publishResult classifies a produce error into the bounded result label.
-func publishResult(err error) string {
-	switch {
-	case err == nil:
-		return resultOK
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, kgo.ErrRecordTimeout), errors.Is(err, kerr.RequestTimedOut):
-		return resultTimeout
-	case errors.Is(err, kerr.MessageTooLarge), errors.Is(err, kerr.RecordListTooLarge):
-		return resultTooLarge
-	case errors.Is(err, kerr.SaslAuthenticationFailed), errors.Is(err, kerr.TopicAuthorizationFailed),
-		errors.Is(err, kerr.ClusterAuthorizationFailed), errors.Is(err, kerr.TransactionalIDAuthorizationFailed),
-		errors.Is(err, kerr.IllegalSaslState), errors.Is(err, kerr.UnsupportedSaslMechanism):
-		return resultAuth
-	case errors.Is(err, kerr.UnknownTopicOrPartition):
-		return resultUnknownTopic
-	default:
-		return resultOther
+	ctx, cancel := context.WithTimeout(ctx, budget+time.Second)
+	defer cancel()
+	err := cl.Send(ctx, msg)
+	if err != nil {
+		var se *SendError
+		if !errors.As(err, &se) {
+			se = NewSendError(KindUnknown, 0, err)
+			err = se
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, se.Kind)
+		span.SetAttributes(attribute.String("error.type", se.Kind))
 	}
+	return err
 }
 
-// ReadyCheck returns a readiness probe (a libs/httpx CheckFunc) that pings the
-// brokers with a short timeout.
+// ReadyCheck returns a readiness probe (a libs/httpx CheckFunc) that asks
+// the brokers for metadata with a short timeout.
 func (p *Producer) ReadyCheck() func(ctx context.Context) error {
+	return readyCheck(p.cl)
+}
+
+func readyCheck(cl interface{ Ping(context.Context) error }) func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
-		if err := pingBounded(ctx, p.cl); err != nil {
+		if err := cl.Ping(ctx); err != nil {
 			return fmt.Errorf("kafka brokers unreachable: %w", err)
 		}
 		return nil
 	}
 }
 
-// Close flushes any buffered records and shuts the client down.
+// Close flushes queued records (briefly) and shuts the client down.
 func (p *Producer) Close() { p.cl.Close() }
 
-// pingBounded is Ping that returns when ctx does: franz-go's Ping keeps
-// waiting for a broker that accepted the connection but stopped answering
-// (a frozen process) until its own request timeout, well past a readiness
-// deadline. The in-flight request is left to finish in the background.
-func pingBounded(ctx context.Context, cl *kgo.Client) error {
-	done := make(chan error, 1)
-	go func() { done <- cl.Ping(ctx) }()
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
+// warnPlaintextSASL logs the one insecure combination Validate allows: a
+// password sent over an unencrypted connection.
+func warnPlaintextSASL(ctx context.Context, cfg Config, log *slog.Logger) {
+	if cfg.SecurityProtocol == "sasl_plaintext" && cfg.SASLMechanism == "PLAIN" {
+		log.WarnContext(ctx, "kafka SASL PLAIN over sasl_plaintext sends the password in clear text; use sasl_ssl")
 	}
 }
 
-// warnPlaintextSASL logs the one insecure combination Validate allows: a
-// PLAIN password sent over an unencrypted connection.
-func warnPlaintextSASL(ctx context.Context, cfg Config, log *slog.Logger) {
-	if cfg.SASLMechanism == "plain" && !cfg.TLSEnabled {
-		log.WarnContext(ctx, "kafka SASL PLAIN without TLS sends the password in clear text; set KAFKA_TLS_ENABLED")
-	}
+// headerCarrier adapts record headers to the OTel propagator, so the W3C
+// trace context travels in them (traceparent / tracestate).
+type headerCarrier struct{ hs *[]Header }
+
+func (c headerCarrier) Get(key string) string {
+	v, _ := headerValue(*c.hs, key)
+	return v
 }
+
+func (c headerCarrier) Set(key, value string) {
+	for i, h := range *c.hs {
+		if h.Key == key {
+			(*c.hs)[i].Value = []byte(value)
+			return
+		}
+	}
+	*c.hs = append(*c.hs, Header{Key: key, Value: []byte(value)})
+}
+
+func (c headerCarrier) Keys() []string {
+	keys := make([]string, len(*c.hs))
+	for i, h := range *c.hs {
+		keys[i] = h.Key
+	}
+	return keys
+}
+
+var _ propagation.TextMapCarrier = headerCarrier{}

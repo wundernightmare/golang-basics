@@ -39,9 +39,9 @@ func TestLoadDefaults(t *testing.T) {
 
 	assert.Equal(t, "localhost", cfg.Postgres.Host, "pgx defaults apply")
 	assert.Equal(t, 30*time.Second, cfg.Postgres.StatementTimeout)
-	assert.Equal(t, "localhost:6379", cfg.Valkey.Addr)
+	assert.False(t, cfg.ValkeyEnabled(), "no address, no cache")
 	assert.Equal(t, 500*time.Millisecond, cfg.Valkey.OpTimeout)
-	assert.Equal(t, []string{"localhost:9092"}, cfg.Kafka.Brokers)
+	assert.False(t, cfg.KafkaEnabled(), "no brokers, no relay")
 	assert.Equal(t, "tasks.events", cfg.Kafka.Topic)
 	assert.Equal(t, "tasks", cfg.Kafka.ClientID, "service default beats the lib's")
 	assert.Equal(t, 5*time.Second, cfg.Kafka.PublishTimeout)
@@ -55,7 +55,51 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, 5*time.Second, cfg.Cache.TombstoneTTL)
 	assert.Equal(t, time.Second, cfg.Outbox.PollInterval)
 	assert.Equal(t, 100, cfg.Outbox.BatchSize)
+	assert.Equal(t, 10, cfg.Outbox.MaxAttempts)
 	assert.Equal(t, 24*time.Hour, cfg.Idempotency.TTL)
+}
+
+// Valkey and Kafka are on when their address is set — nothing else turns
+// them on, and their other keys without the address are an error, not a
+// setting silently ignored.
+func TestOptionalIntegrationsByPresence(t *testing.T) {
+	withAdminToken(t)
+	t.Run("addresses turn them on", func(t *testing.T) {
+		t.Setenv("TASKS_VALKEY_ADDR", "cache:6379")
+		t.Setenv("TASKS_KAFKA_BROKERS", "k:9092")
+		cfg, err := config.Load("")
+		require.NoError(t, err)
+		assert.True(t, cfg.ValkeyEnabled())
+		assert.True(t, cfg.KafkaEnabled())
+	})
+	t.Run("a key without its address", func(t *testing.T) {
+		t.Setenv("TASKS_VALKEY_OP_TIMEOUT", "1s")
+		t.Setenv("TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION", "true")
+		_, err := config.Load("")
+		require.ErrorContains(t, err, "VALKEY_* keys are set but neither VALKEY_URL nor VALKEY_ADDR")
+		require.ErrorContains(t, err, "KAFKA_* keys are set but KAFKA_BROKERS is not")
+	})
+	t.Run("a YAML section without its address", func(t *testing.T) {
+		_, err := config.Load(writeYAML(t, "kafka:\n  topic: x\n"))
+		require.ErrorContains(t, err, "KAFKA_BROKERS is not")
+	})
+	t.Run("a key set to its default is harmless", func(t *testing.T) {
+		t.Setenv("TASKS_KAFKA_TOPIC", "tasks.events")
+		_, err := config.Load("")
+		require.NoError(t, err)
+	})
+	t.Run("Kafka's own rules apply once it is on", func(t *testing.T) {
+		t.Setenv("TASKS_KAFKA_BROKERS", "k:9092")
+		t.Setenv("TASKS_KAFKA_SECURITY_PROTOCOL", "sasl_ssl")
+		t.Setenv("TASKS_KAFKA_SASL_MECHANISM", "PLAIN")
+		_, err := config.Load("")
+		require.ErrorContains(t, err, "needs KAFKA_SASL_USERNAME")
+	})
+	t.Run("max attempts", func(t *testing.T) {
+		t.Setenv("TASKS_OUTBOX_MAX_ATTEMPTS", "-1")
+		_, err := config.Load("")
+		require.ErrorContains(t, err, "OUTBOX_MAX_ATTEMPTS")
+	})
 }
 
 // The keys each lib documents work unchanged under TASKS_.
@@ -149,7 +193,7 @@ func TestLoadRejectsUnknownYAMLKeysAndBadValues(t *testing.T) {
 // operator set nothing; an explicit value — even the libs' default — wins.
 func TestServiceDefaultsYieldToExplicitValues(t *testing.T) {
 	withAdminToken(t)
-	path := writeYAML(t, "admin_addr: \":9080\"\nkafka:\n  client_id: from-yaml\n")
+	path := writeYAML(t, "admin_addr: \":9080\"\nkafka:\n  brokers: [k:9092]\n  client_id: from-yaml\n")
 	t.Setenv("TASKS_SERVICE_NAME", "tasks-canary")
 	cfg, err := config.Load(path)
 	require.NoError(t, err)

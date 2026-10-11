@@ -12,7 +12,9 @@
 //   libs/resilient-http-client  — policy-per-target outbound HTTP client (rate limit, CB, retry…)
 //   libs/pgx                    — shared PostgreSQL pool (pgx)
 //   libs/valkey                 — shared Valkey cache (valkey-go)
-//   libs/kafka                  — shared Kafka producer/consumer (franz-go)
+//   libs/kafka                  — shared Kafka producer/consumer, provider-neutral (no cgo)
+//   libs/kafka-rdkafka          — Kafka provider: librdkafka via confluent-kafka-go (cgo; the default)
+//   libs/kafka-franz            — Kafka provider: franz-go (pure Go)
 //   libs/otelx                  — shared OpenTelemetry tracing setup
 //   libs/testx                  — shared test harness (signal helpers, unique names; _test only, no Docker)
 //   libs/testx/containers       — shared containers + chaos helpers (testcontainers, Toxiproxy; _test only)
@@ -28,6 +30,8 @@ use (
 	./libs/contracts
 	./libs/httpx
 	./libs/kafka
+	./libs/kafka-franz
+	./libs/kafka-rdkafka
 	./libs/otelx
 	./libs/pgx
 	./libs/resilient-http-client

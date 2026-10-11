@@ -7,7 +7,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"golang.org/x/sync/errgroup"
@@ -18,19 +17,20 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	boot := httpx.Boot[config.Config]{
+		Name: "heartbeat", Prefix: config.Prefix,
+		Load: config.Load, Defaults: config.Defaults,
+	}
+	cfg, code, ok := boot.Config(os.Args[1:], os.Stdout, os.Stderr)
+	if !ok {
+		os.Exit(code)
+	}
+	if err := run(cfg); err != nil {
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	cfg, err := config.Load()
-	if err != nil {
-		// There is no logger before the config is known: say it on stderr,
-		// or the process exits 1 without a word.
-		fmt.Fprintln(os.Stderr, err)
-		return err
-	}
+func run(cfg config.Config) error {
 
 	logger := httpx.NewLogger(cfg.LogConfig())
 	srv, err := httpx.NewServer(cfg.HTTP(), logger, httpx.WithConfig(cfg))

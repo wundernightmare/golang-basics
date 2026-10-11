@@ -27,9 +27,12 @@ func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }
 func TestLoadConfigDefaults(t *testing.T) {
 	cfg, err := valkey.LoadConfig("TASKS_")
 	require.NoError(t, err)
-	assert.Equal(t, "localhost:6379", cfg.Addr)
+	assert.Empty(t, cfg.Addr, "no default address: unset means no Valkey")
+	assert.False(t, cfg.Configured())
 	assert.Equal(t, 0, cfg.DB)
 	assert.Equal(t, 500*time.Millisecond, cfg.OpTimeout)
+	_, err = valkey.New(cfg, nil)
+	require.ErrorContains(t, err, "VALKEY_URL or VALKEY_ADDR must be set")
 
 	t.Setenv("TASKS_VALKEY_ADDR", "cache:6380")
 	t.Setenv("TASKS_VALKEY_DB", "3")
@@ -37,6 +40,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "cache:6380", cfg.Addr)
 	assert.Equal(t, 3, cfg.DB)
+	assert.True(t, cfg.Configured())
 }
 
 func sharedCache(t testing.TB) *valkey.Cache {

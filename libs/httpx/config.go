@@ -35,7 +35,7 @@ import (
 //	PING_HTTP_READ_TIMEOUT       time to read the whole request            (default "30s")
 //	PING_HTTP_WRITE_TIMEOUT      time to write the response                (default "30s")
 //	PING_HTTP_IDLE_TIMEOUT       keep-alive idle limit                     (default "120s")
-//	PING_HTTP_REQUEST_TIMEOUT    per-request context deadline (0 = none)   (default "30s")
+//	PING_HTTP_REQUEST_TIMEOUT    per-request context deadline (0 = none; X-Request-Timeout-Ms may shorten it) (default "30s")
 //	PING_HTTP_MAX_HEADER_BYTES   request header limit                      (default 1048576)
 //	PING_HTTP_MAX_BODY_BYTES     request body limit; larger bodies → 413   (default 1048576)
 //	PING_HTTP_SHUTDOWN_DELAY     wait after readiness flips before closing (default "2s")

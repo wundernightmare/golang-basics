@@ -24,8 +24,9 @@ const Prefix = "CONSUMER_"
 //   - the libs/httpx keys (top level, e.g. ADMIN_ADDR, ADMIN_TOKEN,
 //     ADMIN_INSECURE, LOG_LEVEL, LOG_FORMAT); a worker has no API listener,
 //     so HTTP_ADDR is ignored and the admin listener defaults to ":9083";
-//   - the libs/kafka keys (under "kafka:"), e.g. KAFKA_BROKERS, KAFKA_TOPIC,
-//     KAFKA_GROUP, KAFKA_TLS_*, KAFKA_SASL_*, KAFKA_CONSUMER_MAX_RETRIES,
+//   - the libs/kafka keys (under "kafka:"), e.g. KAFKA_BROKERS (required:
+//     a consumer without a broker has nothing to do), KAFKA_TOPIC,
+//     KAFKA_GROUP, KAFKA_SECURITY_PROTOCOL, KAFKA_SASL_*, KAFKA_SSL_*, KAFKA_CONSUMER_MAX_RETRIES,
 //     KAFKA_DEAD_LETTER_TOPIC; the client id defaults to "consumer";
 //   - the libs/otelx keys (under "otel:"), e.g. OTEL_ENABLED,
 //     OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_INSECURE;
@@ -47,11 +48,7 @@ type Config struct {
 // defaults (name, admin port, client id) are set before loading, so the file
 // and the environment still override them.
 func Load(path string) (Config, error) {
-	var cfg Config
-	cfg.Service = "consumer"
-	cfg.AdminAddr = ":9083"
-	cfg.Kafka.ClientID = "consumer"
-	cfg.OTel.ServiceName = "consumer"
+	cfg := preset()
 	if err := httpx.LoadYAML(path, Prefix, &cfg); err != nil {
 		return Config{}, err
 	}
@@ -62,6 +59,26 @@ func Load(path string) (Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
+	return cfg, nil
+}
+
+func preset() Config {
+	var cfg Config
+	cfg.Service = "consumer"
+	cfg.AdminAddr = ":9083"
+	cfg.Kafka.ClientID = "consumer"
+	cfg.OTel.ServiceName = "consumer"
+	return cfg
+}
+
+// Defaults is the configuration with nothing set: what --config-reference
+// prints.
+func Defaults() (Config, error) {
+	cfg := preset()
+	if err := httpx.Defaults(Prefix, &cfg); err != nil {
+		return Config{}, err
+	}
+	cfg.Addr = "" // as Load: no API listener
 	return cfg, nil
 }
 

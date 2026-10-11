@@ -3,7 +3,9 @@ package pgx
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -38,6 +40,9 @@ import (
 //	TASKS_DB_PORT               [port]                port                                      (default 5432)
 //	TASKS_DB_USER               [user]                user                                      (default "app")
 //	TASKS_DB_PASSWORD           [password]            password                                  (default "app")
+//	TASKS_DB_PASSWORD_FILE      [password_file]       file holding the password (a mounted secret);
+//	                                                  read once at boot, wins over DB_PASSWORD and
+//	                                                  the URL's password                       (default "")
 //	TASKS_DB_NAME               [name]                database name                             (default "app")
 //	TASKS_DB_SSLMODE            [sslmode]             disable|require|verify-full|…             (default "disable")
 //	TASKS_DB_MAX_CONNS          [max_conns]           pool max connections                      (default 10)
@@ -62,8 +67,11 @@ type Config struct {
 	Port     int    `env:"DB_PORT" envDefault:"5432" yaml:"port"`
 	User     string `env:"DB_USER" envDefault:"app" yaml:"user"`
 	Password string `env:"DB_PASSWORD" envDefault:"app" yaml:"password" secret:"true"`
-	Name     string `env:"DB_NAME" envDefault:"app" yaml:"name"`
-	SSLMode  string `env:"DB_SSLMODE" envDefault:"disable" yaml:"sslmode"`
+	// PasswordFile names a file with the password, so the secret stays out of
+	// the environment (and /admin/config): a Kubernetes/Docker secret mount.
+	PasswordFile string `env:"DB_PASSWORD_FILE" yaml:"password_file"`
+	Name         string `env:"DB_NAME" envDefault:"app" yaml:"name"`
+	SSLMode      string `env:"DB_SSLMODE" envDefault:"disable" yaml:"sslmode"`
 
 	MaxConns        int32         `env:"DB_MAX_CONNS" envDefault:"10" yaml:"max_conns"`
 	MinConns        int32         `env:"DB_MIN_CONNS" envDefault:"0" yaml:"min_conns"`
@@ -126,4 +134,20 @@ func (c Config) runtimeParams() map[string]string {
 		}
 	}
 	return out
+}
+
+// readSecretFile reads a mounted secret: the whole file, without the
+// trailing newline an editor or `echo` leaves. An empty file is an error — a
+// secret that silently became "" would surface later as a confusing auth
+// failure.
+func readSecretFile(path string) (string, error) {
+	b, err := os.ReadFile(path) //nolint:gosec // path is operator-supplied config, not user input
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimRight(string(b), "\r\n")
+	if s == "" {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	return s, nil
 }

@@ -63,3 +63,6 @@ allure-report/
 /.reports/
 # Personal mise overrides (never read by scripts/mise-pins.sh)
 mise.local.toml
+
+# Example certificates (examples/kafka-sasl-ssl/gen-certs.sh)
+examples/kafka-sasl-ssl/certs/
