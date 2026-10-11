@@ -203,3 +203,16 @@ func TestServiceDefaultsYieldToExplicitValues(t *testing.T) {
 	assert.Equal(t, ":8082", cfg.Addr, "unset: the service default")
 	assert.Equal(t, "tasks", cfg.OTel.ServiceName)
 }
+
+// --check-config runs Load: a set TASKS_CONFIG that names no file and a
+// DB_PASSWORD_FILE that is not mounted both fail it, instead of passing the
+// pre-flight and failing (or silently running on defaults) in the pod.
+func TestLoadFailsOnMissingFiles(t *testing.T) {
+	withAdminToken(t)
+	_, err := config.Load(filepath.Join(t.TempDir(), "absent.yaml"))
+	require.ErrorContains(t, err, "absent.yaml")
+
+	t.Setenv("TASKS_DB_PASSWORD_FILE", filepath.Join(t.TempDir(), "nope"))
+	_, err = config.Load("")
+	require.ErrorContains(t, err, "DB_PASSWORD_FILE")
+}

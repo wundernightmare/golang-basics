@@ -79,7 +79,9 @@ In order, outermost first:
 
 1. **entry** — request id, client address, per-request deadline
    (`HTTP_REQUEST_TIMEOUT`, shortened — never extended — by a caller's
-   `X-Request-Timeout-Ms`; a value that is not 1–9 digits is ignored),
+   `X-Request-Timeout-Ms`, but not below `HTTP_REQUEST_TIMEOUT_MIN` (1s) so a
+   client cannot turn its own requests into 504s on the server's error-rate
+   alert; a value that is not 1–9 digits is ignored),
    `X-Request-Id` on the response;
 2. **debug token** — when `DEBUG_TOKEN` is set (see below);
 3. **tracing** — a server span per request (see *Traces* below);
@@ -280,6 +282,12 @@ way (see `services/tasks/main.go`):
 | `--check-config` | load + validate, print `config ok` or every problem — a deploy pre-flight | 0 / 78 |
 | `--config-reference` | every key: env name, YAML path, default (`(secret)` for secrets), from the struct tags | 0 |
 
+`--check-config` connects to nothing but reads every file the config names:
+the YAML file (a set `*_CONFIG` path that does not exist is an error, not a
+silent env-only start), `DB_PASSWORD_FILE`, `KAFKA_SASL_PASSWORD_FILE` and
+the `KAFKA_SSL_*` certificate and key files — a missing secret mount fails
+the pre-flight, not the pod.
+
 A config that does not load exits **78** (`EX_CONFIG`) with the reason on
 stderr — "fix the deployment", not "restart me"; a bad command line exits
 **64** (`EX_USAGE`). `httpx.Defaults(prefix, &cfg)` gives the tag defaults
@@ -300,6 +308,7 @@ With prefix `PING_`:
 | `PING_HTTP_WRITE_TIMEOUT`        | `write_timeout`         | `30s`            | time to write the response                                 |
 | `PING_HTTP_IDLE_TIMEOUT`         | `idle_timeout`          | `120s`           | keep-alive idle limit                                      |
 | `PING_HTTP_REQUEST_TIMEOUT`      | `request_timeout`       | `30s`            | per-request context deadline (≤ 0 = none); `X-Request-Timeout-Ms` may shorten it |
+| `PING_HTTP_REQUEST_TIMEOUT_MIN`  | `request_timeout_min`   | `1s`             | floor for a deadline shortened by `X-Request-Timeout-Ms` (0 = none) |
 | `PING_HTTP_MAX_HEADER_BYTES`     | `max_header_bytes`      | `1048576`        | request header limit                                       |
 | `PING_HTTP_MAX_BODY_BYTES`       | `max_body_bytes`        | `1048576`        | request body limit (larger → 413)                          |
 | `PING_HTTP_SHUTDOWN_DELAY`       | `shutdown_delay`        | `2s`             | serve on after readiness flips, before draining            |

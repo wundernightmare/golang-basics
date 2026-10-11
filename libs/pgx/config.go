@@ -136,6 +136,19 @@ func (c Config) runtimeParams() map[string]string {
 	return out
 }
 
+// Validate checks what can be checked without connecting: that a
+// DB_PASSWORD_FILE is there, readable and not empty — a missing secret mount
+// is a configuration error at boot (and in --check-config), not a crash when
+// the pool first dials.
+func (c Config) Validate() error {
+	if c.PasswordFile != "" {
+		if _, err := readSecretFile(c.PasswordFile); err != nil {
+			return fmt.Errorf("DB_PASSWORD_FILE: %w", err)
+		}
+	}
+	return nil
+}
+
 // readSecretFile reads a mounted secret: the whole file, without the
 // trailing newline an editor or `echo` leaves. An empty file is an error — a
 // secret that silently became "" would surface later as a confusing auth
