@@ -204,7 +204,7 @@ documents a rootless BuildKit alternative). Locally: `npx gitlab-ci-local <job>`
 
 One recipe for every service: [`docker/service.Dockerfile`](docker/service.Dockerfile)
 (`ARG SERVICE`). Multi-stage, static `CGO_ENABLED=0` binary on distroless
-`static-debian12:nonroot` (uid 65532, no shell, no healthcheck — probes are the
+`static-debian13:nonroot` (uid 65532, no shell, no healthcheck — probes are the
 orchestrator's job), `-trimpath -s -w`, Version / Revision / BuildTime stamped
 from `VERSION` / `GIT_SHA` / `BUILD_TIME`, BuildKit cache mounts, base images
 behind `DOCKER_HUB` / `GCR` and pinned by digest. `GO_VERSION` is required and

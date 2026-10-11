@@ -20,11 +20,12 @@ README; this file is only the high-signal, easy-to-miss bits.
 
 ## Go version
 
-- Module directives target `go 1.27.0`; the toolchain is pinned to `1.27.x` in
-  `mise.toml`. Keep the two in step: golangci-lint has to be built against a
-  stdlib at least as new as the module target, or it panics with "file requires
-  newer Go version" and CI goes red. The pinned golangci-lint 2.13.2 is built
-  with go1.27.0, so bump the linter first, then the module/toolchain target.
+- Module directives target `go 1.27.0`; the toolchain is pinned to the latest
+  `1.27.x` patch in `mise.toml` (and the builder image digest), which is how
+  stdlib security fixes reach the binaries. golangci-lint has to be built
+  against a stdlib at least as new as the module target, or it panics with
+  "file requires newer Go version" and CI goes red. The pinned golangci-lint
+  2.14.0 is built with go1.27.0, so raise a directive only after the linter.
 
 ## Dev workflow
 

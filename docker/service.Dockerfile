@@ -75,9 +75,9 @@ ARG ALPINE_VERSION=3.24
 ARG DOCKER_HUB=docker.io
 ARG GCR=gcr.io
 # renovate: datasource=docker depName=golang versioning=docker
-ARG GOLANG_DIGEST=sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc
-# renovate: datasource=docker depName=gcr.io/distroless/static-debian12 currentValue=nonroot
-ARG DISTROLESS_DIGEST=sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+ARG GOLANG_DIGEST=sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d
+# renovate: datasource=docker depName=gcr.io/distroless/static-debian13 currentValue=nonroot
+ARG DISTROLESS_DIGEST=sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 
 # ── Stage 1 – builder ────────────────────────────────────────────────────────
 FROM ${DOCKER_HUB}/library/golang:${GO_VERSION}-alpine${ALPINE_VERSION}@${GOLANG_DIGEST} AS builder
@@ -145,7 +145,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # ── Stage 2 – runtime ────────────────────────────────────────────────────────
 # distroless/static: ca-certificates, tzdata and /etc/passwd — no shell, no
 # package manager, nothing writable outside /tmp.
-FROM ${GCR}/distroless/static-debian12:nonroot@${DISTROLESS_DIGEST} AS runtime
+FROM ${GCR}/distroless/static-debian13:nonroot@${DISTROLESS_DIGEST} AS runtime
 
 ARG SERVICE
 ARG KAFKA_PROVIDER=rdkafka

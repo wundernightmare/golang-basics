@@ -13,7 +13,7 @@ name: golang-basics-kafka-sasl-ssl
 
 services:
   redpanda:
-    image: ${DOCKER_HUB:-docker.io}/redpandadata/redpanda:v26.1.1
+    image: ${DOCKER_HUB:-docker.io}/redpandadata/redpanda:v26.2.3
     container_name: golang-basics-kafka-sasl-ssl
     command:
       - redpanda
@@ -40,7 +40,7 @@ services:
   # Users and ACLs over the admin API (and SASL_SSL as the superuser for the
   # ACLs) — what a platform team does once per cluster.
   init:
-    image: ${DOCKER_HUB:-docker.io}/redpandadata/redpanda:v26.1.1
+    image: ${DOCKER_HUB:-docker.io}/redpandadata/redpanda:v26.2.3
     depends_on:
       redpanda:
         condition: service_healthy

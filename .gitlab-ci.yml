@@ -189,7 +189,7 @@ variables:
       alias: postgres
     - name: ${DOCKER_HUB}/valkey/valkey:9.0
       alias: valkey
-    - name: ${DOCKER_HUB}/redpandadata/redpanda:v26.1.1
+    - name: ${DOCKER_HUB}/redpandadata/redpanda:v26.2.3
       alias: redpanda
       command:
         - redpanda
