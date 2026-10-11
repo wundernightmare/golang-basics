@@ -16,6 +16,7 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/libs/testx/containers"
+	_ "github.com/tracehubmmp/golang-basics/services/consumer/internal/kafkaprovider" // the Kafka client the binary links
 	"github.com/tracehubmmp/golang-basics/services/consumer/internal/worker"
 )
 
@@ -27,7 +28,7 @@ func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }
 // each applied event's log line carries the producing request's trace.
 func TestIntegration_ConsumesTaskEvents(t *testing.T) {
 	brokers := containers.Kafka(t)
-	testx.Recorder(t) // before the clients: kotel captures the provider then
+	testx.Recorder(t)
 	topic := testx.Unique("tasks.events")
 	buf := &testx.LogBuffer{}
 	log := httpx.NewLogger(httpx.LogConfig{Service: "consumer", Level: "info", Format: "json", Writer: buf})
@@ -47,10 +48,11 @@ func TestIntegration_ConsumesTaskEvents(t *testing.T) {
 		defer span.End()
 		payload, err := json.Marshal(map[string]any{"event_id": eventID, "id": "task-" + eventID, "title": "private"})
 		require.NoError(t, err)
-		require.NoError(t, prod.Publish(pctx, topic, []byte("task-"+eventID), payload,
-			kafka.Header{Key: kafka.HeaderEventID, Value: []byte(eventID)},
-			kafka.Header{Key: kafka.HeaderEventType, Value: []byte(eventType)},
-			kafka.Header{Key: kafka.HeaderContentType, Value: []byte("application/json")}))
+		require.NoError(t, prod.Send(pctx, kafka.Message{Topic: topic, Key: []byte("task-" + eventID), Value: payload, Headers: []kafka.Header{
+			{Key: kafka.HeaderEventID, Value: []byte(eventID)},
+			{Key: kafka.HeaderEventType, Value: []byte(eventType)},
+			{Key: kafka.HeaderContentType, Value: []byte("application/json")},
+		}}))
 		if _, ok := traces[eventID]; !ok {
 			traces[eventID] = span.SpanContext().TraceID().String()
 		}
@@ -62,7 +64,7 @@ func TestIntegration_ConsumesTaskEvents(t *testing.T) {
 
 	cons, err := kafka.NewConsumer(t.Context(), kafka.Config{
 		Brokers: brokers, Topics: []string{topic}, Group: testx.Unique("group"), ClientID: testx.Unique("cons"),
-		AllowAutoTopicCreation: true, PublishTimeout: 15 * time.Second, LagInterval: -1,
+		AllowAutoTopicCreation: true, PublishTimeout: 15 * time.Second, StatisticsInterval: -1,
 	}, log)
 	require.NoError(t, err)
 	reg := prometheus.NewRegistry()

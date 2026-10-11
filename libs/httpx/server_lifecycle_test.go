@@ -94,6 +94,40 @@ func TestRequestTimeout_IsTheHandlersDeadline(t *testing.T) {
 	get(srv.Handler(), "/dl")
 }
 
+func TestRequestTimeoutHeader_ShortensNeverExtends(t *testing.T) {
+	remaining := func(cfg time.Duration, header string) (time.Duration, bool) {
+		srv, _ := loggedServer(t, httpx.Config{RequestTimeout: cfg})
+		var left time.Duration
+		var ok bool
+		srv.Mux().HandleFunc("GET /dl", func(_ http.ResponseWriter, r *http.Request) {
+			var dl time.Time
+			dl, ok = r.Context().Deadline()
+			left = time.Until(dl)
+		})
+		req := httptest.NewRequest(http.MethodGet, "/dl", nil)
+		if header != "" {
+			req.Header.Set(httpx.RequestTimeoutHeader, header)
+		}
+		do(srv.Handler(), req)
+		return left, ok
+	}
+
+	left, _ := remaining(time.Minute, "200")
+	assert.LessOrEqual(t, left, 200*time.Millisecond, "a shorter header wins")
+
+	left, _ = remaining(300*time.Millisecond, "60000")
+	assert.LessOrEqual(t, left, 300*time.Millisecond, "the header never extends the server's budget")
+
+	left, ok := remaining(-1, "250")
+	assert.True(t, ok, "with no configured timeout the header alone sets the deadline")
+	assert.LessOrEqual(t, left, 250*time.Millisecond)
+
+	for _, bad := range []string{"0", "-5", "1.5", "abc", "1234567890", " 100"} {
+		left, _ = remaining(time.Minute, bad)
+		assert.Greater(t, left, 50*time.Second, "invalid %q is ignored", bad)
+	}
+}
+
 func TestNewServer_NilLoggerIsDiscarded(t *testing.T) {
 	srv, err := httpx.NewServer(httpx.Config{Addr: ":0"}, nil)
 	require.NoError(t, err)

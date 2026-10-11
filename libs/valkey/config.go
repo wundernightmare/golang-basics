@@ -13,7 +13,9 @@ import (
 // embeds it in its own config (field `Valkey valkey.Config` tagged yaml:"valkey", no
 // envPrefix: the keys already carry VALKEY_).
 //
-// Two ways to point at a server, in precedence order:
+// Two ways to point at a server, in precedence order (one is required; there
+// is no default address, so a service can treat Valkey as optional — on when
+// an address is set):
 //
 //  1. A connection URL in <PREFIX>VALKEY_URL (e.g. "valkey://:pw@host:6379/0"
 //     or the redis:// scheme). When set, the discrete fields are ignored.
@@ -22,14 +24,14 @@ import (
 // Keys (with the "TASKS_" prefix as an example):
 //
 //	TASKS_VALKEY_URL           [url]           connection URL; overrides discrete fields  (default "")
-//	TASKS_VALKEY_ADDR          [addr]          host:port                                  (default "localhost:6379")
+//	TASKS_VALKEY_ADDR          [addr]          host:port                                  (default "")
 //	TASKS_VALKEY_PASSWORD      [password]      auth password                              (default "")
 //	TASKS_VALKEY_DB            [db]            logical database number                    (default 0)
 //	TASKS_VALKEY_DIAL_TIMEOUT  [dial_timeout]  connection dial timeout                    (default "5s")
 //	TASKS_VALKEY_OP_TIMEOUT    [op_timeout]    per-command deadline                       (default "500ms")
 type Config struct {
 	URL         string        `env:"VALKEY_URL" yaml:"url"`
-	Addr        string        `env:"VALKEY_ADDR" envDefault:"localhost:6379" yaml:"addr"`
+	Addr        string        `env:"VALKEY_ADDR" yaml:"addr"`
 	Password    string        `env:"VALKEY_PASSWORD" yaml:"password" secret:"true"`
 	DB          int           `env:"VALKEY_DB" envDefault:"0" yaml:"db"`
 	DialTimeout time.Duration `env:"VALKEY_DIAL_TIMEOUT" envDefault:"5s" yaml:"dial_timeout"`
@@ -41,7 +43,7 @@ type Config struct {
 }
 
 // LoadConfig parses a [Config] from the environment using the given key prefix
-// (use "" for no prefix). Every field is defaulted.
+// (use "" for no prefix). Every field but the address is defaulted.
 func LoadConfig(prefix string) (Config, error) {
 	var cfg Config
 	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix}); err != nil {
@@ -50,9 +52,16 @@ func LoadConfig(prefix string) (Config, error) {
 	return cfg, nil
 }
 
+// Configured reports whether an address is set (VALKEY_URL or VALKEY_ADDR):
+// the switch for a service that runs without a cache when there is none.
+func (c Config) Configured() bool { return c.URL != "" || c.Addr != "" }
+
 // clientOption translates the Config into a valkey-go ClientOption, preferring
 // the URL form when present.
 func (c Config) clientOption() (valkeygo.ClientOption, error) {
+	if !c.Configured() {
+		return valkeygo.ClientOption{}, fmt.Errorf("valkey: VALKEY_URL or VALKEY_ADDR must be set")
+	}
 	if c.URL != "" {
 		opt, err := valkeygo.ParseURL(c.URL)
 		if err != nil {

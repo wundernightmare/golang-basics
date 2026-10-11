@@ -11,11 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/twmb/franz-go/pkg/kadm"
-	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/plugin/kotel"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 )
@@ -29,41 +28,46 @@ var errDraining = errors.New("kafka: consumer draining")
 // anything, and a header is not the place for a stack dump.
 const maxDLQErrorBytes = 1024
 
-// lagWarnEvery rate-limits the "lag poll failed" warning: a broker outage
-// would otherwise log one per LagInterval per replica.
-const lagWarnEvery = time.Minute
+// fetchWarnEvery rate-limits the "fetch error" log: a broker outage would
+// otherwise log one per poll.
+const fetchWarnEvery = time.Minute
 
 // Consumer drains a consumer group with a poll / process / commit loop. It
 // is the "background worker" shape of this monorepo, fed by a broker instead
-// of a ticker. Register [Consumer.Collectors] for throughput, retries,
-// dead-lettering, commits, rebalances and the group's lag.
+// of a ticker. The loop — commit after handling, retries, [Permanent],
+// dead-lettering, drain — is the same whichever provider is linked (see
+// [Driver]); the provider only polls, commits and reports group changes.
+// Register [Consumer.Collectors] for throughput, retries, dead-lettering,
+// commits, rebalances and the group's lag.
 //
 // A Consumer is single-use: [Consumer.Run] closes it when it returns.
 type Consumer struct {
-	cl      *kgo.Client
-	adm     *kadm.Client
+	cl      ConsumerClient
 	cfg     Config
 	log     *slog.Logger
-	tracer  *kotel.Tracer
 	metrics *consumerMetrics
 
 	mu      sync.Mutex
-	pending map[string]map[int32]*kgo.Record // processed, not yet committed: the latest per partition
-	owned   map[string]map[int32]struct{}    // partitions assigned to this member
+	pending map[TopicPartition]int64 // processed, not yet committed: the latest offset per partition
+	owned   map[TopicPartition]struct{}
 
-	running     atomic.Bool
-	closeOnce   sync.Once
-	lastLagWarn atomic.Int64 // unix nanos of the last lag-poll warning
+	running       atomic.Bool
+	closeOnce     sync.Once
+	lastFetchWarn atomic.Int64 // unix nanos of the last fetch-error log
 }
 
-// NewConsumer builds a consumer-group client subscribed to cfg.Topics and
-// verifies broker connectivity with a ping. Auto-commit is off: offsets
-// advance only past records a [Handler] has accepted or that were parked on
-// the dead-letter topic. The caller owns it and must call [Consumer.Close]
-// if it never calls [Consumer.Run].
+// NewConsumer builds a consumer-group member subscribed to cfg.Topics with
+// the linked provider and verifies broker connectivity. Automatic commits
+// are off: offsets advance only past records a [Handler] has accepted or
+// that were parked on the dead-letter topic. The caller owns it and must
+// call [Consumer.Close] if it never calls [Consumer.Run].
 func NewConsumer(ctx context.Context, cfg Config, log *slog.Logger) (*Consumer, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
+	}
+	d, err := mustDriver()
+	if err != nil {
+		return nil, err
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("kafka: consumer config: %w", err)
@@ -74,56 +78,32 @@ func NewConsumer(ctx context.Context, cfg Config, log *slog.Logger) (*Consumer, 
 	c := &Consumer{
 		cfg:     cfg,
 		log:     log,
-		metrics: newConsumerMetrics(),
-		pending: map[string]map[int32]*kgo.Record{},
-		owned:   map[string]map[int32]struct{}{},
+		pending: map[TopicPartition]int64{},
+		owned:   map[TopicPartition]struct{}{},
 	}
-	c.tracer = kotel.NewTracer(kotel.ClientID(cfg.ClientID), kotel.ConsumerGroup(cfg.Group))
-
-	opts, err := cfg.commonOpts()
+	cl, err := d.NewConsumer(cfg, log, Rebalance{Assigned: c.onAssigned, Revoked: c.onRevoked, Lost: c.onLost})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("kafka: new %s consumer: %w", d.Name(), err)
 	}
-	opts = append(opts, cfg.producerOpts()...) // the dead-letter topic is produced through this client
-	opts = append(opts,
-		kgo.WithHooks(kotel.NewKotel(kotel.WithTracer(c.tracer)).Hooks()...),
-		kgo.ConsumerGroup(cfg.Group),
-		kgo.ConsumeTopics(cfg.Topics...),
-		kgo.DisableAutoCommit(),
-		// Rebalances wait until the loop has processed and committed the
-		// batch it polled (AllowRebalance), so a partition is never handed
-		// to another member with processed-but-uncommitted records on it.
-		kgo.BlockRebalanceOnPoll(),
-		kgo.OnPartitionsAssigned(c.onAssigned),
-		kgo.OnPartitionsRevoked(c.onRevoked),
-		kgo.OnPartitionsLost(c.onLost),
-		// A brand-new group (no committed offsets yet) starts from the oldest
-		// retained record rather than the newest, so a freshly-deployed worker
-		// does not silently skip a backlog. Once the group has committed, those
-		// offsets win and this only applies to new partitions.
-		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
-	)
-	cl, err := kgo.NewClient(opts...)
-	if err != nil {
-		return nil, fmt.Errorf("kafka: new consumer client: %w", err)
-	}
+	c.cl = cl
+	c.metrics = newConsumerMetrics(cl.Stats, d.Name())
 
 	pingCtx, cancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer cancel()
 	if err := cl.Ping(pingCtx); err != nil {
 		cl.Close()
-		return nil, fmt.Errorf("kafka: consumer ping: %w", err)
+		return nil, fmt.Errorf("kafka: consumer: brokers unreachable: %w", err)
 	}
 	warnPlaintextSASL(ctx, cfg, log)
-	c.cl = cl
-	c.adm = kadm.NewClient(cl)
 
 	dlq := cfg.DeadLetterTopic
 	if cfg.deadLetterTopic("x") == "" {
 		dlq = "disabled"
 	}
-	log.InfoContext(ctx, "kafka consumer ready", "brokers", cfg.brokersString(), "group", cfg.Group, "topics", cfg.Topics,
-		"max_retries", cfg.maxRetries(), "dead_letter_topic", dlq, "tls", cfg.TLSEnabled, "sasl", cfg.SASLMechanism)
+	log.InfoContext(ctx, "kafka consumer ready", "provider", d.Name(), "brokers", cfg.brokersString(),
+		"group", cfg.Group, "topics", cfg.Topics, "assignment_strategy", cfg.AssignmentStrategy,
+		"max_retries", cfg.maxRetries(), "dead_letter_topic", dlq, "queue_max_kbytes", cfg.ConsumerQueueMaxKBytes,
+		"security_protocol", cfg.SecurityProtocol, "sasl", cfg.SASLMechanism)
 	return c, nil
 }
 
@@ -141,28 +121,23 @@ func NewConsumer(ctx context.Context, cfg Config, log *slog.Logger) (*Consumer, 
 // must be visible" mode, for streams where skipping is never acceptable.
 //
 // Batches: up to MaxPollRecords records are processed in partition order,
-// then everything processed is committed in one request, then the group may
-// rebalance. On shutdown the in-flight batch gets DrainTimeout to finish;
-// what finished is committed (with a context detached from ctx), what did
-// not is redelivered to the next owner. Delivery is at-least-once: a
-// handler must tolerate seeing a record twice (see services/consumer's
-// dedupe for the pattern).
+// then everything processed is committed in one request (offset + 1 per
+// partition), then the group may rebalance. On shutdown the in-flight batch
+// gets DrainTimeout to finish; what finished is committed (with a context
+// detached from ctx), what did not is redelivered to the next owner.
+// Delivery is at-least-once: a handler must tolerate seeing a record twice
+// (see services/consumer's dedupe for the pattern).
+//
+// Retries happen inside the loop, so one record's retries plus the rest of
+// its batch must fit in KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS, or the member
+// is considered stuck and its partitions move (the records are then
+// redelivered to the new owner).
 func (c *Consumer) Run(ctx context.Context, handler Handler) error {
 	if !c.running.CompareAndSwap(false, true) {
 		return errors.New("kafka: Consumer.Run called twice")
 	}
 	defer c.Close()
 	c.log.InfoContext(ctx, "kafka consumer loop started", "group", c.cfg.Group, "topics", c.cfg.Topics)
-
-	lagCtx, stopLag := context.WithCancel(ctx)
-	lagDone := make(chan struct{})
-	go func() {
-		defer close(lagDone)
-		if c.cfg.LagInterval > 0 {
-			c.pollLag(lagCtx)
-		}
-	}()
-	defer func() { stopLag(); <-lagDone }()
 
 	// Handlers run under procCtx, which outlives ctx by DrainTimeout so the
 	// in-flight batch can finish; its values (logger fields, etc.) are ctx's.
@@ -182,11 +157,13 @@ func (c *Consumer) Run(ctx context.Context, handler Handler) error {
 			c.log.InfoContext(ctx, "kafka consumer loop stopping")
 			return nil
 		}
-		fetches := c.cl.PollRecords(ctx, c.cfg.MaxPollRecords)
-		if fetches.IsClientClosed() {
+		records, err := c.cl.Poll(ctx, c.cfg.MaxPollRecords)
+		if errors.Is(err, ErrClientClosed) {
 			return nil
 		}
-		c.fetchErrors(ctx, fetches)
+		if err != nil && ctx.Err() == nil {
+			c.fetchError(ctx, err)
+		}
 		if ctx.Err() != nil {
 			// Shutdown arrived with the poll: nothing of this batch has
 			// started, so leave all of it for the next owner.
@@ -195,7 +172,7 @@ func (c *Consumer) Run(ctx context.Context, handler Handler) error {
 			return nil
 		}
 
-		err := c.processBatch(procCtx, fetches.Records(), handler)
+		err = c.processBatch(procCtx, records, handler)
 		c.commitPending(ctx)
 		c.cl.AllowRebalance()
 		switch {
@@ -210,25 +187,28 @@ func (c *Consumer) Run(ctx context.Context, handler Handler) error {
 	}
 }
 
-// fetchErrors counts and logs the fetch errors in fetches, skipping the ones
-// that only mean "shutting down".
-func (c *Consumer) fetchErrors(ctx context.Context, fetches kgo.Fetches) {
-	fetches.EachError(func(topic string, partition int32, err error) {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, kgo.ErrClientClosed) {
-			return
-		}
-		c.metrics.fetchErrs.WithLabelValues(topic).Inc()
-		c.log.ErrorContext(ctx, "kafka fetch error", "topic", topic, "partition", partition, "err", err)
-	})
+// fetchError counts a fetch error and logs it at most once per
+// fetchWarnEvery. Warn, not error: the client keeps retrying on its own
+// (a broker restarting, a subscribed topic not created yet), and
+// kafka_consumer_fetch_errors_total is what an alert watches.
+func (c *Consumer) fetchError(ctx context.Context, err error) {
+	c.metrics.fetchErrs.Inc()
+	now := time.Now().UnixNano()
+	if last := c.lastFetchWarn.Load(); now-last >= int64(fetchWarnEvery) && c.lastFetchWarn.CompareAndSwap(last, now) {
+		c.log.WarnContext(ctx, "kafka fetch error; the client retries (further ones within a minute are counted, not logged)", "err", err)
+	}
 }
 
 // processBatch handles records in order, marking each finished one for
 // commit. It stops at the first record that neither succeeded nor was
 // parked, so what is marked is always a per-partition prefix.
-func (c *Consumer) processBatch(ctx context.Context, records []*kgo.Record, handler Handler) error {
+func (c *Consumer) processBatch(ctx context.Context, records []Message, handler Handler) error {
 	for _, r := range records {
 		if ctx.Err() != nil {
 			return errDraining
+		}
+		if !c.owns(r) {
+			continue // its partition moved during the poll: the new owner gets it
 		}
 		if err := c.process(ctx, r, handler); err != nil {
 			return err
@@ -238,17 +218,20 @@ func (c *Consumer) processBatch(ctx context.Context, records []*kgo.Record, hand
 	return nil
 }
 
+func (c *Consumer) owns(r Message) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.owned[TopicPartition{r.Topic, r.Partition}]
+	return ok
+}
+
 // process runs one record through the handler with retries, then the DLQ.
 // nil means "done, commit it".
-func (c *Consumer) process(ctx context.Context, r *kgo.Record, handler Handler) error {
+func (c *Consumer) process(ctx context.Context, r Message, handler Handler) error {
 	reqID := requestID(r)
 	// logCtx: the record's trace (continued from its headers) and request
 	// id, for the loop's own log lines about this record.
-	logCtx := r.Context
-	if logCtx == nil {
-		logCtx = context.WithoutCancel(ctx)
-	}
-	logCtx = httpx.WithRequestID(logCtx, reqID)
+	logCtx := httpx.WithRequestID(recordContext(context.WithoutCancel(ctx), r), reqID)
 	maxRetries := c.cfg.maxRetries()
 	var err error
 	attempt := 1
@@ -298,19 +281,34 @@ func (c *Consumer) process(ctx context.Context, r *kgo.Record, handler Handler) 
 	return nil
 }
 
+// recordContext is ctx with the trace context the record's headers carry as
+// the remote parent.
+func recordContext(ctx context.Context, r Message) context.Context {
+	hs := r.Headers
+	return otel.GetTextMapPropagator().Extract(ctx, headerCarrier{&hs})
+}
+
 // invoke runs one handler attempt inside a process span continued from the
 // record's trace, with the request id and the per-attempt deadline, and
 // turns a panic into an error (retried like any other).
-func (c *Consumer) invoke(ctx context.Context, r *kgo.Record, handler Handler, attempt int, reqID string) (err error) {
-	rctx, span := c.tracer.WithProcessSpan(r)
+func (c *Consumer) invoke(ctx context.Context, r Message, handler Handler, attempt int, reqID string) (err error) {
+	// The span's parent comes from the record, its cancellation from the
+	// loop (the drain deadline): ctx's values are kept, its span replaced.
+	rctx, span := tracer().Start(recordContext(ctx, r), "process "+r.Topic,
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "kafka"),
+			attribute.String("messaging.operation.type", "process"),
+			attribute.String("messaging.operation.name", "process"),
+			attribute.String("messaging.destination.name", r.Topic),
+			attribute.String("messaging.consumer.group.name", c.cfg.Group),
+			attribute.Int("messaging.destination.partition.id", int(r.Partition)),
+			attribute.Int64("messaging.kafka.offset", r.Offset),
+			attribute.Int("messaging.kafka.attempt", attempt),
+		))
 	defer span.End()
-	span.SetAttributes(attribute.Int("messaging.kafka.attempt", attempt))
-	// The span context descends from the record, not from ctx: tie the
-	// loop's cancellation (the drain deadline) to it explicitly.
 	rctx, cancel := context.WithTimeout(rctx, c.cfg.HandlerTimeout)
 	defer cancel()
-	stop := context.AfterFunc(ctx, cancel)
-	defer stop()
 	rctx = httpx.WithRequestID(rctx, reqID)
 
 	start := time.Now()
@@ -325,12 +323,13 @@ func (c *Consumer) invoke(ctx context.Context, r *kgo.Record, handler Handler, a
 			span.SetStatus(codes.Error, err.Error())
 		}
 	}()
-	return handler(rctx, toMessage(r, attempt))
+	r.Attempt = attempt
+	return handler(rctx, r)
 }
 
 // requestID is the record's event_id header when it is a usable correlation
 // id (see httpx.ValidRequestID), a fresh id otherwise.
-func requestID(r *kgo.Record) string {
+func requestID(r Message) string {
 	if id, ok := headerValue(r.Headers, HeaderEventID); ok && httpx.ValidRequestID(id) {
 		return id
 	}
@@ -340,12 +339,12 @@ func requestID(r *kgo.Record) string {
 // deadLetter publishes r to topic with its original headers plus the dlq_*
 // ones, retrying the publish like a handler. The publish span continues the
 // record's trace.
-func (c *Consumer) deadLetter(ctx, logCtx context.Context, r *kgo.Record, topic, reason string, cause error, attempts int) error {
+func (c *Consumer) deadLetter(ctx, logCtx context.Context, r Message, topic, reason string, cause error, attempts int) error {
 	errText := cause.Error()
 	if len(errText) > maxDLQErrorBytes {
 		errText = errText[:maxDLQErrorBytes]
 	}
-	headers := make([]kgo.RecordHeader, 0, len(r.Headers)+6)
+	headers := make([]Header, 0, len(r.Headers)+6)
 	for _, h := range r.Headers {
 		switch h.Key {
 		case HeaderDLQReason, HeaderDLQError, HeaderDLQSourceTopic, HeaderDLQSourcePartition, HeaderDLQSourceOffset, HeaderDLQAttempts:
@@ -354,20 +353,19 @@ func (c *Consumer) deadLetter(ctx, logCtx context.Context, r *kgo.Record, topic,
 		headers = append(headers, h)
 	}
 	headers = append(headers,
-		kgo.RecordHeader{Key: HeaderDLQReason, Value: []byte(reason)},
-		kgo.RecordHeader{Key: HeaderDLQError, Value: []byte(errText)},
-		kgo.RecordHeader{Key: HeaderDLQSourceTopic, Value: []byte(r.Topic)},
-		kgo.RecordHeader{Key: HeaderDLQSourcePartition, Value: []byte(strconv.Itoa(int(r.Partition)))},
-		kgo.RecordHeader{Key: HeaderDLQSourceOffset, Value: []byte(strconv.FormatInt(r.Offset, 10))},
-		kgo.RecordHeader{Key: HeaderDLQAttempts, Value: []byte(strconv.Itoa(attempts))},
+		Header{Key: HeaderDLQReason, Value: []byte(reason)},
+		Header{Key: HeaderDLQError, Value: []byte(errText)},
+		Header{Key: HeaderDLQSourceTopic, Value: []byte(r.Topic)},
+		Header{Key: HeaderDLQSourcePartition, Value: []byte(strconv.Itoa(int(r.Partition)))},
+		Header{Key: HeaderDLQSourceOffset, Value: []byte(strconv.FormatInt(r.Offset, 10))},
+		Header{Key: HeaderDLQAttempts, Value: []byte(strconv.Itoa(attempts))},
 	)
 
+	msg := Message{Topic: topic, Key: r.Key, Value: r.Value, Headers: headers}
 	for n := 0; ; n++ {
-		pctx, cancel := context.WithTimeout(ctx, c.cfg.PublishTimeout)
-		// A fresh record per attempt: franz-go owns a record while producing it.
-		rec := &kgo.Record{Topic: topic, Key: r.Key, Value: r.Value, Headers: append([]kgo.RecordHeader(nil), headers...), Context: logCtx}
-		err := produce(pctx, c.cl, rec)
-		cancel()
+		// The record's traceparent travels along: the dead-letter publish
+		// continues the record's trace.
+		err := send(ctx, c.cl.DeadLetter(), c.cfg.PublishTimeout, msg)
 		if err == nil {
 			c.metrics.dlq.WithLabelValues(topic).Inc()
 			c.log.WarnContext(logCtx, "kafka record dead-lettered",
@@ -390,15 +388,10 @@ func (c *Consumer) deadLetter(ctx, logCtx context.Context, r *kgo.Record, topic,
 }
 
 // markDone records r as processed; the next commit covers it.
-func (c *Consumer) markDone(r *kgo.Record) {
+func (c *Consumer) markDone(r Message) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	parts := c.pending[r.Topic]
-	if parts == nil {
-		parts = map[int32]*kgo.Record{}
-		c.pending[r.Topic] = parts
-	}
-	parts[r.Partition] = r
+	c.pending[TopicPartition{r.Topic, r.Partition}] = r.Offset
 }
 
 // commitPending commits every processed record, with a context detached from
@@ -412,35 +405,35 @@ func (c *Consumer) commitPending(ctx context.Context) {
 	c.commitLocked(ctx, nil)
 }
 
-// commitLocked commits the pending records of the given partitions (all of
-// them when only is nil) and forgets the ones committed. c.mu must be held.
-func (c *Consumer) commitLocked(ctx context.Context, only map[string][]int32) {
-	var recs []*kgo.Record
-	for topic, parts := range c.pending {
-		for p, r := range parts {
-			if only == nil || containsPartition(only[topic], p) {
-				recs = append(recs, r)
-			}
+// commitLocked commits the pending offsets of the given partitions (all of
+// them when only is nil) and forgets the ones committed. The committed
+// position is the next offset to read: last processed + 1. c.mu must be
+// held.
+func (c *Consumer) commitLocked(ctx context.Context, only []TopicPartition) {
+	var offsets []Offset
+	for tp, off := range c.pending {
+		if only == nil || containsPartition(only, tp) {
+			offsets = append(offsets, Offset{TopicPartition: tp, Next: off + 1})
 		}
 	}
-	if len(recs) == 0 {
+	if len(offsets) == 0 {
 		return
 	}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.DrainTimeout)
 	defer cancel()
-	if err := c.cl.CommitRecords(cctx, recs...); err != nil {
+	if err := c.cl.Commit(cctx, offsets); err != nil {
 		c.metrics.commitErrs.Inc()
-		c.log.ErrorContext(ctx, "kafka offset commit failed; records stay pending", "records", len(recs), "err", err)
+		c.log.ErrorContext(ctx, "kafka offset commit failed; records stay pending", "partitions", len(offsets), "err", err)
 		return
 	}
-	for _, r := range recs {
-		if cur := c.pending[r.Topic][r.Partition]; cur == r {
-			delete(c.pending[r.Topic], r.Partition)
+	for _, o := range offsets {
+		if c.pending[o.TopicPartition] == o.Next-1 {
+			delete(c.pending, o.TopicPartition)
 		}
 	}
 }
 
-func containsPartition(ps []int32, p int32) bool {
+func containsPartition(ps []TopicPartition, p TopicPartition) bool {
 	for _, q := range ps {
 		if q == p {
 			return true
@@ -450,151 +443,74 @@ func containsPartition(ps []int32, p int32) bool {
 }
 
 // onAssigned tracks the partitions this member now owns.
-func (c *Consumer) onAssigned(ctx context.Context, _ *kgo.Client, assigned map[string][]int32) {
+func (c *Consumer) onAssigned(ctx context.Context, parts []TopicPartition) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for topic, ps := range assigned {
-		if c.owned[topic] == nil {
-			c.owned[topic] = map[int32]struct{}{}
-		}
-		for _, p := range ps {
-			c.owned[topic][p] = struct{}{}
-		}
+	for _, p := range parts {
+		c.owned[p] = struct{}{}
 	}
-	c.updateAssignedLocked()
-	if len(assigned) > 0 {
+	c.metrics.assigned.Set(float64(len(c.owned)))
+	if len(parts) > 0 {
 		c.metrics.rebalances.WithLabelValues("assigned").Inc()
-		c.log.InfoContext(ctx, "kafka partitions assigned", "partitions", assigned)
+		c.log.InfoContext(ctx, "kafka partitions assigned", "partitions", partitionList(parts))
 	}
 }
 
 // onRevoked commits what was processed on the revoked partitions before they
-// move (with BlockRebalanceOnPoll this is normally nothing: the loop commits
-// before it allows a rebalance; it matters when that commit failed, and on
-// Close), then stops reporting them.
-func (c *Consumer) onRevoked(ctx context.Context, _ *kgo.Client, revoked map[string][]int32) {
+// move (normally nothing: the loop commits before it allows a rebalance; it
+// matters when that commit failed, and on Close), then stops owning them.
+func (c *Consumer) onRevoked(ctx context.Context, parts []TopicPartition) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.commitLocked(ctx, revoked)
-	c.forgetLocked(revoked)
-	if len(revoked) > 0 {
+	c.commitLocked(ctx, parts)
+	c.forgetLocked(parts)
+	if len(parts) > 0 {
 		c.metrics.rebalances.WithLabelValues("revoked").Inc()
-		c.log.InfoContext(ctx, "kafka partitions revoked", "partitions", revoked)
+		c.log.InfoContext(ctx, "kafka partitions revoked", "partitions", partitionList(parts))
 	}
 }
 
 // onLost drops the lost partitions: they already belong to someone else, so
 // committing would at best fail and at worst rewind the new owner.
-func (c *Consumer) onLost(ctx context.Context, _ *kgo.Client, lost map[string][]int32) {
+func (c *Consumer) onLost(ctx context.Context, parts []TopicPartition) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	dropped := 0
-	for topic, ps := range lost {
-		for _, p := range ps {
-			if _, ok := c.pending[topic][p]; ok {
-				delete(c.pending[topic], p)
-				dropped++
-			}
+	for _, p := range parts {
+		if _, ok := c.pending[p]; ok {
+			delete(c.pending, p)
+			dropped++
 		}
 	}
-	c.forgetLocked(lost)
-	if len(lost) > 0 {
+	c.forgetLocked(parts)
+	if len(parts) > 0 {
 		c.metrics.rebalances.WithLabelValues("lost").Inc()
 		c.log.WarnContext(ctx, "kafka partitions lost; uncommitted records will be redelivered to the new owner",
-			"partitions", lost, "uncommitted_partitions", dropped)
+			"partitions", partitionList(parts), "uncommitted_partitions", dropped)
 	}
 }
 
-// forgetLocked removes partitions from the owned set, the gauge and the lag
-// snapshot. c.mu must be held.
-func (c *Consumer) forgetLocked(gone map[string][]int32) {
-	for topic, ps := range gone {
-		for _, p := range ps {
-			delete(c.owned[topic], p)
-		}
+// forgetLocked removes partitions from the owned set. c.mu must be held.
+func (c *Consumer) forgetLocked(gone []TopicPartition) {
+	for _, p := range gone {
+		delete(c.owned, p)
 	}
-	c.updateAssignedLocked()
-	c.metrics.lag.drop(gone)
+	c.metrics.assigned.Set(float64(len(c.owned)))
 }
 
-func (c *Consumer) updateAssignedLocked() {
-	for topic, ps := range c.owned {
-		c.metrics.assigned.WithLabelValues(topic).Set(float64(len(ps)))
+func partitionList(parts []TopicPartition) []string {
+	out := make([]string, len(parts))
+	for i, p := range parts {
+		out[i] = p.Topic + "/" + strconv.Itoa(int(p.Partition))
 	}
+	return out
 }
 
-// pollLag refreshes the lag snapshot every LagInterval until ctx is done.
-func (c *Consumer) pollLag(ctx context.Context) {
-	t := time.NewTicker(c.cfg.LagInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		c.refreshLag(ctx)
-	}
-}
-
-// refreshLag computes the lag of the partitions this member owns (end offset
-// minus the group's committed offset, from the broker) and swaps the
-// snapshot in whole. A failed poll keeps the previous snapshot, bumps the
-// error counter and warns (at most once per lagWarnEvery).
-func (c *Consumer) refreshLag(ctx context.Context) {
-	lctx, cancel := context.WithTimeout(ctx, c.cfg.LagInterval)
-	defer cancel()
-	lags, err := c.adm.Lag(lctx, c.cfg.Group)
-	if err == nil {
-		if gl, ok := lags[c.cfg.Group]; ok {
-			err = gl.Error()
-		}
-	}
-	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		c.metrics.lag.pollErrors.Inc()
-		now := time.Now()
-		if last := c.lastLagWarn.Load(); now.UnixNano()-last >= int64(lagWarnEvery) && c.lastLagWarn.CompareAndSwap(last, now.UnixNano()) {
-			c.log.WarnContext(ctx, "kafka lag poll failed (further failures within a minute are not logged)", "group", c.cfg.Group, "err", err)
-		}
-		return
-	}
-	gl := lags[c.cfg.Group].Lag
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var points []lagPoint
-	for topic, ps := range c.owned {
-		for p := range ps {
-			l, ok := gl.Lookup(topic, p)
-			if !ok || l.Err != nil || l.Lag < 0 {
-				continue
-			}
-			points = append(points, lagPoint{topic: topic, partition: p, lag: l.Lag})
-		}
-	}
-	c.metrics.lag.set(points)
-	c.metrics.lag.lastSuccess.Store(time.Now().UnixNano())
-}
-
-// ReadyCheck returns a readiness probe (a libs/httpx CheckFunc) that pings the
-// brokers with a short timeout.
-func (c *Consumer) ReadyCheck() func(ctx context.Context) error {
-	return func(ctx context.Context) error {
-		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		defer cancel()
-		if err := pingBounded(ctx, c.cl); err != nil {
-			return fmt.Errorf("kafka brokers unreachable: %w", err)
-		}
-		return nil
-	}
-}
+// ReadyCheck returns a readiness probe (a libs/httpx CheckFunc) that asks
+// the brokers for metadata with a short timeout.
+func (c *Consumer) ReadyCheck() func(ctx context.Context) error { return readyCheck(c.cl) }
 
 // Close commits anything still pending (via the revoke callback), leaves the
 // consumer group and shuts the client down. It is idempotent; [Consumer.Run]
 // calls it on return.
-func (c *Consumer) Close() {
-	c.closeOnce.Do(c.cl.CloseAllowingRebalance)
-}
+func (c *Consumer) Close() { c.closeOnce.Do(c.cl.Close) }

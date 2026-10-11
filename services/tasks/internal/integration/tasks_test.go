@@ -17,6 +17,7 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/contracts/tasksapi"
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
+	"github.com/tracehubmmp/golang-basics/libs/testx/containers"
 	"github.com/tracehubmmp/golang-basics/libs/testx/contract"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/domain"
 )
@@ -145,6 +146,33 @@ func TestEndToEnd(t *testing.T) {
 	code, body := w.readyz(t)
 	assert.Equal(t, http.StatusOK, code)
 	assert.Contains(t, body, `"status":"ready"`)
+}
+
+// Valkey and Kafka are optional: with only Postgres configured the API works
+// (every read a miss), readiness checks Postgres alone, and the events wait
+// in the outbox for a release that has brokers.
+func TestPostgresOnly(t *testing.T) {
+	w := wire(t, deps{postgres: containers.Postgres(t)})
+
+	r := w.do(t, http.MethodPost, "/tasks", `{"title":"no cache, no broker"}`)
+	require.Equal(t, http.StatusCreated, r.status, string(r.body))
+	var task tasksapi.Task
+	r.decode(t, &task)
+	for range 2 {
+		r = w.do(t, http.MethodGet, "/tasks/"+task.Id, "")
+		require.Equal(t, http.StatusOK, r.status)
+		assert.Equal(t, "miss", r.header.Get("X-Cache"), "no cache: always served from Postgres")
+	}
+	r = w.do(t, http.MethodPatch, "/tasks/"+task.Id, `{"done":true}`)
+	require.Equal(t, http.StatusOK, r.status, string(r.body))
+
+	body := w.waitReadyz(t, "ready")
+	assert.NotContains(t, body, "valkey")
+	assert.NotContains(t, body, "kafka")
+
+	var n int
+	require.NoError(t, w.db.Pool().QueryRow(context.Background(), `SELECT count(*) FROM outbox`).Scan(&n))
+	assert.Equal(t, 2, n, "created + updated wait in the outbox")
 }
 
 func TestIdempotentCreateOverHTTP(t *testing.T) {

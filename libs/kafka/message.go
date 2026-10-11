@@ -5,8 +5,6 @@ import (
 	"errors"
 	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- retry-backoff jitter is not security-sensitive; a CSPRNG (crypto/rand) is unnecessary here.
 	"time"
-
-	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // Header is one record header. Header keys the libs and services agree on:
@@ -14,7 +12,7 @@ import (
 //	event_id      unique id of the event (the consumer's idempotency key and request_id)
 //	event_type    e.g. task.created — what the consumer dispatches on
 //	content_type  e.g. application/json
-//	traceparent   W3C trace context (written by the producer, see [Producer.Publish])
+//	traceparent   W3C trace context (written by the producer, see [Producer.Send])
 type Header struct {
 	Key   string
 	Value []byte
@@ -39,8 +37,10 @@ const (
 	HeaderDLQAttempts        = "dlq_attempts"         // decimal: handler invocations made
 )
 
-// Message is one consumed record, handed to a [Handler]. It exposes the fields a
-// service handler usually needs without leaking the franz-go record type.
+// Message is one record: what [Producer.Send] sends (Topic — empty for the
+// configured default — Key, Value, Headers) and what a [Handler] receives
+// (all fields). It exposes what a service needs without leaking either
+// client's record type.
 type Message struct {
 	Topic     string
 	Key       []byte
@@ -128,21 +128,8 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func toMessage(r *kgo.Record, attempt int) Message {
-	var hs []Header
-	if len(r.Headers) > 0 {
-		hs = make([]Header, len(r.Headers))
-		for i, h := range r.Headers {
-			hs[i] = Header{Key: h.Key, Value: h.Value}
-		}
-	}
-	return Message{
-		Topic: r.Topic, Key: r.Key, Value: r.Value, Partition: r.Partition, Offset: r.Offset,
-		Headers: hs, Timestamp: r.Timestamp, Attempt: attempt,
-	}
-}
-
-func headerValue(hs []kgo.RecordHeader, key string) (string, bool) {
+// headerValue returns the first header named key.
+func headerValue(hs []Header, key string) (string, bool) {
 	for _, h := range hs {
 		if h.Key == key {
 			return string(h.Value), true

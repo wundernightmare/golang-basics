@@ -40,6 +40,7 @@ linters:
           files:
             - "!$test"
             - "!**/libs/testx/**" # the harness modules themselves are test-only code
+            - "!**/libs/kafka/kafkatest/**" # the Kafka conformance suite, imported only by the providers' tests
           deny:
             - pkg: github.com/tracehubmmp/golang-basics/libs/testx
               desc: test-only harness; import it from _test.go files only

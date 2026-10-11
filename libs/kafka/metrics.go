@@ -1,43 +1,53 @@
 package kafka
 
 import (
-	"strconv"
-	"sync/atomic"
-
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Buckets for per-record handler / per-publish latency: sub-millisecond for a
+// Buckets for per-record handler / per-send latency: sub-millisecond for a
 // local ack up to the seconds a slow downstream or a broker hiccup costs.
 var latencyBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30}
+
+// The metric names are the same whichever provider is linked: a dashboard
+// or an alert never has to know which client a service was built with
+// (kafka_client_info{provider} says it). No topic or partition label on the
+// client gauges — per-partition lag is the broker side's job (exported
+// once, not per pod), and a service may consume hundreds of topics.
 
 // producerMetrics is the instrument set behind [Producer.Collectors].
 type producerMetrics struct {
 	records  *prometheus.CounterVec
 	duration *prometheus.HistogramVec
+	client   *clientCollector
 }
 
-func newProducerMetrics() *producerMetrics {
+func newProducerMetrics(stats func() ClientStats, provider string) *producerMetrics {
 	return &producerMetrics{
 		records: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kafka_publish_total",
-			Help: "Records published, by topic and result (ok|timeout|too_large|auth|unknown_topic|other).",
+			Help: "Records sent, by topic and result (ok, or the SendError kind: queue_full|unavailable|not_provisioned|fatal|rejected|unknown).",
 		}, []string{"topic", "result"}),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "kafka_producer_publish_duration_seconds",
-			Help:    "Time from Publish to broker acknowledgement (or failure), by topic.",
+			Help:    "Time from Send to broker acknowledgement (or failure), by topic.",
 			Buckets: latencyBuckets,
 		}, []string{"topic"}),
+		client: newClientCollector("producer", provider, stats),
 	}
 }
 
 // Collectors returns the producer's Prometheus collectors for the service to
 // register on its metrics registry:
 //
-//	kafka_publish_total{topic,result="ok|timeout|too_large|auth|unknown_topic|other"}
+//	kafka_publish_total{topic,result}
 //	kafka_producer_publish_duration_seconds{topic}
+//	kafka_client_info{client="producer",provider}
+//	kafka_client_brokers_up{client="producer"}
+//	kafka_client_request_errors_total{client="producer"}
+//	kafka_producer_queue_bytes          bytes waiting in the local send queue …
+//	kafka_producer_queue_max_bytes      … and its bound (KAFKA_PRODUCER_QUEUE_MAX_KBYTES): full → queue_full
 func (p *Producer) Collectors() []prometheus.Collector {
-	return []prometheus.Collector{p.metrics.records, p.metrics.duration}
+	return []prometheus.Collector{p.metrics.records, p.metrics.duration, p.metrics.client}
 }
 
 // Consume results, one per record, by final outcome.
@@ -54,13 +64,13 @@ type consumerMetrics struct {
 	duration   *prometheus.HistogramVec
 	commitErrs prometheus.Counter
 	dlq        *prometheus.CounterVec
-	fetchErrs  *prometheus.CounterVec
-	assigned   *prometheus.GaugeVec
+	fetchErrs  prometheus.Counter
+	assigned   prometheus.Gauge
 	rebalances *prometheus.CounterVec
-	lag        *lagCollector
+	client     *clientCollector
 }
 
-func newConsumerMetrics() *consumerMetrics {
+func newConsumerMetrics(stats func() ClientStats, provider string) *consumerMetrics {
 	return &consumerMetrics{
 		records: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kafka_consume_total",
@@ -79,19 +89,19 @@ func newConsumerMetrics() *consumerMetrics {
 			Name: "kafka_consumer_dlq_total",
 			Help: "Records written to a dead-letter topic, by dead-letter topic.",
 		}, []string{"topic"}),
-		fetchErrs: prometheus.NewCounterVec(prometheus.CounterOpts{
+		fetchErrs: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "kafka_consumer_fetch_errors_total",
-			Help: "Fetch errors reported by the client, by topic.",
-		}, []string{"topic"}),
-		assigned: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Help: "Fetch errors reported by the client.",
+		}),
+		assigned: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "kafka_consumer_assigned_partitions",
-			Help: "Partitions currently assigned to this group member, by topic.",
-		}, []string{"topic"}),
+			Help: "Partitions currently assigned to this group member.",
+		}),
 		rebalances: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kafka_consumer_rebalances_total",
 			Help: "Group rebalance callbacks seen by this member, by event (assigned|revoked|lost).",
 		}, []string{"event"}),
-		lag: newLagCollector(),
+		client: newClientCollector("consumer", provider, stats),
 	}
 }
 
@@ -102,102 +112,85 @@ func newConsumerMetrics() *consumerMetrics {
 //	kafka_consumer_handler_duration_seconds{topic}
 //	kafka_consumer_commit_errors_total
 //	kafka_consumer_dlq_total{topic}          (the dead-letter topic)
-//	kafka_consumer_fetch_errors_total{topic}
-//	kafka_consumer_assigned_partitions{topic}
+//	kafka_consumer_fetch_errors_total
+//	kafka_consumer_assigned_partitions
 //	kafka_consumer_rebalances_total{event="assigned|revoked|lost"}
-//	kafka_consumer_group_lag{topic,partition} (partitions this member owns)
-//	kafka_consumer_lag_poll_errors_total
-//	kafka_consumer_lag_last_success_timestamp_seconds
+//	kafka_client_info{client="consumer",provider}
+//	kafka_client_brokers_up{client="consumer"}
+//	kafka_client_request_errors_total{client="consumer"}
+//	kafka_consumer_lag_max                   worst assigned partition (records behind its end)
+//	kafka_consumer_lag                   total over the assigned partitions
 //
-// Lag is the consumer's availability indicator: sum by (topic) of the gauge
-// growing while kafka_consume_total is flat means the worker is stuck,
-// growing while it climbs means it is under-provisioned. Each member reports
-// only the partitions it owns, so a sum across replicas counts each
-// partition once.
+// Lag is the consumer's availability indicator: lag_sum summed over the
+// replicas growing while kafka_consume_total is flat means the worker is
+// stuck, growing while it climbs means it is under-provisioned. Each member
+// reports only the partitions it owns, so a sum across replicas counts each
+// partition once. The client gauges refresh every
+// KAFKA_STATISTICS_INTERVAL_MS and disappear when the client stops
+// reporting.
 func (c *Consumer) Collectors() []prometheus.Collector {
 	m := c.metrics
-	return []prometheus.Collector{m.records, m.duration, m.commitErrs, m.dlq, m.fetchErrs, m.assigned, m.rebalances, m.lag}
+	return []prometheus.Collector{m.records, m.duration, m.commitErrs, m.dlq, m.fetchErrs, m.assigned, m.rebalances, m.client}
 }
 
-// lagPoint is one partition's lag in a snapshot.
-type lagPoint struct {
-	topic     string
-	partition int32
-	lag       int64
+// clientCollector exposes a driver's [ClientStats] at scrape time.
+type clientCollector struct {
+	role  string
+	stats func() ClientStats
+
+	info, brokersUp, requestErrors, queueBytes, queueMax, lagMax, lagSum *prometheus.Desc
 }
 
-// lagCollector exposes the latest lag snapshot. The poller builds a whole new
-// snapshot and swaps it in atomically, so a scrape sees either the previous
-// set or the next one — never a half-reset vector (the old GaugeVec.Reset +
-// Set sequence could be scraped in between).
-type lagCollector struct {
-	snapshot    atomic.Pointer[[]lagPoint]
-	lastSuccess atomic.Int64 // unix nanos, 0 = never
-	pollErrors  prometheus.Counter
-
-	lagDesc, lastDesc *prometheus.Desc
-}
-
-func newLagCollector() *lagCollector {
-	return &lagCollector{
-		pollErrors: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "kafka_consumer_lag_poll_errors_total",
-			Help: "Consumer-lag polls that failed (the previous snapshot stays exposed).",
-		}),
-		lagDesc: prometheus.NewDesc("kafka_consumer_group_lag",
-			"Records not yet committed by this consumer group, per partition this member owns (polled every KAFKA_LAG_INTERVAL).",
-			[]string{"topic", "partition"}, nil),
-		lastDesc: prometheus.NewDesc("kafka_consumer_lag_last_success_timestamp_seconds",
-			"Unix time of the last successful consumer-lag poll (0 = none yet).", nil, nil),
+func newClientCollector(role, provider string, stats func() ClientStats) *clientCollector {
+	l := prometheus.Labels{"client": role}
+	return &clientCollector{
+		role:  role,
+		stats: stats,
+		info: prometheus.NewDesc("kafka_client_info", "The Kafka client library this service was built with (always 1).",
+			nil, prometheus.Labels{"client": role, "provider": provider}),
+		brokersUp: prometheus.NewDesc("kafka_client_brokers_up",
+			"Brokers this client has a live connection to.", nil, l),
+		requestErrors: prometheus.NewDesc("kafka_client_request_errors_total",
+			"Request timeouts and transport errors, summed over brokers.", nil, l),
+		queueBytes: prometheus.NewDesc("kafka_producer_queue_bytes",
+			"Bytes waiting in the producer's local send queue.", nil, nil),
+		queueMax: prometheus.NewDesc("kafka_producer_queue_max_bytes",
+			"The local send queue's bound (KAFKA_PRODUCER_QUEUE_MAX_KBYTES); full → queue_full.", nil, nil),
+		lagMax: prometheus.NewDesc("kafka_consumer_lag_max",
+			"Largest lag (records behind the partition end) over the assigned partitions.", nil, nil),
+		lagSum: prometheus.NewDesc("kafka_consumer_lag",
+			"Total lag over the assigned partitions.", nil, nil),
 	}
-}
-
-// set replaces the snapshot.
-func (l *lagCollector) set(points []lagPoint) { l.snapshot.Store(&points) }
-
-// drop removes the given partitions from the snapshot (they were revoked or
-// lost, so this member must stop reporting them before the next poll).
-func (l *lagCollector) drop(gone map[string][]int32) {
-	cur := l.snapshot.Load()
-	if cur == nil {
-		return
-	}
-	isGone := func(topic string, p int32) bool {
-		for _, q := range gone[topic] {
-			if q == p {
-				return true
-			}
-		}
-		return false
-	}
-	next := make([]lagPoint, 0, len(*cur))
-	for _, pt := range *cur {
-		if !isGone(pt.topic, pt.partition) {
-			next = append(next, pt)
-		}
-	}
-	l.set(next)
 }
 
 // Describe implements prometheus.Collector.
-func (l *lagCollector) Describe(ch chan<- *prometheus.Desc) {
-	ch <- l.lagDesc
-	ch <- l.lastDesc
-	l.pollErrors.Describe(ch)
+func (c *clientCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.info
+	ch <- c.brokersUp
+	ch <- c.requestErrors
+	if c.role == "producer" {
+		ch <- c.queueBytes
+		ch <- c.queueMax
+	} else {
+		ch <- c.lagMax
+		ch <- c.lagSum
+	}
 }
 
 // Collect implements prometheus.Collector.
-func (l *lagCollector) Collect(ch chan<- prometheus.Metric) {
-	if pts := l.snapshot.Load(); pts != nil {
-		for _, pt := range *pts {
-			ch <- prometheus.MustNewConstMetric(l.lagDesc, prometheus.GaugeValue, float64(pt.lag),
-				pt.topic, strconv.Itoa(int(pt.partition)))
-		}
+func (c *clientCollector) Collect(ch chan<- prometheus.Metric) {
+	ch <- prometheus.MustNewConstMetric(c.info, prometheus.GaugeValue, 1)
+	s := c.stats()
+	if !s.Valid {
+		return
 	}
-	var ts float64
-	if ns := l.lastSuccess.Load(); ns > 0 {
-		ts = float64(ns) / 1e9
+	ch <- prometheus.MustNewConstMetric(c.brokersUp, prometheus.GaugeValue, float64(s.BrokersUp))
+	ch <- prometheus.MustNewConstMetric(c.requestErrors, prometheus.CounterValue, float64(s.RequestErrors))
+	if c.role == "producer" {
+		ch <- prometheus.MustNewConstMetric(c.queueBytes, prometheus.GaugeValue, float64(s.QueueBytes))
+		ch <- prometheus.MustNewConstMetric(c.queueMax, prometheus.GaugeValue, float64(s.QueueMaxBytes))
+		return
 	}
-	ch <- prometheus.MustNewConstMetric(l.lastDesc, prometheus.GaugeValue, ts)
-	l.pollErrors.Collect(ch)
+	ch <- prometheus.MustNewConstMetric(c.lagMax, prometheus.GaugeValue, float64(s.LagMax))
+	ch <- prometheus.MustNewConstMetric(c.lagSum, prometheus.GaugeValue, float64(s.LagSum))
 }

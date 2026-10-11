@@ -1,0 +1,62 @@
+# A broker that accepts only SASL_SSL — SCRAM-SHA-512 over TLS with a private
+# CA — to try the client settings against before a real cluster:
+#
+#   just kafka-sasl-ssl-up       # gen-certs.sh + this file
+#   just kafka-sasl-ssl-down
+#
+# One listener, localhost:29094 (the nodejs-basics example uses 29095, so both
+# run side by side). It is advertised as localhost: clients run on the host.
+# Users: `app` (ACLs on every topic and group, idempotent writes) and `admin`
+# (superuser, used only by the init container). The passwords are the
+# example's, not secrets.
+name: golang-basics-kafka-sasl-ssl
+
+services:
+  redpanda:
+    image: ${DOCKER_HUB:-docker.io}/redpandadata/redpanda:v26.1.1
+    container_name: golang-basics-kafka-sasl-ssl
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --node-id=0
+      - --smp=1
+      - --kafka-addr=sasl_ssl://0.0.0.0:29094
+      - --advertise-kafka-addr=sasl_ssl://localhost:29094
+      # TLS on the listener; SASL is switched on by the init container
+      # (enable_sasl is a cluster property, set once the users exist).
+      - --set
+      - 'redpanda.kafka_api_tls=[{"name":"sasl_ssl","enabled":true,"require_client_auth":false,"cert_file":"/certs/broker.crt","key_file":"/certs/broker.key","truststore_file":"/certs/ca.crt"}]'
+    ports:
+      - "29094:29094"
+    volumes:
+      - ./certs:/certs:ro,z
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -Eq 'Healthy:.+true'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # Users and ACLs over the admin API (and SASL_SSL as the superuser for the
+  # ACLs) — what a platform team does once per cluster.
+  init:
+    image: ${DOCKER_HUB:-docker.io}/redpandadata/redpanda:v26.1.1
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./certs:/certs:ro,z
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        admin="-X admin.hosts=redpanda:9644"
+        kafka="-X brokers=redpanda:29094 -X tls.enabled=true -X tls.ca=/certs/ca.crt -X user=admin -X pass=admin-secret -X sasl.mechanism=SCRAM-SHA-512"
+        for user in admin:admin-secret app:app-secret; do
+          rpk security user create "$${user%%:*}" -p "$${user#*:}" --mechanism SCRAM-SHA-512 $$admin ||
+            rpk security user update "$${user%%:*}" --new-password "$${user#*:}" --mechanism SCRAM-SHA-512 $$admin
+        done
+        rpk cluster config set superusers '["admin"]' $$admin
+        rpk cluster config set enable_sasl true $$admin
+        rpk security acl create --allow-principal User:app --operation all --topic '*' --group '*' $$kafka
+        rpk security acl create --allow-principal User:app --operation idempotent_write --cluster $$kafka

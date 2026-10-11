@@ -40,7 +40,8 @@ type fakePublisher struct {
 	delay   time.Duration
 }
 
-func (f *fakePublisher) Publish(_ context.Context, topic string, key, value []byte, headers ...kafka.Header) error {
+func (f *fakePublisher) Send(_ context.Context, msg kafka.Message) error {
+	topic, key, value, headers := msg.Topic, msg.Key, msg.Value, msg.Headers
 	if f.delay > 0 {
 		time.Sleep(f.delay)
 	}
@@ -136,7 +137,7 @@ func TestRelayOnce_StopsAtTheFirstFailureAndKeepsTheRest(t *testing.T) {
 	var lastErr string
 	require.NoError(t, db.Pool().QueryRow(context.Background(),
 		`SELECT attempts, last_error FROM outbox WHERE aggregate_id = 't2'`).Scan(&attempts, &lastErr))
-	assert.Equal(t, 1, attempts)
+	assert.Zero(t, attempts, "an outage is not the record's fault: never counted")
 	assert.Contains(t, lastErr, "not enough replicas")
 
 	pub.failOn = nil
@@ -146,6 +147,49 @@ func TestRelayOnce_StopsAtTheFirstFailureAndKeepsTheRest(t *testing.T) {
 	assert.Equal(t, []string{"t1", "t2", "t3"}, pub.keys())
 	assert.Equal(t, 3.0, testx.Metric(t, reg, "outbox_published_total", map[string]string{"result": "ok"}))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "outbox_published_total", map[string]string{"result": "error"}))
+	testx.LintMetrics(t, reg)
+}
+
+// A record the broker rejects steps aside instead of blocking the queue, is
+// retried until OUTBOX_MAX_ATTEMPTS, then stays in the table as dead.
+func TestRelayOnce_RejectedRowStepsAsideThenDies(t *testing.T) {
+	db := testsupport.DB(t, containers.Postgres(t))
+	enqueue(t, context.Background(), db, "t1", "poison", "t3")
+	pub := &fakePublisher{failOn: map[string]error{"poison": fmt.Errorf("kafka: send: %w", kafka.NewSendError(kafka.KindRejected, 10, errors.New("message too large")))}}
+	r := outbox.NewRelay(db.Pool(), pub, outbox.Config{Topic: "x", MaxAttempts: 2}, nil)
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(r.Collectors()...)
+
+	n, err := r.RelayOnce(context.Background())
+	require.NoError(t, err, "a rejection is not an outage: no backoff")
+	assert.Equal(t, 2, n)
+	assert.Equal(t, []string{"t1", "t3"}, pub.keys(), "the rest went out past the rejected row")
+	assert.Equal(t, int64(1), pending(t, r), "still pending after one rejection")
+
+	n, err = r.RelayOnce(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	assert.Equal(t, int64(0), pending(t, r), "dead after MaxAttempts: no longer pending")
+
+	pub.failOn = nil
+	n, err = r.RelayOnce(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, n, "a dead row is never sent again, even once the broker would take it")
+
+	var attempts int
+	var lastErr string
+	require.NoError(t, db.Pool().QueryRow(context.Background(),
+		`SELECT attempts, last_error FROM outbox WHERE aggregate_id = 'poison'`).Scan(&attempts, &lastErr))
+	assert.Equal(t, 2, attempts)
+	assert.Contains(t, lastErr, "rejected")
+	assert.Equal(t, 2.0, testx.Metric(t, reg, "outbox_published_total", map[string]string{"result": "rejected"}))
+
+	// The gauges, as Run refreshes them after a pass.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = r.Run(ctx) }()
+	require.Eventually(t, func() bool { return testx.Metric(t, reg, "outbox_dead", nil) == 1 }, 5*time.Second, 20*time.Millisecond)
+	cancel()
+	assert.Equal(t, 0.0, testx.Metric(t, reg, "outbox_pending", nil))
 	testx.LintMetrics(t, reg)
 }
 
@@ -221,7 +265,8 @@ func TestRun_BacklogMetricsAndBackoff(t *testing.T) {
 	var calls sync.Map
 	count := 0
 	var mu sync.Mutex
-	pub := publisherFunc(func(_ context.Context, _ string, key, _ []byte, _ ...kafka.Header) error {
+	pub := publisherFunc(func(_ context.Context, msg kafka.Message) error {
+		key := msg.Key
 		mu.Lock()
 		count++
 		mu.Unlock()
@@ -254,8 +299,6 @@ func TestRun_BacklogMetricsAndBackoff(t *testing.T) {
 	assert.Greater(t, testx.Metric(t, reg, "outbox_relay_lag_seconds", nil), 1.0)
 }
 
-type publisherFunc func(ctx context.Context, topic string, key, value []byte, headers ...kafka.Header) error
+type publisherFunc func(ctx context.Context, msg kafka.Message) error
 
-func (f publisherFunc) Publish(ctx context.Context, topic string, key, value []byte, headers ...kafka.Header) error {
-	return f(ctx, topic, key, value, headers...)
-}
+func (f publisherFunc) Send(ctx context.Context, msg kafka.Message) error { return f(ctx, msg) }

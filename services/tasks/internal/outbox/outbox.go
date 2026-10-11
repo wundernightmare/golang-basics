@@ -10,9 +10,11 @@
 // carries event_id so consumers de-duplicate on it.
 //
 // Ordering: rows are relayed in insertion (id) order, a batch stops at the
-// first failure, and only one relay across all replicas works at a time
-// (pg_try_advisory_xact_lock per batch), so events of one task reach its
-// partition in commit order.
+// first failed publish, and only one relay across all replicas works at a
+// time (pg_try_advisory_xact_lock per batch), so events of one task reach its
+// partition in commit order. The exception is a record the broker rejects
+// (too large, malformed): it steps aside so it cannot block the queue, and
+// after OUTBOX_MAX_ATTEMPTS rejections it is dead — kept, no longer sent.
 package outbox
 
 import (

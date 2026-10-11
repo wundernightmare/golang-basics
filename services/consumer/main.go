@@ -7,7 +7,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"time"
 
@@ -17,25 +16,27 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
 	"github.com/tracehubmmp/golang-basics/libs/otelx"
 	"github.com/tracehubmmp/golang-basics/services/consumer/internal/config"
+	_ "github.com/tracehubmmp/golang-basics/services/consumer/internal/kafkaprovider" // the Kafka client, picked at build time
 	"github.com/tracehubmmp/golang-basics/services/consumer/internal/worker"
 )
 
 func main() {
-	if err := run(); err != nil {
+	// CONSUMER_CONFIG names an optional YAML file; the environment overrides it.
+	boot := httpx.Boot[config.Config]{
+		Name: "consumer", Prefix: config.Prefix, File: config.Prefix + "CONFIG",
+		Load:     func() (config.Config, error) { return config.Load(os.Getenv(config.Prefix + "CONFIG")) },
+		Defaults: config.Defaults,
+	}
+	cfg, code, ok := boot.Config(os.Args[1:], os.Stdout, os.Stderr)
+	if !ok {
+		os.Exit(code)
+	}
+	if err := run(cfg); err != nil {
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	// CONSUMER_CONFIG names an optional YAML file; the environment overrides it.
-	cfg, err := config.Load(os.Getenv(config.Prefix + "CONFIG"))
-	if err != nil {
-		// No logger yet (its settings are part of what failed): say why on
-		// stderr, where a crash-looping pod's last words are read.
-		fmt.Fprintf(os.Stderr, "consumer: %v\n", err)
-		return err
-	}
-
+func run(cfg config.Config) error {
 	logger := httpx.NewLogger(cfg.LogConfig())
 
 	shutdownTracing, err := otelx.Init(context.Background(), cfg.OTel, logger)

@@ -15,11 +15,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
@@ -29,6 +29,7 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/valkey"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/api"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/cache"
+	_ "github.com/tracehubmmp/golang-basics/services/tasks/internal/kafkaprovider" // the Kafka client the binary links
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/outbox"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/store"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/testsupport"
@@ -37,7 +38,8 @@ import (
 func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }
 
 // deps are the addresses the service is wired to — the shared containers, or
-// (chaos) Toxiproxy in front of them.
+// (chaos) Toxiproxy in front of them. As in main.go, an empty Valkey address
+// or no brokers leaves that integration off.
 type deps struct {
 	postgres string // base DSN; the test's schema is added to it
 	valkey   string
@@ -55,7 +57,7 @@ type wired struct {
 	srv   *httpx.Server
 	db    *pgx.DB
 	store *store.Store
-	relay *outbox.Relay
+	relay *outbox.Relay // nil without brokers
 	log   *testx.LogBuffer
 	topic string
 }
@@ -73,17 +75,6 @@ func wire(t testing.TB, d deps) *wired {
 
 	db := testsupport.MigratedDB(t, testsupport.SchemaDSN(t, containers.Postgres(t), d.postgres))
 
-	vk, err := valkey.New(valkey.Config{URL: d.valkey, DialTimeout: 5 * time.Second, OpTimeout: 300 * time.Millisecond}, log)
-	require.NoError(t, err)
-	t.Cleanup(vk.Close)
-
-	producer, err := kafka.NewProducer(ctx, kafka.Config{
-		Brokers: d.brokers, Topic: topic, ClientID: testx.Unique("tasks-it"),
-		DialTimeout: 10 * time.Second, PublishTimeout: 2 * time.Second, AllowAutoTopicCreation: true,
-	}, log)
-	require.NoError(t, err)
-	t.Cleanup(producer.Close)
-
 	// Health re-evaluated every second so the chaos tests see it move; the
 	// check timeout below the interval, as Validate demands.
 	srv, err := httpx.NewServer(httpx.Config{
@@ -92,25 +83,48 @@ func wire(t testing.TB, d deps) *wired {
 		ShutdownTimeout: 5 * time.Second,
 	}, log)
 	require.NoError(t, err)
-	st := store.New(db.Pool())
-	relay := outbox.NewRelay(db.Pool(), producer, outbox.Config{
-		Topic: topic, PollInterval: 200 * time.Millisecond, MaxBackoff: time.Second,
-	}, log)
 	srv.Health.Register("postgres", db.ReadyCheck())
-	srv.Health.Register("valkey", vk.ReadyCheck(), httpx.Optional())
-	srv.Health.Register("kafka", producer.ReadyCheck(), httpx.Optional())
 	srv.Metrics.Registry.MustRegister(db.Collectors()...)
-	srv.Metrics.Registry.MustRegister(vk.Collectors()...)
-	srv.Metrics.Registry.MustRegister(producer.Collectors()...)
-	srv.Metrics.Registry.MustRegister(relay.Collectors()...)
-	api.Register(srv, api.Deps{
-		Store: st, Cache: cache.New(vk, time.Minute, 2*time.Second, log), Logger: log, Committed: relay.Wake,
-	})
+
+	var taskCache api.Cache = cache.None{}
+	if d.valkey != "" {
+		vk, err := valkey.New(valkey.Config{URL: d.valkey, DialTimeout: 5 * time.Second, OpTimeout: 300 * time.Millisecond}, log)
+		require.NoError(t, err)
+		t.Cleanup(vk.Close)
+		srv.Health.Register("valkey", vk.ReadyCheck(), httpx.Optional())
+		srv.Metrics.Registry.MustRegister(vk.Collectors()...)
+		taskCache = cache.New(vk, time.Minute, 2*time.Second, log)
+	}
+
+	var relay *outbox.Relay
+	committed := func() {}
+	if len(d.brokers) > 0 {
+		producer, err := kafka.NewProducer(ctx, kafka.Config{
+			Brokers: d.brokers, Topic: topic, ClientID: testx.Unique("tasks-it"),
+			DialTimeout: 10 * time.Second, PublishTimeout: 2 * time.Second, AllowAutoTopicCreation: true,
+		}, log)
+		require.NoError(t, err)
+		t.Cleanup(producer.Close)
+		relay = outbox.NewRelay(db.Pool(), producer, outbox.Config{
+			Topic: topic, PollInterval: 200 * time.Millisecond, MaxBackoff: time.Second,
+		}, log)
+		srv.Health.Register("kafka", producer.ReadyCheck(), httpx.Optional())
+		srv.Metrics.Registry.MustRegister(producer.Collectors()...)
+		srv.Metrics.Registry.MustRegister(relay.Collectors()...)
+		committed = relay.Wake
+	}
+
+	st := store.New(db.Pool())
+	api.Register(srv, api.Deps{Store: st, Cache: taskCache, Logger: log, Committed: committed})
 
 	runCtx, stop := context.WithCancel(ctx)
 	serverDone, relayDone := make(chan error, 1), make(chan error, 1)
 	go func() { serverDone <- srv.Run(runCtx) }()
-	go func() { relayDone <- relay.Run(runCtx) }()
+	if relay != nil {
+		go func() { relayDone <- relay.Run(runCtx) }()
+	} else {
+		relayDone <- nil
+	}
 	t.Cleanup(func() {
 		stop()
 		<-serverDone
@@ -191,31 +205,34 @@ type consumed struct {
 	headers map[string]string
 }
 
-// readEvents reads the topic from the start until it has n records or the
-// timeout passes, and returns what it got.
+// readEvents reads the topic from the start (a fresh consumer group) until
+// it has n records or the timeout passes, and returns what it got.
 func readEvents(t testing.TB, brokers []string, topic string, n int, timeout time.Duration) []consumed {
 	t.Helper()
-	cl, err := kgo.NewClient(
-		kgo.SeedBrokers(brokers...),
-		kgo.ConsumeTopics(topic),
-		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
-		kgo.AllowAutoTopicCreation(),
-	)
+	c, err := kafka.NewConsumer(t.Context(), kafka.Config{
+		Brokers: brokers, Topics: []string{topic}, Group: testx.Unique("read-events"), ClientID: testx.Unique("read-events"),
+		AllowAutoTopicCreation: true, StatisticsInterval: -1,
+	}, nil)
 	require.NoError(t, err)
-	defer cl.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	var mu sync.Mutex
 	var out []consumed
-	for len(out) < n && ctx.Err() == nil {
-		fetches := cl.PollFetches(ctx)
-		fetches.EachRecord(func(r *kgo.Record) {
-			h := map[string]string{}
-			for _, x := range r.Headers {
-				h[x.Key] = string(x.Value)
-			}
-			out = append(out, consumed{key: string(r.Key), value: r.Value, headers: h})
-		})
-	}
+	_ = c.Run(ctx, func(_ context.Context, m kafka.Message) error {
+		h := map[string]string{}
+		for _, x := range m.Headers {
+			h[x.Key] = string(x.Value)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		out = append(out, consumed{key: string(m.Key), value: m.Value, headers: h})
+		if len(out) >= n {
+			cancel()
+		}
+		return nil
+	})
+	mu.Lock()
+	defer mu.Unlock()
 	return out
 }

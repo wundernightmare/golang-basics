@@ -11,6 +11,14 @@
 #   BUILD_TIME  httpx.BuildTime  default: the HEAD commit time (RFC 3339, UTC) —
 #                                reproducible: the same commit stamps the same time
 #
+# KAFKA_PROVIDER picks the Kafka client a service with Kafka links (tasks,
+# consumer — the ones with internal/kafkaprovider; libs/kafka/README.md):
+#
+#   rdkafka (default)  librdkafka via confluent-kafka-go: CGO_ENABLED=1, the
+#                      bundled static librdkafka (the host's libc stays dynamic;
+#                      the image links a fully static musl binary)
+#   franz              franz-go: CGO_ENABLED=0 -tags kafka_franz
+#
 # COVER=1 builds a coverage-instrumented binary (every workspace package,
 # -covermode=atomic) that writes its counters to GOCOVERDIR on a clean exit —
 # how the e2e layer contributes to the merged coverage. Never for a release.
@@ -41,5 +49,15 @@ if [ -n "${COVER:-}" ] && [ "${COVER}" != 0 ]; then
   cover=(-cover -covermode=atomic "-coverpkg=github.com/tracehubmmp/golang-basics/...")
 fi
 
+provider="${KAFKA_PROVIDER:-rdkafka}"
+cgo=0 tags=""
+if [ -d "$root/services/$svc/internal/kafkaprovider" ]; then
+  case "$provider" in
+    rdkafka) cgo=1 ;;
+    franz) tags=kafka_franz ;;
+    *) echo "build-service.sh: KAFKA_PROVIDER is rdkafka or franz, not '$provider'" >&2; exit 2 ;;
+  esac
+fi
+
 cd "$root/services/$svc"
-CGO_ENABLED=0 go build -trimpath ${cover[@]+"${cover[@]}"} -ldflags="$ldflags" -o "$out" .
+CGO_ENABLED=$cgo go build -trimpath -tags "$tags" ${cover[@]+"${cover[@]}"} -ldflags="$ldflags" -o "$out" .

@@ -26,7 +26,7 @@ release:
 
 # Build and run locally; admin listener on loopback unless CONSUMER_ADMIN_ADDR is set (CONSUMER_* env apply; needs `just infra-up`)
 run *args:
-    CONSUMER_ADMIN_ADDR="${CONSUMER_ADMIN_ADDR:-127.0.0.1:9083}" CONSUMER_KAFKA_ALLOW_AUTO_TOPIC_CREATION="${CONSUMER_KAFKA_ALLOW_AUTO_TOPIC_CREATION:-true}" go run . {{args}}
+    CONSUMER_ADMIN_ADDR="${CONSUMER_ADMIN_ADDR:-127.0.0.1:9083}" CONSUMER_KAFKA_BROKERS="${CONSUMER_KAFKA_BROKERS:-localhost:9092}" CONSUMER_KAFKA_ALLOW_AUTO_TOPIC_CREATION="${CONSUMER_KAFKA_ALLOW_AUTO_TOPIC_CREATION:-true}" go run . {{args}}
 
 # go vet (fastest feedback)
 check:

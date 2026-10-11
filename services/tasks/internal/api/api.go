@@ -41,7 +41,8 @@ type Store interface {
 	Delete(ctx context.Context, id string, expect *int64) error
 }
 
-// Cache is the read cache (satisfied by internal/cache.Tasks).
+// Cache is the read cache (satisfied by internal/cache.Tasks, or cache.None
+// when Valkey is not configured).
 type Cache interface {
 	Get(ctx context.Context, id string, load func(context.Context) (domain.Task, error)) (domain.Task, bool, error)
 	Warm(ctx context.Context, t domain.Task)

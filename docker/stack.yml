@@ -34,6 +34,8 @@ x-build: &build
   dockerfile: docker/service.Dockerfile
   args: &build-args
     GO_VERSION: ${GO_VERSION:-}
+    KAFKA_PROVIDER: ${KAFKA_PROVIDER:-rdkafka}
+    ALPINE_MIRROR: ${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
     VERSION: ${VERSION:-dev}
     GIT_SHA: ${GIT_SHA:-}
     BUILD_TIME: ${BUILD_TIME:-}

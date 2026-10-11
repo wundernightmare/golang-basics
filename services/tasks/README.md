@@ -14,6 +14,15 @@ than in isolation.
 | Tracing            | [`libs/otelx`](../../libs/otelx)       | OTLP spans per request, carried through the outbox to the broker    |
 | Errors             | `httpx.Problem`                        | RFC 9457 `application/problem+json`, business errors carry a `code` |
 
+**Postgres is the only required dependency.** Valkey and Kafka are on when
+their address is set (`TASKS_VALKEY_URL`/`TASKS_VALKEY_ADDR`,
+`TASKS_KAFKA_BROKERS` — no defaults, no `*_ENABLED` switches): without Valkey
+every read is served by Postgres (`X-Cache: miss`), without Kafka no relay
+runs and the events wait in the outbox. Another `TASKS_VALKEY_*` /
+`TASKS_KAFKA_*` key set without its address fails the boot (exit 78) instead
+of being ignored. What the process runs with is the `integrations resolved`
+boot log line and `app_integration_enabled{integration}` on `/metrics`.
+
 The contract is [`api/tsp/tasks.tsp`](../../api/tsp/tasks.tsp) (HTTP) and
 [`api/tsp/events.tsp`](../../api/tsp/events.tsp) (events); the Go wire types are
 generated into [`libs/contracts`](../../libs/contracts).
@@ -50,8 +59,8 @@ opaque (base64 of the last row's position); `created_at` comes from the
 database clock, not the app's.
 
 On the **admin** listener (`:9082`, from `httpx`): `/healthz`, `/livez`,
-`/readyz` (Postgres critical; Valkey and Kafka optional — the service
-degrades, it does not leave the load balancer), `/metrics`, `/version`,
+`/readyz` (Postgres critical; Valkey and Kafka, when configured, optional —
+the service degrades, it does not leave the load balancer), `/metrics`, `/version`,
 `/admin/config` (redacted), `/admin/log-level`, `/debug/pprof`.
 
 ## The write path: transactional outbox
@@ -67,21 +76,32 @@ POST/PATCH/DELETE ──► BEGIN; change tasks row; INSERT INTO outbox (event, 
 relay (internal/outbox) ◄────── wake / poll ─────────┘
   BEGIN; pg_try_advisory_xact_lock (one active relay across replicas)
   SELECT … FROM outbox ORDER BY id LIMIT n FOR UPDATE SKIP LOCKED
-  publish each (headers event_id, event_type, content_type, traceparent), stop at first failure
-  DELETE the acknowledged rows; COMMIT          → back off exponentially while the broker fails
+  …   WHERE attempts < OUTBOX_MAX_ATTEMPTS        (dead rows are skipped)
+  publish each (headers event_id, event_type, content_type, traceparent)
+    outage (timeout, broker down…)  → stop here, keep the order, back off exponentially
+    rejected (too large, malformed) → attempts + 1, step aside, go on with the rest
+  DELETE the acknowledged rows; COMMIT
 ```
 
 * **At least once.** A crash between the broker's ack and the DELETE
   republishes; every record carries `event_id` (header and payload) for the
   consumer to de-duplicate on.
 * **In order per task.** Rows go out in insertion order, a batch stops at the
-  first failure, and only one relay (per schema) works at a time; the record
-  key is the task id, so one task's events share a partition.
+  first failed publish, and only one relay (per schema) works at a time; the
+  record key is the task id, so one task's events share a partition.
+* **No poison row blocks the queue.** A publish error is judged by
+  `kafka.Rejected`: an outage is never counted (no broker outage can kill an
+  event), a rejection — the record itself is the problem — counts an attempt
+  and lets the rest go past. After `TASKS_OUTBOX_MAX_ATTEMPTS` (10) the row is
+  *dead*: kept with its `last_error`, never sent again, counted by
+  `outbox_dead` (alert on any). Fix and re-arm it with
+  `UPDATE outbox SET attempts = 0 WHERE id = …`, or delete it.
 * **Traced.** The request's trace context is stored with the row; the relay's
   span and the produced record continue the request's trace.
-* **Visible.** `outbox_pending`, `outbox_relay_lag_seconds` (age of the oldest
-  unpublished event — alert on this) and `outbox_published_total{result}`.
-  Failed rows keep `attempts` and `last_error` for inspection.
+* **Visible.** `outbox_pending`, `outbox_dead`, `outbox_relay_lag_seconds`
+  (age of the oldest pending event — alert on this) and
+  `outbox_published_total{result}` (`ok`, `rejected`, `error`). Failed rows
+  keep `last_error` for inspection.
 * The HTTP handler wakes the relay after each commit, so events normally go
   out within milliseconds; `TASKS_OUTBOX_POLL_INTERVAL` is only the fallback.
 
@@ -118,8 +138,9 @@ works here under its documented key: `TASKS_HTTP_*` / `TASKS_ADMIN_*` /
 | `TASKS_HTTP_REQUEST_TIMEOUT`          | `request_timeout`            | `30s`                            |
 | `TASKS_DATABASE_URL`                  | `postgres.url`               | *(empty: `TASKS_DB_HOST`… → `postgres://app:app@localhost:5432/app`)* |
 | `TASKS_DB_STATEMENT_TIMEOUT`          | `postgres.statement_timeout` | `30s` (also `DB_LOCK_TIMEOUT` 5s, `DB_IDLE_IN_TX_TIMEOUT` 60s) |
-| `TASKS_VALKEY_URL`                    | `valkey.url`                 | *(empty: `TASKS_VALKEY_ADDR` → `localhost:6379`)* |
-| `TASKS_KAFKA_BROKERS`                 | `kafka.brokers`              | `localhost:9092`                 |
+| `TASKS_DB_PASSWORD_FILE`              | `postgres.password_file`     | *(empty)* — a mounted secret, read once; wins over the password in the URL / `DB_PASSWORD` |
+| `TASKS_VALKEY_URL`                    | `valkey.url`                 | *(empty: no cache, unless `TASKS_VALKEY_ADDR` is set)* |
+| `TASKS_KAFKA_BROKERS`                 | `kafka.brokers`              | *(empty: no relay — events wait in the outbox)* |
 | `TASKS_KAFKA_TOPIC`                   | `kafka.topic`                | `tasks.events` — where every event goes |
 | `TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION` | `kafka.allow_auto_topic_creation` | `false` (pre-provision the topic) |
 | `TASKS_OTEL_ENABLED`                  | `otel.enabled`               | `false`                          |
@@ -129,18 +150,29 @@ works here under its documented key: `TASKS_HTTP_*` / `TASKS_ADMIN_*` /
 | `TASKS_OUTBOX_POLL_INTERVAL`          | `outbox.poll_interval`       | `1s`                             |
 | `TASKS_OUTBOX_BATCH_SIZE`             | `outbox.batch_size`          | `100`                            |
 | `TASKS_OUTBOX_MAX_BACKOFF`            | `outbox.max_backoff`         | `30s`                            |
+| `TASKS_OUTBOX_MAX_ATTEMPTS`           | `outbox.max_attempts`        | `10` — broker rejections before a row is dead |
 | `TASKS_IDEMPOTENCY_KEY_TTL`           | `idempotency.ttl`            | `24h`                            |
 | `TASKS_IDEMPOTENCY_PURGE_INTERVAL`    | `idempotency.purge_interval` | `10m`                            |
 
-The effective config (secrets redacted) is on `GET /admin/config`.
+The effective config (secrets redacted) is on `GET /admin/config`. Without
+starting anything: `tasks --check-config` (exit 0, or 78 with every problem
+on stderr — also how a bad config ends a normal boot) and
+`tasks --config-reference` (every key, its YAML path and default).
+A caller's `X-Request-Timeout-Ms` can shorten `TASKS_HTTP_REQUEST_TIMEOUT`
+for its request, never extend it.
 
 ## Schema
 
 [`migrations/`](migrations) holds `NNN_name.sql` files, embedded and applied on
 boot by `pgx.Migrate`: each in its own transaction, recorded in
 `schema_migrations`, serialised across replicas by an advisory lock.
-Forward-only — never edit a shipped file, add the next number. `001` adopts
-the table older releases created.
+Forward-only — never edit a shipped file (comments aside), add the next
+number. `001` adopts the table older releases created.
+[`migrations/safety_test.go`](migrations/safety_test.go) fails on DDL that
+breaks the release still serving or blocks writes — DROP/RENAME COLUMN, DROP
+TABLE, a type change without `USING`, `SET NOT NULL`, `CREATE INDEX` on an
+existing table without `CONCURRENTLY` — unless the file carries
+`-- migration-safety: reviewed` (a reviewer then reads the SQL).
 
 ## Run
 
@@ -148,8 +180,9 @@ the table older releases created.
 # bring up Postgres + Valkey + Kafka first (repo root):
 just infra-up
 
-# then run the service (repo root); a local admin listener needs no token:
-TASKS_ADMIN_ADDR=127.0.0.1:9082 TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION=true just tasks run
+# then run the service (repo root): admin on loopback (no token needed),
+# the Valkey and Kafka addresses of `just infra-up` unless you set others:
+just tasks run
 
 curl -si -XPOST localhost:8082/tasks -H 'Idempotency-Key: demo-1' -d '{"title":"ship it"}'
 curl -si localhost:8082/tasks/<id> | head                               # ETag, X-Cache

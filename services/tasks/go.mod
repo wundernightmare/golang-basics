@@ -10,6 +10,10 @@ replace github.com/tracehubmmp/golang-basics/libs/valkey => ../../libs/valkey
 
 replace github.com/tracehubmmp/golang-basics/libs/kafka => ../../libs/kafka
 
+replace github.com/tracehubmmp/golang-basics/libs/kafka-rdkafka => ../../libs/kafka-rdkafka
+
+replace github.com/tracehubmmp/golang-basics/libs/kafka-franz => ../../libs/kafka-franz
+
 replace github.com/tracehubmmp/golang-basics/libs/otelx => ../../libs/otelx
 
 require (
@@ -19,14 +23,15 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/tracehubmmp/golang-basics/libs/contracts v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/httpx v0.0.0
-	github.com/tracehubmmp/golang-basics/libs/kafka v0.0.0-00010101000000-000000000000
+	github.com/tracehubmmp/golang-basics/libs/kafka v0.0.0
+	github.com/tracehubmmp/golang-basics/libs/kafka-franz v0.0.0-00010101000000-000000000000
+	github.com/tracehubmmp/golang-basics/libs/kafka-rdkafka v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/otelx v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/pgx v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/containers v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/contract v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/valkey v0.0.0-00010101000000-000000000000
-	github.com/twmb/franz-go v1.21.6
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
 	golang.org/x/sync v0.23.0
@@ -42,6 +47,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/confluentinc/confluent-kafka-go/v2 v2.15.1 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/log v0.2.0 // indirect
@@ -97,9 +103,9 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/valkey v0.44.0 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
+	github.com/twmb/franz-go v1.21.6 // indirect
 	github.com/twmb/franz-go/pkg/kadm v1.18.0 // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.13.1 // indirect
-	github.com/twmb/franz-go/plugin/kotel v1.7.0 // indirect
 	github.com/valkey-io/valkey-go v1.0.77 // indirect
 	github.com/valkey-io/valkey-go/valkeyotel v1.0.77 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect

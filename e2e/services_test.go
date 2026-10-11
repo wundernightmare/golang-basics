@@ -4,7 +4,10 @@ package e2e
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -160,4 +163,48 @@ func assertAdminGuarded(t *testing.T, s *service) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, code, "%s", body)
 	assert.NotContains(t, string(body), s.token, "/admin/config leaks the admin token")
+}
+
+// The exit code is what a supervisor sees: a configuration that does not load
+// exits 78 (EX_CONFIG: fix the deployment, do not just restart) before
+// anything starts, and --check-config / --config-reference answer without
+// starting the service.
+func TestConfigFlagsAndExitCodes(t *testing.T) {
+	t.Parallel()
+	run := func(name, prefix string, env map[string]string, args ...string) (int, string) {
+		t.Helper()
+		cmd := exec.Command(filepath.Join(binDir(t), name), args...) //nolint:gosec // the harness's own build output
+		cmd.Env = childEnv(prefix, env)
+		out, err := cmd.CombinedOutput()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return exit.ExitCode(), string(out)
+		}
+		require.NoError(t, err, string(out))
+		return 0, string(out)
+	}
+
+	code, out := run("ping", "PING_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0"}, "--check-config")
+	assert.Equal(t, 0, code, out)
+	assert.Equal(t, "config ok\n", out)
+
+	code, out = run("ping", "PING_", nil, "--config-reference")
+	assert.Equal(t, 0, code, out)
+	assert.Regexp(t, `PING_HTTP_ADDR\s+http_addr\s+:8080`, out)
+	assert.Regexp(t, `PING_ADMIN_TOKEN\s+admin_token\s+-`, out)
+
+	code, out = run("heartbeat", "HEARTBEAT_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0", "INTERVAL": "-1s"})
+	assert.Equal(t, 78, code, "a bad value ends a normal boot with EX_CONFIG: %s", out)
+	assert.Contains(t, out, "INTERVAL must be positive")
+
+	code, out = run("consumer", "CONSUMER_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0"}, "--check-config")
+	assert.Equal(t, 78, code, out)
+	assert.Contains(t, out, "KAFKA_BROKERS must be set", "a consumer needs its broker")
+
+	code, out = run("tasks", "TASKS_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0", "KAFKA_TOPIC": "x"}, "--check-config")
+	assert.Equal(t, 78, code, out)
+	assert.Contains(t, out, "KAFKA_BROKERS is not", "a Kafka key without the brokers is not silently ignored")
+
+	code, out = run("ping", "PING_", nil, "--bogus")
+	assert.Equal(t, 64, code, out)
 }
