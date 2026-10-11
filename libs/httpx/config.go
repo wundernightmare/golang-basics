@@ -36,6 +36,7 @@ import (
 //	PING_HTTP_WRITE_TIMEOUT      time to write the response                (default "30s")
 //	PING_HTTP_IDLE_TIMEOUT       keep-alive idle limit                     (default "120s")
 //	PING_HTTP_REQUEST_TIMEOUT    per-request context deadline (0 = none; X-Request-Timeout-Ms may shorten it) (default "30s")
+//	PING_HTTP_REQUEST_TIMEOUT_MIN floor for a deadline shortened by X-Request-Timeout-Ms (default "1s", 0 = none)
 //	PING_HTTP_MAX_HEADER_BYTES   request header limit                      (default 1048576)
 //	PING_HTTP_MAX_BODY_BYTES     request body limit; larger bodies → 413   (default 1048576)
 //	PING_HTTP_SHUTDOWN_DELAY     wait after readiness flips before closing (default "2s")
@@ -68,6 +69,12 @@ type Config struct {
 	WriteTimeout      time.Duration `env:"HTTP_WRITE_TIMEOUT" envDefault:"30s" yaml:"write_timeout"`
 	IdleTimeout       time.Duration `env:"HTTP_IDLE_TIMEOUT" envDefault:"120s" yaml:"idle_timeout"`
 	RequestTimeout    time.Duration `env:"HTTP_REQUEST_TIMEOUT" envDefault:"30s" yaml:"request_timeout"`
+	// RequestTimeoutMin is the shortest deadline X-Request-Timeout-Ms can
+	// ask for: a smaller value is raised to it, so a 504 always means the
+	// server needed longer than this, never that a caller asked for 1 ms.
+	// Without it any client could fill the 5xx-rate alert with timeouts it
+	// requested itself. 0 = no floor.
+	RequestTimeoutMin time.Duration `env:"HTTP_REQUEST_TIMEOUT_MIN" envDefault:"1s" yaml:"request_timeout_min"`
 	MaxHeaderBytes    int           `env:"HTTP_MAX_HEADER_BYTES" envDefault:"1048576" yaml:"max_header_bytes"`
 	MaxBodyBytes      int64         `env:"HTTP_MAX_BODY_BYTES" envDefault:"1048576" yaml:"max_body_bytes"`
 
@@ -183,6 +190,12 @@ func (c *Config) Validate() error {
 	}
 	if c.ShutdownTimeout <= 0 {
 		errs = append(errs, errors.New("HTTP_SHUTDOWN_TIMEOUT must be positive"))
+	}
+	if c.RequestTimeoutMin < 0 {
+		errs = append(errs, errors.New("HTTP_REQUEST_TIMEOUT_MIN must not be negative"))
+	}
+	if c.RequestTimeout > 0 && c.RequestTimeoutMin > c.RequestTimeout {
+		errs = append(errs, fmt.Errorf("HTTP_REQUEST_TIMEOUT_MIN (%s) must not exceed HTTP_REQUEST_TIMEOUT (%s)", c.RequestTimeoutMin, c.RequestTimeout))
 	}
 	if c.ShutdownDelay < 0 {
 		errs = append(errs, errors.New("HTTP_SHUTDOWN_DELAY must not be negative"))
