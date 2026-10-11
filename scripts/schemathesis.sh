@@ -22,7 +22,7 @@ set -euo pipefail
 
 svc="${1:?usage: schemathesis.sh <ping|tasks>}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-image="${DOCKER_HUB:-docker.io}/schemathesis/schemathesis:${SCHEMATHESIS_VERSION:-4.29.1}"
+image="${DOCKER_HUB:-docker.io}/schemathesis/schemathesis:${SCHEMATHESIS_VERSION:-4.27.0}"
 results="${JUNIT_DIR:-$root/.reports/junit}"
 spec="api/openapi3/$svc.openapi.yaml"
 max_examples="${SCHEMATHESIS_MAX_EXAMPLES:-100}"
