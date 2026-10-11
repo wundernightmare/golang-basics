@@ -35,7 +35,15 @@ type Config struct {
 	BatchSize    int           // rows per batch (default 100)
 	MaxBackoff   time.Duration // cap on the retry delay after a failed batch (default 30s)
 	MaxAttempts  int           // rejections after which a row is dead: kept, no longer sent (default 10)
+	// RejectBackoff is the delay before a rejected row is tried again,
+	// doubled per rejection and capped at an hour (default 1s): the
+	// OUTBOX_MAX_ATTEMPTS tries of a row the broker refuses are spread over
+	// minutes, not burnt in seconds by the next passes.
+	RejectBackoff time.Duration
 }
+
+// maxRejectDelay caps the delay between two tries of a rejected row.
+const maxRejectDelay = time.Hour
 
 func (c *Config) withDefaults() {
 	if c.PollInterval <= 0 {
@@ -50,12 +58,19 @@ func (c *Config) withDefaults() {
 	if c.MaxAttempts <= 0 {
 		c.MaxAttempts = 10
 	}
+	if c.RejectBackoff <= 0 {
+		c.RejectBackoff = time.Second
+	}
 }
 
 // Relay publishes pending outbox rows to Kafka. Construct it with [NewRelay],
 // start [Relay.Run] beside the HTTP server, and call [Relay.Wake] after a
 // commit that enqueued an event so it is relayed at once rather than on the
 // next poll.
+//
+// A relay without a publisher (nil: Kafka is not configured) publishes
+// nothing — events wait in the table — but Run still refreshes the backlog
+// gauges every PollInterval, so a growing outbox shows on /metrics.
 type Relay struct {
 	pool    *pgxpool.Pool
 	pub     Publisher
@@ -74,7 +89,7 @@ type relayMetrics struct {
 }
 
 // NewRelay builds a relay over pool (the service's database, schema migrated)
-// publishing through pub.
+// publishing through pub (nil: watch the backlog, publish nothing).
 func NewRelay(pool *pgxpool.Pool, pub Publisher, cfg Config, log *slog.Logger) *Relay {
 	cfg.withDefaults()
 	if log == nil {
@@ -114,8 +129,8 @@ func NewRelay(pool *pgxpool.Pool, pub Publisher, cfg Config, log *slog.Logger) *
 //
 // Alert on the lag, not on the count: a steady backlog that moves is fine, an
 // event older than a minute means the broker (or the relay) is stuck. Any
-// dead row needs a person: fix and re-arm it (UPDATE outbox SET attempts = 0)
-// or delete it.
+// dead row needs a person: fix and re-arm it
+// (UPDATE outbox SET rejections = 0, next_attempt_at = NULL) or delete it.
 func (r *Relay) Collectors() []prometheus.Collector {
 	return []prometheus.Collector{r.metrics.pending, r.metrics.dead, r.metrics.lag, r.metrics.published}
 }
@@ -133,11 +148,14 @@ func (r *Relay) Wake() {
 // Wake until the delay is over — a broker outage is not hammered by every
 // request. A full batch is followed immediately by the next one.
 func (r *Relay) Run(ctx context.Context) error {
+	if r.pub == nil {
+		return r.watch(ctx)
+	}
 	r.log.InfoContext(ctx, "outbox relay started", "topic", r.cfg.Topic,
 		"poll_interval", r.cfg.PollInterval.String(), "batch_size", r.cfg.BatchSize)
 	failures := 0
 	for {
-		n, err := r.RelayOnce(ctx)
+		_, taken, err := r.relayOnce(ctx)
 		r.refreshGauges(ctx)
 		var wait time.Duration
 		switch {
@@ -146,7 +164,7 @@ func (r *Relay) Run(ctx context.Context) error {
 			wait = backoff(failures, r.cfg.PollInterval, r.cfg.MaxBackoff)
 			r.log.WarnContext(ctx, "outbox relay pass failed, backing off",
 				"err", err, "failures", failures, "retry_in", wait.String())
-		case n == r.cfg.BatchSize:
+		case taken == r.cfg.BatchSize: // published or stepped aside: either way more may be due
 			failures = 0
 			wait = 0 // more is waiting
 		default:
@@ -175,6 +193,23 @@ func (r *Relay) Run(ctx context.Context) error {
 		case <-t.C:
 		case <-wake:
 			t.Stop()
+		}
+	}
+}
+
+// watch is Run without a publisher: it keeps the backlog gauges current until
+// ctx is cancelled.
+func (r *Relay) watch(ctx context.Context) error {
+	r.log.WarnContext(ctx, "outbox relay idle: no Kafka configured, events wait in the outbox",
+		"poll_interval", r.cfg.PollInterval.String())
+	t := time.NewTicker(r.cfg.PollInterval)
+	defer t.Stop()
+	for {
+		r.refreshGauges(ctx)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
 		}
 	}
 }
@@ -211,7 +246,7 @@ type pending struct {
 // open indefinitely; the per-record publish timeout is libs/kafka's.
 const batchBudget = 30 * time.Second
 
-// RelayOnce publishes one batch of pending events and deletes the rows the
+// RelayOnce publishes one batch of due events and deletes the rows the
 // broker acknowledged, returning how many it published. A failed publish is
 // judged by [kafka.Rejected]:
 //
@@ -220,9 +255,11 @@ const batchBudget = 30 * time.Second
 //     last_error, and the error is returned (the caller backs off). Never
 //     counted: no outage can make a row dead.
 //   - a rejection (too large, malformed — the record itself is the problem):
-//     attempts + 1 and last_error, and the batch goes on without it. After
-//     MaxAttempts the row is dead: left in the table, skipped by every pass.
-//     A rejected row gives up its order relative to later events of its task.
+//     rejections + 1, last_error, and next_attempt_at (RejectBackoff doubled
+//     per rejection, capped at an hour); the batch goes on without it. After
+//     MaxAttempts rejections the row is dead: left in the table, skipped by
+//     every pass. A rejected row gives up its order relative to later events
+//     of its task.
 //
 // Another replica holding the relay lock is not an error: the pass publishes
 // nothing.
@@ -232,29 +269,41 @@ const batchBudget = 30 * time.Second
 // leaving acknowledged rows to be published twice; it stops early, between
 // records, once ctx is done.
 func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
+	sent, _, err := r.relayOnce(ctx)
+	return sent, err
+}
+
+// relayOnce is RelayOnce that also returns how many rows the batch took
+// (published or stepped aside), which tells Run whether more may be due.
+func (r *Relay) relayOnce(ctx context.Context) (sent, taken int, _ error) {
+	if r.pub == nil {
+		return 0, 0, nil
+	}
 	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), batchBudget)
 	defer cancel()
 	bctx = pgxlib.WithOperation(bctx, "outbox.relay")
 
 	tx, err := r.pool.Begin(bctx)
 	if err != nil {
-		return 0, fmt.Errorf("outbox: begin: %w", err)
+		return 0, 0, fmt.Errorf("outbox: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(bctx)) }() // no-op after commit
 
 	var leader bool
 	if err := tx.QueryRow(bctx, relayLockSQL).Scan(&leader); err != nil {
-		return 0, fmt.Errorf("outbox: relay lock: %w", err)
+		return 0, 0, fmt.Errorf("outbox: relay lock: %w", err)
 	}
 	if !leader {
-		return 0, nil
+		return 0, 0, nil
 	}
 
 	rows, err := tx.Query(bctx,
 		`SELECT id, event_id::text, aggregate_id, event_type, payload, headers
-		   FROM outbox WHERE attempts < $2 ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED`, r.cfg.BatchSize, r.cfg.MaxAttempts)
+		   FROM outbox
+		  WHERE rejections < $2 AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+		  ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED`, r.cfg.BatchSize, r.cfg.MaxAttempts)
 	if err != nil {
-		return 0, fmt.Errorf("outbox: select batch: %w", err)
+		return 0, 0, fmt.Errorf("outbox: select batch: %w", err)
 	}
 	batch, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (pending, error) {
 		var x pending
@@ -266,13 +315,13 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 		return x, err
 	})
 	if err != nil {
-		return 0, fmt.Errorf("outbox: read batch: %w", err)
+		return 0, 0, fmt.Errorf("outbox: read batch: %w", err)
 	}
 	if len(batch) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
-	sent := make([]int64, 0, len(batch))
+	done := make([]int64, 0, len(batch))
 	var pubErr error
 	for _, x := range batch {
 		if ctx.Err() != nil {
@@ -281,15 +330,22 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 		if err := r.publish(bctx, x); err != nil {
 			if kafka.Rejected(err) {
 				r.metrics.published.WithLabelValues("rejected").Inc()
-				var attempts int
-				if uerr := tx.QueryRow(bctx, `UPDATE outbox SET attempts = attempts + 1, last_error = $2 WHERE id = $1 RETURNING attempts`,
-					x.id, truncate(err.Error(), 1000)).Scan(&attempts); uerr != nil {
+				taken++
+				// The SET expressions see the row before the update: the
+				// first rejection waits RejectBackoff, each next one twice
+				// as long.
+				var rejections int
+				if uerr := tx.QueryRow(bctx, `UPDATE outbox
+					   SET rejections = rejections + 1, last_error = $2,
+					       next_attempt_at = now() + least($3::float8 * power(2, rejections), $4::float8) * interval '1 second'
+					 WHERE id = $1 RETURNING rejections`,
+					x.id, truncate(err.Error(), 1000), r.cfg.RejectBackoff.Seconds(), maxRejectDelay.Seconds()).Scan(&rejections); uerr != nil {
 					pubErr = fmt.Errorf("outbox: record rejection: %w", uerr)
 					break
 				}
 				r.log.WarnContext(ctx, "outbox event rejected by the broker", "event_id", x.eventID,
-					"event_type", x.eventType, "attempts", attempts, "max_attempts", r.cfg.MaxAttempts,
-					"dead", attempts >= r.cfg.MaxAttempts, "err", err)
+					"event_type", x.eventType, "rejections", rejections, "max_attempts", r.cfg.MaxAttempts,
+					"dead", rejections >= r.cfg.MaxAttempts, "err", err)
 				continue // the record is the problem, not the broker: the rest can go
 			}
 			r.metrics.published.WithLabelValues("error").Inc()
@@ -301,18 +357,19 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 			break
 		}
 		r.metrics.published.WithLabelValues("ok").Inc()
-		sent = append(sent, x.id)
+		done = append(done, x.id)
+		taken++
 	}
 
-	if len(sent) > 0 {
-		if _, err := tx.Exec(bctx, `DELETE FROM outbox WHERE id = ANY($1)`, sent); err != nil {
-			return 0, errors.Join(pubErr, fmt.Errorf("outbox: delete published: %w", err))
+	if len(done) > 0 {
+		if _, err := tx.Exec(bctx, `DELETE FROM outbox WHERE id = ANY($1)`, done); err != nil {
+			return 0, 0, errors.Join(pubErr, fmt.Errorf("outbox: delete published: %w", err))
 		}
 	}
 	if err := tx.Commit(bctx); err != nil {
-		return 0, errors.Join(pubErr, fmt.Errorf("outbox: commit: %w", err))
+		return 0, 0, errors.Join(pubErr, fmt.Errorf("outbox: commit: %w", err))
 	}
-	return len(sent), pubErr
+	return len(done), taken, pubErr
 }
 
 // publish sends one row, continuing the trace of the request that wrote it.
@@ -347,10 +404,11 @@ func (r *Relay) publish(ctx context.Context, x pending) error {
 	return nil
 }
 
-// statsSQL counts pending and dead rows and the age of the oldest pending one.
-const statsSQL = `SELECT count(*) FILTER (WHERE attempts < $1),
-       count(*) FILTER (WHERE attempts >= $1),
-       coalesce(extract(epoch FROM now() - min(created_at) FILTER (WHERE attempts < $1)), 0)::float8
+// statsSQL counts pending and dead rows and the age of the oldest pending one
+// (a rejected row waiting out its backoff is still pending).
+const statsSQL = `SELECT count(*) FILTER (WHERE rejections < $1),
+       count(*) FILTER (WHERE rejections >= $1),
+       coalesce(extract(epoch FROM now() - min(created_at) FILTER (WHERE rejections < $1)), 0)::float8
   FROM outbox`
 
 // refreshGauges updates outbox_pending, outbox_dead and outbox_relay_lag_seconds.

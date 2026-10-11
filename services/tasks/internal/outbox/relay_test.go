@@ -133,11 +133,11 @@ func TestRelayOnce_StopsAtTheFirstFailureAndKeepsTheRest(t *testing.T) {
 	assert.Equal(t, []string{"t1"}, pub.keys(), "t3 is not published before t2: order is kept")
 	assert.Equal(t, int64(2), pending(t, r))
 
-	var attempts int
+	var rejections int
 	var lastErr string
 	require.NoError(t, db.Pool().QueryRow(context.Background(),
-		`SELECT attempts, last_error FROM outbox WHERE aggregate_id = 't2'`).Scan(&attempts, &lastErr))
-	assert.Zero(t, attempts, "an outage is not the record's fault: never counted")
+		`SELECT rejections, last_error FROM outbox WHERE aggregate_id = 't2'`).Scan(&rejections, &lastErr))
+	assert.Zero(t, rejections, "an outage is not the record's fault: never counted")
 	assert.Contains(t, lastErr, "not enough replicas")
 
 	pub.failOn = nil
@@ -156,7 +156,7 @@ func TestRelayOnce_RejectedRowStepsAsideThenDies(t *testing.T) {
 	db := testsupport.DB(t, containers.Postgres(t))
 	enqueue(t, context.Background(), db, "t1", "poison", "t3")
 	pub := &fakePublisher{failOn: map[string]error{"poison": fmt.Errorf("kafka: send: %w", kafka.NewSendError(kafka.KindRejected, 10, errors.New("message too large")))}}
-	r := outbox.NewRelay(db.Pool(), pub, outbox.Config{Topic: "x", MaxAttempts: 2}, nil)
+	r := outbox.NewRelay(db.Pool(), pub, outbox.Config{Topic: "x", MaxAttempts: 2, RejectBackoff: 50 * time.Millisecond}, nil)
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(r.Collectors()...)
 
@@ -166,21 +166,24 @@ func TestRelayOnce_RejectedRowStepsAsideThenDies(t *testing.T) {
 	assert.Equal(t, []string{"t1", "t3"}, pub.keys(), "the rest went out past the rejected row")
 	assert.Equal(t, int64(1), pending(t, r), "still pending after one rejection")
 
+	// Due again after its backoff (50ms, then 100ms).
+	time.Sleep(100 * time.Millisecond)
 	n, err = r.RelayOnce(context.Background())
 	require.NoError(t, err)
 	assert.Zero(t, n)
 	assert.Equal(t, int64(0), pending(t, r), "dead after MaxAttempts: no longer pending")
+	time.Sleep(250 * time.Millisecond)
 
 	pub.failOn = nil
 	n, err = r.RelayOnce(context.Background())
 	require.NoError(t, err)
 	assert.Zero(t, n, "a dead row is never sent again, even once the broker would take it")
 
-	var attempts int
+	var rejections int
 	var lastErr string
 	require.NoError(t, db.Pool().QueryRow(context.Background(),
-		`SELECT attempts, last_error FROM outbox WHERE aggregate_id = 'poison'`).Scan(&attempts, &lastErr))
-	assert.Equal(t, 2, attempts)
+		`SELECT rejections, last_error FROM outbox WHERE aggregate_id = 'poison'`).Scan(&rejections, &lastErr))
+	assert.Equal(t, 2, rejections)
 	assert.Contains(t, lastErr, "rejected")
 	assert.Equal(t, 2.0, testx.Metric(t, reg, "outbox_published_total", map[string]string{"result": "rejected"}))
 
@@ -191,6 +194,92 @@ func TestRelayOnce_RejectedRowStepsAsideThenDies(t *testing.T) {
 	cancel()
 	assert.Equal(t, 0.0, testx.Metric(t, reg, "outbox_pending", nil))
 	testx.LintMetrics(t, reg)
+}
+
+// A rejected row waits out its backoff: the passes that follow (every commit
+// wakes the relay) leave it alone instead of burning its attempts in seconds.
+func TestRelayOnce_RejectedRowWaitsOutItsBackoff(t *testing.T) {
+	db := testsupport.DB(t, containers.Postgres(t))
+	enqueue(t, context.Background(), db, "poison")
+	var tries int
+	pub := publisherFunc(func(context.Context, kafka.Message) error {
+		tries++
+		return kafka.NewSendError(kafka.KindRejected, 10, errors.New("message too large"))
+	})
+	r := outbox.NewRelay(db.Pool(), pub, outbox.Config{Topic: "x", RejectBackoff: time.Hour}, nil)
+
+	for range 5 {
+		_, err := r.RelayOnce(context.Background())
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, tries, "tried once, then not before its next_attempt_at")
+	assert.Equal(t, int64(1), pending(t, r), "waiting, not dead")
+
+	var wait float64
+	require.NoError(t, db.Pool().QueryRow(context.Background(),
+		`SELECT extract(epoch FROM next_attempt_at - now()) FROM outbox`).Scan(&wait))
+	assert.InDelta(t, time.Hour.Seconds(), wait, 60, "the first retry waits RejectBackoff")
+}
+
+// Releases before the rejections column counted outages in attempts; a row
+// with any attempts count is still pending, never dead on upgrade.
+func TestRelayOnce_LegacyAttemptsDoNotKillARow(t *testing.T) {
+	db := testsupport.DB(t, containers.Postgres(t))
+	enqueue(t, context.Background(), db, "survived-an-outage")
+	_, err := db.Pool().Exec(context.Background(), `UPDATE outbox SET attempts = 500`)
+	require.NoError(t, err)
+
+	pub := &fakePublisher{}
+	r := outbox.NewRelay(db.Pool(), pub, outbox.Config{Topic: "x"}, nil)
+	assert.Equal(t, int64(1), pending(t, r))
+	n, err := r.RelayOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Equal(t, []string{"survived-an-outage"}, pub.keys())
+}
+
+// A full batch is followed at once by the next even when part of it was
+// rejected: the rows behind it do not wait a poll interval.
+func TestRun_FullBatchWithARejectionGoesOnAtOnce(t *testing.T) {
+	db := testsupport.DB(t, containers.Postgres(t))
+	enqueue(t, context.Background(), db, "poison", "a", "b", "c")
+	pub := &fakePublisher{failOn: map[string]error{"poison": kafka.NewSendError(kafka.KindRejected, 10, errors.New("message too large"))}}
+	r := outbox.NewRelay(db.Pool(), pub, outbox.Config{Topic: "x", BatchSize: 2, PollInterval: time.Hour, RejectBackoff: time.Hour}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.Run(ctx) }()
+	require.Eventually(t, func() bool { return len(pub.keys()) == 3 }, 5*time.Second, 20*time.Millisecond,
+		"three batches back to back, not one per hour")
+	assert.Equal(t, []string{"a", "b", "c"}, pub.keys())
+}
+
+// Without a publisher (no Kafka) the relay sends nothing but keeps the
+// backlog gauges current.
+func TestRun_WithoutPublisherWatchesTheBacklog(t *testing.T) {
+	db := testsupport.DB(t, containers.Postgres(t))
+	r := outbox.NewRelay(db.Pool(), nil, outbox.Config{Topic: "x", PollInterval: 50 * time.Millisecond}, nil)
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(r.Collectors()...)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	enqueue(t, context.Background(), db, "a", "b")
+	r.Wake() // harmless
+	require.Eventually(t, func() bool { return testx.Metric(t, reg, "outbox_pending", nil) == 2 }, 5*time.Second, 20*time.Millisecond)
+	n, err := r.RelayOnce(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	assert.Equal(t, int64(2), pending(t, r), "nothing sent, nothing deleted")
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
 }
 
 // Replicas relaying together publish every event exactly once, in order: one

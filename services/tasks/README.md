@@ -76,10 +76,11 @@ POST/PATCH/DELETE ──► BEGIN; change tasks row; INSERT INTO outbox (event, 
 relay (internal/outbox) ◄────── wake / poll ─────────┘
   BEGIN; pg_try_advisory_xact_lock (one active relay across replicas)
   SELECT … FROM outbox ORDER BY id LIMIT n FOR UPDATE SKIP LOCKED
-  …   WHERE attempts < OUTBOX_MAX_ATTEMPTS        (dead rows are skipped)
+  …   WHERE rejections < OUTBOX_MAX_ATTEMPTS      (dead rows are skipped)
+        AND next_attempt_at is due               (a rejected row waits out its backoff)
   publish each (headers event_id, event_type, content_type, traceparent)
     outage (timeout, broker down…)  → stop here, keep the order, back off exponentially
-    rejected (too large, malformed) → attempts + 1, step aside, go on with the rest
+    rejected (too large, malformed) → rejections + 1, retry later (backoff), go on with the rest
   DELETE the acknowledged rows; COMMIT
 ```
 
@@ -91,11 +92,25 @@ relay (internal/outbox) ◄────── wake / poll ───────�
   record key is the task id, so one task's events share a partition.
 * **No poison row blocks the queue.** A publish error is judged by
   `kafka.Rejected`: an outage is never counted (no broker outage can kill an
-  event), a rejection — the record itself is the problem — counts an attempt
-  and lets the rest go past. After `TASKS_OUTBOX_MAX_ATTEMPTS` (10) the row is
-  *dead*: kept with its `last_error`, never sent again, counted by
-  `outbox_dead` (alert on any). Fix and re-arm it with
-  `UPDATE outbox SET attempts = 0 WHERE id = …`, or delete it.
+  event), a rejection — the record itself is the problem — counts in
+  `rejections`, lets the rest go past and is retried after
+  `TASKS_OUTBOX_REJECT_BACKOFF` (1s), doubled per rejection up to an hour, so
+  the tries span minutes rather than the next few passes. After
+  `TASKS_OUTBOX_MAX_ATTEMPTS` (10) rejections the row is *dead*: kept with its
+  `last_error`, never sent again, counted by `outbox_dead` (alert on any). Fix
+  and re-arm it with
+  `UPDATE outbox SET rejections = 0, next_attempt_at = NULL WHERE id = …`, or
+  delete it.
+* **Upgrading from a release before migration 005.** Older relays counted
+  every failed publish — outages included — in `outbox.attempts`, so a
+  backlog that sat through an outage can hold large counts there. The relay
+  ignores that column (migration 005 adds `rejections` and
+  `next_attempt_at`), so no such row is declared dead on upgrade, including
+  while old pods still run during a rolling deploy. `attempts` is dropped in a
+  later release.
+* **Visible without a broker.** With no `TASKS_KAFKA_BROKERS` the relay
+  publishes nothing, but `outbox_pending` and `outbox_relay_lag_seconds` stay
+  current, so the waiting backlog shows on `/metrics`.
 * **Traced.** The request's trace context is stored with the row; the relay's
   span and the produced record continue the request's trace.
 * **Visible.** `outbox_pending`, `outbox_dead`, `outbox_relay_lag_seconds`
@@ -151,6 +166,7 @@ works here under its documented key: `TASKS_HTTP_*` / `TASKS_ADMIN_*` /
 | `TASKS_OUTBOX_BATCH_SIZE`             | `outbox.batch_size`          | `100`                            |
 | `TASKS_OUTBOX_MAX_BACKOFF`            | `outbox.max_backoff`         | `30s`                            |
 | `TASKS_OUTBOX_MAX_ATTEMPTS`           | `outbox.max_attempts`        | `10` — broker rejections before a row is dead |
+| `TASKS_OUTBOX_REJECT_BACKOFF`         | `outbox.reject_backoff`      | `1s` — first retry of a rejected row, doubled per rejection (≤ 1h) |
 | `TASKS_IDEMPOTENCY_KEY_TTL`           | `idempotency.ttl`            | `24h`                            |
 | `TASKS_IDEMPOTENCY_PURGE_INTERVAL`    | `idempotency.purge_interval` | `10m`                            |
 
