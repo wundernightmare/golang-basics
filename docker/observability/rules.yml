@@ -72,14 +72,26 @@ groups:
           summary: "{{ $labels.service }}: {{ $value }} records behind"
 
       # Transactional outbox: rows written with the task but not yet published
-      # by the relay. Growth means Kafka is unreachable or the relay is stuck.
-      # Metric name as exported by services/tasks' outbox relay — keep in step.
+      # by the relay. Growth means Kafka is unreachable (or not configured —
+      # the gauge is exported either way) or the relay is stuck. Every metric
+      # name in this file and the dashboard is checked against a live
+      # /metrics by the e2e suite (e2e/tasks_test.go).
       - alert: OutboxBacklog
-        expr: max by (service) (tasks_outbox_pending) > 100
+        expr: max by (service) (outbox_pending) > 100
         for: 10m
         labels: { severity: ticket }
         annotations:
           summary: "{{ $labels.service }}: {{ $value }} outbox events pending publication"
+
+      # A dead outbox row: the broker rejected the event OUTBOX_MAX_ATTEMPTS
+      # times and the relay gave up on it. It will never be sent on its own —
+      # someone has to fix and re-arm it (services/tasks README, "Outbox").
+      - alert: OutboxDeadEvents
+        expr: max by (service) (outbox_dead) > 0
+        for: 1m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.service }}: {{ $value }} outbox events dead (rejected by the broker)"
 
       # Postgres pool saturation: acquired connections vs the configured max.
       - alert: PgPoolSaturated

@@ -91,6 +91,15 @@ func TestTasksPipeline(t *testing.T) { //nolint:tparallel // ordered sub-tests o
 		})
 	})
 
+	// After the pipeline ran, every series the alerts and dashboard read has
+	// been produced at least once (a labelled counter only appears on use).
+	t.Run("alerts and dashboard read exported metrics", func(t *testing.T) {
+		eventually(t, 15*time.Second, "kafka_consumer_lag never exported", func(c *assert.CollectT) {
+			assert.True(c, exportedMetrics(t, consumer)["kafka_consumer_lag"])
+		})
+		assertMetricsExist(t, tasks, consumer)
+	})
+
 	t.Run("graceful shutdown", func(t *testing.T) {
 		for _, s := range []*service{tasks, consumer} {
 			require.True(t, s.terminate(10*time.Second), "%s did not exit within 10s of SIGTERM", s.name)

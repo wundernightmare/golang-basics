@@ -564,7 +564,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (service, topic, result) (rate(kafka_producer_records_total[1m]))",
+          "expr": "sum by (service, topic, result) (rate(kafka_publish_total[1m]))",
           "legendFormat": "produce {{topic}} {{result}}"
         },
         {
@@ -573,7 +573,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (service, topic) (rate(kafka_consumer_records_total[1m]))",
+          "expr": "sum by (service, topic) (rate(kafka_consume_total[1m]))",
           "legendFormat": "consume {{topic}}"
         }
       ],
@@ -623,7 +623,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(kafka_consumer_handle_duration_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kafka_consumer_handler_duration_seconds_bucket[1m])))",
           "legendFormat": "handle p95"
         }
       ],
