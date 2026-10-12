@@ -17,7 +17,7 @@ import (
 )
 
 // migrationFile is the name a migration must have: a version number, an
-// underscore, a snake_case name, ".sql" — "001_create_tasks.sql".
+// underscore, a snake_case name, ".sql" — "001_init.sql".
 var migrationFile = regexp.MustCompile(`^(\d+)_([a-z0-9_]+)\.sql$`)
 
 // Migration is one versioned schema change, read from a NNN_name.sql file.
