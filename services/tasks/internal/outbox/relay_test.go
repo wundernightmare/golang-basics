@@ -221,23 +221,6 @@ func TestRelayOnce_RejectedRowWaitsOutItsBackoff(t *testing.T) {
 	assert.InDelta(t, time.Hour.Seconds(), wait, 60, "the first retry waits RejectBackoff")
 }
 
-// Releases before the rejections column counted outages in attempts; a row
-// with any attempts count is still pending, never dead on upgrade.
-func TestRelayOnce_LegacyAttemptsDoNotKillARow(t *testing.T) {
-	db := testsupport.DB(t, containers.Postgres(t))
-	enqueue(t, context.Background(), db, "survived-an-outage")
-	_, err := db.Pool().Exec(context.Background(), `UPDATE outbox SET attempts = 500`)
-	require.NoError(t, err)
-
-	pub := &fakePublisher{}
-	r := outbox.NewRelay(db.Pool(), pub, outbox.Config{Topic: "x"}, nil)
-	assert.Equal(t, int64(1), pending(t, r))
-	n, err := r.RelayOnce(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, 1, n)
-	assert.Equal(t, []string{"survived-an-outage"}, pub.keys())
-}
-
 // A full batch is followed at once by the next even when part of it was
 // rejected: the rows behind it do not wait a poll interval.
 func TestRun_FullBatchWithARejectionGoesOnAtOnce(t *testing.T) {

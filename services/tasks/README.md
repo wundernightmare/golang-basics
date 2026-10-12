@@ -101,13 +101,6 @@ relay (internal/outbox) ◄────── wake / poll ───────�
   and re-arm it with
   `UPDATE outbox SET rejections = 0, next_attempt_at = NULL WHERE id = …`, or
   delete it.
-* **Upgrading from a release before migration 005.** Older relays counted
-  every failed publish — outages included — in `outbox.attempts`, so a
-  backlog that sat through an outage can hold large counts there. The relay
-  ignores that column (migration 005 adds `rejections` and
-  `next_attempt_at`), so no such row is declared dead on upgrade, including
-  while old pods still run during a rolling deploy. `attempts` is dropped in a
-  later release.
 * **Visible without a broker.** With no `TASKS_KAFKA_BROKERS` the relay
   publishes nothing, but `outbox_pending` and `outbox_relay_lag_seconds` stay
   current, so the waiting backlog shows on `/metrics`.
@@ -183,7 +176,8 @@ for its request, never extend it.
 boot by `pgx.Migrate`: each in its own transaction, recorded in
 `schema_migrations`, serialised across replicas by an advisory lock.
 Forward-only — never edit a shipped file (comments aside), add the next
-number. `001` adopts the table older releases created.
+number. `001_init.sql` is the whole schema as of this template; a product
+repo built from it adds `002_…` onward.
 [`migrations/safety_test.go`](migrations/safety_test.go) fails on DDL that
 breaks the release still serving or blocks writes — DROP/RENAME COLUMN, DROP
 TABLE, a type change without `USING`, `SET NOT NULL`, `CREATE INDEX` on an
