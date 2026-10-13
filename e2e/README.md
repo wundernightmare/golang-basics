@@ -62,7 +62,8 @@ cd e2e
 go test -tags e2e -count=1 ./...                  # ping + heartbeat (tasks/consumer skip)
 just test                                         # same
 
-# the data services (docker/deps.yml up: `just infra-up`)
+# the data services (docker/deps.yml up: `just infra-up`; `just e2e` finds
+# their published ports itself, DEPS_*_PORT included)
 E2E_DATABASE_URL='postgres://app:app@localhost:5432/app?sslmode=disable' \
 E2E_VALKEY_URL=valkey://localhost:6379 \
 E2E_KAFKA_BROKERS=localhost:9092 \
