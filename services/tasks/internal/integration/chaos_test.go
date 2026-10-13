@@ -124,7 +124,7 @@ func TestChaos_KafkaPaused(t *testing.T) {
 	unpause()
 	assert.Eventually(t, func() bool { return w.pending(t) == 0 }, 60*time.Second, 200*time.Millisecond,
 		"the relay catches up once the broker is back")
-	events := readEvents(t, d.brokers, w.topic, n, 30*time.Second)
+	events := w.readEvents(t, d.brokers, n, 30*time.Second)
 	assert.GreaterOrEqual(t, len(events), n, "every event delivered (at least once)")
 	assert.Equal(t, 0.0, testx.Metric(t, w.srv.Metrics.Registry, "outbox_pending", nil))
 	w.waitReadyz(t, "ready")

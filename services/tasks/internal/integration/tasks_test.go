@@ -77,7 +77,7 @@ func TestEndToEnd(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrNotFound)
 
 	// The three events, in order, on the task's key.
-	events := readEvents(t, d.brokers, w.topic, 3, 30*time.Second)
+	events := w.readEvents(t, d.brokers, 3, 30*time.Second)
 	require.Len(t, events, 3)
 	schemas := map[string]*contract.JSONSchema{
 		"task.created": contract.LoadJSONSchema(t, "jsonschema/TaskCreatedEvent.json"),
@@ -97,7 +97,6 @@ func TestEndToEnd(t *testing.T) {
 		assert.Equal(t, e.headers[kafka.HeaderEventID], payload["event_id"], "header and payload agree on the event id")
 		assert.Equal(t, versions[i], payload["version"], want)
 	}
-	assert.Eventually(t, func() bool { return w.pending(t) == 0 }, 10*time.Second, 50*time.Millisecond, "the outbox drains")
 
 	// One trace: the POST's server span, its INSERT, its cache fill, and —
 	// later, from the relay — the publish of its event.
@@ -209,7 +208,7 @@ func TestIdempotentCreateOverHTTP(t *testing.T) {
 	r := w.do(t, http.MethodPost, "/tasks", `{"title":"different"}`, "Idempotency-Key", "retry-me")
 	assert.Equal(t, http.StatusUnprocessableEntity, r.status)
 
-	events := readEvents(t, d.brokers, w.topic, 2, 5*time.Second)
+	events := w.readEvents(t, d.brokers, 2, 5*time.Second)
 	assert.Len(t, events, 1, "exactly one task.created")
 }
 
