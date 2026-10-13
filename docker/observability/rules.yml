@@ -44,17 +44,14 @@ groups:
     rules:
       # Scrape target down: the process (or its admin listener) is gone.
       - alert: ServiceDown
-        expr: up{job=~"ping|heartbeat|tasks|consumer"} == 0
+        # No scrapeable target left for the service. One replica (or the
+        # host/container target you are not running locally) being down is
+        # not a page; every one of them gone is.
+        expr: max by (service) (up{service=~"ping|heartbeat|tasks|consumer"}) == 0
         for: 2m
         labels: { severity: page }
         annotations:
-          summary: "{{ $labels.service }} ({{ $labels.instance }}) is not scrapeable"
-          description: >-
-            Both the container and the host target are configured per job;
-            the one you are not running is expected to be down — silence it
-            locally, this rule is meant for one target per service in prod.
-
-      # Readiness: a critical check failing turns /readyz to 503.
+          summary: "{{ $labels.service }}: no scrapeable instance"
       - alert: ReadinessCheckFailing
         expr: health_check_up{critical="true"} == 0
         for: 2m
