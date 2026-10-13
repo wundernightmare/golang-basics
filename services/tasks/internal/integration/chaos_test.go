@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -116,7 +117,7 @@ func TestChaos_KafkaPaused(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return testx.Metric(t, w.srv.Metrics.Registry, "outbox_pending", nil) >= n
 	}, 20*time.Second, 100*time.Millisecond, "the backlog is visible on /metrics")
-	assert.Greater(t, testx.Metric(t, w.srv.Metrics.Registry, "outbox_published_total", map[string]string{"result": "error"}), 0.0)
+	assert.Positive(t, failedSends(t, w.srv.Metrics.Registry), "the failed publishes are counted by the producer")
 	body := w.waitReadyz(t, "degraded")
 	assert.Contains(t, body, "kafka")
 
@@ -127,4 +128,25 @@ func TestChaos_KafkaPaused(t *testing.T) {
 	assert.GreaterOrEqual(t, len(events), n, "every event delivered (at least once)")
 	assert.Equal(t, 0.0, testx.Metric(t, w.srv.Metrics.Registry, "outbox_pending", nil))
 	w.waitReadyz(t, "ready")
+}
+
+// failedSends sums kafka_producer_records_total over every result but ok.
+func failedSends(t *testing.T, g prometheus.Gatherer) float64 {
+	t.Helper()
+	mfs, err := g.Gather()
+	require.NoError(t, err)
+	var n float64
+	for _, mf := range mfs {
+		if mf.GetName() != "kafka_producer_records_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "result" && l.GetValue() != "ok" {
+					n += m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return n
 }

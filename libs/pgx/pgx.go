@@ -17,7 +17,7 @@ import (
 // with [DB.Collectors]. Every query runs under an OpenTelemetry span (client
 // span named after the statement) when the calling context carries a trace,
 // so a request's DB time shows up inside its HTTP span, and is timed into
-// pgx_query_duration_seconds{operation} (see [WithOperation]).
+// db_query_duration_seconds{operation} (see [WithOperation]).
 type DB struct {
 	pool    *pgxpool.Pool
 	log     *slog.Logger

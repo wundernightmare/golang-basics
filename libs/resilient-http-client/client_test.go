@@ -109,7 +109,7 @@ func TestSend_SuccessTracesAndMeters(t *testing.T) {
 
 	assert.InDelta(t, 1, metric(t, c, "http_client_requests_total", map[string]string{"target": "api", "method": "GET", "outcome": "2xx"}), 0)
 	assert.InDelta(t, 1, metric(t, c, "http_client_request_duration_seconds", map[string]string{"target": "api", "method": "GET"}), 0)
-	assert.InDelta(t, 0, metric(t, c, "circuit_breaker_state", map[string]string{"target": "api"}), 0)
+	assert.InDelta(t, 0, metric(t, c, "http_client_circuit_breaker_state", map[string]string{"target": "api"}), 0)
 	testx.LintMetrics(t, c.Registry())
 }
 
@@ -123,7 +123,10 @@ func TestSend_RejectsUnknownTargetAndBadURL(t *testing.T) {
 	req := get(t, t.Context(), "/relative")
 	_, err = c.Send("api", req) //nolint:bodyclose // error
 	require.ErrorIs(t, err, resilient.KindInvalid)
-	assert.InDelta(t, -1, metric(t, c, "http_client_requests_total", nil), 0, "caller bugs are not metered")
+	assert.InDelta(t, 1, metric(t, c, "http_client_requests_total", map[string]string{"target": "api", "outcome": "invalid"}), 0,
+		"a bad request to a known target is counted")
+	assert.InDelta(t, -1, metric(t, c, "http_client_requests_total", map[string]string{"target": "nope"}), 0,
+		"an unknown target name never becomes a label value")
 }
 
 func TestNew_RejectsInvalidConfigAndDuplicateRegistration(t *testing.T) {
@@ -134,7 +137,7 @@ func TestNew_RejectsInvalidConfigAndDuplicateRegistration(t *testing.T) {
 	c, err := resilient.New(resilient.DefaultConfig("a"), resilient.WithRegisterer(reg))
 	require.NoError(t, err)
 	assert.Nil(t, c.Registry(), "metrics went to the caller's registerer")
-	assert.InDelta(t, 0, testx.Metric(t, reg, "circuit_breaker_state", map[string]string{"target": "a"}), 0)
+	assert.InDelta(t, 0, testx.Metric(t, reg, "http_client_circuit_breaker_state", map[string]string{"target": "a"}), 0)
 	_, err = resilient.New(resilient.DefaultConfig("a"), resilient.WithRegisterer(reg))
 	require.Error(t, err, "a second client on the same registerer collides")
 }
@@ -334,8 +337,8 @@ func TestSend_TimeoutIsABreakerFailure(t *testing.T) {
 	assert.InDelta(t, 2, metric(t, c, "http_client_requests_total", map[string]string{"outcome": "timeout"}), 0)
 	assert.InDelta(t, 1, metric(t, c, "http_client_requests_total", map[string]string{"outcome": "circuit_open"}), 0)
 	assert.InDelta(t, 2, metric(t, c, "http_client_request_duration_seconds", nil), 0, "the rejected one never reached the network")
-	assert.InDelta(t, 1, metric(t, c, "circuit_breaker_transitions_total", map[string]string{"from": "closed", "to": "open"}), 0)
-	assert.InDelta(t, 1, metric(t, c, "circuit_breaker_state", nil), 0)
+	assert.InDelta(t, 1, metric(t, c, "http_client_circuit_breaker_transitions_total", map[string]string{"from": "closed", "to": "open"}), 0)
+	assert.InDelta(t, 1, metric(t, c, "http_client_circuit_breaker_state", nil), 0)
 }
 
 func TestSend_CallerCancellationDoesNotTripBreaker(t *testing.T) {
@@ -423,7 +426,7 @@ func TestSend_HalfOpenAdmitsOneProbeUnderConcurrency(t *testing.T) {
 	assert.Equal(t, int32(2), hits.Load(), "the tripping request and exactly one probe")
 	st, _ := c.BreakerState("api")
 	assert.Equal(t, resilient.StateClosed, st)
-	assert.InDelta(t, 1, metric(t, c, "circuit_breaker_transitions_total", map[string]string{"from": "half_open", "to": "closed"}), 0)
+	assert.InDelta(t, 1, metric(t, c, "http_client_circuit_breaker_transitions_total", map[string]string{"from": "half_open", "to": "closed"}), 0)
 }
 
 func TestSend_RateLimitWaitsWithinAttemptTimeout(t *testing.T) {

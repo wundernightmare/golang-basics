@@ -7,9 +7,10 @@
 // Every libs/kafka key is mapped onto a typed franz-go option (config.go);
 // librdkafka properties (KAFKA_*_EXTRA_PROPERTIES) have no franz-go
 // equivalent and are a config error here. Client metrics come from franz-go
-// hooks (connections, request errors) and kadm (group lag), refreshed every
-// KAFKA_STATISTICS_INTERVAL_MS. See libs/kafka's README for when to pick it
-// over libs/kafka-rdkafka.
+// hooks (connections, request errors), reported while
+// KAFKA_STATISTICS_INTERVAL_MS is not 0; consumer-group lag is the broker's
+// to export. See libs/kafka's README for when to pick it over
+// libs/kafka-rdkafka.
 package franz
 
 import (
@@ -22,7 +23,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -201,11 +201,6 @@ func (Driver) NewConsumer(cfg kafka.Config, log *slog.Logger, rb kafka.Rebalance
 	}
 	c.cl = cl
 	st.cl = cl
-	c.lagCtx, c.stopLag = context.WithCancel(context.Background())
-	if cfg.StatisticsInterval > 0 {
-		c.lagDone = make(chan struct{})
-		go c.pollLag()
-	}
 	return c, nil
 }
 
@@ -220,10 +215,7 @@ type consumer struct {
 	mu    sync.Mutex
 	owned map[kafka.TopicPartition]struct{}
 
-	lagCtx  context.Context
-	stopLag context.CancelFunc
-	lagDone chan struct{}
-	closed  atomic.Bool
+	closed atomic.Bool
 }
 
 // Poll implements kafka.ConsumerClient.
@@ -300,10 +292,6 @@ func (c *consumer) Close() {
 	if !c.closed.CompareAndSwap(false, true) {
 		return
 	}
-	c.stopLag()
-	if c.lagDone != nil {
-		<-c.lagDone
-	}
 	c.cl.CloseAllowingRebalance()
 }
 
@@ -347,43 +335,5 @@ func (c *consumer) forget(parts []kafka.TopicPartition) {
 	defer c.mu.Unlock()
 	for _, p := range parts {
 		delete(c.owned, p)
-	}
-}
-
-// pollLag refreshes the group lag of the owned partitions every statistics
-// period (kadm: end offset minus the group's committed offset).
-func (c *consumer) pollLag() {
-	defer close(c.lagDone)
-	adm := kadm.NewClient(c.cl)
-	t := time.NewTicker(time.Duration(c.cfg.StatisticsInterval) * time.Millisecond)
-	defer t.Stop()
-	for {
-		select {
-		case <-c.lagCtx.Done():
-			return
-		case <-t.C:
-		}
-		ctx, cancel := context.WithTimeout(c.lagCtx, time.Duration(c.cfg.StatisticsInterval)*time.Millisecond)
-		lags, err := adm.Lag(ctx, c.cfg.Group)
-		cancel()
-		if err != nil {
-			continue // the snapshot ages out; the client metrics disappear
-		}
-		gl, ok := lags[c.cfg.Group]
-		if !ok || gl.Error() != nil {
-			continue
-		}
-		var lagMax, lagSum int64
-		c.mu.Lock()
-		for p := range c.owned {
-			l, ok := gl.Lag.Lookup(p.Topic, p.Partition)
-			if !ok || l.Err != nil || l.Lag < 0 {
-				continue
-			}
-			lagMax = max(lagMax, l.Lag)
-			lagSum += l.Lag
-		}
-		c.mu.Unlock()
-		c.stats.setLag(lagMax, lagSum)
 	}
 }

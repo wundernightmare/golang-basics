@@ -103,22 +103,18 @@ type rdStats struct {
 		TxErrs      int64  `json:"txerrs"`
 		RxErrs      int64  `json:"rxerrs"`
 	} `json:"brokers"`
-	Topics map[string]struct {
-		Partitions map[string]struct {
-			ConsumerLag int64 `json:"consumer_lag"`
-		} `json:"partitions"`
-	} `json:"topics"`
 }
 
-// statsSnapshot is what one statistics event boils down to.
+// statsSnapshot is what one statistics event boils down to. brokerErrors
+// holds each broker's own cumulative error count, keyed by the broker's name;
+// the holder turns them into one monotonic total.
 type statsSnapshot struct {
 	at            time.Time
 	brokersUp     int
+	brokerErrors  map[string]int64
 	requestErrors int64
 	queueBytes    int64
 	queueMaxBytes int64
-	lagMax        int64
-	lagSum        int64
 }
 
 func parseStats(raw string) (statsSnapshot, error) {
@@ -126,24 +122,16 @@ func parseStats(raw string) (statsSnapshot, error) {
 	if err := json.Unmarshal([]byte(raw), &s); err != nil {
 		return statsSnapshot{}, fmt.Errorf("kafka: parse statistics: %w", err)
 	}
-	snap := statsSnapshot{at: time.Now(), queueBytes: s.MsgSize, queueMaxBytes: s.MsgSizeMax}
-	for _, b := range s.Brokers {
+	snap := statsSnapshot{at: time.Now(), queueBytes: s.MsgSize, queueMaxBytes: s.MsgSizeMax,
+		brokerErrors: make(map[string]int64, len(s.Brokers))}
+	for name, b := range s.Brokers {
 		if b.NodeID < 0 { // bootstrap and coordinator entries, not real brokers
 			continue
 		}
 		if b.State == "UP" {
 			snap.brokersUp++
 		}
-		snap.requestErrors += b.ReqTimeouts + b.TxErrs + b.RxErrs
-	}
-	for _, t := range s.Topics {
-		for id, p := range t.Partitions {
-			if id == "-1" || p.ConsumerLag < 0 { // the internal UA partition, or lag not known yet
-				continue
-			}
-			snap.lagMax = max(snap.lagMax, p.ConsumerLag)
-			snap.lagSum += p.ConsumerLag
-		}
+		snap.brokerErrors[name] = b.ReqTimeouts + b.TxErrs + b.RxErrs
 	}
 	return snap, nil
 }
@@ -152,6 +140,13 @@ func parseStats(raw string) (statsSnapshot, error) {
 type statsHolder struct {
 	mu   sync.Mutex
 	snap statsSnapshot
+	// seen is each broker's last cumulative error count, total the sum of
+	// their increases: a counter must never go down, but a per-broker count
+	// does when librdkafka drops a broker handle (the cluster shrank, a
+	// broker was replaced) and starts a new one from zero. Entries are kept
+	// after a broker disappears so its return is not counted twice.
+	seen  map[string]int64
+	total int64
 }
 
 func (h *statsHolder) update(raw string) {
@@ -160,8 +155,20 @@ func (h *statsHolder) update(raw string) {
 		return
 	}
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.seen == nil {
+		h.seen = map[string]int64{}
+	}
+	for name, n := range snap.brokerErrors {
+		if prev := h.seen[name]; n >= prev {
+			h.total += n - prev
+		} else {
+			h.total += n // a new handle under an old name: its count started at zero
+		}
+		h.seen[name] = n
+	}
+	snap.requestErrors = h.total
 	h.snap = snap
-	h.mu.Unlock()
 }
 
 // latest returns the snapshot when it is fresh enough to report: a client
@@ -188,5 +195,5 @@ func (h *statsHolder) clientStats(cfg kafka.Config) kafka.ClientStats {
 		return kafka.ClientStats{}
 	}
 	return kafka.ClientStats{Valid: true, BrokersUp: int64(s.brokersUp), RequestErrors: s.requestErrors,
-		QueueBytes: s.queueBytes, QueueMaxBytes: s.queueMaxBytes, LagMax: s.lagMax, LagSum: s.lagSum}
+		QueueBytes: s.queueBytes, QueueMaxBytes: s.queueMaxBytes}
 }

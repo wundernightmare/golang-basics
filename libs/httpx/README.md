@@ -17,7 +17,7 @@ It packages the boilerplate every service otherwise re-writes:
 | Request logging    | One structured line per API request: info (sampled) for 2xx–4xx, warn above `HTTP_SLOW_REQUEST`, error for 5xx |
 | Logging setup      | `NewLogger(LogConfig)` — JSON/text to stdout, `trace_id`/`span_id`/`request_id` from the context (top level, also under `WithGroup`), zap-style sampling of debug/info |
 | Runtime debugging  | Log level switchable at runtime with an auto-revert TTL; debug logging for one request via `X-Debug-Token`; the effective config, secrets redacted, on `/admin/config` |
-| Metrics            | Prometheus, on a private registry: `build_info`, request count / latency / sizes / in-flight / panics by `route` template, health check results and latency, `log_dropped_total`; exemplars carry the `trace_id` |
+| Metrics            | Prometheus, on a private registry: `build_info`, request count / latency / in-flight / unhandled errors by `route` template, health check results and latency, `log_dropped_total`; exemplars carry the `trace_id` |
 | Tracing            | A server span per request from the global OpenTelemetry provider (install one with `libs/otelx`), named `GET /items/{id}` after routing |
 | Health             | `/healthz` (liveness) and `/readyz` (gate + pluggable checks evaluated in the background, answered from cache) |
 | Config             | `LoadConfig(prefix)` (env) or `LoadYAML(path, prefix, &cfg)` (file + env + defaults), validated before the server starts |
@@ -92,7 +92,7 @@ In order, outermost first:
    what they add to the context, and a request they reject (401, 429) is
    still traced, logged and counted like any other;
 7. **recovery** — a panic becomes a 500 problem, an error log with the stack,
-   an error span and a tick of `http_panics_total`;
+   an error span and a tick of `http_unhandled_errors_total`;
 8. **body limit** — `HTTP_MAX_BODY_BYTES`; `DecodeJSON` turns an overrun into 413;
 9. **routing** — unknown path → 404, known path with the wrong method → 405
    with `Allow`, both as `problem+json`; the matched pattern becomes the
@@ -213,20 +213,23 @@ its own registry, `srv.Metrics.Registry`; register the data libs'
 
 | Metric                                            | Type      | Labels                     |
 | ------------------------------------------------- | --------- | -------------------------- |
-| `build_info`                                      | gauge (1) | `service, version, revision, go_version` |
+| `build_info`                                      | gauge (1) | `version, revision`        |
 | `http_requests_total`                             | counter   | `method, route, status`    |
 | `http_request_duration_seconds`                   | histogram (classic + native) | `method, route` |
-| `http_request_size_bytes`                         | histogram | `method, route` (requests with a body) |
-| `http_response_size_bytes`                        | histogram | `method, route`            |
 | `http_requests_in_flight`                         | gauge     |                            |
-| `http_panics_total`                               | counter   |                            |
+| `http_unhandled_errors_total`                     | counter   | (recovered panics, answered 500) |
 | `health_check_up`                                 | gauge     | `check, critical`          |
 | `health_check_duration_seconds`                   | histogram | `check`                    |
 | `log_dropped_total`                               | counter   | `level`                    |
 
 `route` is the matched pattern (`/tasks/{id}`) or `unmatched`, never the raw
-URL; `method` is one of the standard methods or `_OTHER`. No client can grow
-the series. When the request's span is sampled, `http_requests_total` and the
+URL; `method` is one of the standard methods or `_OTHER`; `status` is the
+code sent, 499 when the client went away first (nothing written, or a handler
+passed the cancellation to `WriteError`) so a disconnect is not a 5xx. No
+client can grow the series. `build_info` has no `service` label (the scrape
+config attaches it) and no Go version (`go_info` has it). Request/response
+sizes are not measured. The names are the workspace's metrics contract
+([docs/METRICS.md](../../docs/METRICS.md)), shared with nodejs-basics. When the request's span is sampled, `http_requests_total` and the
 latency histogram carry its `trace_id` as an exemplar.
 
 **Traces** are OpenTelemetry. The server starts one `SpanKindServer` span per

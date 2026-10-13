@@ -283,9 +283,9 @@ func TestCommandsAreTracedAndMeasured(t *testing.T) {
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_lookups_total", map[string]string{"result": "miss"}))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_lookups_total", map[string]string{"result": "hit"}))
 	assert.Equal(t, -1.0, testx.Metric(t, reg, "cache_lookups_total", map[string]string{"result": "error"}))
-	assert.Equal(t, 2.0, testx.Metric(t, reg, "cache_command_duration_seconds", map[string]string{"op": "get"}))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_command_duration_seconds", map[string]string{"op": "set"}))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_command_duration_seconds", map[string]string{"op": "del"}))
+	assert.Equal(t, 2.0, testx.Metric(t, reg, "cache_command_duration_seconds", map[string]string{"operation": "get"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_command_duration_seconds", map[string]string{"operation": "set"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_command_duration_seconds", map[string]string{"operation": "del"}))
 	assert.Equal(t, -1.0, testx.Metric(t, reg, "cache_command_errors_total", nil))
 	testx.LintMetrics(t, reg)
 
@@ -316,8 +316,8 @@ func TestUnreachableCacheFailsFastAndCounts(t *testing.T) {
 	require.Error(t, err)
 	require.Error(t, c.Set(ctx, "k", "v", time.Minute))
 	assert.Less(t, time.Since(start), 2*time.Second)
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_command_errors_total", map[string]string{"op": "get"}))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_command_errors_total", map[string]string{"op": "set"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_command_errors_total", map[string]string{"operation": "get"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_command_errors_total", map[string]string{"operation": "set"}))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_lookups_total", map[string]string{"result": "error"}))
 
 	// Aside degrades to the loader.

@@ -18,8 +18,8 @@
 //     while (see [LogLevel]), debug logging for one request via X-Debug-Token
 //     (see [WithDebugLogging]), the effective config with secrets redacted
 //     (see [Redact], [WithConfig]);
-//   - Prometheus metrics: build_info, request count / latency / sizes /
-//     in-flight / panics, plus whatever collectors the service registers from
+//   - Prometheus metrics: build_info, request count / latency / in-flight /
+//     unhandled errors, plus whatever collectors the service registers from
 //     the data libs (see [Metrics]);
 //   - liveness and readiness backed by a pluggable check registry (see [Health]);
 //   - environment- and YAML-driven configuration with a per-service prefix,

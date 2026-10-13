@@ -186,11 +186,12 @@ func (c *Client) send(target string, req *http.Request, retry bool) (*http.Respo
 	if !ok {
 		return nil, &OutboundError{Kind: KindInvalid, Target: target, Err: errUnknownTarget}
 	}
+	method := methodLabel(req.Method)
 	if req.URL == nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") || req.URL.Host == "" {
+		c.count(p, method, KindInvalid.String())
 		return nil, &OutboundError{Kind: KindInvalid, Target: target, Err: errors.New("request URL must be absolute http(s)")}
 	}
 	ctx := req.Context()
-	method := methodLabel(req.Method)
 
 	if !c.enter() {
 		c.count(p, method, KindShutdown.String())
@@ -305,6 +306,7 @@ func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n in
 		if err != nil {
 			release()
 			p.breaker.record(tk, outcomeIgnored)
+			c.count(p, method, KindInvalid.String())
 			return nil, nil, &OutboundError{Kind: KindInvalid, Target: p.name, Err: fmt.Errorf("replay body: %w", err)}
 		}
 		r.Body = body

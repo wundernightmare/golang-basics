@@ -27,6 +27,16 @@ const (
 	dashboardFile = "../docker/observability/dashboards/golang-basics.json"
 )
 
+// brokerMetrics are the names the alerts and dashboard read from something
+// other than the services — the broker or an exporter — with where they come
+// from. The services' /metrics cannot have them by design (docs/METRICS.md:
+// what the broker measures better is not collected in the app), so the guard
+// skips exactly these and fails on any other name nobody exports. An entry
+// nothing references any more fails too, so the list cannot rot.
+var brokerMetrics = map[string]string{
+	"redpanda_kafka_consumer_group_lag_sum": "Redpanda /public_metrics (enable_consumer_group_metrics, docker/deps.yml)",
+}
+
 // promQLNames returns the metric names a PromQL expression reads: label
 // matchers, strings, ranges and grouping clauses removed, function calls and
 // keywords skipped. Prometheus' own synthetic series (up) is not exported by
@@ -132,16 +142,21 @@ func exportedMetrics(t *testing.T, services ...*service) map[string]bool {
 }
 
 // assertMetricsExist fails for every name the rules or dashboard reference
-// that none of the services exports.
+// that none of the services exports, the broker's own (brokerMetrics) aside.
 func assertMetricsExist(t *testing.T, services ...*service) {
 	t.Helper()
 	have := exportedMetrics(t, services...)
+	refs := referencedMetrics(t)
 	var missing []string
-	for name, where := range referencedMetrics(t) {
-		if !have[name] {
+	for name, where := range refs {
+		if _, broker := brokerMetrics[name]; !broker && !have[name] {
 			missing = append(missing, name+"  ← "+where)
 		}
 	}
 	sort.Strings(missing)
 	require.Empty(t, missing, "metrics referenced by the alerts/dashboard but not exported")
+	for name := range brokerMetrics {
+		require.Contains(t, refs, name, "brokerMetrics lists %s, which nothing references", name)
+		require.False(t, have[name], "%s is the broker's metric; a service must not export it", name)
+	}
 }

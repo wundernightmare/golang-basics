@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// consumedMetric is the consumer's per-event success counter
-// (services/consumer/internal/worker).
-const consumedMetric = "consumer_tasks_consumed_total"
+// consumedMetric is the consumer's per-event success counter, by event type
+// (services/consumer/internal/worker); service.metric sums the types.
+const consumedMetric = "consumer_events_total"
 
 // TestTasksPipeline: a task created through the real tasks binary reaches the
 // real consumer binary through the outbox relay and the real broker. The CRUD
@@ -94,8 +94,8 @@ func TestTasksPipeline(t *testing.T) { //nolint:tparallel // ordered sub-tests o
 	// After the pipeline ran, every series the alerts and dashboard read has
 	// been produced at least once (a labelled counter only appears on use).
 	t.Run("alerts and dashboard read exported metrics", func(t *testing.T) {
-		eventually(t, 15*time.Second, "kafka_consumer_lag never exported", func(c *assert.CollectT) {
-			assert.True(c, exportedMetrics(t, consumer)["kafka_consumer_lag"])
+		eventually(t, 15*time.Second, "kafka client gauges never exported", func(c *assert.CollectT) {
+			assert.True(c, exportedMetrics(t, consumer)["kafka_client_brokers_up"])
 		})
 		assertMetricsExist(t, tasks, consumer)
 	})

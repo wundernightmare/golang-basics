@@ -41,14 +41,18 @@ committed, the rest is redelivered to the next group member.
 
 | Metric | Meaning |
 | --- | --- |
-| `consumer_tasks_consumed_total` | events applied (every type) |
-| `consumer_events_total{event_type}` | events applied, by type |
+| `consumer_events_total{event_type}` | events applied, by type (`sum()` for all) |
 | `consumer_duplicates_total` | redeliveries skipped by `event_id` |
 | `consumer_events_rejected_total{reason}` | `undecodable` \| `unknown_type` (dead-lettered) |
-| `kafka_consume_total{topic,result}` | `ok` \| `retried` \| `dead_lettered` \| `failed` (from `libs/kafka`) |
-| `kafka_consumer_dlq_total{topic}`, `kafka_consumer_commit_errors_total`, `kafka_consumer_handler_duration_seconds` | dead-lettering, commits, handler latency |
-| `kafka_consumer_lag`, `kafka_consumer_lag_max` | records behind, total and worst, over the partitions this replica owns (every `CONSUMER_KAFKA_STATISTICS_INTERVAL_MS`, default 15000) — the worker's availability indicator |
+| `kafka_consumer_records_total{topic,result}` | `ok` \| `retried` \| `dead_lettered` \| `failed` (from `libs/kafka`) |
+| `kafka_consumer_commit_errors_total`, `kafka_consumer_handler_duration_seconds` | commits, handler latency |
+| `kafka_producer_records_total{client="consumer",topic}` | dead-letter publishes, by DLQ topic and result |
 | `kafka_consumer_assigned_partitions`, `kafka_consumer_rebalances_total`, `kafka_client_*` | group membership, broker connections, which Kafka client (`kafka_client_info{provider}`) |
+
+How far behind the group is — the worker's availability indicator — is the
+broker's metric (`redpanda_kafka_consumer_group_lag_sum{redpanda_group}`
+locally), not this service's: see
+[libs/kafka](../../libs/kafka#observability) and [docs/METRICS.md](../../docs/METRICS.md).
 | `build_info`, `log_dropped_total`, `health_*`, `go_*`, `process_*` | from `httpx` |
 
 ## Endpoints (admin listener only — a worker has no API port)
@@ -106,7 +110,7 @@ just consumer run         # sets CONSUMER_KAFKA_BROKERS=localhost:9092 unless se
 # in another shell, create a task so an event flows:
 just tasks run &
 curl -s -XPOST localhost:8082/tasks -d '{"title":"hello"}'
-curl -s localhost:9083/metrics | grep consumer_tasks_consumed_total
+curl -s localhost:9083/metrics | grep consumer_events_total
 ```
 
 ## Test

@@ -79,6 +79,12 @@ services:
       # topic is not pre-provisioned (convenient for a demo/dev broker).
       - --set
       - redpanda.auto_create_topics_enabled=true
+      # Consumer-group lag is exported by the broker, not by the services
+      # (docs/METRICS.md): redpanda_kafka_consumer_group_lag_sum / _lag_max
+      # {redpanda_group} on /public_metrics, recomputed every
+      # consumer_group_lag_collection_interval_sec (60s by default).
+      - --set
+      - 'redpanda.enable_consumer_group_metrics=["group","partition","consumer_lag"]'
       # Two Kafka listeners: INTERNAL (advertised as redpanda:29092 for app
       # containers) and HOST (advertised as localhost:9092 for host processes).
       # A Kafka client reconnects to the advertised address, so each must be

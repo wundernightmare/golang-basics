@@ -111,7 +111,7 @@ func run(cfg config.Config) error {
 	}
 
 	// Without Kafka the relay publishes nothing — events wait in the outbox —
-	// but still keeps outbox_pending / outbox_relay_lag_seconds current, so
+	// but still keeps outbox_pending / outbox_oldest_age_seconds current, so
 	// the backlog of a deploy that lost its broker address is visible.
 	var pub outbox.Publisher // nil interface: no Kafka
 	committed := func() {}

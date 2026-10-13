@@ -26,7 +26,7 @@ import (
 //
 // Only "rejected" is not retryable: everything else is the broker, the
 // network or the deployment, and an event kept for later is never lost.
-// The kinds are also the result label of kafka_publish_total. Each driver
+// The kinds are also the result label of kafka_producer_records_total. Each driver
 // maps its client's error codes onto them (the same codes Node's
 // KAFKA_SEND_ERRORS lists).
 const (

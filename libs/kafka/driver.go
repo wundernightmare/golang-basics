@@ -75,7 +75,7 @@ type ConsumerClient interface {
 	DeadLetter() ProducerClient
 	// Ping checks the brokers answer (metadata), bounded by ctx.
 	Ping(ctx context.Context) error
-	// Stats is the latest client snapshot for the metrics (lag included).
+	// Stats is the latest client snapshot for the metrics.
 	Stats() ClientStats
 	// Close leaves the group — calling Revoked for the partitions it held,
 	// so their processed offsets are committed — and releases the client.
@@ -114,8 +114,6 @@ type ClientStats struct {
 	RequestErrors int64 // cumulative request timeouts + transport errors
 	QueueBytes    int64 // producer: bytes waiting in the local send queue
 	QueueMaxBytes int64 // producer: the queue's bound
-	LagMax        int64 // consumer: worst assigned partition
-	LagSum        int64 // consumer: total over assigned partitions
 }
 
 // ErrClientClosed is what [ConsumerClient.Poll] returns once the client is

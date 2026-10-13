@@ -145,8 +145,6 @@ func TestRelayOnce_StopsAtTheFirstFailureAndKeepsTheRest(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, n)
 	assert.Equal(t, []string{"t1", "t2", "t3"}, pub.keys())
-	assert.Equal(t, 3.0, testx.Metric(t, reg, "outbox_published_total", map[string]string{"result": "ok"}))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "outbox_published_total", map[string]string{"result": "error"}))
 	testx.LintMetrics(t, reg)
 }
 
@@ -185,7 +183,6 @@ func TestRelayOnce_RejectedRowStepsAsideThenDies(t *testing.T) {
 		`SELECT rejections, last_error FROM outbox WHERE aggregate_id = 'poison'`).Scan(&rejections, &lastErr))
 	assert.Equal(t, 2, rejections)
 	assert.Contains(t, lastErr, "rejected")
-	assert.Equal(t, 2.0, testx.Metric(t, reg, "outbox_published_total", map[string]string{"result": "rejected"}))
 
 	// The gauges, as Run refreshes them after a pass.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -368,7 +365,7 @@ func TestRun_BacklogMetricsAndBackoff(t *testing.T) {
 	_, triedB := calls.Load("b")
 	assert.False(t, triedB, "b waits behind a")
 	assert.Equal(t, 2.0, testx.Metric(t, reg, "outbox_pending", nil))
-	assert.Greater(t, testx.Metric(t, reg, "outbox_relay_lag_seconds", nil), 1.0)
+	assert.Greater(t, testx.Metric(t, reg, "outbox_oldest_age_seconds", nil), 1.0)
 }
 
 type publisherFunc func(ctx context.Context, msg kafka.Message) error

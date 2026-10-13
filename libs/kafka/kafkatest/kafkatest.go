@@ -228,7 +228,7 @@ func produceConsume(t *testing.T, h Harness) {
 		{Key: kafka.HeaderTraceparent, Value: []byte(carrier.Get("traceparent"))},
 	}}))
 	relay.End()
-	assert.Equal(t, float64(n+1), testx.Metric(t, preg, "kafka_publish_total", map[string]string{"topic": topic, "result": "ok"}))
+	assert.Equal(t, float64(n+1), testx.Metric(t, preg, "kafka_producer_records_total", map[string]string{"client": "producer", "topic": topic, "result": "ok"}))
 	assert.Equal(t, 1.0, testx.Metric(t, preg, "kafka_client_info", map[string]string{"client": "producer", "provider": kafka.Provider()}))
 	require.Eventually(t, func() bool {
 		return testx.Metric(t, preg, "kafka_producer_queue_max_bytes", nil) == float64(64<<20) &&
@@ -266,16 +266,16 @@ func produceConsume(t *testing.T, h Harness) {
 	got.mu.Unlock()
 
 	require.Eventually(t, func() bool {
-		return testx.Metric(t, r.reg, "kafka_consumer_lag", nil) == 0 &&
-			testx.Metric(t, r.reg, "kafka_consumer_lag_max", nil) == 0
-	}, 30*time.Second, 100*time.Millisecond, "lag is reported and drops to zero once the records are committed")
+		return testx.Metric(t, r.reg, "kafka_client_brokers_up", map[string]string{"client": "consumer"}) >= 1
+	}, 30*time.Second, 100*time.Millisecond, "the consumer's client gauges report its brokers")
+	assert.Equal(t, -1.0, testx.Metric(t, r.reg, "kafka_consumer_lag", nil), "group lag is the broker's to export")
 	assert.Equal(t, 1.0, testx.Metric(t, r.reg, "kafka_consumer_assigned_partitions", nil))
 
 	r.cancel()
 	require.NoError(t, r.wait(t))
-	assert.Equal(t, float64(n+1), testx.Metric(t, r.reg, "kafka_consume_total", map[string]string{"topic": topic, "result": "ok"}))
+	assert.Equal(t, float64(n+1), testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}))
 	assert.Equal(t, float64(n+1), testx.Metric(t, r.reg, "kafka_consumer_handler_duration_seconds", map[string]string{"topic": topic}))
-	assert.Equal(t, -1.0, testx.Metric(t, r.reg, "kafka_consume_total", map[string]string{"topic": topic, "result": "failed"}), "no failure series")
+	assert.Equal(t, -1.0, testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "failed"}), "no failure series")
 	assert.Equal(t, 0.0, testx.Metric(t, r.reg, "kafka_consumer_commit_errors_total", nil))
 	testx.LintMetrics(t, r.reg)
 	testx.LintMetrics(t, preg)
@@ -312,8 +312,8 @@ func retriesThenSucceeds(t *testing.T, h Harness) {
 		return nil
 	})
 	require.Eventually(t, func() bool {
-		return testx.Metric(t, r.reg, "kafka_consume_total", map[string]string{"topic": topic, "result": "ok"}) == 2 &&
-			testx.Metric(t, r.reg, "kafka_consume_total", map[string]string{"topic": topic, "result": "retried"}) == 1
+		return testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}) == 2 &&
+			testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "retried"}) == 1
 	}, 30*time.Second, 50*time.Millisecond)
 
 	var attempts []int
@@ -324,7 +324,7 @@ func retriesThenSucceeds(t *testing.T, h Harness) {
 	}
 	assert.Equal(t, []int{1, 2, 3}, attempts)
 	assert.Equal(t, 5.0, testx.Metric(t, r.reg, "kafka_consumer_handler_duration_seconds", map[string]string{"topic": topic}), "one observation per attempt: 1 + 3 + 1")
-	assert.Equal(t, -1.0, testx.Metric(t, r.reg, "kafka_consumer_dlq_total", nil))
+	assert.Equal(t, -1.0, testx.Metric(t, r.reg, "kafka_producer_records_total", map[string]string{"client": "consumer"}), "nothing dead-lettered")
 }
 
 func deadLetter(t *testing.T, h Harness) {
@@ -367,9 +367,10 @@ func deadLetter(t *testing.T, h Harness) {
 
 	require.Eventually(t, func() bool { return h.Committed(t, cfg.Group, topic)[0] == 4 }, 20*time.Second, 100*time.Millisecond,
 		"everything is committed (offset + 1), the parked records included")
-	assert.Equal(t, 2.0, testx.Metric(t, r.reg, "kafka_consume_total", map[string]string{"topic": topic, "result": "dead_lettered"}))
-	assert.Equal(t, 2.0, testx.Metric(t, r.reg, "kafka_consume_total", map[string]string{"topic": topic, "result": "ok"}))
-	assert.Equal(t, 2.0, testx.Metric(t, r.reg, "kafka_consumer_dlq_total", map[string]string{"topic": dlq}))
+	assert.Equal(t, 2.0, testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "dead_lettered"}))
+	assert.Equal(t, 2.0, testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}))
+	assert.Equal(t, 2.0, testx.Metric(t, r.reg, "kafka_producer_records_total", map[string]string{"client": "consumer", "topic": dlq, "result": "ok"}),
+		"dead-letter publishes are counted as sends of the consumer's producer")
 
 	select {
 	case <-r.done:
@@ -403,7 +404,7 @@ func dlqDisabled(t *testing.T, h Harness) {
 		assert.NotEqual(t, "k-2", string(m.Key), "nothing past the poison record is processed")
 	}
 	assert.Equal(t, int64(1), h.Committed(t, cfg.Group, topic)[0], "the record before the poison is committed, the poison is not")
-	assert.Equal(t, 1.0, testx.Metric(t, r.reg, "kafka_consume_total", map[string]string{"topic": topic, "result": "failed"}))
+	assert.Equal(t, 1.0, testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "failed"}))
 }
 
 // A shutdown mid-batch commits exactly what was processed: a restarted
@@ -480,7 +481,7 @@ func gracefulShutdown(t *testing.T, h Harness) {
 
 // Two members of one group share the partitions without losing a record,
 // with bounded duplicates across the rebalances (a member joining, then one
-// leaving mid-stream), and each reports lag for what it owns.
+// leaving mid-stream), each reporting its own client gauges.
 func rebalance(t *testing.T, h Harness) {
 	t.Helper()
 	topic := testx.Unique("rebalance")
@@ -522,8 +523,9 @@ func rebalance(t *testing.T, h Harness) {
 		60*time.Second, 50*time.Millisecond, "the group settles with both members")
 	<-publishing
 	require.Eventually(t, func() bool {
-		return testx.Metric(t, a.reg, "kafka_consumer_lag", nil) >= 0 && testx.Metric(t, b.reg, "kafka_consumer_lag", nil) >= 0
-	}, 30*time.Second, 100*time.Millisecond, "both members report the lag of their partitions")
+		up := map[string]string{"client": "consumer"}
+		return testx.Metric(t, a.reg, "kafka_client_brokers_up", up) >= 1 && testx.Metric(t, b.reg, "kafka_client_brokers_up", up) >= 1
+	}, 30*time.Second, 100*time.Millisecond, "both members report their client gauges")
 
 	// A leaves mid-stream; B takes everything over.
 	publishing = make(chan struct{})
@@ -586,7 +588,7 @@ func errorTaxonomy(t *testing.T, h Harness) {
 	assert.Contains(t, []string{kafka.KindNotProvisioned, kafka.KindUnavailable}, se.Kind,
 		"a topic that is not there fails as the path's problem: %v", err)
 	assert.False(t, kafka.Rejected(err))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_publish_total", map[string]string{"topic": missing, "result": se.Kind}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_producer_records_total", map[string]string{"topic": missing, "result": se.Kind}))
 
 	auto, err := kafka.NewProducer(t.Context(), kafka.Config{Brokers: brokers, ClientID: testx.Unique("prod"), AllowAutoTopicCreation: true}, nil)
 	require.NoError(t, err)

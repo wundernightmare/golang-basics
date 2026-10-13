@@ -293,8 +293,6 @@ func TestQueriesAreTracedAndMeasured(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(db.Collectors()...)
 
-	before := testx.Metric(t, reg, "pgxpool_acquire_total", nil)
-
 	qctx, parent := otel.Tracer("test").Start(ctx, "handler")
 	var one int
 	require.NoError(t, db.Pool().QueryRow(qctx, "SELECT 1").Scan(&one))
@@ -315,14 +313,15 @@ func TestQueriesAreTracedAndMeasured(t *testing.T) {
 	require.NotNil(t, query, "a client span named by the statement, child of the caller's span")
 	assert.Equal(t, parent.SpanContext().TraceID(), query.SpanContext().TraceID())
 
-	assert.Greater(t, testx.Metric(t, reg, "pgxpool_acquire_total", nil), before, "the query acquired a connection")
-	assert.Equal(t, float64(cfg.MaxConns), testx.Metric(t, reg, "pgxpool_max_conns", nil))
-	assert.Equal(t, 0.0, testx.Metric(t, reg, "pgxpool_conns", map[string]string{"state": "acquired"}), "released after the query")
-	assert.GreaterOrEqual(t, testx.Metric(t, reg, "pgx_query_duration_seconds", map[string]string{"operation": "select"}), 1.0,
+	assert.Equal(t, float64(cfg.MaxConns), testx.Metric(t, reg, "db_pool_max_connections", nil))
+	assert.Equal(t, 0.0, testx.Metric(t, reg, "db_pool_connections", map[string]string{"state": "in_use"}), "released after the query")
+	assert.GreaterOrEqual(t, testx.Metric(t, reg, "db_pool_connections", map[string]string{"state": "idle"}), 1.0)
+	assert.GreaterOrEqual(t, testx.Metric(t, reg, "db_pool_acquire_wait_seconds_total", nil), 0.0)
+	assert.GreaterOrEqual(t, testx.Metric(t, reg, "db_query_duration_seconds", map[string]string{"operation": "select"}), 1.0,
 		"unnamed queries are labelled by their keyword")
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "pgx_query_duration_seconds", map[string]string{"operation": "widgets.broken"}))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "pgx_query_errors_total", map[string]string{"operation": "widgets.broken"}))
-	assert.Equal(t, -1.0, testx.Metric(t, reg, "pgx_query_errors_total", map[string]string{"operation": "select"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "db_query_duration_seconds", map[string]string{"operation": "widgets.broken"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "db_query_errors_total", map[string]string{"operation": "widgets.broken"}))
+	assert.Equal(t, -1.0, testx.Metric(t, reg, "db_query_errors_total", map[string]string{"operation": "select"}))
 	testx.LintMetrics(t, reg)
 }
 

@@ -11,8 +11,8 @@ import (
 )
 
 // stats implements the franz-go hooks behind kafka.ClientStats: live
-// connections per broker and request errors, plus the lag snapshot the
-// consumer polls with kadm.
+// connections per broker and request errors. Consumer-group lag is not
+// measured here: the broker exports it (once, for every group).
 type stats struct {
 	cfg kafka.Config
 	cl  *kgo.Client
@@ -20,9 +20,6 @@ type stats struct {
 	mu        sync.Mutex
 	conns     map[int32]int // open connections per broker node id
 	reqErrors int64
-	lagMax    int64
-	lagSum    int64
-	lagAt     time.Time
 }
 
 func newStats(cfg kafka.Config) *stats { return &stats{cfg: cfg, conns: map[int32]int{}} }
@@ -74,12 +71,6 @@ func (s *stats) addError() {
 	s.mu.Unlock()
 }
 
-func (s *stats) setLag(lagMax, lagSum int64) {
-	s.mu.Lock()
-	s.lagMax, s.lagSum, s.lagAt = lagMax, lagSum, time.Now()
-	s.mu.Unlock()
-}
-
 // common is the connection part; seed brokers (negative node ids) are not
 // brokers of the cluster.
 func (s *stats) common() kafka.ClientStats {
@@ -103,16 +94,8 @@ func (s *stats) producer() kafka.ClientStats {
 	return st
 }
 
-// consumer reports only while the lag snapshot is fresh: a client that
-// stopped polling must not freeze its last numbers on a dashboard.
 func (s *stats) consumer() kafka.ClientStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.common()
-	maxAge := max(3*time.Duration(s.cfg.StatisticsInterval)*time.Millisecond, time.Minute)
-	if s.lagAt.IsZero() || time.Since(s.lagAt) > maxAge {
-		st.Valid = false
-	}
-	st.LagMax, st.LagSum = s.lagMax, s.lagSum
-	return st
+	return s.common()
 }

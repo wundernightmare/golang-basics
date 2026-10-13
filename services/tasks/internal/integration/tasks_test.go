@@ -137,10 +137,9 @@ func TestEndToEnd(t *testing.T) {
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"method": "POST", "route": "/tasks", "status": "201"}))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"method": "PATCH", "route": "/tasks/{id}", "status": "412"}))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "cache_lookups_total", map[string]string{"result": "hit"}))
-	assert.Equal(t, 3.0, testx.Metric(t, reg, "outbox_published_total", map[string]string{"result": "ok"}))
-	assert.Equal(t, 3.0, testx.Metric(t, reg, "kafka_publish_total", map[string]string{"topic": w.topic, "result": "ok"}))
-	assert.GreaterOrEqual(t, testx.Metric(t, reg, "pgx_query_duration_seconds", map[string]string{"operation": "tasks.create"}), 1.0)
-	assert.Greater(t, testx.Metric(t, reg, "pgxpool_acquire_total", nil), 0.0)
+	assert.Equal(t, 3.0, testx.Metric(t, reg, "kafka_producer_records_total", map[string]string{"topic": w.topic, "result": "ok"}))
+	assert.GreaterOrEqual(t, testx.Metric(t, reg, "db_query_duration_seconds", map[string]string{"operation": "tasks.create"}), 1.0)
+	assert.GreaterOrEqual(t, testx.Metric(t, reg, "db_pool_max_connections", nil), 1.0)
 	testx.LintMetrics(t, reg)
 
 	code, body := w.readyz(t)
@@ -176,7 +175,7 @@ func TestPostgresOnly(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return testx.Metric(t, w.srv.Metrics.Registry, "outbox_pending", nil) == 2
 	}, 5*time.Second, 50*time.Millisecond, "the backlog is visible on /metrics without a broker")
-	assert.Positive(t, testx.Metric(t, w.srv.Metrics.Registry, "outbox_relay_lag_seconds", nil), "and it ages")
+	assert.Positive(t, testx.Metric(t, w.srv.Metrics.Registry, "outbox_oldest_age_seconds", nil), "and it ages")
 }
 
 func TestIdempotentCreateOverHTTP(t *testing.T) {

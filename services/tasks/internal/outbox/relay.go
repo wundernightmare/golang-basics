@@ -84,8 +84,7 @@ type Relay struct {
 type relayMetrics struct {
 	pending   prometheus.Gauge
 	dead      prometheus.Gauge
-	lag       prometheus.Gauge
-	published *prometheus.CounterVec
+	oldestAge prometheus.Gauge
 }
 
 // NewRelay builds a relay over pool (the service's database, schema migrated)
@@ -108,31 +107,29 @@ func NewRelay(pool *pgxpool.Pool, pub Publisher, cfg Config, log *slog.Logger) *
 				Name: "outbox_dead",
 				Help: "Outbox events the broker rejected OUTBOX_MAX_ATTEMPTS times; kept for an operator, no longer sent.",
 			}),
-			lag: prometheus.NewGauge(prometheus.GaugeOpts{
-				Name: "outbox_relay_lag_seconds",
+			oldestAge: prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "outbox_oldest_age_seconds",
 				Help: "Age of the oldest unpublished outbox event in seconds (0 when the outbox is empty).",
 			}),
-			published: prometheus.NewCounterVec(prometheus.CounterOpts{
-				Name: "outbox_published_total",
-				Help: "Outbox events the relay tried to publish, by result (ok, rejected, error).",
-			}, []string{"result"}),
 		},
 	}
 }
 
 // Collectors returns the relay's metrics for the service's registry:
 //
-//	outbox_pending                   backlog size (rows still being sent)
-//	outbox_dead                      rows given up on (rejected OUTBOX_MAX_ATTEMPTS times)
-//	outbox_relay_lag_seconds         age of the oldest pending event
-//	outbox_published_total{result}   publish attempts, ok | rejected | error
+//	outbox_pending              backlog size (rows still being sent)
+//	outbox_dead                 rows given up on (rejected OUTBOX_MAX_ATTEMPTS times)
+//	outbox_oldest_age_seconds   age of the oldest pending event
 //
-// Alert on the lag, not on the count: a steady backlog that moves is fine, an
-// event older than a minute means the broker (or the relay) is stuck. Any
+// The publishes themselves are counted by the producer
+// (kafka_producer_records_total{result}: ok, rejected, or the outage kinds),
+// so the relay keeps no counter of its own. Alert on the age, not on the
+// count: a steady backlog that moves is fine, an event older than a minute
+// means the broker (or the relay) is stuck. Any
 // dead row needs a person: fix and re-arm it
 // (UPDATE outbox SET rejections = 0, next_attempt_at = NULL) or delete it.
 func (r *Relay) Collectors() []prometheus.Collector {
-	return []prometheus.Collector{r.metrics.pending, r.metrics.dead, r.metrics.lag, r.metrics.published}
+	return []prometheus.Collector{r.metrics.pending, r.metrics.dead, r.metrics.oldestAge}
 }
 
 // Wake asks the relay to run a pass now. It never blocks.
@@ -329,7 +326,6 @@ func (r *Relay) relayOnce(ctx context.Context) (sent, taken int, _ error) {
 		}
 		if err := r.publish(bctx, x); err != nil {
 			if kafka.Rejected(err) {
-				r.metrics.published.WithLabelValues("rejected").Inc()
 				taken++
 				// The SET expressions see the row before the update: the
 				// first rejection waits RejectBackoff, each next one twice
@@ -348,7 +344,6 @@ func (r *Relay) relayOnce(ctx context.Context) (sent, taken int, _ error) {
 					"dead", rejections >= r.cfg.MaxAttempts, "err", err)
 				continue // the record is the problem, not the broker: the rest can go
 			}
-			r.metrics.published.WithLabelValues("error").Inc()
 			pubErr = fmt.Errorf("outbox: publish %s %s (event %s): %w", x.eventType, x.aggregateID, x.eventID, err)
 			if _, uerr := tx.Exec(bctx, `UPDATE outbox SET last_error = $2 WHERE id = $1`,
 				x.id, truncate(err.Error(), 1000)); uerr != nil {
@@ -356,7 +351,6 @@ func (r *Relay) relayOnce(ctx context.Context) (sent, taken int, _ error) {
 			}
 			break
 		}
-		r.metrics.published.WithLabelValues("ok").Inc()
 		done = append(done, x.id)
 		taken++
 	}
@@ -411,7 +405,7 @@ const statsSQL = `SELECT count(*) FILTER (WHERE rejections < $1),
        coalesce(extract(epoch FROM now() - min(created_at) FILTER (WHERE rejections < $1)), 0)::float8
   FROM outbox`
 
-// refreshGauges updates outbox_pending, outbox_dead and outbox_relay_lag_seconds.
+// refreshGauges updates outbox_pending, outbox_dead and outbox_oldest_age_seconds.
 func (r *Relay) refreshGauges(ctx context.Context) {
 	qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
@@ -424,7 +418,7 @@ func (r *Relay) refreshGauges(ctx context.Context) {
 	}
 	r.metrics.pending.Set(float64(n))
 	r.metrics.dead.Set(float64(dead))
-	r.metrics.lag.Set(max(lag, 0))
+	r.metrics.oldestAge.Set(max(lag, 0))
 }
 
 // Stats returns the backlog size (dead rows aside) and the age of its oldest

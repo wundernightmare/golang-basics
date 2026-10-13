@@ -32,6 +32,14 @@ groups:
         annotations:
           summary: "{{ $labels.service }} {{ $labels.route }}: p99 {{ $value | humanizeDuration }}"
 
+      # A handler panicked (recovered, answered 500): a bug, not load.
+      - alert: HttpUnhandledErrors
+        expr: sum by (service) (increase(http_unhandled_errors_total[5m])) > 0
+        for: 0m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.service }}: {{ $value }} unhandled errors (panics) in 5m"
+
   - name: golang-basics-health
     rules:
       # Scrape target down: the process (or its admin listener) is gone.
@@ -63,25 +71,36 @@ groups:
 
   - name: golang-basics-data
     rules:
-      # Kafka consumer lag (the consumer's own view of the partitions it owns).
+      # Consumer-group lag, from the broker (Redpanda /public_metrics with
+      # enable_consumer_group_metrics, docker/deps.yml; kafka-exporter or
+      # Burrow on Kafka). The services do not export lag: the broker sees
+      # every group and partition once, also while no member is running.
       - alert: KafkaConsumerLagHigh
-        expr: sum by (service) (kafka_consumer_lag) > 1000
+        expr: max by (redpanda_group) (redpanda_kafka_consumer_group_lag_sum) > 1000
         for: 10m
         labels: { severity: ticket }
         annotations:
-          summary: "{{ $labels.service }}: {{ $value }} records behind"
+          summary: "consumer group {{ $labels.redpanda_group }}: {{ $value }} records behind"
 
-      # Transactional outbox: rows written with the task but not yet published
-      # by the relay. Growth means Kafka is unreachable (or not configured —
-      # the gauge is exported either way) or the relay is stuck. Every metric
-      # name in this file and the dashboard is checked against a live
-      # /metrics by the e2e suite (e2e/tasks_test.go).
-      - alert: OutboxBacklog
-        expr: max by (service) (outbox_pending) > 100
-        for: 10m
+      # Records the consumer gave up on and parked on the dead-letter topic.
+      - alert: KafkaDeadLettering
+        expr: sum by (service, topic) (rate(kafka_consumer_records_total{result="dead_lettered"}[5m])) > 0
+        for: 1m
         labels: { severity: ticket }
         annotations:
-          summary: "{{ $labels.service }}: {{ $value }} outbox events pending publication"
+          summary: "{{ $labels.service }}: records from {{ $labels.topic }} are being dead-lettered"
+
+      # Transactional outbox: the oldest event not yet published. A backlog
+      # that moves is fine; one stuck for minutes means Kafka is unreachable
+      # (or not configured — the gauge is exported either way) or the relay
+      # is stuck. Every app metric name in this file and the dashboard is
+      # checked against a live /metrics by the e2e suite (e2e/tasks_test.go).
+      - alert: OutboxStuck
+        expr: max by (service) (outbox_oldest_age_seconds) > 60
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.service }}: oldest outbox event is {{ $value | humanizeDuration }} old"
 
       # A dead outbox row: the broker rejected the event OUTBOX_MAX_ATTEMPTS
       # times and the relay gave up on it. It will never be sent on its own —
@@ -93,19 +112,20 @@ groups:
         annotations:
           summary: "{{ $labels.service }}: {{ $value }} outbox events dead (rejected by the broker)"
 
-      # Postgres pool saturation: acquired connections vs the configured max.
-      - alert: PgPoolSaturated
+      # Postgres pool saturation: connections in use vs the configured max.
+      - alert: DbPoolSaturated
         expr: |
-          sum by (service) (pgxpool_conns{state="acquired"})
-            / max by (service) (pgxpool_max_conns) > 0.9
+          sum by (service) (db_pool_connections{state="in_use"})
+            / max by (service) (db_pool_max_connections) > 0.9
         for: 5m
         labels: { severity: ticket }
         annotations:
-          summary: "{{ $labels.service }}: pgx pool {{ $value | humanizePercentage }} in use"
+          summary: "{{ $labels.service }}: db pool {{ $value | humanizePercentage }} in use"
 
-      # …and requests actually waiting for a connection.
-      - alert: PgPoolStarved
-        expr: sum by (service) (rate(pgxpool_empty_acquire_total[5m])) > 1
+      # …and requests actually waiting for a connection (pgxpool only counts
+      # this; nodejs-basics alerts on its pending-acquires gauge instead).
+      - alert: DbPoolStarved
+        expr: sum by (service) (rate(db_pool_acquires_waited_total[5m])) > 1
         for: 5m
         labels: { severity: ticket }
         annotations:

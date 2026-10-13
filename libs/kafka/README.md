@@ -51,7 +51,7 @@ one a running service has.
 | Memory model | separate bounded queues: send queue (bytes + count), prefetch queue (bytes) per consumer | one producer buffer (bytes + count, in-flight included); prefetch = concurrent fetches × fetch size |
 | Same engine as | nodejs-basics, rust-basics (`rdkafka`), most non-JVM clients — one set of tuning knowledge, one set of known bugs | — |
 | Maturity | the reference non-JVM client, maintained by Confluent; behaviour documented in CONFIGURATION.md / STATISTICS.md | mature and widely used, single main maintainer, very close protocol coverage |
-| Client metrics | librdkafka statistics (`statistics.interval.ms`): brokers, request errors, queue, lag from the client's own view | franz-go hooks (connections, request errors), buffered bytes, lag polled with `kadm` |
+| Client metrics | librdkafka statistics (`statistics.interval.ms`): brokers, request errors, queue | franz-go hooks (connections, request errors), buffered bytes |
 | Client logs | librdkafka's log lines → slog (repeats folded for a minute) | none wired (franz-go logs through a `kgo.Logger`, not set here) |
 | Debugging | `KAFKA_EXTRA_PROPERTIES={"debug":"broker,protocol"}` | code (hooks, a logger) |
 
@@ -118,7 +118,7 @@ client library's default happens to be in the version you link. `<service>
 | `KAFKA_CLIENT_ID` | `client.id` | `ClientID` | `golang-basics` | shows in broker logs and quotas; set it per service |
 | `KAFKA_DIAL_TIMEOUT` | `socket.connection.setup.timeout.ms` | `DialTimeout` | `10s` | also bounds the boot connectivity check (a metadata request) |
 | `KAFKA_ALLOW_AUTO_TOPIC_CREATION` | `allow.auto.create.topics` | `AllowAutoTopicCreation` | `false` | see [Topics are broker policy](#topics-are-broker-policy) |
-| `KAFKA_STATISTICS_INTERVAL_MS` | `statistics.interval.ms` | lag poll period (`kadm`) | `15000` | client metrics refresh; negative = off |
+| `KAFKA_STATISTICS_INTERVAL_MS` | `statistics.interval.ms` | — (hooks are live; ≤ 0 turns the client gauges off) | `15000` | client metrics refresh; negative = off |
 | — | `socket.keepalive.enable=true` | Go's default TCP keepalive | fixed | cloud LBs / NAT drop idle connections silently |
 
 **Security** — see [TLS, SASL, custom CA, mTLS](#tls-sasl-custom-ca-mtls)
@@ -277,7 +277,7 @@ only polls, commits and reports group changes).
 
 | Situation | What happens |
 | --- | --- |
-| handler returns `nil` | offset committed after the batch (`kafka_consume_total{result="ok"}`) |
+| handler returns `nil` | offset committed after the batch (`kafka_consumer_records_total{result="ok"}`) |
 | handler returns an error | retried up to `KAFKA_CONSUMER_MAX_RETRIES` times, backoff `KAFKA_CONSUMER_RETRY_BACKOFF` ×2 per retry, ±50 % jitter, capped at `KAFKA_CONSUMER_RETRY_BACKOFF_MAX`; success → `result="retried"` |
 | error wrapped with `kafka.Permanent` | no retries |
 | retries exhausted / permanent, DLQ on (default) | record sent to `KAFKA_DEAD_LETTER_TOPIC` (default `{topic}.dlq`) with its key, value and headers plus `dlq_reason` (`permanent`\|`retries_exhausted`), `dlq_error`, `dlq_source_topic`, `dlq_source_partition`, `dlq_source_offset`, `dlq_attempts` (the same names as nodejs-basics); then committed and the loop moves on (`result="dead_lettered"`) |
@@ -395,7 +395,7 @@ kinds as nodejs-basics' `KAFKA_SEND_ERRORS`, mapped from each client's codes:
 
 `kafka.Rejected(err)` is the one question a caller asks: the outbox relay
 counts rejections towards `OUTBOX_MAX_ATTEMPTS` and retries everything else.
-The kind is also the `result` label of `kafka_publish_total`.
+The kind is also the `result` label of `kafka_producer_records_total`.
 
 **A consumer client that failed for good** (librdkafka's fatal errors — a
 static member, `group.instance.id` via the passthrough, fenced by another
@@ -414,33 +414,43 @@ call would crash it.
 
 ## Observability
 
-**Metrics** — identical names whichever client is linked; no topic or
-partition label on the client gauges (a service may consume hundreds of
-topics; per-partition lag is the broker side's job).
+**Metrics** — the workspace's metrics contract
+([docs/METRICS.md](../../docs/METRICS.md)): the same names whichever client
+is linked, and the same as nodejs-basics. No partition label anywhere.
 
 | Metric | |
 | --- | --- |
-| `kafka_publish_total{topic,result}` | `ok` or the error kind |
-| `kafka_producer_publish_duration_seconds{topic}` | send → acknowledgement |
-| `kafka_consume_total{topic,result}` | `ok`\|`retried`\|`dead_lettered`\|`failed`, one per record |
+| `kafka_producer_records_total{client,topic,result}` | `ok` or the error kind; `client="producer"` for `Producer.Send`, `client="consumer"` for the consumer's dead-letter publishes (topic = the DLQ topic) |
+| `kafka_producer_send_duration_seconds{client,topic}` | send → acknowledgement |
+| `kafka_consumer_records_total{topic,result}` | `ok`\|`retried`\|`dead_lettered`\|`failed`, one per record |
 | `kafka_consumer_handler_duration_seconds{topic}` | one observation per attempt |
 | `kafka_consumer_commit_errors_total`, `kafka_consumer_fetch_errors_total` | |
-| `kafka_consumer_dlq_total{topic}` | by dead-letter topic |
 | `kafka_consumer_assigned_partitions` | partitions this member owns |
 | `kafka_consumer_rebalances_total{event}` | `assigned`\|`revoked`\|`lost` |
 | `kafka_client_info{client,provider}` | which library (always 1) |
 | `kafka_client_brokers_up{client}` | brokers with a live connection |
-| `kafka_client_request_errors_total{client}` | request timeouts + transport errors |
+| `kafka_client_request_errors_total{client}` | request timeouts + transport errors (monotonic: a broker handle librdkafka replaces does not make it go down) |
 | `kafka_producer_queue_bytes`, `kafka_producer_queue_max_bytes` | the send buffer and its bound: alert when the first nears the second |
-| `kafka_consumer_lag_max`, `kafka_consumer_lag` | worst / total records behind over the owned partitions |
 
-The client gauges refresh every `KAFKA_STATISTICS_INTERVAL_MS` and disappear
-when the client stops reporting (three missed periods), so a stuck client
-never shows its last healthy numbers. Lag summed over the replicas counts
-each partition once (each member reports what it owns): growing while
-`kafka_consume_total` is flat = stuck, growing while it climbs =
-under-provisioned. librdkafka's lag is the client's own view (high watermark
-− position); franz-go's is polled with `kadm` (end offset − committed).
+The consumer's `topic` is a topic named in `KAFKA_TOPICS`; one matched by a
+`^regex` subscription is labelled `other`, so the series follow the config,
+not whatever the cluster grows. The client gauges refresh every
+`KAFKA_STATISTICS_INTERVAL_MS` and disappear when the client stops reporting
+(three missed periods), so a stuck client never shows its last healthy
+numbers.
+
+**Consumer-group lag is the broker's metric, not ours.** The broker knows
+every group's committed offset and every partition's end, once, also while
+no member runs; a member only knows what it owns right now, and summing
+members double-counts during a rebalance. So the services export no lag:
+
+| Broker | Lag metrics |
+| --- | --- |
+| Redpanda | `redpanda_kafka_consumer_group_lag_sum{redpanda_group}` / `_lag_max` on `/public_metrics`, with the cluster property `enable_consumer_group_metrics: [group, partition, consumer_lag]` (docker/deps.yml sets it; recomputed every `consumer_group_lag_collection_interval_sec`, 60 s) |
+| Apache Kafka | an exporter beside the cluster: [kafka-exporter](https://github.com/danielqsj/kafka_exporter) (`kafka_consumergroup_lag`) or [Burrow](https://github.com/linkedin/Burrow) (lag *status* per group); managed offerings export it themselves (MSK, Confluent Cloud) |
+
+Lag growing while `kafka_consumer_records_total` is flat = the worker is
+stuck; growing while it climbs = under-provisioned.
 
 **Traces** — a `publish <topic>` producer span per `Send`, a `process <topic>`
 consumer span per handler attempt, messaging semconv attributes; the W3C

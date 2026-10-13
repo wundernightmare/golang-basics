@@ -38,7 +38,7 @@ const fetchWarnEvery = time.Minute
 // dead-lettering, drain — is the same whichever provider is linked (see
 // [Driver]); the provider only polls, commits and reports group changes.
 // Register [Consumer.Collectors] for throughput, retries, dead-lettering,
-// commits, rebalances and the group's lag.
+// commits and rebalances (the group's lag is the broker's to export).
 //
 // A Consumer is single-use: [Consumer.Run] closes it when it returns.
 type Consumer struct {
@@ -86,7 +86,7 @@ func NewConsumer(ctx context.Context, cfg Config, log *slog.Logger) (*Consumer, 
 		return nil, fmt.Errorf("kafka: new %s consumer: %w", d.Name(), err)
 	}
 	c.cl = cl
-	c.metrics = newConsumerMetrics(cl.Stats, d.Name())
+	c.metrics = newConsumerMetrics(cl.Stats, d.Name(), cfg.Topics)
 
 	pingCtx, cancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer cancel()
@@ -248,7 +248,7 @@ func (c *Consumer) process(ctx context.Context, r Message, handler Handler) erro
 			if attempt > 1 {
 				result = consumeRetried
 			}
-			c.metrics.records.WithLabelValues(r.Topic, result).Inc()
+			c.metrics.records.WithLabelValues(c.metrics.topic(r.Topic), result).Inc()
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -271,7 +271,7 @@ func (c *Consumer) process(ctx context.Context, r Message, handler Handler) erro
 	}
 	dlqTopic := c.cfg.deadLetterTopic(r.Topic)
 	if dlqTopic == "" {
-		c.metrics.records.WithLabelValues(r.Topic, consumeFailed).Inc()
+		c.metrics.records.WithLabelValues(c.metrics.topic(r.Topic), consumeFailed).Inc()
 		return fmt.Errorf("kafka: record %s/%d@%d failed after %d attempt(s) (%s) and the dead-letter topic is disabled: %w",
 			r.Topic, r.Partition, r.Offset, attempt, reason, err)
 	}
@@ -279,11 +279,11 @@ func (c *Consumer) process(ctx context.Context, r Message, handler Handler) erro
 		if errors.Is(dlqErr, errDraining) {
 			return errDraining
 		}
-		c.metrics.records.WithLabelValues(r.Topic, consumeFailed).Inc()
+		c.metrics.records.WithLabelValues(c.metrics.topic(r.Topic), consumeFailed).Inc()
 		return fmt.Errorf("kafka: record %s/%d@%d failed and could not be dead-lettered to %q: %w",
 			r.Topic, r.Partition, r.Offset, dlqTopic, errors.Join(err, dlqErr))
 	}
-	c.metrics.records.WithLabelValues(r.Topic, consumeDeadLettered).Inc()
+	c.metrics.records.WithLabelValues(c.metrics.topic(r.Topic), consumeDeadLettered).Inc()
 	return nil
 }
 
@@ -323,7 +323,7 @@ func (c *Consumer) invoke(ctx context.Context, r Message, handler Handler, attem
 			c.log.ErrorContext(rctx, "kafka handler panicked", "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
 			err = fmt.Errorf("kafka: handler panic: %v", p)
 		}
-		c.metrics.duration.WithLabelValues(r.Topic).Observe(time.Since(start).Seconds())
+		c.metrics.duration.WithLabelValues(c.metrics.topic(r.Topic)).Observe(time.Since(start).Seconds())
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
@@ -371,9 +371,10 @@ func (c *Consumer) deadLetter(ctx, logCtx context.Context, r Message, topic, rea
 	for n := 0; ; n++ {
 		// The record's traceparent travels along: the dead-letter publish
 		// continues the record's trace.
+		start := time.Now()
 		err := send(ctx, c.cl.DeadLetter(), c.cfg.PublishTimeout, msg)
+		c.metrics.dlq.observe(topic, start, err)
 		if err == nil {
-			c.metrics.dlq.WithLabelValues(topic).Inc()
 			c.log.WarnContext(logCtx, "kafka record dead-lettered",
 				"topic", r.Topic, "partition", r.Partition, "offset", r.Offset, "dead_letter_topic", topic,
 				"reason", reason, "attempts", attempts, "err", cause)

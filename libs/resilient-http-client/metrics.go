@@ -12,13 +12,15 @@ import (
 //	http_client_request_duration_seconds{target,method}      attempts that reached the network
 //	http_client_retries_total{target}
 //	http_client_retry_budget_exhausted_total{target}
-//	circuit_breaker_state{target}                            0 closed, 1 open, 2 half-open
-//	circuit_breaker_transitions_total{target,from,to}
+//	http_client_circuit_breaker_state{target}                0 closed, 1 open, 2 half-open
+//	http_client_circuit_breaker_transitions_total{target,from,to}
 //	http_client_bulkhead_in_flight{target}
 //	http_client_bulkhead_rejected_total{target}
 //
 // outcome is 2xx, 3xx, 4xx, 5xx, timeout, connection, redirect,
-// circuit_open, rate_limited, bulkhead_full, shutdown or canceled.
+// circuit_open, rate_limited, bulkhead_full, shutdown, canceled or invalid;
+// method is a standard method or _OTHER. The names are the workspace's
+// metrics contract (docs/METRICS.md), shared with nodejs-basics.
 type metrics struct {
 	requests        *prometheus.CounterVec
 	duration        *prometheus.HistogramVec
@@ -39,7 +41,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "http_client_request_duration_seconds",
 			Help:    "Duration of outbound HTTP attempts that reached the network, until response headers.",
-			Buckets: prometheus.DefBuckets,
+			Buckets: []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 		}, []string{"target", "method"}),
 		retries: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "http_client_retries_total",
@@ -50,11 +52,11 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 			Help: "Retries not sent because the target's retry budget was spent.",
 		}, []string{"target"}),
 		breakerState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "circuit_breaker_state",
+			Name: "http_client_circuit_breaker_state",
 			Help: "Circuit breaker state: 0 closed, 1 open, 2 half-open.",
 		}, []string{"target"}),
 		transitions: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "circuit_breaker_transitions_total",
+			Name: "http_client_circuit_breaker_transitions_total",
 			Help: "Circuit breaker state transitions.",
 		}, []string{"target", "from", "to"}),
 		bulkheadInUse: prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -86,7 +88,7 @@ func methodLabel(m string) string {
 		http.MethodDelete, http.MethodOptions, http.MethodConnect, http.MethodTrace:
 		return m
 	}
-	return "OTHER"
+	return "_OTHER"
 }
 
 // statusOutcome is the outcome label of an answered request.

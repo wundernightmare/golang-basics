@@ -23,7 +23,7 @@ easy-to-miss conventions, [`CONTRIBUTING.md`](CONTRIBUTING.md) the workflow.
 | [`services/ping`](services/ping) | HTTP service | `:8080` API, `:9080` admin | `GET /ping` → `pong`, `?msg=` echo. |
 | [`services/heartbeat`](services/heartbeat) | Worker | `:9081` admin | Ticker worker — a beat + `heartbeat_beats_total` every interval. |
 | [`services/tasks`](services/tasks) | HTTP service | `:8082` API, `:9082` admin | Tasks CRUD over **Postgres** (+ a **Valkey** read cache); `task.created` goes through a **transactional outbox** (row + event in one transaction, a relay publishes to Kafka; a rejected event steps aside and is dead after a few tries); Valkey and Kafka are on when their address is set — the service runs on Postgres alone; traced end to end, `problem+json` errors. |
-| [`services/consumer`](services/consumer) | Worker | `:9083` admin | Drains `tasks.events`: continues the producer's trace, idempotent by `event_id`, retries with backoff, dead-letters to `tasks.events.dlq`; exports group lag. |
+| [`services/consumer`](services/consumer) | Worker | `:9083` admin | Drains `tasks.events`: continues the producer's trace, idempotent by `event_id`, retries with backoff, dead-letters to `tasks.events.dlq` (group lag comes from the broker). |
 | [`api`](api) | Contracts | — | TypeSpec source of the ping + tasks HTTP APIs and the Kafka events → OpenAPI 3 + JSON Schema (committed). Node lives only here. |
 | [`libs/contracts`](libs/contracts) | Library | — | Generated Go types of those contracts (`pingapi`, `tasksapi`, `events`). Never edited by hand. |
 | [`libs/httpx`](libs/httpx) | Library | — | **net/http** (Go 1.22 ServeMux, no framework) server scaffolding: request ids, tracing, sampled trace-correlated logs, RED metrics (`route` label), admin listener (health / metrics / version / config / runtime log level / pprof, token-guarded), graceful shutdown, env + YAML config, RFC 9457 `Problem`. |
@@ -261,7 +261,7 @@ mTLS, topics as broker policy, the error taxonomy and the metrics.
 | --- | --- | --- |
 | Logs | stdout, JSON | `service`, `trace_id`/`span_id`, `request_id`, one access-log line per request (`route`, `status`, `latency_ms`); debug/info sampled (`*_LOG_SAMPLE_*`), warn/error never dropped |
 | Traces | OTLP over **HTTP** to `*_OTEL_EXPORTER_OTLP_ENDPOINT` (TLS unless `*_OTEL_EXPORTER_OTLP_INSECURE`) | server span → pgx / Valkey spans → outbox relay publish; record headers carry the context, so the consumer's span continues the trace |
-| Metrics | `/metrics` on the admin port — Prometheus only, nothing pushed | `build_info`, RED per `route`, `health_check_up`, `pgxpool_*`, `cache_lookups_total`, `kafka_publish_*` / `kafka_consumer_*` / `kafka_client_*` incl. `kafka_consumer_lag`, outbox backlog |
+| Metrics | `/metrics` on the admin port — Prometheus only, nothing pushed | one contract with nodejs-basics, [docs/METRICS.md](docs/METRICS.md): `build_info`, RED per `route`, `health_check_up`, `db_pool_*` / `db_query_*`, `cache_*`, `kafka_producer_*` / `kafka_consumer_*` / `kafka_client_*`, `outbox_*`; consumer-group lag from the broker |
 | Profiles | `/debug/pprof/` on the admin port | for a runtime agent or `go tool pprof` |
 | Identity / debugging | admin port | `/version` (version, revision, build time), `PUT /admin/log-level?level=debug&ttl=30m`, `GET /admin/config` (redacted), `X-Debug-Token` per request — see [`libs/httpx`](libs/httpx#runtime-debugging) |
 
@@ -270,8 +270,9 @@ production: an OpenTelemetry Collector (OTLP/HTTP `:4318`, traces → Jaeger;
 no metrics / logs pipeline), Jaeger, VictoriaMetrics scraping the admin ports
 and the dependency exporters, **vmalert** with starter rules
 ([`docker/observability/rules.yml`](docker/observability/rules.yml): 5xx
-ratio, p99 latency, target / readiness down, consumer lag, outbox backlog,
-pool saturation), Loki fed by Vector from container stdout, and Grafana with
+ratio, p99 latency, unhandled errors, target / readiness down, consumer
+lag from the broker, dead-lettering, a stuck or dead outbox, pool
+saturation), Loki fed by Vector from container stdout, and Grafana with
 the datasources cross-linked (span ⇄ log lines) and one dashboard.
 
 ```sh
@@ -298,7 +299,7 @@ number, and every behaviour is checked at exactly one layer.
 |---|---|---|---|
 | **Unit** | `*_test.go` next to the code, `-short` | pure logic, config parsing, handlers behind small interfaces with fakes, readiness cache semantics, log sampling arithmetic, route ↔ listener wiring | anything that needs a real dependency |
 | **Contract** | telemetry: `libs/otelx/telemetry_test.go`, `*/metrics_test.go`; API: exchanges validated with `libs/testx/contract` | the access-log line, the span and the counters describe the same request; every exposition is promlint-clean; every request/response and every published event conforms to the TypeSpec-generated OpenAPI / JSON Schema | route behaviour (unit), real dependencies (integration) |
-| **Integration** | `libs/{pgx,valkey}`, `libs/kafka-{rdkafka,franz}` (the shared `kafka/kafkatest` conformance suite, once per provider), `services/tasks/internal/integration`, `services/consumer/internal/worker` — one shared container per test binary | the libs against real Postgres / Valkey / Kafka (spans, trace propagation through the broker, pool / hit-miss / lag metrics); the tasks vertical wired as `main.go` wires it, including the outbox relay | route contracts proven with fakes; process-level behaviour |
+| **Integration** | `libs/{pgx,valkey}`, `libs/kafka-{rdkafka,franz}` (the shared `kafka/kafkatest` conformance suite, once per provider), `services/tasks/internal/integration`, `services/consumer/internal/worker` — one shared container per test binary | the libs against real Postgres / Valkey / Kafka (spans, trace propagation through the broker, pool / hit-miss / client metrics); the tasks vertical wired as `main.go` wires it, including the outbox relay | route contracts proven with fakes; process-level behaviour |
 | **Chaos** | `services/tasks/internal/integration/chaos_test.go` (`containers.Proxied`, `containers.Pause`) | what the design promises when a dependency fails, slows down or hangs: cache bypassed, outbox catches up, readiness degrades only for the critical dependency, probes stay fast, everything recovers | happy-path behaviour (integration) |
 | **E2E** | `e2e/` (Go, real binaries, `-tags e2e`) | what only a real process shows: it boots from env, is ready on its admin listener, `/version` carries the build stamp, the admin surface is token-guarded, SIGTERM exits 0 with "servers stopped cleanly", and tasks → outbox → Kafka → consumer across processes | per-route behaviour, error bodies (unit), the CRUD flow (integration) |
 | **Generative** | `just schemathesis <svc>` | "bad input → 4xx problem", no 5xx, every response in the contract's shape | business semantics (unit), effects on dependencies (integration) |
