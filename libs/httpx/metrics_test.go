@@ -109,12 +109,27 @@ func TestMetrics_ExpositionIsLintCleanAndComplete(t *testing.T) {
 		"# TYPE health_check_up gauge",
 		`health_check_up{check="db",critical="true"} 1`,
 		"# TYPE health_check_duration_seconds histogram",
+		// What the runtime dashboard reads (docker/observability/dashboards).
 		"# TYPE go_goroutines gauge",
+		"# TYPE go_threads gauge",
+		"# TYPE go_memstats_heap_inuse_bytes gauge",
+		"# TYPE go_memstats_next_gc_bytes gauge",
+		"# TYPE go_memstats_alloc_bytes_total counter",
+		"# TYPE go_gc_duration_seconds summary",
+		"# TYPE go_gc_gogc_percent gauge",
+		"# TYPE go_gc_gomemlimit_bytes gauge",
+		"# TYPE go_sched_gomaxprocs_threads gauge",
+		"# TYPE go_sched_latencies_seconds histogram",
 		"# TYPE process_cpu_seconds_total counter",
+		"# TYPE process_resident_memory_bytes gauge",
+		"# TYPE process_open_fds gauge",
+		"# TYPE process_max_fds gauge",
+		"# TYPE process_start_time_seconds gauge",
 	} {
 		assert.Containsf(t, body, want, "exposition must contain %q", want)
 	}
-	for _, gone := range []string{"http_request_size_bytes", "http_response_size_bytes", "http_panics_total"} {
+	for _, gone := range []string{"http_request_size_bytes", "http_response_size_bytes", "http_panics_total",
+		"go_sched_goroutines_goroutines"} { // the scheduler rule adds latencies only, not a second goroutine count
 		assert.NotContainsf(t, body, gone, "%s is not part of the metrics contract", gone)
 	}
 }

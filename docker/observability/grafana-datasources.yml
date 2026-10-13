@@ -13,6 +13,15 @@ datasources:
     url: http://victoriametrics:8428
     isDefault: true
     editable: false
+    # Exemplars (trace_id on http_request_duration_seconds) are exposed by the
+    # services but not stored by VictoriaMetrics single-node, so nothing here
+    # asks for them. On a Prometheus backend (--enable-feature=exemplar-storage)
+    # this links each exemplar dot to its trace; then set "exemplar": true on
+    # the latency panels' targets:
+    # jsonData:
+    #   exemplarTraceIdDestinations:
+    #     - name: trace_id
+    #       datasourceUid: jaeger
 
   - name: Jaeger
     uid: jaeger
