@@ -51,7 +51,7 @@ services:
     restart: unless-stopped
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     volumes:
-      - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
+      - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro,z
     ports:
       - "127.0.0.1:4318:4318" # OTLP/HTTP — services on the host, curl
     depends_on:
@@ -91,7 +91,7 @@ services:
       - "-retentionPeriod=7d"
       - "-httpListenAddr=:8428"
     volumes:
-      - ./observability/scrape.yml:/etc/vm/scrape.yml:ro
+      - ./observability/scrape.yml:/etc/vm/scrape.yml:ro,z
       - vm-data:/victoria-metrics-data
     ports:
       - "127.0.0.1:9095:8428"
@@ -116,7 +116,7 @@ services:
       - "-notifier.blackhole"
       - "-evaluationInterval=15s"
     volumes:
-      - ./observability/rules.yml:/etc/vmalert/rules.yml:ro
+      - ./observability/rules.yml:/etc/vmalert/rules.yml:ro,z
     ports:
       - "127.0.0.1:8880:8880"
     depends_on: [victoriametrics]
@@ -131,7 +131,7 @@ services:
     restart: unless-stopped
     command: ["-config.file=/etc/loki/config.yml"]
     volumes:
-      - ./observability/loki.yml:/etc/loki/config.yml:ro
+      - ./observability/loki.yml:/etc/loki/config.yml:ro,z
       - loki-data:/loki
     ports:
       - "127.0.0.1:3100:3100"
@@ -152,7 +152,7 @@ services:
     container_name: golang-basics-vector
     restart: unless-stopped
     volumes:
-      - ./observability/vector.yml:/etc/vector/vector.yaml:ro
+      - ./observability/vector.yml:/etc/vector/vector.yaml:ro,z
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       loki:
@@ -176,9 +176,9 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
     volumes:
-      - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
-      - ./observability/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/provider.yml:ro
-      - ./observability/dashboards:/var/lib/grafana/dashboards:ro
+      - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro,z
+      - ./observability/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/provider.yml:ro,z
+      - ./observability/dashboards:/var/lib/grafana/dashboards:ro,z
       - grafana-data:/var/lib/grafana
     ports:
       - "127.0.0.1:3000:3000"
