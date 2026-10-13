@@ -426,24 +426,33 @@ e2e-build:
     mkdir -p "{{BUILD_DIR}}"
     for s in {{SERVICES}}; do echo "── build $s${COVER:+ (cover)}"; {{STAMP}} scripts/build-service.sh "$s" "{{BUILD_DIR}}/$s"; done
 
-# With `just infra-up` running, the data flow (tasks → Kafka → consumer)
-# runs too — its URLs are read from docker/deps.yml's published ports;
-# without the deps those tests skip.
+# The data flow (tasks → Kafka → consumer) needs Postgres, Valkey and Kafka:
+# E2E_DATABASE_URL / E2E_VALKEY_URL / E2E_KAFKA_BROKERS when all three are set,
+# else docker/deps.yml's published ports (`just infra-up`). Nothing up → those
+# tests skip; deps.yml only partly up → the recipe fails instead of skipping.
 
 # Run the Go e2e suite against the binaries in .build/
 e2e *args: e2e-build
     #!/usr/bin/env bash
     set -euo pipefail
     export E2E_BIN_DIR="${E2E_BIN_DIR:-{{BUILD_DIR}}}"
-    port() { docker compose -f docker/deps.yml port "$1" "$2" 2>/dev/null | tail -1; }
-    if command -v docker >/dev/null && pg="$(port postgres 5432)" && [ -n "$pg" ]; then
-      vk="$(port valkey 6379)"; kf="$(port redpanda 9092)"
-      export E2E_DATABASE_URL="${E2E_DATABASE_URL:-postgres://app:app@$pg/app?sslmode=disable}"
-      export E2E_VALKEY_URL="${E2E_VALKEY_URL:-valkey://$vk}"
-      export E2E_KAFKA_BROKERS="${E2E_KAFKA_BROKERS:-$kf}"
-      echo "e2e: data flow against docker/deps.yml (postgres $pg, valkey $vk, kafka $kf)"
+    if [ -n "${E2E_DATABASE_URL:-}" ] && [ -n "${E2E_VALKEY_URL:-}" ] && [ -n "${E2E_KAFKA_BROKERS:-}" ]; then
+      echo "e2e: data flow against E2E_DATABASE_URL / E2E_VALKEY_URL / E2E_KAFKA_BROKERS"
     else
-      echo "e2e: docker/deps.yml not up — data-flow tests skip (just infra-up to include them)"
+      port() { docker compose -f docker/deps.yml port "$1" "$2" 2>/dev/null | tail -1 || true; }
+      pg="" vk="" kf=""
+      if command -v docker >/dev/null; then pg="$(port postgres 5432)" vk="$(port valkey 6379)" kf="$(port redpanda 9092)"; fi
+      if [ -n "$pg" ] && [ -n "$vk" ] && [ -n "$kf" ]; then
+        export E2E_DATABASE_URL="${E2E_DATABASE_URL:-postgres://app:app@$pg/app?sslmode=disable}"
+        export E2E_VALKEY_URL="${E2E_VALKEY_URL:-valkey://$vk}"
+        export E2E_KAFKA_BROKERS="${E2E_KAFKA_BROKERS:-$kf}"
+        echo "e2e: data flow against docker/deps.yml (postgres $pg, valkey $vk, kafka $kf)"
+      elif [ -n "$pg$vk$kf" ]; then
+        echo "e2e: docker/deps.yml is only partly up (postgres '${pg}', valkey '${vk}', kafka '${kf}') — fix it (just infra-up; DEPS_*_PORT if a port is taken) or set all three E2E_* URLs" >&2
+        exit 1
+      else
+        echo "e2e: no data services (just infra-up, or set E2E_DATABASE_URL, E2E_VALKEY_URL, E2E_KAFKA_BROKERS) — data-flow tests skip"
+      fi
     fi
     cd e2e && go test -tags e2e -count=1 ./... {{args}}
 
