@@ -3,6 +3,7 @@ package httpx
 import (
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -41,6 +42,11 @@ type Metrics struct {
 // quantiles at no extra series.
 var latencyBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}
 
+// schedLatencies selects the scheduler-latency histogram from runtime/metrics
+// (and nothing else: MetricsScheduler would also add a goroutine count that
+// duplicates go_goroutines).
+var schedLatencies = collectors.GoRuntimeMetricsRule{Matcher: regexp.MustCompile(`^/sched/latencies:seconds$`)}
+
 // NewMetrics builds a registry pre-populated with the Go-runtime and process
 // collectors, the build identity, and the canonical HTTP metrics:
 //
@@ -58,13 +64,19 @@ var latencyBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1
 // first — so no client can grow the series. build_info carries no service
 // label (the scrape config attaches it) and no Go version (go_info has it).
 // Request and response sizes are not measured: no alert or panel reads them,
-// and a histogram per route costs more series than the rest together. When the request's span is sampled, the counter and the latency
-// histogram carry its trace_id as an exemplar, which is how a dashboard jumps
-// from "p99 spiked here" to one trace of it.
+// and a histogram per route costs more series than the rest together. When
+// the request's span is sampled, the counter and the latency histogram carry
+// its trace_id as an exemplar, which is how a dashboard jumps from "p99
+// spiked here" to one trace of it.
+//
+// The Go collector adds one runtime/metrics series to its defaults:
+// go_sched_latencies_seconds, the time a runnable goroutine waited for a
+// thread — Go's counterpart of Node's event-loop delay, read by the runtime
+// dashboard.
 func NewMetrics(build BuildInfo, log *slog.Logger) *Metrics {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(
-		collectors.NewGoCollector(),
+		collectors.NewGoCollector(collectors.WithGoCollectorRuntimeMetrics(schedLatencies)),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 

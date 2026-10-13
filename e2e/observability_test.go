@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -17,14 +18,15 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// The alert rules and the Grafana dashboard name metrics by hand; a rename in
+// The alert rules and the Grafana dashboards name metrics by hand; a rename in
 // a lib silently turns an alert into one that can never fire. These helpers
 // let the pipeline test compare every name they reference with what the real
-// binaries export.
+// binaries export, and TestDashboards_Lint keeps the dashboards' queries to
+// the house rules.
 
 const (
 	rulesFile     = "../docker/observability/rules.yml"
-	dashboardFile = "../docker/observability/dashboards/golang-basics.json"
+	dashboardsDir = "../docker/observability/dashboards"
 )
 
 // brokerMetrics are the names the alerts and dashboard read from something
@@ -37,6 +39,16 @@ var brokerMetrics = map[string]string{
 	"redpanda_kafka_consumer_group_lag_sum": "Redpanda /public_metrics (enable_consumer_group_metrics, docker/deps.yml)",
 }
 
+// errorOnlyMetrics are labelled error counters the dashboards read whose
+// series appear with the first error (a vector has no series before its first
+// label set), so a healthy e2e run cannot see them. Each name is pinned by the
+// lib test that provokes the error instead; an entry nothing references fails,
+// like brokerMetrics.
+var errorOnlyMetrics = map[string]string{
+	"db_query_errors_total":      "libs/pgx/pgx_test.go (a failing query)",
+	"cache_command_errors_total": "libs/valkey/valkey_test.go (Valkey down)",
+}
+
 // promQLNames returns the metric names a PromQL expression reads: label
 // matchers, strings, ranges and grouping clauses removed, function calls and
 // keywords skipped. Prometheus' own synthetic series (up) is not exported by
@@ -47,6 +59,7 @@ func promQLNames(expr string) []string {
 		regexp.MustCompile(`\{[^}]*\}`),
 		regexp.MustCompile(`\[[^\]]*\]`),
 		regexp.MustCompile(`\b(by|without|on|ignoring|group_left|group_right)\s*\([^)]*\)`),
+		regexp.MustCompile(`(?i)\b\d+(\.\d*)?(e[+-]?\d+)?\b`), // 0.95, 1e18
 	} {
 		expr = re.ReplaceAllString(expr, " ")
 	}
@@ -87,32 +100,97 @@ func referencedMetrics(t *testing.T) map[string]string {
 		}
 	}
 
-	raw, err = os.ReadFile(dashboardFile)
-	require.NoError(t, err)
-	var dash any
-	require.NoError(t, json.Unmarshal(raw, &dash))
-	var walk func(any)
-	walk = func(v any) {
-		switch v := v.(type) {
-		case map[string]any:
-			for k, x := range v {
-				if s, ok := x.(string); ok && k == "expr" {
-					for _, n := range promQLNames(s) {
-						refs[n] = "dashboard: " + s
-					}
-					continue
-				}
-				walk(x)
-			}
-		case []any:
-			for _, x := range v {
-				walk(x)
+	for file, exprs := range dashboardExprs(t) {
+		for _, e := range exprs {
+			for _, n := range promQLNames(e) {
+				refs[n] = file + ": " + e
 			}
 		}
 	}
-	walk(dash)
 	require.NotEmpty(t, refs)
 	return refs
+}
+
+// dashboardExprs returns every PromQL expression ("expr", panel queries and
+// template variables' "query"/"definition" aside) of every dashboard file,
+// by file name.
+func dashboardExprs(t *testing.T) map[string][]string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dashboardsDir, "*.json"))
+	require.NoError(t, err)
+	require.NotEmpty(t, files)
+	out := map[string][]string{}
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		require.NoError(t, err)
+		var dash any
+		require.NoError(t, json.Unmarshal(raw, &dash), f)
+		name := filepath.Base(f)
+		var walk func(any)
+		walk = func(v any) {
+			switch v := v.(type) {
+			case map[string]any:
+				for k, x := range v {
+					if s, ok := x.(string); ok && k == "expr" {
+						out[name] = append(out[name], s)
+						continue
+					}
+					walk(x)
+				}
+			case []any:
+				for _, x := range v {
+					walk(x)
+				}
+			}
+		}
+		walk(dash)
+	}
+	return out
+}
+
+// TestDashboards_Lint holds every dashboard query to the rules that keep the
+// boards correct at any scrape interval and for any set of services:
+//   - windows are $__rate_interval (or $__range / $__interval), never a fixed
+//     [1m] — a window shorter than two scrapes draws nothing;
+//   - every selector of a service metric filters service=~"$service" and
+//     instance=~"$instance" (the broker's own metrics, brokerMetrics, aside);
+//   - services are named by the scrape's `service` label, never `job`.
+//
+// Static (no binaries needed), so it never skips.
+func TestDashboards_Lint(t *testing.T) {
+	fixedWindow := regexp.MustCompile(`\[\d+[smhdwy]\]`)
+	jobMatcher := regexp.MustCompile(`\bjob\s*(=|!=|=~|!~)`)
+	var problems []string
+	for file, exprs := range dashboardExprs(t) {
+		for _, e := range exprs {
+			if fixedWindow.MatchString(e) {
+				problems = append(problems, file+": fixed window, use $__rate_interval: "+e)
+			}
+			if jobMatcher.MatchString(e) {
+				problems = append(problems, file+": selects on job, use service: "+e)
+			}
+			for _, n := range promQLNames(e) {
+				if _, broker := brokerMetrics[n]; broker {
+					continue
+				}
+				sel := regexp.MustCompile(`\b` + regexp.QuoteMeta(n) + `\b(\{[^}]*\})?`)
+				for _, m := range sel.FindAllStringSubmatch(e, -1) {
+					if !strings.Contains(m[1], `service=~"$service"`) || !strings.Contains(m[1], `instance=~"$instance"`) {
+						problems = append(problems, file+": "+n+" without the $service/$instance filter: "+e)
+					}
+				}
+			}
+		}
+	}
+	sort.Strings(problems)
+	require.Empty(t, problems)
+}
+
+func TestPromQLNames(t *testing.T) {
+	require.Equal(t, []string{"go_gc_gomemlimit_bytes"}, promQLNames(`go_gc_gomemlimit_bytes{service=~"$service"} < 1e18`))
+	require.Equal(t, []string{"http_request_duration_seconds_bucket"},
+		promQLNames(`histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{x="y"}[$__rate_interval])))`))
+	require.Equal(t, []string{"process_start_time_seconds"}, promQLNames(`time() - process_start_time_seconds`))
 }
 
 // exportedMetrics is the set of sample names (histogram _bucket/_sum/_count
@@ -141,20 +219,26 @@ func exportedMetrics(t *testing.T, services ...*service) map[string]bool {
 	return out
 }
 
-// assertMetricsExist fails for every name the rules or dashboard reference
-// that none of the services exports, the broker's own (brokerMetrics) aside.
+// assertMetricsExist fails for every name the rules or dashboards reference
+// that none of the services exports, the broker's own (brokerMetrics) and the
+// error-only counters (errorOnlyMetrics) aside.
 func assertMetricsExist(t *testing.T, services ...*service) {
 	t.Helper()
 	have := exportedMetrics(t, services...)
 	refs := referencedMetrics(t)
 	var missing []string
 	for name, where := range refs {
-		if _, broker := brokerMetrics[name]; !broker && !have[name] {
+		_, broker := brokerMetrics[name]
+		_, errorOnly := errorOnlyMetrics[name]
+		if !broker && !errorOnly && !have[name] {
 			missing = append(missing, name+"  ← "+where)
 		}
 	}
 	sort.Strings(missing)
 	require.Empty(t, missing, "metrics referenced by the alerts/dashboard but not exported")
+	for name := range errorOnlyMetrics {
+		require.Contains(t, refs, name, "errorOnlyMetrics lists %s, which nothing references", name)
+	}
 	for name := range brokerMetrics {
 		require.Contains(t, refs, name, "brokerMetrics lists %s, which nothing references", name)
 		require.False(t, have[name], "%s is the broker's metric; a service must not export it", name)

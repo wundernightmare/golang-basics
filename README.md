@@ -273,7 +273,9 @@ and the dependency exporters, **vmalert** with starter rules
 ratio, p99 latency, unhandled errors, target / readiness down, consumer
 lag from the broker, dead-lettering, a stuck or dead outbox, pool
 saturation), Loki fed by Vector from container stdout, and Grafana with
-the datasources cross-linked (span ⇄ log lines) and one dashboard.
+the datasources cross-linked (span ⇄ log lines) and two dashboards built
+only from the metrics contract ([`docs/METRICS.md`](docs/METRICS.md#dashboards)):
+the service overview (RED first) and a Go runtime reference.
 
 ```sh
 just obs-up          # needs infra-up; Grafana http://localhost:3000 (admin/admin), Jaeger :16686, vmalert :8880
