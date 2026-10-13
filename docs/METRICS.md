@@ -121,7 +121,10 @@ docker/deps.yml).
 | `app_integration_enabled` | gauge (1/0) | `integration` |
 | `log_dropped_total` | counter (Go) | `level` |
 
-Go runtime and process: the client_golang defaults (`go_*`, `process_*`).
+Go runtime and process: the client_golang defaults (`go_*`, `process_*`:
+CPU, RSS, open / max file descriptors, start time) plus
+`go_sched_latencies_seconds` (histogram: how long a runnable goroutine waited
+for a thread — Go's counterpart of Node's event-loop delay).
 
 ## Service-specific
 
@@ -137,5 +140,31 @@ HighErrorRatio, HighP99Latency, HttpUnhandledErrors, ServiceDown,
 ReadinessCheckFailing, OptionalDependencyDegraded, KafkaConsumerLagHigh
 (broker metric), KafkaDeadLettering, OutboxStuck (oldest age), OutboxDeadEvents,
 DbPoolSaturated, DbPoolStarved (Go: waited acquires). The e2e suite checks
-that every name the rules and the dashboard read is on a live `/metrics`; the
-broker's own names are listed explicitly in `e2e/observability_test.go`.
+that every name the rules and the dashboards read is on a live `/metrics`; the
+broker's own names and the error-only counters (no series before the first
+error) are listed explicitly in `e2e/observability_test.go`.
+
+## Dashboards
+
+[`docker/observability/dashboards/`](../docker/observability/dashboards),
+provisioned into Grafana, the same layout in nodejs-basics:
+
+- **golang-basics** (`golang-basics-overview`): RED by service (requests/s,
+  5xx and 4xx ratio, p50/p95/p99) → HTTP by route → client-side dependencies
+  (DB pool saturation and waits, query p95 and errors by operation, cache) →
+  Kafka and outbox (records by result, send/handle p95, the broker's
+  consumer-group lag, oldest outbox age, pending/dead) → up, readiness checks,
+  running versions. Thresholds are the alerts'.
+- **golang-basics — runtime** (`golang-basics-runtime`): process CPU, RSS,
+  file descriptors against the limit, uptime and restarts; goroutines and
+  threads, heap against the next GC target and GOMEMLIMIT, allocation rate,
+  GC pauses and cycles, scheduler latency, GOMAXPROCS / GOGC, Go version.
+
+Both take `$datasource`, `$service` and `$instance` and filter every query
+by them; windows are `$__rate_interval`; services are keyed by the scrape's
+`service` label, never `job`. `TestDashboards_Lint` (e2e, static) enforces
+those three. Exemplars: the services expose them (trace_id on the HTTP
+latency histogram, OpenMetrics), but VictoriaMetrics single-node does not
+store them, so the panels do not ask for them; a Prometheus backend with
+`--enable-feature=exemplar-storage` plus the commented datasource setting in
+`docker/observability/grafana-datasources.yml` turns them on.
