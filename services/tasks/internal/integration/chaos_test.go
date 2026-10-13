@@ -63,7 +63,7 @@ func TestChaos_ValkeyDown(t *testing.T) {
 	assert.Equal(t, http.StatusOK, code, "an optional dependency never pulls the pod")
 	assert.Contains(t, body, `"postgres":"ok"`)
 	assert.Equal(t, 0.0, testx.Metric(t, w.srv.Metrics.Registry, "health_check_up", map[string]string{"check": "valkey", "critical": "false"}))
-	assert.Greater(t, testx.Metric(t, w.srv.Metrics.Registry, "cache_command_errors_total", map[string]string{"op": "get"}), 0.0)
+	assert.Greater(t, testx.Metric(t, w.srv.Metrics.Registry, "cache_command_errors_total", map[string]string{"operation": "get"}), 0.0)
 
 	vk.Up()
 	w.waitReadyz(t, "ready")
