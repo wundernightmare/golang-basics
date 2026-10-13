@@ -204,12 +204,18 @@ type consumed struct {
 	headers map[string]string
 }
 
-// readEvents reads the topic from the start (a fresh consumer group) until
-// it has n records or the timeout passes, and returns what it got.
-func readEvents(t testing.TB, brokers []string, topic string, n int, timeout time.Duration) []consumed {
+// readEvents waits for the outbox to drain, then reads the service's topic
+// from the start (a fresh consumer group) until it has n records or the
+// timeout passes, and returns what it got. The wait comes first because the
+// relay's first publish is what creates the topic: a consumer that
+// subscribes before that finds no such topic and librdkafka looks again
+// only at the next metadata refresh (topic.metadata.refresh.interval.ms,
+// 5 min), so it would read nothing.
+func (w *wired) readEvents(t testing.TB, brokers []string, n int, timeout time.Duration) []consumed {
 	t.Helper()
+	require.Eventually(t, func() bool { return w.pending(t) == 0 }, 30*time.Second, 50*time.Millisecond, "the outbox drains")
 	c, err := kafka.NewConsumer(t.Context(), kafka.Config{
-		Brokers: brokers, Topics: []string{topic}, Group: testx.Unique("read-events"), ClientID: testx.Unique("read-events"),
+		Brokers: brokers, Topics: []string{w.topic}, Group: testx.Unique("read-events"), ClientID: testx.Unique("read-events"),
 		AllowAutoTopicCreation: true, StatisticsInterval: -1,
 	}, nil)
 	require.NoError(t, err)
