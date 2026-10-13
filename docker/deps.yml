@@ -82,7 +82,12 @@ services:
       # Consumer-group lag is exported by the broker, not by the services
       # (docs/METRICS.md): redpanda_kafka_consumer_group_lag_sum / _lag_max
       # {redpanda_group} on /public_metrics, recomputed every
-      # consumer_group_lag_collection_interval_sec (60s by default).
+      # consumer_group_lag_collection_interval_sec (60s by default). All three
+      # values are needed (without "partition" the lag stays 0). A cluster
+      # property set here is only applied when the cluster is first created:
+      # on an existing redpanda_data volume run once
+      #   docker exec golang-basics-redpanda rpk cluster config set \
+      #     enable_consumer_group_metrics '["group","partition","consumer_lag"]'
       - --set
       - 'redpanda.enable_consumer_group_metrics=["group","partition","consumer_lag"]'
       # Two Kafka listeners: INTERNAL (advertised as redpanda:29092 for app
