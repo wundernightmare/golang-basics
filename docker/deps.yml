@@ -5,6 +5,12 @@
 #   valkey     — Valkey 9 (Redis-compatible)   localhost:6379
 #   redpanda   — Redpanda (Kafka API broker)   localhost:9092
 #
+# Host ports are overridable when the defaults are taken by something else
+# (another stack on the machine): DEPS_POSTGRES_PORT, DEPS_VALKEY_PORT,
+# DEPS_KAFKA_PORT — in the environment or .env (just loads it). The broker
+# advertises the same port, and `just e2e` reads the published ports back, so
+# nothing else needs to change; point host processes' URLs at them.
+#
 # Usage (from the master worktree root):
 #   just infra-up      |  docker compose -f docker/deps.yml up -d --wait
 #   just infra-down    |  docker compose -f docker/deps.yml down -v
@@ -40,7 +46,7 @@ services:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: app
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${DEPS_POSTGRES_PORT:-5432}:5432"
     volumes:
       # Postgres 18 wants a single mount at /var/lib/postgresql (it places the
       # data in a versioned subdirectory itself).
@@ -57,7 +63,7 @@ services:
     restart: unless-stopped
     command: ["valkey-server", "--save", "60", "1", "--loglevel", "notice"]
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:${DEPS_VALKEY_PORT:-6379}:6379"
     volumes:
       - valkey_data:/data
     healthcheck:
@@ -97,7 +103,7 @@ services:
       - --kafka-addr
       - INTERNAL://0.0.0.0:29092,HOST://0.0.0.0:9092
       - --advertise-kafka-addr
-      - INTERNAL://redpanda:29092,HOST://localhost:9092
+      - INTERNAL://redpanda:29092,HOST://localhost:${DEPS_KAFKA_PORT:-9092}
       - --rpc-addr
       - 0.0.0.0:33145
       - --advertise-rpc-addr
@@ -107,7 +113,7 @@ services:
       - --reserve-memory=0M
       - --overprovisioned
     ports:
-      - "127.0.0.1:9092:9092" # host → HOST listener (advertised as localhost:9092)
+      - "127.0.0.1:${DEPS_KAFKA_PORT:-9092}:9092" # host → HOST listener (advertised as localhost:DEPS_KAFKA_PORT)
     volumes:
       - redpanda_data:/var/lib/redpanda/data
     healthcheck:
