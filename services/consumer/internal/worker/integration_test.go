@@ -77,13 +77,13 @@ func TestIntegration_ConsumesTaskEvents(t *testing.T) {
 	t.Cleanup(cancel)
 
 	require.Eventually(t, func() bool {
-		return testx.Metric(t, reg, "consumer_tasks_consumed_total", nil) == 2 &&
+		return applied(t, reg) == 2 &&
 			testx.Metric(t, reg, "consumer_duplicates_total", nil) == 1 &&
-			testx.Metric(t, reg, "kafka_consume_total", map[string]string{"topic": topic, "result": "dead_lettered"}) == 1
+			testx.Metric(t, reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "dead_lettered"}) == 1
 	}, 60*time.Second, 100*time.Millisecond)
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "consumer_events_total", map[string]string{"event_type": worker.TaskCreated}))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "consumer_events_total", map[string]string{"event_type": worker.TaskDeleted}))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_consumer_dlq_total", map[string]string{"topic": topic + ".dlq"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_producer_records_total", map[string]string{"client": "consumer", "topic": topic + ".dlq", "result": "ok"}))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "consumer_events_rejected_total", map[string]string{"reason": "unknown_type"}))
 
 	cancel()

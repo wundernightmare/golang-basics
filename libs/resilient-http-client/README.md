@@ -123,15 +123,23 @@ http_client_requests_total{target,method,outcome}      one per attempt
 http_client_request_duration_seconds{target,method}    attempts that reached the network
 http_client_retries_total{target}
 http_client_retry_budget_exhausted_total{target}
-circuit_breaker_state{target}                          0 closed, 1 open, 2 half-open
-circuit_breaker_transitions_total{target,from,to}
+http_client_circuit_breaker_state{target}              0 closed, 1 open, 2 half-open
+http_client_circuit_breaker_transitions_total{target,from,to}
 http_client_bulkhead_in_flight{target}
 http_client_bulkhead_rejected_total{target}
 ```
 
 `outcome`: `2xx 3xx 4xx 5xx timeout connection redirect circuit_open
-rate_limited bulkhead_full shutdown canceled`. Without `WithRegisterer` they
-live on a private registry, `client.Registry()`.
+rate_limited bulkhead_full shutdown canceled invalid` (`invalid`: a request
+that could not be sent — a relative URL, a body that cannot be replayed; an
+undeclared target name is an error but never a label value). `method` is a
+standard method or `_OTHER`. The names are the workspace's metrics contract
+([docs/METRICS.md](../../docs/METRICS.md)), shared with nodejs-basics.
+
+Without `WithRegisterer` they live on a private registry, `client.Registry()`,
+which no `/metrics` endpoint serves: a service passes
+`resilient.WithRegisterer(srv.Metrics.Registry)` so its outbound calls show up
+next to everything else (one client per registry — a second one collides).
 
 Logs (`WithLogger`) carry scheme, host and path only — never the query string
 or user info — and warnings are rate-limited per target.

@@ -57,7 +57,6 @@ type Worker struct {
 	inject   func(context.Context, string, kafka.Message) error
 	seen     *lru
 
-	consumed   prometheus.Counter
 	byType     *prometheus.CounterVec
 	duplicates prometheus.Counter
 	rejected   *prometheus.CounterVec
@@ -66,7 +65,6 @@ type Worker struct {
 // New builds a Worker over consumer and registers its metrics on reg (typically
 // the server's registry, so they appear on /metrics):
 //
-//	consumer_tasks_consumed_total                 events applied (every type)
 //	consumer_events_total{event_type}             events applied, by type
 //	consumer_duplicates_total                     redeliveries skipped by event id
 //	consumer_events_rejected_total{reason}        events rejected as permanent failures
@@ -80,10 +78,6 @@ func New(consumer Consumer, log *slog.Logger, reg prometheus.Registerer, opts Op
 		log:      log,
 		inject:   opts.Inject,
 		seen:     newLRU(opts.DedupeSize),
-		consumed: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "consumer_tasks_consumed_total",
-			Help: "Task events applied (every type).",
-		}),
 		byType: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "consumer_events_total",
 			Help: "Task events applied, by event type.",
@@ -97,7 +91,7 @@ func New(consumer Consumer, log *slog.Logger, reg prometheus.Registerer, opts Op
 			Help: "Events rejected as permanent failures (dead-lettered), by reason (undecodable|unknown_type).",
 		}, []string{"reason"}),
 	}
-	reg.MustRegister(w.consumed, w.byType, w.duplicates, w.rejected)
+	reg.MustRegister(w.byType, w.duplicates, w.rejected)
 	return w
 }
 
@@ -187,7 +181,6 @@ func (w *Worker) Handle(ctx context.Context, msg kafka.Message) error {
 	if eventID != "" {
 		w.seen.add(eventID)
 	}
-	w.consumed.Inc()
 	w.byType.WithLabelValues(eventType).Inc()
 	w.log.InfoContext(ctx, "task event applied",
 		"event_type", eventType, "event_id", eventID, "task_id", evt.taskID(),

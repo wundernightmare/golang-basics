@@ -1,6 +1,7 @@
 package rdkafka
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -100,17 +101,37 @@ func TestParseStats(t *testing.T) {
 	s, err := parseStats(`{"msg_size":10,"msg_size_max":67108864,
 	  "brokers":{"b:9092/1":{"nodeid":1,"state":"UP","req_timeouts":1,"txerrs":2,"rxerrs":3},
 	             "b:9092/bootstrap":{"nodeid":-1,"state":"UP"},
-	             "c:9092/2":{"nodeid":2,"state":"DOWN"}},
-	  "topics":{"t":{"partitions":{"0":{"consumer_lag":5},"1":{"consumer_lag":7},"-1":{"consumer_lag":100},"2":{"consumer_lag":-1}}}}}`)
+	             "c:9092/2":{"nodeid":2,"state":"DOWN"}}}`)
 	require.NoError(t, err)
 	assert.Equal(t, 1, s.brokersUp, "the bootstrap entry is not a broker")
-	assert.Equal(t, int64(6), s.requestErrors)
+	assert.Equal(t, map[string]int64{"b:9092/1": 6, "c:9092/2": 0}, s.brokerErrors)
 	assert.Equal(t, int64(10), s.queueBytes)
 	assert.Equal(t, int64(67108864), s.queueMaxBytes)
-	assert.Equal(t, int64(7), s.lagMax)
-	assert.Equal(t, int64(12), s.lagSum, "the UA partition and unknown lag are skipped")
 	_, err = parseStats("{")
 	require.Error(t, err)
+}
+
+// kafka_client_request_errors_total is a counter: it only ever grows, also
+// when a broker's own count drops (librdkafka replaced its handle) or the
+// broker leaves the statistics and comes back.
+func TestStatsHolder_RequestErrorsNeverDecrease(t *testing.T) {
+	var h statsHolder
+	cfg := kafka.Config{StatisticsInterval: 1000}
+	broker := func(a, b int64) string {
+		return fmt.Sprintf(`{"brokers":{"a/1":{"nodeid":1,"state":"UP","txerrs":%d},"b/2":{"nodeid":2,"state":"UP","txerrs":%d}}}`, a, b)
+	}
+	var got []int64
+	for _, raw := range []string{
+		broker(2, 3), // 5
+		broker(4, 3), // +2 → 7
+		broker(1, 3), // a restarted from zero: +1 → 8
+		`{"brokers":{"a/1":{"nodeid":1,"state":"UP","txerrs":1}}}`, // b gone: 8
+		broker(1, 5), // b back with its old handle: +2 → 10
+	} {
+		h.update(raw)
+		got = append(got, h.clientStats(cfg).RequestErrors)
+	}
+	assert.Equal(t, []int64{5, 7, 8, 8, 10}, got)
 }
 
 // A broker connection failure is retried by librdkafka itself: a warning, not

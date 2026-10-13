@@ -56,12 +56,16 @@ func infoFrom(ctx context.Context) *reqInfo {
 
 // status returns the response status as the client saw it: what was written,
 // 200 when the handler returned without writing (net/http's behaviour), 499
-// when the connection was aborted.
-func (i *reqInfo) status() int {
+// when the connection was aborted, or when nothing was written because the
+// client had already gone (ctx, the request's context, cancelled — net/http
+// cancels it when the connection closes).
+func (i *reqInfo) status(ctx context.Context) int {
 	switch {
 	case i == nil:
 		return 0
 	case i.aborted:
+		return statusClientClosedRequest
+	case i.rw.status == 0 && ctx != nil && errors.Is(ctx.Err(), context.Canceled):
 		return statusClientClosedRequest
 	case i.rw.status == 0:
 		return http.StatusOK
@@ -315,7 +319,7 @@ func tracing(next http.Handler) http.Handler {
 			span.SetName(method + " " + info.route)
 			span.SetAttributes(semconv.HTTPRoute(info.route))
 		}
-		status := info.status()
+		status := info.status(r.Context())
 		span.SetAttributes(semconv.HTTPResponseStatusCode(status))
 		if status >= http.StatusInternalServerError {
 			span.SetStatus(codes.Error, http.StatusText(status))
@@ -345,7 +349,7 @@ func accessLog(log *slog.Logger, slow time.Duration) Middleware {
 			start := time.Now()
 			defer func() {
 				info := infoFrom(r.Context())
-				status := info.status()
+				status := info.status(r.Context())
 				latency := time.Since(start)
 				attrs := []slog.Attr{
 					slog.String("method", r.Method),
@@ -372,7 +376,7 @@ func accessLog(log *slog.Logger, slow time.Duration) Middleware {
 
 // recovery turns a panic in a handler into a 500 problem+json (when nothing
 // was written yet), a structured error log with the stack, an error status on
-// the span and one tick of http_panics_total. It sits inside the log and
+// the span and one tick of http_unhandled_errors_total. It sits inside the log and
 // metrics middleware so the 500 is logged and counted like any other; both
 // use defer and survive a panic that escapes anyway. http.ErrAbortHandler is
 // re-raised as net/http expects: it means "drop the connection", not "bug".
@@ -390,7 +394,7 @@ func (s *Server) recovery(next http.Handler) http.Handler {
 				}
 				panic(p)
 			}
-			s.Metrics.panics.Inc()
+			s.Metrics.unhandled.Inc()
 			err := fmt.Errorf("panic: %v", p)
 			s.log.LogAttrs(r.Context(), slog.LevelError, "panic in handler",
 				slog.Any("panic", p), slog.String("method", r.Method), slog.String("path", r.URL.Path),

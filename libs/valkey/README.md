@@ -65,8 +65,8 @@ it.
 | Metric | Meaning |
 | --- | --- |
 | `cache_lookups_total{result="hit\|miss\|error"}` | GET outcomes (a tombstone is a miss) |
-| `cache_command_duration_seconds{op="get\|set\|del"}` | command latency |
-| `cache_command_errors_total{op}` | failed commands, timeouts included (a missing key is not a failure) |
+| `cache_command_duration_seconds{operation="get\|set\|del"}` | command latency |
+| `cache_command_errors_total{operation}` | failed commands, timeouts included (a missing key is not a failure) |
 
 Every command is also a client span (valkeyotel) in the caller's trace.
 

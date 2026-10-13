@@ -140,15 +140,19 @@ func WriteProblem(w http.ResponseWriter, r *http.Request, p Problem) {
 }
 
 // WriteError answers with err in problem shape: a [Problem] (possibly
-// wrapped) is written as is; a context deadline is a 504; anything else is a
-// 500 with err as the cause, so no error is ever swallowed on the way to a
-// generic response.
+// wrapped) is written as is; a context deadline is a 504; a cancellation
+// because the client went away is a 499 (nobody reads it, but the access log
+// and http_requests_total show the client left instead of counting a 5xx);
+// anything else is a 500 with err as the cause, so no error is ever swallowed
+// on the way to a generic response.
 func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	var p Problem
 	switch {
 	case errors.As(err, &p):
 	case errors.Is(err, context.DeadlineExceeded):
 		p = NewProblem(http.StatusGatewayTimeout, "the request took too long").WithCause(err)
+	case errors.Is(err, context.Canceled) && r != nil && errors.Is(r.Context().Err(), context.Canceled):
+		p = Problem{Status: statusClientClosedRequest, Title: "Client Closed Request", Detail: "the client went away"}.WithCause(err)
 	default:
 		p = Internal("internal error", err)
 	}

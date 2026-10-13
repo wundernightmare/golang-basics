@@ -15,7 +15,7 @@ Only what a real process shows — everything else is owned by a lower layer
 | `TestPing` | ready on the admin port; `/version` build stamp; `GET /ping?msg=x` echoes; `/metrics` is not on the API port; `/admin/config` requires the admin token |
 | `TestHeartbeat` | `/version`; `heartbeat_beats_total` increases (polled); admin token |
 | `TestGracefulShutdown` | SIGTERM → exit 0 within 5s, no error-level log line, `servers stopped cleanly` logged and the last line says stopped cleanly (ping, heartbeat) |
-| `TestTasksPipeline` | tasks + consumer: `/version`, admin token, `POST /tasks` → 201, `GET /tasks/{id}` → 200, the consumer's `consumer_tasks_consumed_total` increases within 30s (outbox relay → Kafka → consumer), then both shut down cleanly |
+| `TestTasksPipeline` | tasks + consumer: `/version`, admin token, `POST /tasks` → 201, `GET /tasks/{id}` → 200, the consumer's `consumer_events_total` increases within 30s (outbox relay → Kafka → consumer), then both shut down cleanly |
 
 ## Harness (`harness_test.go`)
 

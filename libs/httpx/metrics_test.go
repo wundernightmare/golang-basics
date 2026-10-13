@@ -2,6 +2,7 @@ package httpx_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,9 +29,10 @@ func TestMetrics_EndpointRecordsRequestsByRoute(t *testing.T) {
 	assert.NotContains(t, body, `http_request_duration_seconds_bucket{method="GET",route="/items/{id}",status=`,
 		"latency histogram must not be split by status")
 	assert.Contains(t, body, "http_requests_in_flight 0")
-	assert.Contains(t, body, `build_info{go_version="`)
-	assert.Contains(t, body, `service="test"`)
+	assert.Contains(t, body, `build_info{revision="`)
 	assert.Contains(t, body, `version="dev"`)
+	assert.NotContains(t, body, `build_info{go_version`, "go_info carries the Go version")
+	assert.NotContains(t, body, `service="test"`, "the scrape config attaches service; a second one would become exported_service")
 }
 
 // Arbitrary methods must not grow the series: anything outside the standard
@@ -54,30 +56,27 @@ func TestMetrics_NonStandardMethodsCollapseToOther(t *testing.T) {
 	}
 }
 
-func TestMetrics_RequestAndResponseSizes(t *testing.T) {
+// A request whose client went away before anything was written is a 499, in
+// the counter and the log alike, not the 200 net/http would assume; a handler
+// that reports the cancellation through WriteError is a 499 too, not a 5xx.
+func TestMetrics_ClientGoneIs499(t *testing.T) {
 	srv, _ := loggedServer(t, httpx.Config{})
-	srv.Mux().HandleFunc("POST /echo", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(strings.Repeat("r", 300)))
+	srv.Mux().HandleFunc("GET /silent", func(http.ResponseWriter, *http.Request) {})
+	srv.Mux().HandleFunc("GET /failed", func(w http.ResponseWriter, r *http.Request) {
+		httpx.WriteError(w, r, fmt.Errorf("query: %w", r.Context().Err()))
 	})
-	srv.Mux().HandleFunc("GET /empty", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-
-	do(srv.Handler(), httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader(strings.Repeat("q", 40))))
-	get(srv.Handler(), "/empty")
+	for _, path := range []string{"/silent", "/failed"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		do(srv.Handler(), httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx))
+	}
+	get(srv.Handler(), "/silent")
 
 	reg := srv.Metrics.Registry
-	req := histogram(t, reg, "http_request_size_bytes", map[string]string{"method": "POST", "route": "/echo"})
-	require.NotNil(t, req)
-	assert.Equal(t, uint64(1), req.GetSampleCount())
-	assert.InDelta(t, 40, req.GetSampleSum(), 0)
-	assert.Nil(t, histogram(t, reg, "http_request_size_bytes", map[string]string{"route": "/empty"}),
-		"a request without a body is not observed")
-
-	resp := histogram(t, reg, "http_response_size_bytes", map[string]string{"method": "POST", "route": "/echo"})
-	require.NotNil(t, resp)
-	assert.InDelta(t, 300, resp.GetSampleSum(), 0)
-	resp = histogram(t, reg, "http_response_size_bytes", map[string]string{"method": "GET", "route": "/empty"})
-	require.NotNil(t, resp)
-	assert.InDelta(t, 0, resp.GetSampleSum(), 0, "an empty response is a zero-byte observation")
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"route": "/silent", "status": "499"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"route": "/silent", "status": "200"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"route": "/failed", "status": "499"}))
+	assert.Equal(t, -1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"route": "/failed", "status": "500"}), "no 5xx series")
 }
 
 // The exposition itself is contract: names, label sets and types are what
@@ -103,11 +102,9 @@ func TestMetrics_ExpositionIsLintCleanAndComplete(t *testing.T) {
 		"# TYPE build_info gauge",
 		"# TYPE http_requests_total counter",
 		"# TYPE http_request_duration_seconds histogram",
-		"# TYPE http_request_size_bytes histogram",
-		"# TYPE http_response_size_bytes histogram",
 		"# TYPE http_requests_in_flight gauge",
-		"# TYPE http_panics_total counter",
-		"http_panics_total 1",
+		"# TYPE http_unhandled_errors_total counter",
+		"http_unhandled_errors_total 1",
 		"# TYPE log_dropped_total counter",
 		"# TYPE health_check_up gauge",
 		`health_check_up{check="db",critical="true"} 1`,
@@ -116,6 +113,9 @@ func TestMetrics_ExpositionIsLintCleanAndComplete(t *testing.T) {
 		"# TYPE process_cpu_seconds_total counter",
 	} {
 		assert.Containsf(t, body, want, "exposition must contain %q", want)
+	}
+	for _, gone := range []string{"http_request_size_bytes", "http_response_size_bytes", "http_panics_total"} {
+		assert.NotContainsf(t, body, gone, "%s is not part of the metrics contract", gone)
 	}
 }
 

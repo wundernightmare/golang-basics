@@ -90,7 +90,11 @@ README; this file is only the high-signal, easy-to-miss bits.
   requires a collector. Export is OTLP over **HTTP** (`:4318`) and **TLS by
   default**: a local collector needs `*_OTEL_EXPORTER_OTLP_INSECURE=true`.
   Metrics are Prometheus-only (scraped from the admin port); there is no OTel
-  meter provider, on purpose.
+  meter provider, on purpose. Metric names, labels, units and buckets are a
+  contract shared with nodejs-basics, written down in `docs/METRICS.md`: a new
+  or renamed metric changes that file (and the sibling repo) first. What the
+  broker or a server-side exporter measures better (consumer-group lag,
+  Postgres/Valkey server state) is not collected in the services.
 - **Secure by default.** `*_ADMIN_TOKEN` guards `/admin/*` and `/debug/*`;
   `httpx.Config.Validate()` refuses an empty token on a non-loopback admin
   address unless `*_ADMIN_INSECURE=true` (local compose / e2e set it). Kafka
