@@ -368,7 +368,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (service, version, revision, go_version) (build_info)",
+          "expr": "max by (service, version, revision) (build_info)",
           "legendFormat": ""
         }
       ],
@@ -432,7 +432,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (state) (pgxpool_conns{service=\"tasks\"})",
+          "expr": "sum by (state) (db_pool_connections{service=\"tasks\"})",
           "legendFormat": "{{state}}"
         },
         {
@@ -441,7 +441,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max(pgxpool_max_conns{service=\"tasks\"})",
+          "expr": "max(db_pool_max_connections{service=\"tasks\"})",
           "legendFormat": "max"
         }
       ],
@@ -523,8 +523,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (service) (kafka_consumer_lag)",
-          "legendFormat": "{{service}}"
+          "expr": "max by (redpanda_group) (redpanda_kafka_consumer_group_lag_sum)",
+          "legendFormat": "{{redpanda_group}}"
         }
       ],
       "fieldConfig": {
@@ -564,7 +564,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (service, topic, result) (rate(kafka_publish_total[1m]))",
+          "expr": "sum by (service, topic, result) (rate(kafka_producer_records_total[1m]))",
           "legendFormat": "produce {{topic}} {{result}}"
         },
         {
@@ -573,7 +573,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (service, topic) (rate(kafka_consume_total[1m]))",
+          "expr": "sum by (service, topic) (rate(kafka_consumer_records_total[1m]))",
           "legendFormat": "consume {{topic}}"
         }
       ],
@@ -614,7 +614,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(kafka_producer_publish_duration_seconds_bucket[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kafka_producer_send_duration_seconds_bucket[1m])))",
           "legendFormat": "publish p95"
         },
         {

@@ -96,7 +96,7 @@ func TestPanic_IsA500AndCounted(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "kaboom", "the panic value stays in the log")
 
 	reg := srv.Metrics.Registry
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_panics_total", nil))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_unhandled_errors_total", nil))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"route": "/boom", "status": "500"}))
 	assert.Equal(t, 0.0, testx.Metric(t, reg, "http_requests_in_flight", nil), "the gauge does not stick after a panic")
 

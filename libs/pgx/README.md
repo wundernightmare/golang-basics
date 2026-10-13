@@ -70,16 +70,18 @@ here.
 
 | Metric | Meaning |
 | --- | --- |
-| `pgxpool_conns{state}`, `pgxpool_max_conns` | connections idle / acquired / constructing, and the ceiling |
-| `pgxpool_acquire_total`, `pgxpool_acquire_duration_seconds_total`, `pgxpool_empty_acquire_total`, `pgxpool_canceled_acquire_total` | acquires, time spent waiting, waits on an empty pool — "exhausted" is empty acquires climbing while acquired sits at the max |
-| `pgx_query_duration_seconds{operation}` | Exec / Query / QueryRow latency |
-| `pgx_query_errors_total{operation}` | of those, the failed ones |
+| `db_pool_connections{state}`, `db_pool_max_connections` | connections idle / in_use / constructing, and the ceiling |
+| `db_pool_acquires_waited_total`, `db_pool_acquire_wait_seconds_total`, `db_pool_acquires_canceled_total` | acquires that found no idle connection, time spent acquiring, acquires given up — "exhausted" is waited acquires climbing while in_use sits at the max |
+| `db_query_duration_seconds{operation}` | Exec / Query / QueryRow latency |
+| `db_query_errors_total{operation}` | of those, the failed ones |
 
 `operation` is the name set with `pgx.WithOperation(ctx, "tasks.create")`, or
 the statement's leading keyword (`select`, `insert`, `begin`, …) — never the
 SQL text, so the label set stays bounded. The metrics tracer runs beside
 otelpgx (a client span per query, child of the caller's span) through pgx's
-`multitracer`.
+`multitracer`. The names follow the workspace's metrics contract
+([docs/METRICS.md](../../docs/METRICS.md)); what the server itself sees
+(backends, locks, replication) comes from postgres-exporter, not from here.
 
 ## Tests
 

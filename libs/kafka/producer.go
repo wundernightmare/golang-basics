@@ -85,13 +85,7 @@ func (p *Producer) Send(ctx context.Context, msg Message) error {
 	}
 	start := time.Now()
 	err := send(ctx, p.cl, p.cfg.PublishTimeout, msg)
-	result := "ok"
-	var se *SendError
-	if errors.As(err, &se) {
-		result = se.Kind
-	}
-	p.metrics.duration.WithLabelValues(msg.Topic).Observe(time.Since(start).Seconds())
-	p.metrics.records.WithLabelValues(msg.Topic, result).Inc()
+	p.metrics.send.observe(msg.Topic, start, err)
 	if err != nil {
 		return fmt.Errorf("kafka: send to %q: %w", msg.Topic, err)
 	}

@@ -27,10 +27,11 @@ type Metrics struct {
 	Registry *prometheus.Registry
 	reqTotal *prometheus.CounterVec
 	reqDur   *prometheus.HistogramVec
-	reqSize  *prometheus.HistogramVec
-	respSize *prometheus.HistogramVec
 	inFlight prometheus.Gauge
-	panics   prometheus.Counter
+	// unhandled counts requests answered 500 by the recovery middleware (a
+	// handler panic): the 500 a handler returns on purpose is already in
+	// http_requests_total, this one is a bug.
+	unhandled prometheus.Counter
 }
 
 // Latency buckets tuned for a service that answers in milliseconds: the
@@ -40,24 +41,24 @@ type Metrics struct {
 // quantiles at no extra series.
 var latencyBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}
 
-// sizeBuckets cover a JSON API: from a bare status line to a few megabytes.
-var sizeBuckets = []float64{256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304}
-
 // NewMetrics builds a registry pre-populated with the Go-runtime and process
 // collectors, the build identity, and the canonical HTTP metrics:
 //
-//	build_info{service,version,revision,go_version}   always 1
+//	build_info{version,revision}                      always 1
 //	http_requests_total{method,route,status}
 //	http_request_duration_seconds{method,route}       histogram (classic + native)
-//	http_request_size_bytes{method,route}             histogram of Content-Length
-//	http_response_size_bytes{method,route}            histogram of bytes written
 //	http_requests_in_flight
-//	http_panics_total                                 handler panics recovered
+//	http_unhandled_errors_total                       handler panics recovered (answered 500)
 //	log_dropped_total{level}                          records dropped by log sampling
 //
-// route is the matched route template ("/tasks/{id}"), never the raw URL, and
-// method is one of the standard methods or "_OTHER", so no client can grow the
-// series. When the request's span is sampled, the counter and the latency
+// The names are the workspace's metrics contract, shared with nodejs-basics.
+// route is the matched route template ("/tasks/{id}"), never the raw URL
+// ("unmatched" when none matched), method is one of the standard methods or
+// "_OTHER", and status is the code sent — 499 when the client went away
+// first — so no client can grow the series. build_info carries no service
+// label (the scrape config attaches it) and no Go version (go_info has it).
+// Request and response sizes are not measured: no alert or panel reads them,
+// and a histogram per route costs more series than the rest together. When the request's span is sampled, the counter and the latency
 // histogram carry its trace_id as an exemplar, which is how a dashboard jumps
 // from "p99 spiked here" to one trace of it.
 func NewMetrics(build BuildInfo, log *slog.Logger) *Metrics {
@@ -71,8 +72,7 @@ func NewMetrics(build BuildInfo, log *slog.Logger) *Metrics {
 		Name: "build_info",
 		Help: "Build identity of the running binary; always 1.",
 		ConstLabels: prometheus.Labels{
-			"service": build.Service, "version": build.Version,
-			"revision": build.Revision, "go_version": build.GoVersion,
+			"version": build.Version, "revision": build.Revision,
 		},
 	})
 	buildInfo.Set(1)
@@ -92,26 +92,16 @@ func NewMetrics(build BuildInfo, log *slog.Logger) *Metrics {
 			NativeHistogramMaxBucketNumber:  100,
 			NativeHistogramMinResetDuration: time.Hour,
 		}, labels),
-		reqSize: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "http_request_size_bytes",
-			Help:    "HTTP request body size in bytes (Content-Length), by method and route template.",
-			Buckets: sizeBuckets,
-		}, labels),
-		respSize: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "http_response_size_bytes",
-			Help:    "HTTP response body size in bytes, by method and route template.",
-			Buckets: sizeBuckets,
-		}, labels),
 		inFlight: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "http_requests_in_flight",
 			Help: "HTTP requests currently being handled.",
 		}),
-		panics: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "http_panics_total",
-			Help: "Handler panics recovered by the server (each one answered 500).",
+		unhandled: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "http_unhandled_errors_total",
+			Help: "Requests that failed outside the handler's own error handling (a recovered panic, answered 500).",
 		}),
 	}
-	reg.MustRegister(buildInfo, m.reqTotal, m.reqDur, m.reqSize, m.respSize, m.inFlight, m.panics)
+	reg.MustRegister(buildInfo, m.reqTotal, m.reqDur, m.inFlight, m.unhandled)
 
 	if dropped := logDropped(log); dropped != nil {
 		reg.MustRegister(
@@ -128,7 +118,7 @@ func NewMetrics(build BuildInfo, log *slog.Logger) *Metrics {
 	return m
 }
 
-// Middleware records request count, latency, sizes and the in-flight gauge
+// Middleware records request count, latency and the in-flight gauge
 // for every request, in a defer so a panic that escapes recovery is still
 // counted and the gauge never sticks. Outside a [Server] chain (no request
 // info on the context) it wraps the writer itself and labels the route
@@ -147,7 +137,7 @@ func (m *Metrics) Middleware() Middleware {
 			defer func() {
 				m.inFlight.Dec()
 				method, route := methodLabel(r.Method), info.routeLabel()
-				status := strconv.Itoa(info.status())
+				status := strconv.Itoa(info.status(r.Context()))
 				elapsed := time.Since(start).Seconds()
 				if ex := exemplar(r); ex != nil {
 					m.reqTotal.WithLabelValues(method, route, status).(prometheus.ExemplarAdder).AddWithExemplar(1, ex)
@@ -156,10 +146,6 @@ func (m *Metrics) Middleware() Middleware {
 					m.reqTotal.WithLabelValues(method, route, status).Inc()
 					m.reqDur.WithLabelValues(method, route).Observe(elapsed)
 				}
-				if r.ContentLength > 0 {
-					m.reqSize.WithLabelValues(method, route).Observe(float64(r.ContentLength))
-				}
-				m.respSize.WithLabelValues(method, route).Observe(float64(info.rw.bytes))
 			}()
 			next.ServeHTTP(w, r)
 		})

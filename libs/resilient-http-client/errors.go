@@ -38,7 +38,9 @@ const (
 	// KindRedirect: a redirect was refused (another host, or too many).
 	KindRedirect
 	// KindInvalid: the request cannot be sent (unknown target, missing or
-	// non-http(s) URL). A caller bug; never retried, not counted in metrics.
+	// non-http(s) URL, a body that cannot be replayed). A caller bug; never
+	// retried. Counted as outcome="invalid" — except an unknown target, whose
+	// name is not a configured one and must not become a label value.
 	KindInvalid
 )
 

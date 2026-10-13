@@ -15,37 +15,47 @@ import (
 
 // The instrument set is a contract for dashboards and alerts: lint it the
 // way Prometheus would (naming, units, help) before any broker is involved.
+// A producer and a consumer share one registry: the consumer's dead-letter
+// publishes land in the producer families under client="consumer".
 func TestMetrics_AreLintClean(t *testing.T) {
 	stats := func() ClientStats {
-		return ClientStats{Valid: true, BrokersUp: 3, RequestErrors: 2, QueueBytes: 10, QueueMaxBytes: 64 << 20, LagMax: 7, LagSum: 12}
+		return ClientStats{Valid: true, BrokersUp: 3, RequestErrors: 2, QueueBytes: 10, QueueMaxBytes: 64 << 20}
 	}
 	reg := prometheus.NewRegistry()
-	pm := newProducerMetrics(stats, "test")
-	cm := newConsumerMetrics(stats, "test")
-	reg.MustRegister(pm.records, pm.duration, pm.client)
-	reg.MustRegister(cm.records, cm.duration, cm.commitErrs, cm.dlq, cm.fetchErrs, cm.assigned, cm.rebalances, cm.client)
-	pm.records.WithLabelValues("t", "ok").Inc()
-	pm.duration.WithLabelValues("t").Observe(0.01)
-	cm.records.WithLabelValues("t", consumeRetried).Inc()
-	cm.duration.WithLabelValues("t").Observe(0.01)
-	cm.dlq.WithLabelValues("t.dlq").Inc()
-	cm.rebalances.WithLabelValues("assigned").Inc()
+	p := &Producer{metrics: newProducerMetrics(stats, "test")}
+	c := &Consumer{metrics: newConsumerMetrics(stats, "test", []string{"t", "^re.*"})}
+	reg.MustRegister(p.Collectors()...)
+	reg.MustRegister(c.Collectors()...)
+	p.metrics.send.observe("t", time.Now(), nil)
+	p.metrics.send.observe("t", time.Now(), NewSendError(KindQueueFull, 0, errors.New("full")))
+	c.metrics.records.WithLabelValues(c.metrics.topic("t"), consumeRetried).Inc()
+	c.metrics.records.WithLabelValues(c.metrics.topic("re-1"), consumeOK).Inc()
+	c.metrics.duration.WithLabelValues("t").Observe(0.01)
+	c.metrics.dlq.observe("t.dlq", time.Now(), nil)
+	c.metrics.rebalances.WithLabelValues("assigned").Inc()
 
 	testx.LintMetrics(t, reg)
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_producer_records_total", map[string]string{"client": "producer", "topic": "t", "result": "ok"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_producer_records_total", map[string]string{"client": "producer", "topic": "t", "result": KindQueueFull}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_producer_records_total", map[string]string{"client": "consumer", "topic": "t.dlq", "result": "ok"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_producer_send_duration_seconds", map[string]string{"client": "consumer", "topic": "t.dlq"}))
+	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_consumer_records_total", map[string]string{"topic": "other", "result": "ok"}),
+		"a topic matched by a regex subscription does not become a label value")
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_client_info", map[string]string{"client": "consumer", "provider": "test"}))
 	assert.Equal(t, 3.0, testx.Metric(t, reg, "kafka_client_brokers_up", map[string]string{"client": "producer"}))
 	assert.Equal(t, 2.0, testx.Metric(t, reg, "kafka_client_request_errors_total", map[string]string{"client": "consumer"}))
 	assert.Equal(t, float64(64<<20), testx.Metric(t, reg, "kafka_producer_queue_max_bytes", nil))
-	assert.Equal(t, 7.0, testx.Metric(t, reg, "kafka_consumer_lag_max", nil))
-	assert.Equal(t, 12.0, testx.Metric(t, reg, "kafka_consumer_lag", nil))
+	for _, gone := range []string{"kafka_consumer_lag", "kafka_consumer_lag_max", "kafka_consumer_dlq_total", "kafka_publish_total", "kafka_consume_total"} {
+		assert.Equal(t, -1.0, testx.Metric(t, reg, gone, nil), "%s is not part of the metrics contract", gone)
+	}
 }
 
 // A client that stopped reporting shows no client gauges rather than its
 // last numbers.
 func TestClientCollector_StaleSnapshotIsNotExposed(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(newClientCollector("consumer", "test", func() ClientStats { return ClientStats{LagSum: 9} }))
-	assert.Equal(t, -1.0, testx.Metric(t, reg, "kafka_consumer_lag", nil))
+	reg.MustRegister(newClientCollector("consumer", "test", func() ClientStats { return ClientStats{BrokersUp: 2} }))
+	assert.Equal(t, -1.0, testx.Metric(t, reg, "kafka_client_brokers_up", nil))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_client_info", map[string]string{"client": "consumer", "provider": "test"}))
 }
 

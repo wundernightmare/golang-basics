@@ -14,18 +14,20 @@ import (
 // its metrics registry: the pool's live statistics ([pgxpool.Pool.Stat]) and
 // the per-operation query metrics recorded by the pool's query tracer.
 //
-//	pgxpool_conns{state="idle|acquired|constructing"}   connections by state
-//	pgxpool_max_conns                                    configured ceiling
-//	pgxpool_acquire_total                                successful acquires
-//	pgxpool_acquire_duration_seconds_total               time spent waiting to acquire
-//	pgxpool_empty_acquire_total                          acquires that had to wait for a free conn
-//	pgxpool_canceled_acquire_total                       acquires cancelled by context
-//	pgx_query_duration_seconds{operation}                Exec / Query / QueryRow latency
-//	pgx_query_errors_total{operation}                    of those, the ones that failed
+//	db_pool_connections{state="idle|in_use|constructing"}  connections by state
+//	db_pool_max_connections                                 configured ceiling
+//	db_pool_acquires_waited_total                           acquires that had to wait for a free conn
+//	db_pool_acquire_wait_seconds_total                      time spent acquiring connections
+//	db_pool_acquires_canceled_total                         acquires cancelled by context while waiting
+//	db_query_duration_seconds{operation}                    Exec / Query / QueryRow latency
+//	db_query_errors_total{operation}                        of those, the ones that failed
 //
-// pgxpool_empty_acquire_total climbing while pgxpool_conns{state="acquired"}
-// sits at pgxpool_max_conns is the "pool exhausted" signal; the acquire
-// duration counter turns it into seconds of wait per second.
+// The names are the workspace's metrics contract (docs/METRICS.md), shared
+// with nodejs-basics. db_pool_connections{state="in_use"} at
+// db_pool_max_connections is the "pool exhausted" signal;
+// db_pool_acquires_waited_total climbing says requests feel it, and the wait
+// counter turns it into seconds of wait per second. What the server itself
+// sees (backends, locks, replication) is postgres-exporter's job, not ours.
 //
 // operation is the name the caller put on the context with [WithOperation]
 // ("tasks.create"), or the statement's leading keyword in lower case
@@ -39,18 +41,17 @@ func (db *DB) Collectors() []prometheus.Collector {
 	counter := func(name, help string, f func() float64) prometheus.Collector {
 		return prometheus.NewCounterFunc(prometheus.CounterOpts{Name: name, Help: help}, f)
 	}
-	const conns, connsHelp = "pgxpool_conns", "Connections in the pool by state."
+	const conns, connsHelp = "db_pool_connections", "Connections in the pool by state."
 	return []prometheus.Collector{
 		gauge(conns, connsHelp, func() float64 { return float64(stat().IdleConns()) }, prometheus.Labels{"state": "idle"}),
-		gauge(conns, connsHelp, func() float64 { return float64(stat().AcquiredConns()) }, prometheus.Labels{"state": "acquired"}),
+		gauge(conns, connsHelp, func() float64 { return float64(stat().AcquiredConns()) }, prometheus.Labels{"state": "in_use"}),
 		gauge(conns, connsHelp, func() float64 { return float64(stat().ConstructingConns()) }, prometheus.Labels{"state": "constructing"}),
-		gauge("pgxpool_max_conns", "Configured maximum pool size.", func() float64 { return float64(stat().MaxConns()) }, nil),
-		counter("pgxpool_acquire_total", "Successful connection acquires.", func() float64 { return float64(stat().AcquireCount()) }),
-		counter("pgxpool_acquire_duration_seconds_total", "Cumulative time spent acquiring connections.",
-			func() float64 { return stat().AcquireDuration().Seconds() }),
-		counter("pgxpool_empty_acquire_total", "Acquires that waited because the pool was empty.",
+		gauge("db_pool_max_connections", "Configured maximum pool size.", func() float64 { return float64(stat().MaxConns()) }, nil),
+		counter("db_pool_acquires_waited_total", "Connection acquires that waited because the pool had no idle connection.",
 			func() float64 { return float64(stat().EmptyAcquireCount()) }),
-		counter("pgxpool_canceled_acquire_total", "Acquires cancelled by their context while waiting.",
+		counter("db_pool_acquire_wait_seconds_total", "Cumulative time spent acquiring connections.",
+			func() float64 { return stat().AcquireDuration().Seconds() }),
+		counter("db_pool_acquires_canceled_total", "Connection acquires cancelled by their context while waiting.",
 			func() float64 { return float64(stat().CanceledAcquireCount()) }),
 		db.metrics.duration,
 		db.metrics.errors,
@@ -60,7 +61,7 @@ func (db *DB) Collectors() []prometheus.Collector {
 type operationKey struct{}
 
 // WithOperation names the queries run with ctx for the query metrics
-// (pgx_query_duration_seconds{operation=name}). Use a constant per call site
+// (db_query_duration_seconds{operation=name}). Use a constant per call site
 // ("tasks.list"), never anything derived from input: it is a label.
 func WithOperation(ctx context.Context, name string) context.Context {
 	return context.WithValue(ctx, operationKey{}, name)
@@ -76,12 +77,12 @@ type queryMetrics struct {
 func newQueryMetrics() *queryMetrics {
 	return &queryMetrics{
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "pgx_query_duration_seconds",
+			Name:    "db_query_duration_seconds",
 			Help:    "PostgreSQL query latency in seconds by operation (WithOperation name, else the statement keyword).",
-			Buckets: []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
+			Buckets: []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10},
 		}, []string{"operation"}),
 		errors: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "pgx_query_errors_total",
+			Name: "db_query_errors_total",
 			Help: "PostgreSQL queries that failed, by operation (a cancelled context counts).",
 		}, []string{"operation"}),
 	}

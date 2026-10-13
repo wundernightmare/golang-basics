@@ -7,7 +7,7 @@ import (
 )
 
 // BreakerState is a circuit breaker's state; its value is the
-// circuit_breaker_state gauge.
+// http_client_circuit_breaker_state gauge.
 type BreakerState int
 
 // The breaker states.

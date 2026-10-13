@@ -102,14 +102,14 @@ relay (internal/outbox) ◄────── wake / poll ───────�
   `UPDATE outbox SET rejections = 0, next_attempt_at = NULL WHERE id = …`, or
   delete it.
 * **Visible without a broker.** With no `TASKS_KAFKA_BROKERS` the relay
-  publishes nothing, but `outbox_pending` and `outbox_relay_lag_seconds` stay
+  publishes nothing, but `outbox_pending` and `outbox_oldest_age_seconds` stay
   current, so the waiting backlog shows on `/metrics`.
 * **Traced.** The request's trace context is stored with the row; the relay's
   span and the produced record continue the request's trace.
-* **Visible.** `outbox_pending`, `outbox_dead`, `outbox_relay_lag_seconds`
-  (age of the oldest pending event — alert on this) and
-  `outbox_published_total{result}` (`ok`, `rejected`, `error`). Failed rows
-  keep `last_error` for inspection.
+* **Visible.** `outbox_pending`, `outbox_dead` and `outbox_oldest_age_seconds`
+  (age of the oldest pending event — alert on this); the publishes
+  themselves are `kafka_producer_records_total{result}` (`ok`, `rejected`,
+  or the outage kinds). Failed rows keep `last_error` for inspection.
 * The HTTP handler wakes the relay after each commit, so events normally go
   out within milliseconds; `TASKS_OUTBOX_POLL_INTERVAL` is only the fallback.
 
