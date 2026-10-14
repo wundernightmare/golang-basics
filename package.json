@@ -13,6 +13,6 @@
   },
   "devDependencies": {
     "allure-commandline": "2.46.1",
-    "lefthook": "^2.1.16"
+    "lefthook": "^2.2.0"
   }
 }
