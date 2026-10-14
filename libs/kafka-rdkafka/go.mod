@@ -3,7 +3,7 @@ module github.com/tracehubmmp/golang-basics/libs/kafka-rdkafka
 go 1.27.0
 
 require (
-	github.com/confluentinc/confluent-kafka-go/v2 v2.15.1
+	github.com/confluentinc/confluent-kafka-go/v2 v2.16.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/stretchr/testify v1.12.1
 	github.com/tracehubmmp/golang-basics/libs/kafka v0.0.0

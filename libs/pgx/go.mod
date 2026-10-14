@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/caarlos0/env/v11 v11.4.1
-	github.com/exaring/otelpgx v0.12.0
+	github.com/exaring/otelpgx v0.12.1
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/stretchr/testify v1.12.1
