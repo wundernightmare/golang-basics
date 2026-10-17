@@ -8,7 +8,7 @@
 # own version-pinned image (or `go install` for the Go-built ones).
 
 [tools]
-semgrep     = "1.179.0"
+semgrep     = "1.180.0"
 gitleaks    = "8.30.1"
 osv-scanner = "2.6.0"
 hadolint    = "2.15.1"
@@ -16,8 +16,8 @@ hadolint    = "2.15.1"
 # Container CVE / SBOM — `just docker-scan` / `docker-scan-ci`. syft writes
 # the CycloneDX SBOM, grype matches it against the OSV / Debian / Go vuln
 # databases and fails on HIGH+ in CI.
-syft  = "1.54.0"
-grype = "0.120.0"
+syft  = "1.54.1"
+grype = "0.120.1"
 
 # Supply-chain signing — cosign in key-mode with `--tlog-upload=false`. No
 # Rekor / Sigstore involvement; verify offline against cosign.pub.

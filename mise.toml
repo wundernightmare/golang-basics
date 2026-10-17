@@ -44,8 +44,8 @@ just          = "1.57.0"
 shellcheck    = "0.11.0" # `just lint` runs it over scripts/ and benchmarks/
 # TypeSpec (api/) only. Full semver: CI derives image tags from it. pnpm is
 # kept equal to package.json's packageManager (corepack is not used).
-node = "26.10.0"
-pnpm = "11.28.4"
+node = "24.21.0"
+pnpm = "12.11.2"
 
 # `go:` backend = `go install` from source against the Go pinned above; the
 # first `mise install` compiles them, afterwards they are cached.
