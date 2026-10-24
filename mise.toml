@@ -68,7 +68,7 @@ pnpm = "12.11.2"
 # HTTP strips the surrounding whitespace before the server sees the value
 # (RFC 9110 §5.5, net/http does), so the 255-character key is accepted and
 # Schemathesis reports a violation that cannot exist on the wire.
-SCHEMATHESIS_VERSION = "4.27.0"
+SCHEMATHESIS_VERSION = "4.27.5"
 # Load the (gitignored) .env so the mise shims see the same proxy / registry /
 # GOPROXY settings `just` loads via `set dotenv-load`. Silently skipped when
 # the file is absent — an open-network clone needs no .env at all. Every knob
