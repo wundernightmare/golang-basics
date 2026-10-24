@@ -34,7 +34,7 @@
 # through it). The module `go` directives (go.mod / go.work) stay at 1.27.0:
 # golangci-lint must be built with a Go at least as new as the directive, and
 # the pinned release is built with go1.27.0 (see CLAUDE.md "Go version").
-go            = "1.27.2"
+go            = "1.27.3"
 golangci-lint = "2.14.0"
 # just: CI installs the same version — GitHub via extractions/setup-just,
 # GitLab from the npm registry (`rust-just`, the just README's npm package,
