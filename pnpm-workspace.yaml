@@ -26,11 +26,7 @@ trustPolicy: no-downgrade
 # The escape hatch when a release is needed before the window closes is a
 # time-boxed `minimumReleaseAgeExclude:` list with the reason and a
 # `Remove after YYYY-MM-DD` line — scripts/check-waivers.sh (`just sec`, CI
-# sast) fails once that date has passed.
-minimumReleaseAgeExclude:
-  # CVE floor (GHSA-w74x/wjr9/333x/xhq7 via ajv), released 2026-10-19.
-  # Remove after 2026-10-26.
-  - 'fast-uri@3.1.9'
+# sast) fails once that date has passed. None is needed today.
 
 # Transitive CVEs pinned out. Floors as caret ranges: `pnpm update` still moves
 # them inside the major, and the release-age window still applies. Drop an
