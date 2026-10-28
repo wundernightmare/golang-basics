@@ -3,7 +3,7 @@ module github.com/tracehubmmp/golang-basics/libs/testx/contract
 go 1.27.0
 
 require (
-	github.com/getkin/kin-openapi v0.150.0
+	github.com/getkin/kin-openapi v0.151.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/stretchr/testify v1.12.1
 )
