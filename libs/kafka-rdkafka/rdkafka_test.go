@@ -28,6 +28,7 @@ func admin(t testing.TB) *ckafka.AdminClient {
 	a, err := ckafka.NewAdminClient(&ckafka.ConfigMap{"bootstrap.servers": strings.Join(containers.Kafka(t), ",")})
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
+
 	return a
 }
 
@@ -35,13 +36,16 @@ var harness = kafkatest.Harness{
 	Brokers: containers.Kafka,
 	CreateTopic: func(t testing.TB, partitions int32, names ...string) {
 		t.Helper()
-		a := admin(t)
+		adminClient := admin(t)
+
 		specs := make([]ckafka.TopicSpecification, len(names))
 		for i, n := range names {
 			specs[i] = ckafka.TopicSpecification{Topic: n, NumPartitions: int(partitions), ReplicationFactor: 1}
 		}
-		res, err := a.CreateTopics(t.Context(), specs)
+
+		res, err := adminClient.CreateTopics(t.Context(), specs)
 		require.NoError(t, err)
+
 		for _, r := range res {
 			require.Equal(t, ckafka.ErrNoError, r.Error.Code(), "create %s: %v", r.Topic, r.Error)
 		}
@@ -49,26 +53,32 @@ var harness = kafkatest.Harness{
 		// every partition.
 		require.Eventually(t, func() bool {
 			for _, n := range names {
-				md, err := a.GetMetadata(&n, false, 2000)
+				md, err := adminClient.GetMetadata(&n, false, 2000)
 				if err != nil || len(md.Topics[n].Partitions) != int(partitions) {
 					return false
 				}
+
 				for _, p := range md.Topics[n].Partitions {
 					if p.Leader < 0 || p.Error.Code() != ckafka.ErrNoError {
 						return false
 					}
 				}
 			}
+
 			return true
 		}, 30*time.Second, 50*time.Millisecond, "topics %v get leaders", names)
 	},
 	Committed: func(t testing.TB, group, topic string) map[int32]int64 {
 		t.Helper()
+
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
+
 		res, err := admin(t).ListConsumerGroupOffsets(ctx, []ckafka.ConsumerGroupTopicPartitions{{Group: group}})
 		require.NoError(t, err)
+
 		out := map[int32]int64{}
+
 		for _, g := range res.ConsumerGroupsTopicPartitions {
 			for _, tp := range g.Partitions {
 				if tp.Topic != nil && *tp.Topic == topic && tp.Error == nil && tp.Offset >= 0 {
@@ -76,27 +86,41 @@ var harness = kafkatest.Harness{
 				}
 			}
 		}
+
 		return out
 	},
 }
 
-func TestConformance(t *testing.T) { kafkatest.Run(t, harness) }
+func TestConformance(t *testing.T) {
+	t.Parallel()
+	kafkatest.Run(t, harness)
+}
 
-func TestSASLSSL(t *testing.T) { kafkatest.SASLSSL(t) }
+func TestSASLSSL(t *testing.T) {
+	t.Parallel()
+	kafkatest.SASLSSL(t)
+}
 
 func TestProvider(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(t, "rdkafka", kafka.Provider())
 }
 
 // A property a named key owns cannot come in through the passthrough —
 // one source of truth — and the error names the key, never the value.
 func TestValidate_PassthroughCannotOverrideNamedKeys(t *testing.T) {
-	cfg := kafka.Config{Brokers: []string{"b:9092"},
+	t.Parallel()
+
+	cfg := kafka.Config{
+		Brokers:                 []string{"b:9092"},
 		ExtraProperties:         kafka.Properties{"queue.buffering.max.kbytes": "1048576", "debug": "broker"},
 		ConsumerExtraProperties: kafka.Properties{"fetch.message.max.bytes": "1", "partition.assignment.strategy": "range", "go.events.channel.size": "1"},
-		ProducerExtraProperties: kafka.Properties{"sasl.password": "hunter2", "batch.size": "262144"}}
+		ProducerExtraProperties: kafka.Properties{"sasl.password": "hunter2", "batch.size": "262144"},
+	}
 	err := cfg.Validate()
 	require.Error(t, err)
+
 	for _, want := range []string{
 		`KAFKA_EXTRA_PROPERTIES: "queue.buffering.max.kbytes" is not set here — use KAFKA_PRODUCER_QUEUE_MAX_KBYTES`,
 		`"fetch.message.max.bytes" is not set here — use KAFKA_CONSUMER_PARTITION_FETCH_MAX_BYTES`,
@@ -106,6 +130,7 @@ func TestValidate_PassthroughCannotOverrideNamedKeys(t *testing.T) {
 	} {
 		assert.Contains(t, err.Error(), want)
 	}
+
 	assert.NotContains(t, err.Error(), "hunter2", "values are never echoed")
 	assert.NotContains(t, err.Error(), "debug")
 	assert.NotContains(t, err.Error(), "batch.size")
@@ -116,8 +141,11 @@ func TestValidate_PassthroughCannotOverrideNamedKeys(t *testing.T) {
 // exits and restarts) and readiness fails — the loop no longer polls a dead
 // client while /readyz stays green.
 func TestFencedStaticMemberStopsTheLoop(t *testing.T) {
+	t.Parallel()
+
 	topic := testx.Unique("fenced")
 	harness.CreateTopic(t, 1, topic)
+
 	cfg := func() kafka.Config {
 		return kafka.Config{
 			Brokers: containers.Kafka(t), Topics: []string{topic}, Group: "g-" + topic,
@@ -129,8 +157,10 @@ func TestFencedStaticMemberStopsTheLoop(t *testing.T) {
 
 	first, err := kafka.NewConsumer(t.Context(), cfg(), nil)
 	require.NoError(t, err)
+
 	done := make(chan error, 1)
 	go func() { done <- first.Run(context.Background(), handle) }()
+
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(first.Collectors()...)
 	require.Eventually(t, func() bool { return testx.Metric(t, reg, "kafka_consumer_assigned_partitions", nil) == 1 },
@@ -138,8 +168,10 @@ func TestFencedStaticMemberStopsTheLoop(t *testing.T) {
 
 	second, err := kafka.NewConsumer(t.Context(), cfg(), nil)
 	require.NoError(t, err)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+
 	go func() { _ = second.Run(ctx, handle) }()
 
 	select {
@@ -149,7 +181,9 @@ func TestFencedStaticMemberStopsTheLoop(t *testing.T) {
 	case <-time.After(60 * time.Second):
 		t.Fatal("the fenced member kept polling")
 	}
+
 	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer rcancel()
+
 	require.Error(t, first.ReadyCheck()(rctx), "readiness fails on the dead client")
 }

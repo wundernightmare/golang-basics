@@ -27,10 +27,12 @@ func main() {
 		Load:     func() (config.Config, error) { return config.Load(os.Getenv(config.Prefix + "CONFIG")) },
 		Defaults: config.Defaults,
 	}
+
 	cfg, code, ok := boot.Config(os.Args[1:], os.Stdout, os.Stderr)
 	if !ok {
 		os.Exit(code)
 	}
+
 	if err := run(cfg); err != nil {
 		os.Exit(1)
 	}
@@ -39,7 +41,7 @@ func main() {
 func run(cfg config.Config) error {
 	logger := httpx.NewLogger(cfg.LogConfig())
 
-	shutdownTracing, err := otelx.Init(context.Background(), cfg.OTel, logger)
+	tel, err := otelx.Init(context.Background(), cfg.OTel, logger) // passed explicitly below (see otelx.Telemetry)
 	if err != nil {
 		logger.Error("tracing init failed", "err", err)
 		return err
@@ -47,24 +49,28 @@ func run(cfg config.Config) error {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = shutdownTracing(ctx)
+
+		_ = tel.Shutdown(ctx)
 	}()
 
 	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelBoot()
 
-	consumer, err := kafka.NewConsumer(bootCtx, cfg.Kafka, logger)
+	consumer, err := kafka.NewConsumer(bootCtx, cfg.Kafka, logger,
+		kafka.WithTracerProvider(tel.TracerProvider), kafka.WithPropagator(tel.Propagator))
 	if err != nil {
 		logger.Error("kafka consumer init failed", "err", err)
 		return err
 	}
 	defer consumer.Close() // Run closes it too; this covers an early return
 
-	srv, err := httpx.NewServer(cfg.Config, logger, httpx.WithConfig(cfg))
+	srv, err := httpx.NewServer(cfg.Config, logger, httpx.WithConfig(cfg),
+		httpx.WithTracerProvider(tel.TracerProvider), httpx.WithPropagator(tel.Propagator))
 	if err != nil {
 		logger.Error("admin server init failed", "err", err)
 		return err
 	}
+
 	srv.Health.Register("kafka", consumer.ReadyCheck())
 	// Consume outcomes / retries / DLQ / lag from the lib, the worker's own
 	// counters next to them — one /metrics on the admin listener has it all.
@@ -84,6 +90,8 @@ func run(cfg config.Config) error {
 		logger.Error("consumer exited with error", "err", err)
 		return err
 	}
+
 	logger.Info("consumer stopped cleanly")
+
 	return nil
 }

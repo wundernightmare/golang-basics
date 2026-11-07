@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"fmt"
+	"maps"
 	"net/url"
 	"reflect"
 	"regexp"
@@ -52,6 +53,7 @@ func Redact(v any) any {
 	if v == nil {
 		return nil
 	}
+
 	return redactValue(reflect.ValueOf(v), false)
 }
 
@@ -59,61 +61,93 @@ func redactValue(rv reflect.Value, secret bool) any {
 	if !rv.IsValid() {
 		return nil
 	}
+
 	switch rv.Kind() {
 	case reflect.Pointer, reflect.Interface:
 		if rv.IsNil() {
 			return nil
 		}
+
 		return redactValue(rv.Elem(), secret)
 	case reflect.Struct:
-		if t, ok := rv.Interface().(time.Time); ok {
+		if t, ok := reflect.TypeAssert[time.Time](rv); ok {
 			return t
 		}
+
 		return redactStruct(rv, secret)
 	case reflect.Slice, reflect.Array:
-		if rv.Kind() == reflect.Slice && rv.IsNil() {
-			return nil
-		}
-		if rv.Type().Elem().Kind() == reflect.Uint8 { // []byte: a blob, never an operator-readable value
-			if secret && rv.Len() > 0 {
-				return redactedValue
-			}
-			return rv.Interface()
-		}
-		out := make([]any, rv.Len())
-		for i := range rv.Len() {
-			out[i] = redactValue(rv.Index(i), secret)
-		}
-		return out
+		return redactList(rv, secret)
 	case reflect.Map:
-		if rv.IsNil() {
-			return nil
-		}
-		out := make(map[string]any, rv.Len())
-		iter := rv.MapRange()
-		for iter.Next() {
-			key := keyString(iter.Key())
-			out[key] = redactValue(iter.Value(), secret || secretFieldName.MatchString(key))
-		}
-		return out
+		return redactMap(rv, secret)
 	case reflect.String:
-		s := rv.String()
-		if secret {
-			if s == "" {
-				return ""
-			}
-			return redactedValue
-		}
-		return redactURL(s)
+		return redactString(rv.String(), secret)
 	case reflect.Int64:
 		if rv.Type() == reflect.TypeFor[time.Duration]() {
 			return time.Duration(rv.Int()).String()
 		}
+	default: // other scalars (and an Int64 that is not a Duration): below
 	}
+
 	if secret && !rv.IsZero() {
 		return redactedValue
 	}
+
 	return rv.Interface()
+}
+
+// redactList renders a slice or array; a []byte is a blob, never an
+// operator-readable value.
+func redactList(rv reflect.Value, secret bool) any {
+	if rv.Kind() == reflect.Slice && rv.IsNil() {
+		return nil
+	}
+
+	if rv.Type().Elem().Kind() == reflect.Uint8 {
+		if secret && rv.Len() > 0 {
+			return redactedValue
+		}
+
+		return rv.Interface()
+	}
+
+	out := make([]any, rv.Len())
+	for i := range rv.Len() {
+		out[i] = redactValue(rv.Index(i), secret)
+	}
+
+	return out
+}
+
+// redactMap renders a map with string keys; a key that names a secret
+// redacts its value.
+func redactMap(rv reflect.Value, secret bool) any {
+	if rv.IsNil() {
+		return nil
+	}
+
+	out := make(map[string]any, rv.Len())
+
+	iter := rv.MapRange()
+	for iter.Next() {
+		key := keyString(iter.Key())
+		out[key] = redactValue(iter.Value(), secret || secretFieldName.MatchString(key))
+	}
+
+	return out
+}
+
+// redactString hides a secret (an empty one stays empty: "unset" is not a
+// secret) and strips credentials from anything URL-shaped.
+func redactString(s string, secret bool) any {
+	if secret {
+		if s == "" {
+			return ""
+		}
+
+		return redactedValue
+	}
+
+	return redactURL(s)
 }
 
 // redactStruct renders a struct as a map. inherited is true when the struct
@@ -121,24 +155,27 @@ func redactValue(rv reflect.Value, secret bool) any {
 // elements of a secret slice or map are.
 func redactStruct(rv reflect.Value, inherited bool) map[string]any {
 	rt := rv.Type()
+
 	out := make(map[string]any, rt.NumField())
 	for i := range rt.NumField() {
 		f := rt.Field(i)
 		if !f.IsExported() {
 			continue
 		}
+
 		name := fieldName(f)
 		if name == "-" {
 			continue
 		}
+
 		if f.Anonymous && f.Type.Kind() == reflect.Struct && !hasNameTag(f) {
 			// Embedded struct without its own name: inline its fields, as
 			// encoding/json does.
-			for k, v := range redactStruct(rv.Field(i), inherited) {
-				out[k] = v
-			}
+			maps.Copy(out, redactStruct(rv.Field(i), inherited))
+
 			continue
 		}
+
 		secret := inherited || secretFieldName.MatchString(f.Name)
 		switch f.Tag.Get("secret") {
 		case "true":
@@ -146,8 +183,10 @@ func redactStruct(rv reflect.Value, inherited bool) map[string]any {
 		case "false":
 			secret = false
 		}
+
 		out[name] = redactValue(rv.Field(i), secret)
 	}
+
 	return out
 }
 
@@ -157,6 +196,7 @@ func hasNameTag(f reflect.StructField) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -166,6 +206,7 @@ func fieldName(f reflect.StructField) string {
 			return n
 		}
 	}
+
 	return f.Name
 }
 
@@ -173,9 +214,11 @@ func keyString(k reflect.Value) string {
 	if k.Kind() == reflect.String {
 		return k.String()
 	}
-	if s, ok := k.Interface().(interface{ String() string }); ok {
+
+	if s, ok := reflect.TypeAssert[interface{ String() string }](k); ok {
 		return s.String()
 	}
+
 	return fmt.Sprint(k.Interface())
 }
 
@@ -184,36 +227,61 @@ func keyString(k reflect.Value) string {
 // is returned unchanged.
 func redactURL(s string) string {
 	if strings.Contains(s, "://") {
-		u, err := url.Parse(s)
-		if err == nil && (u.User != nil || u.RawQuery != "") {
-			if _, has := u.User.Password(); has {
-				u.User = url.UserPassword(u.User.Username(), "xxxxx")
-			}
-			if u.RawQuery != "" {
-				q := u.Query()
-				changed := false
-				for k := range q {
-					if secretParam.MatchString(k) {
-						q.Set(k, redactedValue)
-						changed = true
-					}
-				}
-				if changed {
-					u.RawQuery = q.Encode()
-				}
-			}
-			return u.String()
-		}
-		if err != nil && rawUserinfo.MatchString(s) {
+		return redactURLForm(s)
+	}
+
+	if strings.Contains(s, "=") && dsnPair.MatchString(s) {
+		return dsnPair.ReplaceAllString(s, "$1="+redactedValue)
+	}
+
+	return s
+}
+
+// redactURLForm masks the password and the secret query parameters of a
+// scheme://… string.
+func redactURLForm(s string) string {
+	u, err := url.Parse(s)
+	if err != nil {
+		if rawUserinfo.MatchString(s) {
 			// A URL net/url rejects (a bad escape, a space, several hosts)
 			// still carries its password in plain sight: mask everything
 			// between the user and the last '@' rather than show it.
 			return rawUserinfo.ReplaceAllString(s, "${1}:xxxxx@")
 		}
+
 		return s
 	}
-	if strings.Contains(s, "=") && dsnPair.MatchString(s) {
-		return dsnPair.ReplaceAllString(s, "$1="+redactedValue)
+
+	if u.User == nil && u.RawQuery == "" {
+		return s
 	}
-	return s
+
+	if _, has := u.User.Password(); has { // (*url.Userinfo).Password is nil-safe
+		u.User = url.UserPassword(u.User.Username(), "xxxxx")
+	}
+
+	if u.RawQuery != "" {
+		redactQuery(u)
+	}
+
+	return u.String()
+}
+
+// redactQuery replaces the value of every secret-looking query parameter;
+// the query is re-encoded only when something changed.
+func redactQuery(u *url.URL) {
+	q := u.Query()
+	changed := false
+
+	for k := range q {
+		if secretParam.MatchString(k) {
+			q.Set(k, redactedValue)
+
+			changed = true
+		}
+	}
+
+	if changed {
+		u.RawQuery = q.Encode()
+	}
 }

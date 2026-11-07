@@ -31,6 +31,7 @@ func (s BreakerState) String() string {
 	case StateHalfOpen:
 		return "half_open"
 	}
+
 	return "unknown"
 }
 
@@ -86,6 +87,7 @@ func newBreaker(cfg *TargetConfig, now func() time.Time, onChange func(from, to 
 	if cfg.BreakerFailureRatio <= 0 {
 		return nil
 	}
+
 	b := &breaker{
 		win:         newWindow(cfg.BreakerWindow),
 		ratio:       cfg.BreakerFailureRatio,
@@ -96,6 +98,7 @@ func newBreaker(cfg *TargetConfig, now func() time.Time, onChange func(from, to 
 		onChange:    onChange,
 	}
 	b.cur.Store(&snapshot{state: StateClosed})
+
 	return b
 }
 
@@ -104,6 +107,7 @@ func (b *breaker) state() BreakerState {
 	if b == nil {
 		return StateClosed
 	}
+
 	return b.cur.Load().state
 }
 
@@ -113,6 +117,7 @@ func (b *breaker) allow() (ticket, bool) {
 	if b == nil {
 		return ticket{}, true
 	}
+
 	for {
 		s := b.cur.Load()
 		switch s.state {
@@ -131,7 +136,9 @@ func (b *breaker) allow() (ticket, bool) {
 			if s.probes >= b.maxProbes {
 				return ticket{}, false
 			}
+
 			next := *s
+
 			next.probes++
 			if b.cur.CompareAndSwap(s, &next) {
 				return ticket{gen: s.gen, probe: true}, true
@@ -141,31 +148,37 @@ func (b *breaker) allow() (ticket, bool) {
 }
 
 // record reports how the request admitted with t ended.
-func (b *breaker) record(t ticket, o outcome) {
+func (b *breaker) record(t ticket, result outcome) {
 	if b == nil {
 		return
 	}
+
 	if t.probe {
-		b.recordProbe(t, o)
+		b.recordProbe(t, result)
 		return
 	}
-	if o == outcomeIgnored {
+
+	if result == outcomeIgnored {
 		return
 	}
+
 	s := b.cur.Load()
 	if s.state != StateClosed || s.gen != t.gen {
 		return // admitted in an earlier generation: its result is stale
 	}
+
 	failed := 0
-	if o == outcomeFailure {
+	if result == outcomeFailure {
 		failed = 1
 	}
+
 	now := b.now()
 	b.mu.Lock()
 	if b.winGen != s.gen {
 		b.win.reset()
 		b.winGen = s.gen
 	}
+
 	b.win.add(now, 1, failed)
 	requests, failures := b.win.sum(now)
 	b.mu.Unlock()
@@ -181,7 +194,9 @@ func (b *breaker) recordProbe(t ticket, o outcome) {
 		if s.state != StateHalfOpen || s.gen != t.gen {
 			return
 		}
+
 		var next *snapshot
+
 		switch o {
 		case outcomeIgnored: // release the slot for another probe
 			n := *s
@@ -198,6 +213,7 @@ func (b *breaker) recordProbe(t ticket, o outcome) {
 				next = &n
 			}
 		}
+
 		if next.state != s.state {
 			if b.swap(s, next) {
 				return
@@ -214,8 +230,10 @@ func (b *breaker) swap(s, next *snapshot) bool {
 	if !b.cur.CompareAndSwap(s, next) {
 		return false
 	}
+
 	if b.onChange != nil {
 		b.onChange(s.state, next.state)
 	}
+
 	return true
 }

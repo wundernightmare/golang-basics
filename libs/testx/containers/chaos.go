@@ -46,12 +46,14 @@ var toxi shared[*toxiclient.Client]
 // Docker network wiring is needed.
 func toxiproxy(tb testing.TB) *toxiclient.Client {
 	tb.Helper()
+
 	return use(tb, &toxi, "toxiproxy", func(ctx context.Context) (*toxiclient.Client, testcontainers.Container, error) {
 		exposed := []string{tctoxiproxy.ControlPort}
 		for _, p := range proxyPorts {
 			exposed = append(exposed, strconv.Itoa(p)+"/tcp")
 		}
-		c, err := tctoxiproxy.Run(ctx, ToxiproxyImage,
+
+		container, err := tctoxiproxy.Run(ctx, ToxiproxyImage,
 			testcontainers.WithExposedPorts(exposed...),
 			testcontainers.WithWaitStrategy(wait.ForListeningPort(tctoxiproxy.ControlPort).WithStartupTimeout(60*time.Second)),
 			testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) {
@@ -62,11 +64,13 @@ func toxiproxy(tb testing.TB) *toxiclient.Client {
 		if err != nil {
 			return nil, nil, err
 		}
-		uri, err := c.URI(ctx)
+
+		uri, err := container.URI(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
-		return toxiclient.NewClient(uri), c, nil
+
+		return toxiclient.NewClient(uri), container, nil
 	})
 }
 
@@ -84,10 +88,12 @@ type Proxy struct {
 // the address the service dials changes.
 func Proxied(tb testing.TB, dep string) *Proxy {
 	tb.Helper()
+
 	port, ok := proxyPorts[dep]
 	require.Truef(tb, ok, "containers: no proxy port for %q", dep)
 
 	var upstreamHost string
+
 	switch dep {
 	case "postgres":
 		Postgres(tb)
@@ -96,16 +102,20 @@ func Proxied(tb testing.TB, dep string) *Proxy {
 		Valkey(tb)
 		upstreamHost = mappedHostPort(tb, valkey.container, "6379/tcp")
 	}
+
 	cli := toxiproxy(tb)
 	name := dep
+
 	p, err := cli.Proxy(name)
 	if err != nil { // not created yet
 		p, err = cli.CreateProxy(name, fmt.Sprintf("0.0.0.0:%d", port), "host.docker.internal:"+upstreamHost)
 		require.NoError(tb, err)
 	}
+
 	addr := mappedHostPort(tb, toxi.container, strconv.Itoa(port)+"/tcp")
 	pr := &Proxy{tb: tb, proxy: p, Addr: "localhost:" + addr}
 	tb.Cleanup(pr.Reset)
+
 	return pr
 }
 
@@ -131,6 +141,7 @@ func (p *Proxy) Reset() {
 			_ = p.proxy.RemoveToxic(t.Name)
 		}
 	}
+
 	_ = p.proxy.Enable()
 }
 
@@ -147,36 +158,46 @@ func (p *Proxy) Reset() {
 // daemon (OrbStack) on unpause during development.
 func Pause(tb testing.TB, dep string) (unpause func()) {
 	tb.Helper()
-	var c testcontainers.Container
+
+	var container testcontainers.Container
+
 	switch dep {
 	case "kafka":
 		Kafka(tb)
-		c = kafka.container
+
+		container = kafka.container
 	case "postgres":
 		Postgres(tb)
-		c = postgres.container
+
+		container = postgres.container
 	case "valkey":
 		Valkey(tb)
-		c = valkey.container
+
+		container = valkey.container
 	default:
 		tb.Fatalf("containers: cannot pause %q", dep)
 	}
+
 	signalAll := func(sig string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		// -1: every process the sender may signal, except itself and init —
 		// exactly the container's workload.
-		code, _, err := c.Exec(ctx, []string{"/bin/sh", "-c", "kill -" + sig + " -1"})
+		code, _, err := container.Exec(ctx, []string{"/bin/sh", "-c", "kill -" + sig + " -1"})
 		if err != nil {
 			return err
 		}
+
 		if code != 0 {
 			return fmt.Errorf("kill -%s -1 exited %d", sig, code)
 		}
+
 		return nil
 	}
 	require.NoError(tb, signalAll("STOP"))
+
 	var once sync.Once
+
 	unpause = func() {
 		once.Do(func() {
 			if err := signalAll("CONT"); err != nil {
@@ -185,14 +206,17 @@ func Pause(tb testing.TB, dep string) (unpause func()) {
 		})
 	}
 	tb.Cleanup(unpause)
+
 	return unpause
 }
 
 // mappedHostPort returns "<host port>" for a container's exposed port.
 func mappedHostPort(tb testing.TB, c testcontainers.Container, port string) string {
 	tb.Helper()
+
 	ctx := context.Background()
 	mp, err := c.MappedPort(ctx, port)
 	require.NoError(tb, err)
+
 	return mp.Port()
 }

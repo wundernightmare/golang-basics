@@ -74,6 +74,7 @@ func NewSendError(kind string, code int, err error) *SendError {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		kind = KindUnavailable
 	}
+
 	return &SendError{Kind: kind, Retryable: kind != KindRejected, Code: code, Err: err}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"time"
 
 	"github.com/exaring/otelpgx"
@@ -32,7 +33,12 @@ type DB struct {
 // (statement_timeout, lock_timeout, idle_in_transaction_session_timeout) as
 // run-time parameters; a value already in the DSN is overridden only when the
 // corresponding field is non-zero.
-func New(ctx context.Context, cfg Config, log *slog.Logger) (*DB, error) {
+func New(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) (*DB, error) {
+	var applied options
+	for _, opt := range opts {
+		opt(&applied)
+	}
+
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -48,36 +54,47 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*DB, error) {
 	if cfg.MaxConns > 0 {
 		poolCfg.MaxConns = cfg.MaxConns
 	}
+
 	if cfg.MinConns > 0 {
 		poolCfg.MinConns = cfg.MinConns
 	}
+
 	if cfg.MaxConnLifetime > 0 {
 		poolCfg.MaxConnLifetime = cfg.MaxConnLifetime
 	}
+
 	if cfg.MaxConnIdleTime > 0 {
 		poolCfg.MaxConnIdleTime = cfg.MaxConnIdleTime
 	}
+
 	if cfg.PasswordFile != "" {
 		pw, err := readSecretFile(cfg.PasswordFile)
 		if err != nil {
 			return nil, fmt.Errorf("pgx: DB_PASSWORD_FILE: %w", err)
 		}
+
 		poolCfg.ConnConfig.Password = pw // over the URL's and DB_PASSWORD
 	}
+
 	connectTimeout := cfg.ConnectTimeout
 	if connectTimeout <= 0 {
 		connectTimeout = defaultConnectTimeout
 	}
+
 	poolCfg.ConnConfig.ConnectTimeout = connectTimeout
-	for k, v := range cfg.runtimeParams() {
-		poolCfg.ConnConfig.RuntimeParams[k] = v
-	}
+	maps.Copy(poolCfg.ConnConfig.RuntimeParams, cfg.runtimeParams())
 
 	// Tracing and metrics: a span per query/batch/prepare/connect, child of
 	// whatever span is in the query context (no-op provider → no cost beyond
 	// the hook call), and the query duration / error metrics beside it.
 	metrics := newQueryMetrics()
-	poolCfg.ConnConfig.Tracer = multitracer.New(otelpgx.NewTracer(), metrics)
+
+	var traceOpts []otelpgx.Option
+	if applied.tp != nil {
+		traceOpts = append(traceOpts, otelpgx.WithTracerProvider(applied.tp))
+	}
+
+	poolCfg.ConnConfig.Tracer = multitracer.New(otelpgx.NewTracer(traceOpts...), metrics)
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
@@ -86,6 +103,7 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*DB, error) {
 
 	pingCtx, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
+
 	if err := pool.Ping(pingCtx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("pgx: initial ping: %w", err)
@@ -97,6 +115,7 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) (*DB, error) {
 		"host", poolCfg.ConnConfig.Host, "port", poolCfg.ConnConfig.Port,
 		"database", poolCfg.ConnConfig.Database, "max_conns", poolCfg.MaxConns,
 		"statement_timeout", cfg.StatementTimeout.String())
+
 	return &DB{pool: pool, log: log, metrics: metrics}, nil
 }
 
@@ -111,9 +130,11 @@ func (db *DB) ReadyCheck() func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
+
 		if err := db.pool.Ping(ctx); err != nil {
 			return fmt.Errorf("postgres unreachable: %w", err)
 		}
+
 		return nil
 	}
 }

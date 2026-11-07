@@ -15,8 +15,10 @@
 // A service typically does:
 //
 //	otelCfg, _ := otelx.LoadConfig("TASKS_")
-//	shutdown, _ := otelx.Init(ctx, otelCfg, log)
-//	defer shutdown(context.Background())
+//	tel, _ := otelx.Init(ctx, otelCfg, log)
+//	defer tel.Shutdown(context.Background())
+//	srv, _ := httpx.NewServer(cfg, log,
+//		httpx.WithTracerProvider(tel.TracerProvider), httpx.WithPropagator(tel.Propagator))
 //
 // Metrics are deliberately not OpenTelemetry: the workspace scrapes Prometheus
 // from the admin listeners (libs/httpx.Metrics and the libs' collectors), so

@@ -25,7 +25,22 @@ README; this file is only the high-signal, easy-to-miss bits.
   stdlib security fixes reach the binaries. golangci-lint has to be built
   against a stdlib at least as new as the module target, or it panics with
   "file requires newer Go version" and CI goes red. The pinned golangci-lint
-  2.14.0 is built with go1.27.0, so raise a directive only after the linter.
+  2.15.0 is built with go1.27.0, so raise a directive only after the linter.
+
+## Lint & format
+
+- **golangci-lint runs `default: all`**; what is off is in `.golangci.yml`
+  `disable`, each with its reason. Read the policy block at the top of that
+  file before fixing findings: a finding is a signal, not an order — a fix
+  must not change behaviour or API silently; otherwise it is a
+  `//nolint:<linter> // <why>` (nolintlint requires both) or a reasoned
+  `disable`. Never trade a panic on a broken invariant for a silent skip.
+- **Formatting is `just fmt`, never by hand**: the formatters (gofumpt, gci,
+  goimports) plus the auto-fixable layout linters in `FMT_LINTERS`
+  (wsl_v5, whitespace, godot). A layout rule without an auto-fix does not
+  get enabled. No line-length limit, on purpose.
+- `just lint` starts with `golangci-lint config verify`: `run` silently
+  ignores an unknown or misspelt key.
 
 ## Dev workflow
 

@@ -86,9 +86,11 @@ func NewHealth(interval, timeout time.Duration) *Health {
 	if interval <= 0 {
 		interval = defaultHealthInterval
 	}
+
 	if timeout <= 0 {
 		timeout = defaultHealthTimeout
 	}
+
 	return &Health{
 		checks:   make(map[string]*check),
 		results:  make(map[string]result),
@@ -114,6 +116,7 @@ func (h *Health) Register(name string, fn CheckFunc, opts ...CheckOption) {
 	for _, o := range opts {
 		o(c)
 	}
+
 	h.mu.Lock()
 	h.checks[name] = c
 	delete(h.results, name) // force a fresh evaluation
@@ -133,8 +136,10 @@ func (h *Health) Collectors() []prometheus.Collector { return []prometheus.Colle
 // Health without a Server.
 func (h *Health) Run(ctx context.Context) {
 	h.refresh(ctx)
+
 	t := time.NewTicker(h.interval)
 	defer t.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -153,27 +158,34 @@ func (h *Health) Run(ctx context.Context) {
 func (h *Health) refresh(ctx context.Context) {
 	h.mu.RLock()
 	names := make([]string, 0, len(h.checks))
+
 	checks := make([]*check, 0, len(h.checks))
 	for name, c := range h.checks {
 		names = append(names, name)
 		checks = append(checks, c)
 	}
+
 	h.mu.RUnlock()
 
 	out := make([]*result, len(names))
+
 	var wg sync.WaitGroup
+
 	for i, c := range checks {
 		if !c.running.CompareAndSwap(false, true) {
 			continue
 		}
+
 		wg.Add(1)
 		go func(i int, c *check) {
 			defer wg.Done()
+
 			r, took := runCheck(ctx, c, h.timeout)
 			h.dur.WithLabelValues(names[i]).Observe(took.Seconds())
 			out[i] = &r
 		}(i, c)
 	}
+
 	wg.Wait()
 
 	h.mu.Lock()
@@ -181,14 +193,18 @@ func (h *Health) refresh(ctx context.Context) {
 		if out[i] == nil {
 			continue // skipped: still running
 		}
+
 		if _, still := h.checks[name]; !still {
 			continue // unregistered while we were running
 		}
+
 		h.results[name] = *out[i]
+
 		v := 1.0
 		if out[i].err != nil {
 			v = 0
 		}
+
 		h.up.WithLabelValues(name, boolString(!checks[i].optional)).Set(v)
 	}
 	h.mu.Unlock()
@@ -209,18 +225,24 @@ func (h *Health) refresh(ctx context.Context) {
 func runCheck(ctx context.Context, c *check, timeout time.Duration) (result, time.Duration) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
 	start := time.Now()
 	done := make(chan error, 1)
+
 	go func() {
 		defer c.running.Store(false)
+
 		done <- c.fn(cctx)
 	}()
+
 	select {
 	case err := <-done:
 		return result{err: err, checkedAt: time.Now()}, time.Since(start)
 	case <-cctx.Done():
-		return result{err: fmt.Errorf("check did not return within %s: %w", timeout, context.DeadlineExceeded),
-			checkedAt: time.Now()}, time.Since(start)
+		return result{
+			err:       fmt.Errorf("check did not return within %s: %w", timeout, context.DeadlineExceeded),
+			checkedAt: time.Now(),
+		}, time.Since(start)
 	}
 }
 
@@ -228,6 +250,7 @@ func boolString(b bool) string {
 	if b {
 		return "true"
 	}
+
 	return "false"
 }
 
@@ -246,20 +269,25 @@ func (h *Health) snapshot(ctx context.Context) (map[string]result, map[string]bo
 		}
 		h.refreshMu.Unlock()
 	}
+
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+
 	res := make(map[string]result, len(h.results))
+
 	critical := make(map[string]bool, len(h.checks))
 	for name, c := range h.checks {
 		res[name] = h.results[name]
 		critical[name] = !c.optional
 	}
+
 	return res, critical
 }
 
 func (h *Health) stale() bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+
 	limit := time.Now().Add(-(2*h.interval + h.timeout))
 	for name := range h.checks {
 		r, ok := h.results[name]
@@ -267,6 +295,7 @@ func (h *Health) stale() bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -290,22 +319,26 @@ func (h *Health) ReadyHandler() http.HandlerFunc {
 			WriteJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready"})
 			return
 		}
+
 		results, critical := h.snapshot(r.Context())
 
 		names := make([]string, 0, len(results))
 		for name := range results {
 			names = append(names, name)
 		}
+
 		sort.Strings(names) // deterministic output for tests + humans
 
 		checks := make(map[string]string, len(names))
 		criticalFailing, optionalFailing := false, false
+
 		for _, name := range names {
 			res := results[name]
 			if res.err == nil {
 				checks[name] = "ok"
 				continue
 			}
+
 			checks[name] = res.err.Error()
 			if critical[name] {
 				criticalFailing = true
@@ -315,12 +348,14 @@ func (h *Health) ReadyHandler() http.HandlerFunc {
 		}
 
 		status, body := http.StatusOK, "ready"
+
 		switch {
 		case criticalFailing:
 			status, body = http.StatusServiceUnavailable, "not_ready"
 		case optionalFailing:
 			body = "degraded"
 		}
+
 		WriteJSON(w, status, map[string]any{"status": body, "checks": checks})
 	}
 }

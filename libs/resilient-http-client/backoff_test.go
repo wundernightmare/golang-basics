@@ -13,6 +13,8 @@ import (
 )
 
 func TestFullJitter_Bounds(t *testing.T) {
+	t.Parallel()
+
 	const base, capDelay = 10 * time.Millisecond, 100 * time.Millisecond
 	assert.Zero(t, fullJitter(0, base, capDelay), "no retry, no delay")
 	assert.Zero(t, fullJitter(-1, base, capDelay))
@@ -30,18 +32,23 @@ func TestFullJitter_Bounds(t *testing.T) {
 		{1000, capDelay}, // no overflow
 	} {
 		var top time.Duration
+
 		for range 2000 {
 			d := fullJitter(tc.retry, base, capDelay)
 			assert.GreaterOrEqual(t, d, time.Duration(0))
 			assert.LessOrEqual(t, d, tc.ceiling, "retry %d", tc.retry)
 			top = max(top, d)
 		}
+
 		assert.Greater(t, top, tc.ceiling/2, "retry %d: the range reaches up to the ceiling", tc.retry)
 	}
+
 	assert.LessOrEqual(t, fullJitter(1, 1, 1), time.Duration(1), "a 1ns ceiling is still a valid range")
 }
 
 func TestParseRetryAfter(t *testing.T) {
+	t.Parallel()
+
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		in   string
@@ -73,20 +80,25 @@ func TestParseRetryAfter(t *testing.T) {
 
 func FuzzParseRetryAfter(f *testing.F) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+
 	for _, s := range []string{"0", "5", "18446744073709551616", "Fri, 25 Sep 2026 12:01:00 GMT", "Sunday, 06-Nov-94 08:49:37 GMT", "", "x", "-3"} {
 		f.Add(s)
 	}
+
 	f.Fuzz(func(t *testing.T, s string) {
 		d, ok := parseRetryAfter(s, now)
 		if !ok {
 			if d != 0 {
 				t.Fatalf("%q: not ok but %v", s, d)
 			}
+
 			return
 		}
+
 		if d < 0 || d > maxRetryAfter {
 			t.Fatalf("%q: %v out of [0, %v]", s, d, maxRetryAfter)
 		}
+
 		if n, err := strconv.ParseUint(s, 10, 64); err == nil && n < 86400 && d != time.Duration(n)*time.Second {
 			t.Fatalf("%q: seconds form parsed to %v", s, d)
 		}
@@ -94,6 +106,8 @@ func FuzzParseRetryAfter(f *testing.F) {
 }
 
 func TestIdempotent(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		method string
 		key    bool
@@ -114,16 +128,21 @@ func TestIdempotent(t *testing.T) {
 		if tc.key {
 			req.Header.Set("Idempotency-Key", "k1")
 		}
+
 		assert.Equal(t, tc.want, idempotent(req), "%s key=%v", tc.method, tc.key)
 	}
 }
 
 func TestRetryable(t *testing.T) {
+	t.Parallel()
+
 	for code := 100; code < 600; code++ {
 		want := code == 408 || code == 425 || code == 429 || (code >= 500 && code != 501 && code != 505)
 		assert.Equal(t, want, retryable(&OutboundError{Kind: KindStatus, StatusCode: code}), "status %d", code)
 	}
+
 	assert.False(t, retryableStatus(600), "not a status")
+
 	for k, want := range map[Kind]bool{
 		KindTimeout: true, KindConnection: true,
 		KindCircuitOpen: false, KindRateLimited: false, KindBulkheadFull: false, KindShutdown: false,
@@ -131,20 +150,25 @@ func TestRetryable(t *testing.T) {
 	} {
 		assert.Equal(t, want, retryable(&OutboundError{Kind: k}), k.String())
 	}
+
 	assert.True(t, Retryable(fmt.Errorf("wrapped: %w", &OutboundError{Kind: KindTimeout})))
 	assert.False(t, Retryable(errors.New("plain")))
 }
 
 func TestOutboundError_IsAsAndMessage(t *testing.T) {
+	t.Parallel()
+
 	cause := errors.New("boom")
 	err := fmt.Errorf("call: %w", &OutboundError{Kind: KindStatus, Target: "api", StatusCode: 503, Err: cause, Body: []byte("secret")})
 	require.ErrorIs(t, err, KindStatus)
 	require.NotErrorIs(t, err, KindTimeout)
 	require.ErrorIs(t, err, cause)
+
 	var oe *OutboundError
 	if assert.ErrorAs(t, err, &oe) {
 		assert.Equal(t, 503, oe.StatusCode)
 	}
+
 	assert.Equal(t, "call: resilient: api: status 503: boom", err.Error())
 	assert.NotContains(t, err.Error(), "secret", "the body stays out of the message")
 	assert.Equal(t, "resilient: api: circuit_open", (&OutboundError{Kind: KindCircuitOpen, Target: "api"}).Error())

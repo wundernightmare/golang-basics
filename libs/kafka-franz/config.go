@@ -24,6 +24,7 @@ const minBrokerReadBytes = 16 << 20
 // validate rejects what franz-go cannot express.
 func validate(cfg kafka.Config) []error {
 	var errs []error
+
 	for name, props := range map[string]kafka.Properties{
 		"KAFKA_EXTRA_PROPERTIES":          cfg.ExtraProperties,
 		"KAFKA_PRODUCER_EXTRA_PROPERTIES": cfg.ProducerExtraProperties,
@@ -35,6 +36,7 @@ func validate(cfg kafka.Config) []error {
 				"or build with KAFKA_PROVIDER=rdkafka", name))
 		}
 	}
+
 	return errs
 }
 
@@ -62,20 +64,25 @@ func commonOpts(cfg kafka.Config, hooks kgo.Hook) ([]kgo.Opt, error) {
 		// pre-provisions topics so a typo cannot create one.
 		opts = append(opts, kgo.AllowAutoTopicCreation())
 	}
+
 	tlsCfg, err := tlsConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
+
 	if tlsCfg != nil {
 		opts = append(opts, kgo.DialTLSConfig(tlsCfg))
 	}
+
 	mech, err := saslMechanism(cfg)
 	if err != nil {
 		return nil, err
 	}
+
 	if mech != nil {
 		opts = append(opts, kgo.SASL(mech))
 	}
+
 	return opts, nil
 }
 
@@ -109,6 +116,7 @@ func consumerOpts(cfg kafka.Config) []kgo.Opt {
 	// prefetch bound is KAFKA_CONSUMER_QUEUE_MAX_KBYTES worth of fetches (at
 	// least one).
 	fetches := max(cfg.ConsumerQueueMaxKBytes*1024/cfg.ConsumerFetchMaxBytes, 1)
+
 	return []kgo.Opt{
 		kgo.ConsumerGroup(cfg.Group),
 		kgo.ConsumeTopics(cfg.Topics...),
@@ -163,41 +171,51 @@ func tlsConfig(cfg kafka.Config) (*tls.Config, error) {
 	if cfg.SecurityProtocol != "ssl" && cfg.SecurityProtocol != "sasl_ssl" {
 		return nil, nil //nolint:nilnil // nil config means "plaintext", not an error
 	}
+
 	pool, err := x509.SystemCertPool()
 	if err != nil || pool == nil {
 		pool = x509.NewCertPool()
 	}
+
 	if cfg.SSLCALocation != "" {
 		pem, err := os.ReadFile(cfg.SSLCALocation)
 		if err != nil {
 			return nil, fmt.Errorf("kafka: read KAFKA_SSL_CA_LOCATION: %w", err)
 		}
+
 		if !pool.AppendCertsFromPEM(pem) {
 			return nil, fmt.Errorf("kafka: KAFKA_SSL_CA_LOCATION %q holds no PEM certificate", cfg.SSLCALocation)
 		}
 	}
+
 	tc := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
 	if cfg.SSLEndpointIdentificationAlgorithm == "none" {
-		tc.InsecureSkipVerify = true //nolint:gosec // the chain is still verified below; only the host name is not
+		tc.InsecureSkipVerify = true // the chain is still verified below; only the host name is not
 		tc.VerifyConnection = func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 {
 				return errors.New("kafka: broker sent no certificate")
 			}
+
 			inter := x509.NewCertPool()
 			for _, c := range cs.PeerCertificates[1:] {
 				inter.AddCert(c)
 			}
+
 			_, err := cs.PeerCertificates[0].Verify(x509.VerifyOptions{Roots: pool, Intermediates: inter})
+
 			return err
 		}
 	}
+
 	if cfg.SSLCertificateLocation != "" {
 		cert, err := tls.LoadX509KeyPair(cfg.SSLCertificateLocation, cfg.SSLKeyLocation)
 		if err != nil {
 			return nil, fmt.Errorf("kafka: load client key pair: %w", err)
 		}
+
 		tc.Certificates = []tls.Certificate{cert}
 	}
+
 	return tc, nil
 }
 
@@ -207,16 +225,19 @@ func saslMechanism(cfg kafka.Config) (sasl.Mechanism, error) {
 	if cfg.SecurityProtocol != "sasl_plaintext" && cfg.SecurityProtocol != "sasl_ssl" {
 		return nil, nil //nolint:nilnil // nil mechanism means "no SASL", not an error
 	}
+
 	password := cfg.SASLPassword
 	if cfg.SASLPasswordFile != "" {
 		b, err := os.ReadFile(cfg.SASLPasswordFile)
 		if err != nil {
 			return nil, fmt.Errorf("kafka: KAFKA_SASL_PASSWORD_FILE: %w", err)
 		}
+
 		if password = strings.TrimRight(string(b), "\r\n"); password == "" {
 			return nil, fmt.Errorf("kafka: KAFKA_SASL_PASSWORD_FILE: %s is empty", cfg.SASLPasswordFile)
 		}
 	}
+
 	switch cfg.SASLMechanism {
 	case "PLAIN":
 		return plain.Auth{User: cfg.SASLUsername, Pass: password}.AsMechanism(), nil

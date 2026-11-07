@@ -37,6 +37,7 @@ type harness struct {
 
 func newHarness(t testing.TB) *harness {
 	t.Helper()
+
 	h := &harness{store: newFakeStore(), cache: newFakeCache(), log: &testx.LogBuffer{}}
 	logger := httpx.NewLogger(httpx.LogConfig{Level: "info", Format: "json", Writer: h.log})
 	srv, err := httpx.NewServer(httpx.Config{Service: "tasks", Addr: ":0", AdminAddr: ""}, logger)
@@ -48,6 +49,7 @@ func newHarness(t testing.TB) *harness {
 	h.ts = httptest.NewServer(srv.Handler())
 	t.Cleanup(h.ts.Close)
 	h.oapi = contract.LoadOpenAPI(t, "openapi3/tasks.openapi.yaml")
+
 	return h
 }
 
@@ -65,8 +67,10 @@ func (r response) json(t testing.TB, v any) {
 func (r response) problem(t testing.TB) map[string]any {
 	t.Helper()
 	assert.Equal(t, httpx.ProblemContentType, r.header.Get("Content-Type"))
+
 	var p map[string]any
 	r.json(t, &p)
+
 	return p
 }
 
@@ -76,38 +80,50 @@ func (r response) problem(t testing.TB) map[string]any {
 func (h *harness) do(t testing.TB, method, path, body string, headers ...string) response {
 	t.Helper()
 	resp := h.send(t, method, path, body, headers...)
-	req, err := http.NewRequest(method, h.ts.URL+path, nil)
+	req, err := http.NewRequest(method, h.ts.URL+path, http.NoBody)
 	require.NoError(t, err)
+
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
 	}
+
 	h.oapi.Validate(t, req, []byte(body), resp.status, resp.header, resp.body)
+
 	return resp
 }
 
 // send is do without the contract check — for the undocumented 5xx.
 func (h *harness) send(t testing.TB, method, path, body string, headers ...string) response {
 	t.Helper()
+
 	var rd io.Reader
 	if body != "" {
 		rd = strings.NewReader(body)
 	}
+
 	req, err := http.NewRequest(method, h.ts.URL+path, rd)
 	require.NoError(t, err)
+
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
 	}
+
 	resp, err := h.ts.Client().Do(req)
 	require.NoError(t, err)
+
 	defer func() { _ = resp.Body.Close() }()
+
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
+
 	return response{status: resp.StatusCode, header: resp.Header, body: bytes.TrimSpace(raw)}
 }
 
@@ -115,8 +131,10 @@ func (h *harness) create(t testing.TB, title string) tasksapi.Task {
 	t.Helper()
 	r := h.do(t, http.MethodPost, "/tasks", `{"title":"`+title+`"}`)
 	require.Equal(t, http.StatusCreated, r.status, string(r.body))
+
 	var task tasksapi.Task
 	r.json(t, &task)
+
 	return task
 }
 
@@ -129,6 +147,8 @@ func (h *harness) create(t testing.TB, title string) tasksapi.Task {
 // still validated against the contract.
 
 func TestCreate_PersistsWarmsTheCacheAndAnswersWithETag(t *testing.T) {
+	t.Parallel()
+
 	h := newHarness(t)
 	r := h.do(t, http.MethodPost, "/tasks", `{"title":"  write tests  "}`)
 	require.Equal(t, http.StatusCreated, r.status)
@@ -147,7 +167,15 @@ func TestCreate_PersistsWarmsTheCacheAndAnswersWithETag(t *testing.T) {
 }
 
 func TestCreate_RejectsTitlesTheStoreWillNotHold(t *testing.T) {
-	h := newHarness(t)
+	t.Parallel()
+
+	env := newHarness(t)
+	// After every (parallel) sub-test: none of them got anything stored.
+	t.Cleanup(func() {
+		assert.Empty(t, env.store.snapshot(), "nothing persisted")
+		assert.Equal(t, int32(0), env.committed.Load())
+	})
+
 	for name, title := range map[string]string{
 		"blank":             `   `,
 		"too long":          strings.Repeat("x", domain.MaxTitleRunes+1),
@@ -155,42 +183,48 @@ func TestCreate_RejectsTitlesTheStoreWillNotHold(t *testing.T) {
 		"control character": `a\u0007b`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			r := h.do(t, http.MethodPost, "/tasks", `{"title":"`+title+`"}`)
+			t.Parallel()
+
+			r := env.do(t, http.MethodPost, "/tasks", `{"title":"`+title+`"}`)
 			require.Equal(t, http.StatusBadRequest, r.status)
 			assert.Equal(t, "invalid_title", r.problem(t)["code"])
 		})
 	}
-	assert.Empty(t, h.store.snapshot(), "nothing persisted")
-	assert.Equal(t, int32(0), h.committed.Load())
 }
 
 func TestCreate_IdempotencyKeyReplaysTheFirstResult(t *testing.T) {
-	h := newHarness(t)
-	first := h.do(t, http.MethodPost, "/tasks", `{"title":"pay rent"}`, "Idempotency-Key", "k-1")
+	t.Parallel()
+
+	env := newHarness(t)
+	first := env.do(t, http.MethodPost, "/tasks", `{"title":"pay rent"}`, "Idempotency-Key", "k-1")
 	require.Equal(t, http.StatusCreated, first.status)
+
 	var created tasksapi.Task
 	first.json(t, &created)
 
 	// A retry — even with different whitespace — is the same request.
-	replay := h.do(t, http.MethodPost, "/tasks", `{"title":" pay rent "}`, "Idempotency-Key", "k-1")
+	replay := env.do(t, http.MethodPost, "/tasks", `{"title":" pay rent "}`, "Idempotency-Key", "k-1")
 	require.Equal(t, http.StatusOK, replay.status)
 	assert.Equal(t, "true", replay.header.Get("Idempotent-Replayed"))
 	assert.Equal(t, `"1"`, replay.header.Get("ETag"))
+
 	var again tasksapi.Task
 	replay.json(t, &again)
 	assert.Equal(t, created.Id, again.Id, "the same task, not a second one")
-	assert.Len(t, h.store.snapshot(), 1)
-	assert.Equal(t, int32(1), h.committed.Load(), "a replay commits nothing")
+	assert.Len(t, env.store.snapshot(), 1)
+	assert.Equal(t, int32(1), env.committed.Load(), "a replay commits nothing")
 
-	reused := h.do(t, http.MethodPost, "/tasks", `{"title":"pay taxes"}`, "Idempotency-Key", "k-1")
+	reused := env.do(t, http.MethodPost, "/tasks", `{"title":"pay taxes"}`, "Idempotency-Key", "k-1")
 	require.Equal(t, http.StatusUnprocessableEntity, reused.status)
 	assert.Equal(t, "idempotency_key_reused", reused.problem(t)["code"])
 
-	other := h.do(t, http.MethodPost, "/tasks", `{"title":"pay rent"}`, "Idempotency-Key", "k-2")
+	other := env.do(t, http.MethodPost, "/tasks", `{"title":"pay rent"}`, "Idempotency-Key", "k-2")
 	assert.Equal(t, http.StatusCreated, other.status, "another key is another request")
 }
 
 func TestCreate_InvalidIdempotencyKey(t *testing.T) {
+	t.Parallel()
+
 	h := newHarness(t)
 	r := h.do(t, http.MethodPost, "/tasks", `{"title":"x"}`, "Idempotency-Key", strings.Repeat("k", 256))
 	require.Equal(t, http.StatusBadRequest, r.status)
@@ -201,6 +235,8 @@ func TestCreate_InvalidIdempotencyKey(t *testing.T) {
 // --- get ---------------------------------------------------------------------
 
 func TestGet_ServesFromCacheWithoutTouchingTheStore(t *testing.T) {
+	t.Parallel()
+
 	h := newHarness(t)
 	h.cache.Warm(context.Background(), domain.Task{ID: "abc", Title: "cached", Version: 4, CreatedAt: time.Now()})
 
@@ -212,6 +248,8 @@ func TestGet_ServesFromCacheWithoutTouchingTheStore(t *testing.T) {
 }
 
 func TestGet_MissLoadsFromTheStore(t *testing.T) {
+	t.Parallel()
+
 	h := newHarness(t)
 	h.store.put(domain.Task{ID: "xyz", Title: "stored", CreatedAt: time.Now()})
 
@@ -225,6 +263,8 @@ func TestGet_MissLoadsFromTheStore(t *testing.T) {
 }
 
 func TestGet_UnknownIsA404ProblemWithACode(t *testing.T) {
+	t.Parallel()
+
 	h := newHarness(t)
 	r := h.do(t, http.MethodGet, "/tasks/nope", "")
 	require.Equal(t, http.StatusNotFound, r.status)
@@ -237,32 +277,43 @@ func TestGet_UnknownIsA404ProblemWithACode(t *testing.T) {
 // --- list --------------------------------------------------------------------
 
 func TestList_KeysetPagesChainAndEnd(t *testing.T) {
-	h := newHarness(t)
+	t.Parallel()
+
+	env := newHarness(t)
+
 	var ids []string
 	for _, title := range []string{"a", "b", "c", "d", "e"} {
-		ids = append(ids, h.create(t, title).Id)
+		ids = append(ids, env.create(t, title).Id)
 	}
 
 	var seen []string
+
 	path := "/tasks?limit=2"
+
 	for pages := 0; ; pages++ {
 		require.Less(t, pages, 5, "the pages must end")
-		r := h.do(t, http.MethodGet, path, "")
+		r := env.do(t, http.MethodGet, path, "")
 		require.Equal(t, http.StatusOK, r.status)
+
 		var page tasksapi.TaskList
 		r.json(t, &page)
 		assert.LessOrEqual(t, len(page.Tasks), 2)
+
 		for _, task := range page.Tasks {
 			seen = append(seen, task.Id)
 		}
+
 		if page.NextCursor == nil {
 			break
 		}
+
 		path = "/tasks?limit=2&cursor=" + *page.NextCursor
 	}
+
 	assert.Equal(t, []string{ids[4], ids[3], ids[2], ids[1], ids[0]}, seen, "newest first, each task once")
 
-	r := h.do(t, http.MethodGet, "/tasks", "")
+	r := env.do(t, http.MethodGet, "/tasks", "")
+
 	var all tasksapi.TaskList
 	r.json(t, &all)
 	assert.Len(t, all.Tasks, 5, "default page size covers them")
@@ -270,23 +321,26 @@ func TestList_KeysetPagesChainAndEnd(t *testing.T) {
 }
 
 func TestList_RejectsBadLimitsAndForeignCursors(t *testing.T) {
-	h := newHarness(t)
+	t.Parallel()
+
+	env := newHarness(t)
 	for _, q := range []string{"limit=0", "limit=201", "limit=ten", "limit="} {
-		r := h.do(t, http.MethodGet, "/tasks?"+q, "")
+		r := env.do(t, http.MethodGet, "/tasks?"+q, "")
 		require.Equal(t, http.StatusBadRequest, r.status, q)
 		assert.Equal(t, "invalid_limit", r.problem(t)["code"], q)
 	}
+
 	for _, c := range []string{"not-a-cursor", ""} {
-		r := h.do(t, http.MethodGet, "/tasks?cursor="+c, "")
+		r := env.do(t, http.MethodGet, "/tasks?cursor="+c, "")
 		require.Equal(t, http.StatusBadRequest, r.status, c)
 		assert.Equal(t, "invalid_cursor", r.problem(t)["code"], c)
 	}
 
-	r := h.do(t, http.MethodGet, "/tasks?limit=5&page=2", "")
+	r := env.do(t, http.MethodGet, "/tasks?limit=5&page=2", "")
 	require.Equal(t, http.StatusBadRequest, r.status)
 	assert.Equal(t, "unknown_parameter", r.problem(t)["code"])
 
-	r = h.do(t, http.MethodGet, "/tasks?limit=5&limit=6", "")
+	r = env.do(t, http.MethodGet, "/tasks?limit=5&limit=6", "")
 	require.Equal(t, http.StatusBadRequest, r.status)
 	assert.Equal(t, "repeated_parameter", r.problem(t)["code"])
 }
@@ -294,22 +348,25 @@ func TestList_RejectsBadLimitsAndForeignCursors(t *testing.T) {
 // --- update ------------------------------------------------------------------
 
 func TestUpdate_ChangesBumpsTheVersionAndInvalidates(t *testing.T) {
-	h := newHarness(t)
-	task := h.create(t, "draft")
-	require.True(t, h.cache.has(task.Id))
+	t.Parallel()
 
-	r := h.do(t, http.MethodPatch, "/tasks/"+task.Id, `{"title":" final ","done":true}`)
+	env := newHarness(t)
+	task := env.create(t, "draft")
+	require.True(t, env.cache.has(task.Id))
+
+	r := env.do(t, http.MethodPatch, "/tasks/"+task.Id, `{"title":" final ","done":true}`)
 	require.Equal(t, http.StatusOK, r.status)
+
 	var got tasksapi.Task
 	r.json(t, &got)
 	assert.Equal(t, "final", got.Title)
 	assert.True(t, got.Done)
 	assert.Equal(t, int64(2), got.Version)
 	assert.Equal(t, `"2"`, r.header.Get("ETag"))
-	assert.Equal(t, []string{task.Id}, h.cache.invalidated, "the cached task is invalidated after the commit")
-	assert.Equal(t, int32(2), h.committed.Load())
+	assert.Equal(t, []string{task.Id}, env.cache.invalidated, "the cached task is invalidated after the commit")
+	assert.Equal(t, int32(2), env.committed.Load())
 
-	r = h.do(t, http.MethodPatch, "/tasks/"+task.Id, `{"done":false}`)
+	r = env.do(t, http.MethodPatch, "/tasks/"+task.Id, `{"done":false}`)
 	require.Equal(t, http.StatusOK, r.status)
 	r.json(t, &got)
 	assert.Equal(t, "final", got.Title, "absent fields are left alone")
@@ -317,6 +374,8 @@ func TestUpdate_ChangesBumpsTheVersionAndInvalidates(t *testing.T) {
 }
 
 func TestUpdate_IfMatch(t *testing.T) {
+	t.Parallel()
+
 	h := newHarness(t)
 	task := h.create(t, "contended")
 
@@ -339,8 +398,11 @@ func TestUpdate_IfMatch(t *testing.T) {
 }
 
 func TestUpdate_RejectsEmptyAndInvalidPatches(t *testing.T) {
-	h := newHarness(t)
-	task := h.create(t, "x")
+	t.Parallel()
+
+	env := newHarness(t)
+
+	task := env.create(t, "x")
 	for body, code := range map[string]string{
 		`{}`:                        "empty_patch",
 		`{"unknown":1}`:             "invalid_patch",
@@ -350,14 +412,17 @@ func TestUpdate_RejectsEmptyAndInvalidPatches(t *testing.T) {
 		`{"title":"   "}`:           "invalid_title",
 		`{"title":"a\u0000"}`:       "invalid_title",
 	} {
-		r := h.do(t, http.MethodPatch, "/tasks/"+task.Id, body)
+		r := env.do(t, http.MethodPatch, "/tasks/"+task.Id, body)
 		require.Equal(t, http.StatusBadRequest, r.status, body)
 		assert.Equal(t, code, r.problem(t)["code"], body)
 	}
-	assert.Equal(t, int64(1), h.store.snapshot()[task.Id].Version, "nothing changed")
+
+	assert.Equal(t, int64(1), env.store.snapshot()[task.Id].Version, "nothing changed")
 }
 
 func TestUpdate_UnknownIs404(t *testing.T) {
+	t.Parallel()
+
 	h := newHarness(t)
 	r := h.do(t, http.MethodPatch, "/tasks/ghost", `{"done":true}`)
 	require.Equal(t, http.StatusNotFound, r.status)
@@ -368,6 +433,8 @@ func TestUpdate_UnknownIs404(t *testing.T) {
 // --- delete ------------------------------------------------------------------
 
 func TestDelete_RemovesAndInvalidates(t *testing.T) {
+	t.Parallel()
+
 	h := newHarness(t)
 	task := h.create(t, "doomed")
 
@@ -389,6 +456,8 @@ func TestDelete_RemovesAndInvalidates(t *testing.T) {
 
 // A failed invalidation is logged, not failed: the change is committed.
 func TestDelete_CacheInvalidationFailureIsAWarning(t *testing.T) {
+	t.Parallel()
+
 	h := newHarness(t)
 	task := h.create(t, "x")
 	h.cache.invErr = errors.New("valkey: connection refused")
@@ -405,8 +474,10 @@ func TestDelete_CacheInvalidationFailureIsAWarning(t *testing.T) {
 // A store failure is a 500 problem that keeps the driver out of the body and
 // puts the cause in the log line of the request; a deadline is a 504.
 func TestStoreFailures(t *testing.T) {
-	h := newHarness(t)
-	h.store.err = errors.New("pgconn: connection refused")
+	t.Parallel()
+
+	env := newHarness(t)
+	env.store.err = errors.New("pgconn: connection refused")
 
 	for _, c := range []struct{ method, path, body string }{
 		{http.MethodPost, "/tasks", `{"title":"x"}`},
@@ -415,22 +486,26 @@ func TestStoreFailures(t *testing.T) {
 		{http.MethodPatch, "/tasks/abc", `{"done":true}`},
 		{http.MethodDelete, "/tasks/abc", ""},
 	} {
-		r := h.send(t, c.method, c.path, c.body)
+		r := env.send(t, c.method, c.path, c.body)
 		require.Equal(t, http.StatusInternalServerError, r.status, c.method+" "+c.path)
 		p := r.problem(t)
 		assert.NotContains(t, string(r.body), "pgconn", "the cause stays in the log")
 		assert.NotEmpty(t, p["detail"])
 	}
+
 	failed := 0
-	for _, line := range h.log.Lines(t) {
+
+	for _, line := range env.log.Lines(t) {
 		if line["msg"] == "request failed" {
 			failed++
+
 			assert.Equal(t, "pgconn: connection refused", line["err"])
 		}
 	}
+
 	assert.Equal(t, 5, failed, "every 5xx logs its cause")
 
-	h.store.err = context.DeadlineExceeded
-	r := h.send(t, http.MethodGet, "/tasks", "")
+	env.store.err = context.DeadlineExceeded
+	r := env.send(t, http.MethodGet, "/tasks", "")
 	assert.Equal(t, http.StatusGatewayTimeout, r.status)
 }

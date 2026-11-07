@@ -35,5 +35,6 @@ func pong(w http.ResponseWriter, r *http.Request) {
 	if msg := r.URL.Query().Get("msg"); msg != "" {
 		resp.Echo = &msg
 	}
+
 	httpx.WriteJSON(w, http.StatusOK, resp)
 }

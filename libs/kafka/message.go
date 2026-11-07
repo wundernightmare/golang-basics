@@ -62,6 +62,7 @@ func (m Message) Header(key string) ([]byte, bool) {
 			return h.Value, true
 		}
 	}
+
 	return nil, false
 }
 
@@ -90,6 +91,7 @@ func Permanent(err error) error {
 	if err == nil {
 		return nil
 	}
+
 	return &permanentError{err: err}
 }
 
@@ -108,11 +110,14 @@ func backoff(n int, initial, maxDelay time.Duration) time.Duration {
 	for i := 0; i < n && d < maxDelay; i++ {
 		d *= 2
 	}
+
 	d = min(d, maxDelay)
+
 	half := d / 2
 	if half <= 0 {
 		return d
 	}
+
 	return half + rand.N(half+1) //nolint:gosec // jitter, not a secret
 }
 
@@ -120,6 +125,7 @@ func backoff(n int, initial, maxDelay time.Duration) time.Duration {
 func sleep(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
+
 	select {
 	case <-t.C:
 		return true
@@ -135,5 +141,6 @@ func headerValue(hs []Header, key string) (string, bool) {
 			return string(h.Value), true
 		}
 	}
+
 	return "", false
 }

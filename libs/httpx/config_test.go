@@ -18,8 +18,10 @@ import (
 const envPrefix = "HTTPXTEST_"
 
 func TestLoadConfig_Defaults(t *testing.T) {
-	t.Setenv(envPrefix+"ADMIN_TOKEN", "s3cret") // the default admin address is routable
-	cfg, err := httpx.LoadConfig(envPrefix)
+	t.Parallel()
+
+	environ := map[string]string{envPrefix + "ADMIN_TOKEN": "s3cret"} // the default admin address is routable
+	cfg, err := httpx.LoadConfigFrom(envPrefix, environ)
 	require.NoError(t, err)
 	assert.Equal(t, ":8080", cfg.Addr)
 	assert.Equal(t, ":9080", cfg.AdminAddr)
@@ -46,22 +48,26 @@ func TestLoadConfig_Defaults(t *testing.T) {
 }
 
 func TestLoadConfig_EmptyTokenOnRoutableAdminIsRejected(t *testing.T) {
+	t.Parallel()
+
 	// The defaults put the admin listener on ":9080" (every interface) and
 	// leave the token empty: running like that must be an explicit choice.
-	_, err := httpx.LoadConfig(envPrefix)
+	environ := map[string]string{} // nothing set; each step below adds to it
+	_, err := httpx.LoadConfigFrom(envPrefix, environ)
 	require.ErrorContains(t, err, "ADMIN_TOKEN is empty")
 
-	t.Setenv(envPrefix+"ADMIN_INSECURE", "true")
-	cfg, err := httpx.LoadConfig(envPrefix)
+	environ[envPrefix+"ADMIN_INSECURE"] = "true"
+	cfg, err := httpx.LoadConfigFrom(envPrefix, environ)
 	require.NoError(t, err)
 	assert.True(t, cfg.AdminInsecure)
 
-	t.Setenv(envPrefix+"ADMIN_INSECURE", "false")
-	t.Setenv(envPrefix+"ADMIN_ADDR", "127.0.0.1:9080")
-	_, err = httpx.LoadConfig(envPrefix)
+	environ[envPrefix+"ADMIN_INSECURE"] = "false"
+	environ[envPrefix+"ADMIN_ADDR"] = "127.0.0.1:9080"
+	_, err = httpx.LoadConfigFrom(envPrefix, environ)
 	require.NoError(t, err, "loopback needs no token")
 }
 
+// Serial on purpose: exercises the process-environment path (t.Setenv cannot run in parallel).
 func TestLoadConfig_PrefixAndOverride(t *testing.T) {
 	t.Setenv(envPrefix+"ADMIN_ADDR", "127.0.0.1:9080")
 	t.Setenv(envPrefix+"HTTP_ADDR", ":9999")
@@ -80,20 +86,26 @@ func TestLoadConfig_PrefixAndOverride(t *testing.T) {
 }
 
 func TestLoadConfig_InvalidIsAnError(t *testing.T) {
-	t.Setenv(envPrefix+"ADMIN_ADDR", "127.0.0.1:9080")
-	t.Setenv(envPrefix+"LOG_FORMAT", "xml")
-	_, err := httpx.LoadConfig(envPrefix)
+	t.Parallel()
+
+	environ := map[string]string{
+		envPrefix + "ADMIN_ADDR": "127.0.0.1:9080",
+		envPrefix + "LOG_FORMAT": "xml",
+	}
+	_, err := httpx.LoadConfigFrom(envPrefix, environ)
 	require.ErrorContains(t, err, "LOG_FORMAT")
 
-	t.Setenv(envPrefix+"LOG_FORMAT", "json")
-	t.Setenv(envPrefix+"HTTP_READ_TIMEOUT", "soon")
-	_, err = httpx.LoadConfig(envPrefix)
+	environ[envPrefix+"LOG_FORMAT"] = "json"
+	environ[envPrefix+"HTTP_READ_TIMEOUT"] = "soon"
+	_, err = httpx.LoadConfigFrom(envPrefix, environ)
 	require.ErrorContains(t, err, "parse config")
 }
 
 func TestConfigValidate(t *testing.T) {
 	t.Parallel()
+
 	valid := func() httpx.Config { return httpx.Config{Addr: ":0", AdminAddr: "127.0.0.1:0"} }
+
 	for _, tc := range []struct {
 		name    string
 		mutate  func(*httpx.Config)
@@ -127,22 +139,28 @@ func TestConfigValidate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+
 			cfg := valid()
 			tc.mutate(&cfg)
+
 			err := cfg.Validate()
 			if tc.wantErr == "" {
 				require.NoError(t, err)
 				return
 			}
+
 			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
 }
 
 func TestConfigValidate_ReportsEveryProblemAndAppliesDefaults(t *testing.T) {
+	t.Parallel()
+
 	cfg := httpx.Config{Addr: ":0", LogLevel: "loud", LogFormat: "xml", MaxBodyBytes: -1}
 	err := cfg.Validate()
 	require.Error(t, err)
+
 	for _, want := range []string{"LOG_LEVEL", "LOG_FORMAT", "HTTP_MAX_BODY_BYTES"} {
 		require.ErrorContains(t, err, want, "all problems at once, not the first one")
 	}
@@ -161,6 +179,8 @@ func TestConfigValidate_ReportsEveryProblemAndAppliesDefaults(t *testing.T) {
 }
 
 func TestConfig_LogConfigProjection(t *testing.T) {
+	t.Parallel()
+
 	cfg := httpx.Config{Service: "svc", LogLevel: "warn", LogFormat: "text", LogSampleInitial: 5, LogSampleThereafter: 7}
 	assert.Equal(t, httpx.LogConfig{Service: "svc", Level: "warn", Format: "text", SampleInitial: 5, SampleThereafter: 7}, cfg.LogConfig())
 }
@@ -189,18 +209,22 @@ func writeYAML(t testing.TB, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
 	return path
 }
 
 func TestLoadYAML_FileOnly(t *testing.T) {
+	t.Parallel()
+
 	path := writeYAML(t, "addr: \":9000\"\nworkers: 4\n")
 
 	var cfg sampleConfig
-	require.NoError(t, httpx.LoadYAML(path, envPrefix, &cfg))
+	require.NoError(t, httpx.LoadYAMLFrom(path, envPrefix, map[string]string{}, &cfg))
 	assert.Equal(t, ":9000", cfg.Addr)
 	assert.Equal(t, 4, cfg.Workers)
 }
 
+// Serial on purpose: exercises the process-environment path (t.Setenv cannot run in parallel).
 func TestLoadYAML_EnvOverlaysFile(t *testing.T) {
 	path := writeYAML(t, "addr: \":9000\"\nworkers: 4\n")
 	t.Setenv(envPrefix+"HTTP_ADDR", ":7777") // env wins over the file…
@@ -212,10 +236,12 @@ func TestLoadYAML_EnvOverlaysFile(t *testing.T) {
 }
 
 func TestLoadYAML_NoPathIsEnvOnly(t *testing.T) {
-	t.Setenv(envPrefix+"HTTP_ADDR", ":8080")
+	t.Parallel()
+
+	environ := map[string]string{envPrefix + "HTTP_ADDR": ":8080"}
 
 	var cfg sampleConfig
-	require.NoError(t, httpx.LoadYAML("", envPrefix, &cfg), "no path: env-only")
+	require.NoError(t, httpx.LoadYAMLFrom("", envPrefix, environ, &cfg), "no path: env-only")
 	assert.Equal(t, ":8080", cfg.Addr)
 	assert.Equal(t, 0, cfg.Workers)
 }
@@ -223,13 +249,18 @@ func TestLoadYAML_NoPathIsEnvOnly(t *testing.T) {
 // A path that is set but names no file is a mistake (a typo, a ConfigMap that
 // was not mounted) — never a silent fall-back to the defaults.
 func TestLoadYAML_MissingFileIsAnError(t *testing.T) {
+	t.Parallel()
+
 	var cfg sampleConfig
-	err := httpx.LoadYAML(filepath.Join(t.TempDir(), "absent.yaml"), envPrefix, &cfg)
+
+	err := httpx.LoadYAMLFrom(filepath.Join(t.TempDir(), "absent.yaml"), envPrefix, map[string]string{}, &cfg)
 	require.ErrorIs(t, err, fs.ErrNotExist)
 	assert.ErrorContains(t, err, "absent.yaml")
 }
 
 func TestLoadYAML_PrecedenceEnvThenYAMLThenDefault(t *testing.T) {
+	t.Parallel()
+
 	path := writeYAML(t, `
 http_addr: ":9000"
 log_level: warn
@@ -237,11 +268,13 @@ workers: 8
 db:
   max_conns: 20
 `)
-	t.Setenv(envPrefix+"HTTP_ADDR", ":7777")                // env over yaml, embedded struct
-	t.Setenv(envPrefix+"DB_DSN", "postgres://env-host/app") // env over default, nested envPrefix
+	environ := map[string]string{
+		envPrefix + "HTTP_ADDR": ":7777",                   // env over yaml, embedded struct
+		envPrefix + "DB_DSN":    "postgres://env-host/app", // env over default, nested envPrefix
+	}
 
 	var cfg serviceConfig
-	require.NoError(t, httpx.LoadYAML(path, envPrefix, &cfg))
+	require.NoError(t, httpx.LoadYAMLFrom(path, envPrefix, environ, &cfg))
 
 	assert.Equal(t, ":7777", cfg.Addr, "env > yaml")
 	assert.Equal(t, "warn", cfg.LogLevel, "yaml > envDefault (embedded)")
@@ -261,8 +294,10 @@ db:
 }
 
 func TestLoadYAML_EnvDefaultsWithoutFile(t *testing.T) {
+	t.Parallel()
+
 	var cfg serviceConfig
-	require.NoError(t, httpx.LoadYAML("", envPrefix, &cfg))
+	require.NoError(t, httpx.LoadYAMLFrom("", envPrefix, map[string]string{}, &cfg))
 	assert.Equal(t, ":8080", cfg.Addr)
 	assert.Equal(t, 4, cfg.Workers)
 	assert.Equal(t, "postgres://localhost/app", cfg.DB.DSN)
@@ -270,35 +305,55 @@ func TestLoadYAML_EnvDefaultsWithoutFile(t *testing.T) {
 }
 
 func TestLoadYAML_Errors(t *testing.T) {
+	t.Parallel()
+
 	t.Run("unknown key", func(t *testing.T) {
+		t.Parallel()
+
 		var cfg serviceConfig
-		err := httpx.LoadYAML(writeYAML(t, "http_adr: \":9000\"\n"), envPrefix, &cfg)
+
+		err := httpx.LoadYAMLFrom(writeYAML(t, "http_adr: \":9000\"\n"), envPrefix, map[string]string{}, &cfg)
 		require.ErrorContains(t, err, "parse yaml")
 		assert.ErrorContains(t, err, "http_adr", "a typo is named, not silently defaulted")
 	})
 	t.Run("unknown nested key", func(t *testing.T) {
+		t.Parallel()
+
 		var cfg serviceConfig
-		err := httpx.LoadYAML(writeYAML(t, "db:\n  max_con: 3\n"), envPrefix, &cfg)
+
+		err := httpx.LoadYAMLFrom(writeYAML(t, "db:\n  max_con: 3\n"), envPrefix, map[string]string{}, &cfg)
 		require.ErrorContains(t, err, "max_con")
 	})
 	t.Run("wrong type", func(t *testing.T) {
+		t.Parallel()
+
 		var cfg sampleConfig
-		err := httpx.LoadYAML(writeYAML(t, "workers: many\n"), envPrefix, &cfg)
+
+		err := httpx.LoadYAMLFrom(writeYAML(t, "workers: many\n"), envPrefix, map[string]string{}, &cfg)
 		require.ErrorContains(t, err, "parse yaml")
 	})
 	t.Run("empty file is an empty config", func(t *testing.T) {
+		t.Parallel()
+
 		var cfg sampleConfig
-		require.NoError(t, httpx.LoadYAML(writeYAML(t, ""), envPrefix, &cfg))
+		require.NoError(t, httpx.LoadYAMLFrom(writeYAML(t, ""), envPrefix, map[string]string{}, &cfg))
 	})
 	t.Run("unreadable path", func(t *testing.T) {
+		t.Parallel()
+
 		var cfg sampleConfig
-		err := httpx.LoadYAML(t.TempDir(), envPrefix, &cfg) // a directory
+
+		err := httpx.LoadYAMLFrom(t.TempDir(), envPrefix, map[string]string{}, &cfg) // a directory
 		require.ErrorContains(t, err, "read yaml")
 	})
 	t.Run("bad env value", func(t *testing.T) {
-		t.Setenv(envPrefix+"WORKERS", "many")
+		t.Parallel()
+
+		environ := map[string]string{envPrefix + "WORKERS": "many"}
+
 		var cfg sampleConfig
-		err := httpx.LoadYAML("", envPrefix, &cfg)
+
+		err := httpx.LoadYAMLFrom("", envPrefix, environ, &cfg)
 		require.ErrorContains(t, err, "env overlay")
 	})
 }

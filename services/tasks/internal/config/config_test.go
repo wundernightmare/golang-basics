@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,19 +17,25 @@ func writeYAML(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
 	return path
 }
 
 // The admin listener is on a routable address by default, so it needs a
 // token (or ADMIN_INSECURE) to validate — as in any deployment.
-func withAdminToken(t *testing.T) {
-	t.Helper()
-	t.Setenv("TASKS_ADMIN_TOKEN", "s3cret")
+// withAdminToken returns a fresh environment holding the token plus env
+// (env wins on a clash, like a sub-test's t.Setenv over its parent's).
+func withAdminToken(env map[string]string) map[string]string {
+	out := map[string]string{"TASKS_ADMIN_TOKEN": "s3cret"}
+	maps.Copy(out, env)
+
+	return out
 }
 
 func TestLoadDefaults(t *testing.T) {
-	withAdminToken(t)
-	cfg, err := config.Load("")
+	t.Parallel()
+
+	cfg, err := config.LoadFrom("", withAdminToken(nil))
 	require.NoError(t, err)
 
 	assert.Equal(t, "tasks", cfg.Service)
@@ -63,49 +70,63 @@ func TestLoadDefaults(t *testing.T) {
 // them on, and their other keys without the address are an error, not a
 // setting silently ignored.
 func TestOptionalIntegrationsByPresence(t *testing.T) {
-	withAdminToken(t)
+	t.Parallel()
 	t.Run("addresses turn them on", func(t *testing.T) {
-		t.Setenv("TASKS_VALKEY_ADDR", "cache:6379")
-		t.Setenv("TASKS_KAFKA_BROKERS", "k:9092")
-		cfg, err := config.Load("")
+		t.Parallel()
+
+		cfg, err := config.LoadFrom("", withAdminToken(map[string]string{
+			"TASKS_VALKEY_ADDR":   "cache:6379",
+			"TASKS_KAFKA_BROKERS": "k:9092",
+		}))
 		require.NoError(t, err)
 		assert.True(t, cfg.ValkeyEnabled())
 		assert.True(t, cfg.KafkaEnabled())
 	})
 	t.Run("a key without its address", func(t *testing.T) {
-		t.Setenv("TASKS_VALKEY_OP_TIMEOUT", "1s")
-		t.Setenv("TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION", "true")
-		_, err := config.Load("")
+		t.Parallel()
+
+		_, err := config.LoadFrom("", withAdminToken(map[string]string{
+			"TASKS_VALKEY_OP_TIMEOUT":               "1s",
+			"TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION": "true",
+		}))
 		require.ErrorContains(t, err, "VALKEY_* keys are set but neither VALKEY_URL nor VALKEY_ADDR")
 		require.ErrorContains(t, err, "KAFKA_* keys are set but KAFKA_BROKERS is not")
 	})
 	t.Run("a YAML section without its address", func(t *testing.T) {
-		_, err := config.Load(writeYAML(t, "kafka:\n  topic: x\n"))
+		t.Parallel()
+
+		_, err := config.LoadFrom(writeYAML(t, "kafka:\n  topic: x\n"), withAdminToken(nil))
 		require.ErrorContains(t, err, "KAFKA_BROKERS is not")
 	})
 	t.Run("a key set to its default is harmless", func(t *testing.T) {
-		t.Setenv("TASKS_KAFKA_TOPIC", "tasks.events")
-		_, err := config.Load("")
+		t.Parallel()
+
+		_, err := config.LoadFrom("", withAdminToken(map[string]string{"TASKS_KAFKA_TOPIC": "tasks.events"}))
 		require.NoError(t, err)
 	})
 	t.Run("Kafka's own rules apply once it is on", func(t *testing.T) {
-		t.Setenv("TASKS_KAFKA_BROKERS", "k:9092")
-		t.Setenv("TASKS_KAFKA_SECURITY_PROTOCOL", "sasl_ssl")
-		t.Setenv("TASKS_KAFKA_SASL_MECHANISM", "PLAIN")
-		_, err := config.Load("")
+		t.Parallel()
+
+		_, err := config.LoadFrom("", withAdminToken(map[string]string{
+			"TASKS_KAFKA_BROKERS":           "k:9092",
+			"TASKS_KAFKA_SECURITY_PROTOCOL": "sasl_ssl",
+			"TASKS_KAFKA_SASL_MECHANISM":    "PLAIN",
+		}))
 		require.ErrorContains(t, err, "needs KAFKA_SASL_USERNAME")
 	})
 	t.Run("max attempts", func(t *testing.T) {
-		t.Setenv("TASKS_OUTBOX_MAX_ATTEMPTS", "-1")
-		_, err := config.Load("")
+		t.Parallel()
+
+		_, err := config.LoadFrom("", withAdminToken(map[string]string{"TASKS_OUTBOX_MAX_ATTEMPTS": "-1"}))
 		require.ErrorContains(t, err, "OUTBOX_MAX_ATTEMPTS")
 	})
 }
 
 // The keys each lib documents work unchanged under TASKS_.
 func TestLibKeysKeepTheirDocumentedNames(t *testing.T) {
-	withAdminToken(t)
-	for k, v := range map[string]string{
+	t.Parallel()
+
+	cfg, err := config.LoadFrom("", withAdminToken(map[string]string{
 		"TASKS_DATABASE_URL":                "postgres://u:p@db:5432/app",
 		"TASKS_DB_MAX_CONNS":                "33",
 		"TASKS_DB_STATEMENT_TIMEOUT":        "7s",
@@ -121,10 +142,7 @@ func TestLibKeysKeepTheirDocumentedNames(t *testing.T) {
 		"TASKS_OUTBOX_BATCH_SIZE":           "10",
 		"TASKS_IDEMPOTENCY_KEY_TTL":         "1h",
 		"TASKS_HTTP_ADDR":                   ":1234",
-	} {
-		t.Setenv(k, v)
-	}
-	cfg, err := config.Load("")
+	}))
 	require.NoError(t, err)
 	assert.Equal(t, "postgres://u:p@db:5432/app", cfg.Postgres.URL)
 	assert.Equal(t, int32(33), cfg.Postgres.MaxConns)
@@ -143,8 +161,9 @@ func TestLibKeysKeepTheirDocumentedNames(t *testing.T) {
 	assert.Equal(t, ":1234", cfg.Addr)
 }
 
+// Serial on purpose: exercises the process-environment path (t.Setenv cannot run in parallel).
 func TestLoadYAMLThenEnvOverlay(t *testing.T) {
-	withAdminToken(t)
+	t.Setenv("TASKS_ADMIN_TOKEN", "s3cret")
 	path := writeYAML(t, `
 http_addr: ":9999"
 postgres:
@@ -174,28 +193,34 @@ outbox:
 }
 
 func TestLoadRejectsUnknownYAMLKeysAndBadValues(t *testing.T) {
-	withAdminToken(t)
-	_, err := config.Load(writeYAML(t, "databse_url: postgres://typo\n"))
+	t.Parallel()
+
+	env := withAdminToken(nil)
+	_, err := config.LoadFrom(writeYAML(t, "databse_url: postgres://typo\n"), env)
 	require.ErrorContains(t, err, "databse_url", "a typo is an error, not a silent default")
 
-	_, err = config.Load(writeYAML(t, "outbox:\n  batch_size: 5000\n"))
+	_, err = config.LoadFrom(writeYAML(t, "outbox:\n  batch_size: 5000\n"), env)
 	require.ErrorContains(t, err, "OUTBOX_BATCH_SIZE")
 
-	t.Setenv("TASKS_ADMIN_TOKEN", "")
-	_, err = config.Load("")
+	env["TASKS_ADMIN_TOKEN"] = ""
+
+	_, err = config.LoadFrom("", env)
 	require.ErrorContains(t, err, "ADMIN_TOKEN", "an open admin surface on :9082 is refused")
-	t.Setenv("TASKS_ADMIN_INSECURE", "true")
-	_, err = config.Load("")
+
+	env["TASKS_ADMIN_INSECURE"] = "true"
+
+	_, err = config.LoadFrom("", env)
 	require.NoError(t, err, "… unless explicitly allowed for local development")
 }
 
 // The service's own defaults (name, ports, client id) apply only where the
 // operator set nothing; an explicit value — even the libs' default — wins.
 func TestServiceDefaultsYieldToExplicitValues(t *testing.T) {
-	withAdminToken(t)
+	t.Parallel()
+
 	path := writeYAML(t, "admin_addr: \":9080\"\nkafka:\n  brokers: [k:9092]\n  client_id: from-yaml\n")
-	t.Setenv("TASKS_SERVICE_NAME", "tasks-canary")
-	cfg, err := config.Load(path)
+
+	cfg, err := config.LoadFrom(path, withAdminToken(map[string]string{"TASKS_SERVICE_NAME": "tasks-canary"}))
 	require.NoError(t, err)
 	assert.Equal(t, ":9080", cfg.AdminAddr, "set in YAML to the lib's default: kept")
 	assert.Equal(t, "from-yaml", cfg.Kafka.ClientID)
@@ -208,11 +233,14 @@ func TestServiceDefaultsYieldToExplicitValues(t *testing.T) {
 // DB_PASSWORD_FILE that is not mounted both fail it, instead of passing the
 // pre-flight and failing (or silently running on defaults) in the pod.
 func TestLoadFailsOnMissingFiles(t *testing.T) {
-	withAdminToken(t)
-	_, err := config.Load(filepath.Join(t.TempDir(), "absent.yaml"))
+	t.Parallel()
+
+	env := withAdminToken(nil)
+	_, err := config.LoadFrom(filepath.Join(t.TempDir(), "absent.yaml"), env)
 	require.ErrorContains(t, err, "absent.yaml")
 
-	t.Setenv("TASKS_DB_PASSWORD_FILE", filepath.Join(t.TempDir(), "nope"))
-	_, err = config.Load("")
+	env["TASKS_DB_PASSWORD_FILE"] = filepath.Join(t.TempDir(), "nope")
+
+	_, err = config.LoadFrom("", env)
 	require.ErrorContains(t, err, "DB_PASSWORD_FILE")
 }

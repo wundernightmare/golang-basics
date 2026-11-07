@@ -67,9 +67,11 @@ func Register(srv *httpx.Server, deps Deps) {
 	if deps.Logger == nil {
 		deps.Logger = slog.New(slog.DiscardHandler)
 	}
+
 	if deps.Committed == nil {
 		deps.Committed = func() {}
 	}
+
 	h := &handlers{Deps: deps}
 	mux := srv.Mux()
 	mux.HandleFunc("POST /tasks", h.create)
@@ -103,11 +105,13 @@ func (h *handlers) create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
+
 	title, err := domain.NormalizeTitle(req.Title)
 	if err != nil {
 		httpx.WriteProblem(w, r, badRequest("invalid_title", err))
 		return
 	}
+
 	idem, err := idempotencyKey(r, title)
 	if err != nil {
 		httpx.WriteProblem(w, r, badRequest("invalid_idempotency_key", err))
@@ -115,11 +119,13 @@ func (h *handlers) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+
 	task, replayed, err := h.Store.Create(ctx, uuid.NewString(), title, idem)
 	switch {
 	case errors.Is(err, domain.ErrIdempotencyKeyReused):
 		httpx.WriteProblem(w, r, problem(http.StatusUnprocessableEntity, "idempotency_key_reused",
 			"Idempotency-Key was already used for a request with a different body"))
+
 		return
 	case err != nil:
 		h.fail(w, r, "could not persist task", err)
@@ -127,11 +133,14 @@ func (h *handlers) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("ETag", ETag(task.Version))
+
 	if replayed {
 		w.Header().Set(HeaderIdempotentReplay, "true")
 		httpx.WriteJSON(w, http.StatusOK, toWire(task))
+
 		return
 	}
+
 	h.Committed()
 	h.Cache.Warm(ctx, task)
 	w.Header().Set("Location", "/tasks/"+task.ID)
@@ -147,17 +156,22 @@ func idempotencyKey(r *http.Request, title string) (*domain.IdempotencyKey, erro
 		if _, sent := r.Header[HeaderIdempotencyKey]; sent {
 			return nil, errors.New("Idempotency-Key must not be empty")
 		}
-		return nil, nil
+
+		return nil, nil //nolint:nilnil // nil key means "header not sent" (optional), not an error
 	}
+
 	if len(key) > maxIdempotencyKeyLength {
 		return nil, errors.New("Idempotency-Key must be at most 255 characters")
 	}
+
 	for i := range len(key) {
 		if c := key[i]; c < 0x20 || c > 0x7e {
 			return nil, errors.New("Idempotency-Key must be printable ASCII")
 		}
 	}
+
 	sum := sha256.Sum256([]byte(title))
+
 	return &domain.IdempotencyKey{Key: key, Hash: hex.EncodeToString(sum[:])}, nil
 }
 
@@ -165,6 +179,7 @@ func idempotencyKey(r *http.Request, title string) (*domain.IdempotencyKey, erro
 // missing task is a 404 problem and is never cached.
 func (h *handlers) get(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
 	task, hit, err := h.Cache.Get(r.Context(), id, func(ctx context.Context) (domain.Task, error) {
 		return h.Store.Get(ctx, id)
 	})
@@ -176,46 +191,57 @@ func (h *handlers) get(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, "could not load task", err)
 		return
 	}
+
 	w.Header().Set("ETag", ETag(task.Version))
+
 	if hit {
 		w.Header().Set(HeaderCache, "hit")
 	} else {
 		w.Header().Set(HeaderCache, "miss")
 	}
+
 	httpx.WriteJSON(w, http.StatusOK, toWire(task))
 }
 
 // list returns one page of tasks, newest first (keyset pagination).
 func (h *handlers) list(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	for name, values := range q {
+	query := r.URL.Query()
+	for name, values := range query {
 		switch {
 		case name != "limit" && name != "cursor":
 			httpx.WriteProblem(w, r, problem(http.StatusBadRequest, "unknown_parameter",
 				"unknown query parameter "+strconv.Quote(name)+"; only limit and cursor are accepted"))
+
 			return
 		case len(values) > 1:
 			httpx.WriteProblem(w, r, problem(http.StatusBadRequest, "repeated_parameter",
 				"query parameter "+strconv.Quote(name)+" given more than once"))
+
 			return
 		}
 	}
+
 	req := domain.PageRequest{Limit: domain.DefaultPageSize}
-	if _, sent := q["limit"]; sent {
-		n, err := strconv.Atoi(q.Get("limit"))
+
+	if _, sent := query["limit"]; sent {
+		n, err := strconv.Atoi(query.Get("limit"))
 		if err != nil || n < 1 || n > domain.MaxPageSize {
 			httpx.WriteProblem(w, r, problem(http.StatusBadRequest, "invalid_limit",
 				"limit must be an integer from 1 to "+strconv.Itoa(domain.MaxPageSize)))
+
 			return
 		}
+
 		req.Limit = n
 	}
-	if _, sent := q["cursor"]; sent {
-		c, err := domain.DecodeCursor(q.Get("cursor"))
+
+	if _, sent := query["cursor"]; sent {
+		c, err := domain.DecodeCursor(query.Get("cursor"))
 		if err != nil {
 			httpx.WriteProblem(w, r, badRequest("invalid_cursor", err))
 			return
 		}
+
 		req.Cursor = &c
 	}
 
@@ -224,14 +250,17 @@ func (h *handlers) list(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, "could not list tasks", err)
 		return
 	}
+
 	out := tasksapi.TaskList{Tasks: make([]tasksapi.Task, 0, len(page.Tasks))}
 	for _, t := range page.Tasks {
 		out.Tasks = append(out.Tasks, toWire(t))
 	}
+
 	if page.Next != nil {
 		next := page.Next.Encode()
 		out.NextCursor = &next
 	}
+
 	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
@@ -240,21 +269,25 @@ func (h *handlers) list(w http.ResponseWriter, r *http.Request) {
 // has committed.
 func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
 	expect, err := ifMatch(r)
 	if err != nil {
 		httpx.WriteProblem(w, r, badRequest("invalid_if_match", err))
 		return
 	}
+
 	var raw map[string]json.RawMessage
 	if err := httpx.DecodeJSON(r, &raw); err != nil {
 		httpx.WriteError(w, r, err)
 		return
 	}
+
 	req, err := decodePatch(raw)
 	if err != nil {
 		httpx.WriteProblem(w, r, badRequest("invalid_patch", err))
 		return
 	}
+
 	patch, err := domain.Patch{Title: req.Title, Done: req.Done}.Normalize()
 	switch {
 	case errors.Is(err, domain.ErrEmptyPatch):
@@ -266,10 +299,12 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+
 	task, err := h.Store.Update(ctx, id, patch, expect)
 	if h.writeChangeError(w, r, id, err, "could not update task") {
 		return
 	}
+
 	h.Committed()
 	h.invalidate(ctx, id)
 	w.Header().Set("ETag", ETag(task.Version))
@@ -280,15 +315,18 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 // its cache entry once the delete (and its task.deleted event) has committed.
 func (h *handlers) delete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
 	expect, err := ifMatch(r)
 	if err != nil {
 		httpx.WriteProblem(w, r, badRequest("invalid_if_match", err))
 		return
 	}
+
 	ctx := r.Context()
 	if h.writeChangeError(w, r, id, h.Store.Delete(ctx, id, expect), "could not delete task") {
 		return
 	}
+
 	h.Committed()
 	h.invalidate(ctx, id)
 	w.WriteHeader(http.StatusNoContent)
@@ -299,8 +337,10 @@ func (h *handlers) delete(w http.ResponseWriter, r *http.Request) {
 // {"done": null} must not read as "leave done alone" (found by Schemathesis).
 func decodePatch(raw map[string]json.RawMessage) (tasksapi.UpdateTaskRequest, error) {
 	var req tasksapi.UpdateTaskRequest
+
 	for name, v := range raw {
 		var dst any
+
 		switch name {
 		case "title":
 			dst = &req.Title
@@ -309,13 +349,16 @@ func decodePatch(raw map[string]json.RawMessage) (tasksapi.UpdateTaskRequest, er
 		default:
 			return req, fmt.Errorf("unknown field %q; a patch sets title and/or done", name)
 		}
+
 		if string(v) == "null" {
 			return req, fmt.Errorf("%s must not be null", name)
 		}
+
 		if err := json.Unmarshal(v, dst); err != nil {
 			return req, fmt.Errorf("%s: %w", name, err)
 		}
 	}
+
 	return req, nil
 }
 
@@ -332,6 +375,7 @@ func (h *handlers) writeChangeError(w http.ResponseWriter, r *http.Request, id s
 	default:
 		h.fail(w, r, detail, err)
 	}
+
 	return true
 }
 
@@ -353,15 +397,18 @@ const maxIfMatchLength = 20
 func ifMatch(r *http.Request) (*int64, error) {
 	raw := strings.TrimSpace(r.Header.Get("If-Match"))
 	if _, sent := r.Header["If-Match"]; !sent || raw == "*" {
-		return nil, nil
+		return nil, nil //nolint:nilnil // nil means "no precondition" (absent or *), not an error
 	}
+
 	if len(raw) < 3 || len(raw) > maxIfMatchLength || raw[0] != '"' || raw[len(raw)-1] != '"' {
 		return nil, errors.New(`If-Match must be a single strong entity tag such as "3" (weak tags never match)`)
 	}
+
 	v, err := strconv.ParseInt(raw[1:len(raw)-1], 10, 64)
 	if err != nil || v < 1 {
 		return nil, errors.New(`If-Match must carry a task version such as "3"`)
 	}
+
 	return &v, nil
 }
 
@@ -372,6 +419,7 @@ func (h *handlers) fail(w http.ResponseWriter, r *http.Request, detail string, e
 		httpx.WriteError(w, r, err)
 		return
 	}
+
 	httpx.WriteProblem(w, r, httpx.Internal(detail, err))
 }
 

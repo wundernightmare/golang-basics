@@ -24,7 +24,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 )
 
@@ -53,19 +52,23 @@ type Execer interface {
 
 // Enqueue writes e to the outbox inside tx — the caller's transaction, the
 // one that makes the change e describes. The trace context of ctx (the
-// request's span) is stored with the row, so the relay can publish the
-// record as part of the request's trace however much later it runs.
-func Enqueue(ctx context.Context, tx Execer, e Event) error {
+// request's span) is stored with the row through prop, so the relay (built
+// with the same propagator) can publish the record as part of the request's
+// trace however much later it runs.
+func Enqueue(ctx context.Context, prop propagation.TextMapPropagator, tx Execer, e Event) error {
 	carrier := propagation.MapCarrier{}
-	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	prop.Inject(ctx, carrier)
+
 	headers, err := json.Marshal(carrier)
 	if err != nil {
 		return fmt.Errorf("outbox: encode headers: %w", err)
 	}
+
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO outbox (event_id, aggregate_id, event_type, payload, headers) VALUES ($1, $2, $3, $4, $5)`,
 		e.ID, e.AggregateID, e.Type, e.Payload, headers); err != nil {
 		return fmt.Errorf("outbox: enqueue %s %s: %w", e.Type, e.AggregateID, err)
 	}
+
 	return nil
 }

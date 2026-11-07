@@ -25,7 +25,9 @@ const consumedMetric = "consumer_events_total"
 //
 // Not parallel with its own sub-tests: they share the two processes and run
 // in order, the shutdown check last.
-func TestTasksPipeline(t *testing.T) { //nolint:tparallel // ordered sub-tests over shared processes
+//
+//nolint:tparallel,paralleltest // ordered sub-tests over shared processes
+func TestTasksPipeline(t *testing.T) {
 	t.Parallel()
 	dbURL, valkeyURL, brokers := dataEnv(t)
 
@@ -71,6 +73,7 @@ func TestTasksPipeline(t *testing.T) { //nolint:tparallel // ordered sub-tests o
 			strings.NewReader(fmt.Sprintf(`{"title":%q}`, title)))
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, code, "POST /tasks: %s", body)
+
 		var created struct {
 			ID    json.RawMessage `json:"id"`
 			Title string          `json:"title"`

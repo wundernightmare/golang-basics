@@ -38,44 +38,51 @@ func FuzzProblemJSON(f *testing.F) {
 	})
 
 	f.Fuzz(func(t *testing.T, status int, detail, extKey, extVal string) {
-		p := httpx.NewProblem(status, detail)
+		problem := httpx.NewProblem(status, detail)
 		if extKey != "" {
-			p.Extensions = map[string]any{extKey: extVal}
+			problem.Extensions = map[string]any{extKey: extVal}
 		}
-		b, err := json.Marshal(p)
+
+		b, err := json.Marshal(problem)
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
-		var m map[string]any
-		if err := json.Unmarshal(b, &m); err != nil {
+
+		var decoded map[string]any
+		if err := json.Unmarshal(b, &decoded); err != nil {
 			t.Fatalf("round trip: %v (%q)", err, b)
 		}
-		want := p.Status
+
+		want := problem.Status
 		if want < 100 || want > 999 {
 			want = http.StatusInternalServerError // an invalid status degrades to 500, never a panic
 		}
-		if got, _ := m["status"].(float64); int(got) != want {
-			t.Fatalf("status %v != %d", m["status"], want)
+
+		if got, _ := decoded["status"].(float64); int(got) != want {
+			t.Fatalf("status %v != %d", decoded["status"], want)
 		}
 		// encoding/json coerces invalid UTF-8 in keys to U+FFFD, so only a valid
 		// key is expected back under its own name.
 		if extKey != "" && !isReserved(extKey) && utf8.ValidString(extKey) {
-			if _, ok := m[extKey]; !ok {
+			if _, ok := decoded[extKey]; !ok {
 				t.Fatalf("extension %q lost", extKey)
 			}
 		}
 
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req = req.WithContext(context.WithValue(req.Context(), problemKey{}, p))
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+		req = req.WithContext(context.WithValue(req.Context(), problemKey{}, problem))
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
+
 		if rec.Code != want {
 			t.Fatalf("response status %d != problem status %d", rec.Code, want)
 		}
+
 		var body map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatalf("response body is not JSON: %v (%q)", err, rec.Body.String())
 		}
+
 		if got, _ := body["status"].(float64); int(got) != want {
 			t.Fatalf("body status %v != response status %d", body["status"], want)
 		}
@@ -87,6 +94,7 @@ func isReserved(k string) bool {
 	case "type", "title", "status", "detail", "instance":
 		return true
 	}
+
 	return false
 }
 
@@ -105,11 +113,14 @@ func FuzzLoadYAML(f *testing.F) {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Skip()
 		}
-		t.Setenv("FUZZ_WORKERS", "7")
+
+		environ := map[string]string{"FUZZ_WORKERS": "7"}
+
 		var cfg sampleConfig
-		if err := httpx.LoadYAML(path, "FUZZ_", &cfg); err != nil {
+		if err := httpx.LoadYAMLFrom(path, "FUZZ_", environ, &cfg); err != nil {
 			return // a parse error is a valid outcome
 		}
+
 		if cfg.Workers != 7 {
 			t.Fatalf("env overlay lost: workers=%d", cfg.Workers)
 		}
@@ -136,47 +147,59 @@ func FuzzRedact(f *testing.F) {
 			Secret string   `yaml:"secret"`
 			List   []string `yaml:"list"`
 		}
+
 		b, err := json.Marshal(httpx.Redact(cfg{Target: s, Secret: s, List: []string{s}}))
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
-		var m map[string]any
-		if err := json.Unmarshal(b, &m); err != nil {
+
+		var decoded map[string]any
+		if err := json.Unmarshal(b, &decoded); err != nil {
 			t.Fatalf("round trip: %v (%q)", err, b)
 		}
-		if s != "" && m["secret"] != "[redacted]" {
-			t.Fatalf("secret field leaked: %v", m["secret"])
+
+		if s != "" && decoded["secret"] != "[redacted]" {
+			t.Fatalf("secret field leaked: %v", decoded["secret"])
 		}
-		list, _ := m["list"].([]any)
+
+		list, _ := decoded["list"].([]any)
 		if len(list) != 1 {
-			t.Fatalf("list lost its element: %v", m["list"])
+			t.Fatalf("list lost its element: %v", decoded["list"])
 		}
-		if list[0] != m["target"] {
-			t.Fatalf("the same string redacted differently in a slice: %q vs %q", list[0], m["target"])
+
+		if list[0] != decoded["target"] {
+			t.Fatalf("the same string redacted differently in a slice: %q vs %q", list[0], decoded["target"])
 		}
 
 		if !strings.Contains(s, "://") {
 			return
 		}
+
 		u, err := url.Parse(s)
 		if err != nil || u.User == nil {
 			return
 		}
+
 		password, has := u.User.Password()
 		if !has {
 			return
 		}
-		out, _ := m["target"].(string)
+
+		out, _ := decoded["target"].(string)
+
 		ru, err := url.Parse(out)
 		if err != nil {
 			t.Fatalf("redacted URL %q no longer parses: %v", out, err)
 		}
+
 		if ru.User == nil {
 			t.Fatalf("redacted URL %q lost its userinfo", out)
 		}
+
 		if got := ru.User.Username(); got != u.User.Username() {
 			t.Fatalf("user changed: %q → %q", u.User.Username(), got)
 		}
+
 		if got, ok := ru.User.Password(); !ok || got != "xxxxx" {
 			t.Fatalf("password %q redacted to %q (present=%v), want xxxxx", password, got, ok)
 		}

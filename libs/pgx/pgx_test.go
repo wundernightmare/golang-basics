@@ -2,6 +2,7 @@ package pgx_test
 
 import (
 	"context"
+	"maps"
 	"net/url"
 	"os"
 	"strings"
@@ -13,7 +14,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
@@ -26,18 +26,38 @@ import (
 func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }
 
 func TestConfigDSN(t *testing.T) {
+	t.Parallel()
+
 	t.Run("explicit URL wins", func(t *testing.T) {
+		t.Parallel()
+
 		cfg := pgx.Config{URL: "postgres://u:p@h:1/db?sslmode=require", Host: "ignored"}
 		assert.Equal(t, "postgres://u:p@h:1/db?sslmode=require", cfg.DSN())
 	})
 	t.Run("assembled from fields", func(t *testing.T) {
+		t.Parallel()
+
 		cfg := pgx.Config{Host: "db", Port: 5432, User: "app", Password: "s3cret", Name: "app", SSLMode: "disable"}
 		assert.Equal(t, "postgres://app:s3cret@db:5432/app?sslmode=disable", cfg.DSN())
 	})
 }
 
-func TestLoadConfigDefaults(t *testing.T) {
+// The process-environment path of LoadConfig (LoadConfigFrom with nil);
+// everything else reads a map through LoadConfigFrom.
+//
+// Serial on purpose: exercises the process-environment path (t.Setenv cannot run in parallel).
+func TestLoadConfig_ReadsTheProcessEnvironment(t *testing.T) {
+	t.Setenv("TASKS_DB_HOST", "db.from-env")
+
 	cfg, err := pgx.LoadConfig("TASKS_")
+	require.NoError(t, err)
+	assert.Equal(t, "db.from-env", cfg.Host, "LoadConfig reads the process environment")
+}
+
+func TestLoadConfigDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := pgx.LoadConfigFrom("TASKS_", map[string]string{})
 	require.NoError(t, err)
 	assert.Equal(t, "localhost", cfg.Host)
 	assert.Equal(t, 5432, cfg.Port)
@@ -46,10 +66,11 @@ func TestLoadConfigDefaults(t *testing.T) {
 	assert.Equal(t, 5*time.Second, cfg.LockTimeout)
 	assert.Equal(t, time.Minute, cfg.IdleInTransactionSessionTimeout)
 
-	t.Setenv("TASKS_DB_HOST", "db.internal")
-	t.Setenv("TASKS_DB_MAX_CONNS", "42")
-	t.Setenv("TASKS_DB_STATEMENT_TIMEOUT", "2s")
-	cfg, err = pgx.LoadConfig("TASKS_")
+	cfg, err = pgx.LoadConfigFrom("TASKS_", map[string]string{
+		"TASKS_DB_HOST":              "db.internal",
+		"TASKS_DB_MAX_CONNS":         "42",
+		"TASKS_DB_STATEMENT_TIMEOUT": "2s",
+	})
 	require.NoError(t, err)
 	assert.Equal(t, "db.internal", cfg.Host)
 	assert.Equal(t, int32(42), cfg.MaxConns)
@@ -57,7 +78,11 @@ func TestLoadConfigDefaults(t *testing.T) {
 }
 
 func TestLoadMigrations(t *testing.T) {
+	t.Parallel()
+
 	t.Run("ordered by version, not by name", func(t *testing.T) {
+		t.Parallel()
+
 		ms, err := pgx.LoadMigrations(fstest.MapFS{
 			"010_later.sql": {Data: []byte("SELECT 10")},
 			"2_second.sql":  {Data: []byte("SELECT 2")},
@@ -72,10 +97,14 @@ func TestLoadMigrations(t *testing.T) {
 		assert.Equal(t, "001_first.sql", ms[0].File)
 	})
 	t.Run("a misnamed file is an error", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := pgx.LoadMigrations(fstest.MapFS{"create-tasks.sql": {Data: []byte("x")}})
 		require.ErrorContains(t, err, "create-tasks.sql")
 	})
 	t.Run("a duplicate version is an error", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := pgx.LoadMigrations(fstest.MapFS{
 			"001_a.sql": {Data: []byte("x")}, "1_b.sql": {Data: []byte("y")},
 		})
@@ -99,17 +128,21 @@ func schemaConfig(t testing.TB) (pgx.Config, string) {
 
 	u, err := url.Parse(base)
 	require.NoError(t, err)
+
 	q := u.Query()
 	q.Set("search_path", schema)
 	u.RawQuery = q.Encode()
+
 	return pgx.Config{URL: u.String(), ConnectTimeout: 5 * time.Second, MaxConns: 5}, schema
 }
 
-func newDB(t testing.TB, cfg pgx.Config) *pgx.DB {
+func newDB(t testing.TB, cfg pgx.Config, opts ...pgx.Option) *pgx.DB {
 	t.Helper()
-	db, err := pgx.New(context.Background(), cfg, nil)
+
+	db, err := pgx.New(context.Background(), cfg, nil, opts...)
 	require.NoError(t, err)
 	t.Cleanup(db.Close)
+
 	return db
 }
 
@@ -120,25 +153,33 @@ var widgets = fstest.MapFS{
 
 func appliedVersions(t testing.TB, db *pgx.DB) []int64 {
 	t.Helper()
+
 	rows, err := db.Pool().Query(context.Background(), `SELECT version FROM schema_migrations ORDER BY version`)
 	require.NoError(t, err)
+
 	var out []int64
+
 	for rows.Next() {
 		var v int64
 		require.NoError(t, rows.Scan(&v))
 		out = append(out, v)
 	}
+
 	require.NoError(t, rows.Err())
+
 	return out
 }
 
 func TestMigrate_FreshSchemaThenRerunIsANoop(t *testing.T) {
+	t.Parallel()
+
 	cfg, _ := schemaConfig(t)
 	db := newDB(t, cfg)
 	ctx := context.Background()
 
 	require.NoError(t, pgx.Migrate(ctx, db.Pool(), widgets, nil))
 	assert.Equal(t, []int64{1, 2}, appliedVersions(t, db))
+
 	var n int
 	require.NoError(t, db.Pool().QueryRow(ctx, `SELECT count(*) FROM widgets`).Scan(&n))
 	assert.Equal(t, 2, n, "a multi-statement file runs every statement")
@@ -149,40 +190,50 @@ func TestMigrate_FreshSchemaThenRerunIsANoop(t *testing.T) {
 
 	// A new file is picked up on the next run.
 	next := fstest.MapFS{"003_widget_color.sql": {Data: []byte(`ALTER TABLE widgets ADD COLUMN color TEXT`)}}
-	for k, v := range widgets {
-		next[k] = v
-	}
+	maps.Copy(next, widgets)
+
 	require.NoError(t, pgx.Migrate(ctx, db.Pool(), next, nil))
 	assert.Equal(t, []int64{1, 2, 3}, appliedVersions(t, db))
 }
 
 func TestMigrate_ConcurrentRunnersDoNotCollide(t *testing.T) {
+	t.Parallel()
+
 	cfg, _ := schemaConfig(t)
 	ctx := context.Background()
 	// Separate pools: separate "replicas".
 	dbs := []*pgx.DB{newDB(t, cfg), newDB(t, cfg), newDB(t, cfg), newDB(t, cfg)}
 
 	var wg sync.WaitGroup
+
 	errs := make([]error, len(dbs))
 	start := make(chan struct{})
+
 	for i, db := range dbs {
 		wg.Go(func() {
 			<-start
+
 			errs[i] = pgx.Migrate(ctx, db.Pool(), widgets, nil)
 		})
 	}
+
 	close(start)
 	wg.Wait()
+
 	for i, err := range errs {
 		require.NoError(t, err, "runner %d", i)
 	}
+
 	assert.Equal(t, []int64{1, 2}, appliedVersions(t, dbs[0]), "each version applied exactly once")
+
 	var n int
 	require.NoError(t, dbs[0].Pool().QueryRow(ctx, `SELECT count(*) FROM widgets`).Scan(&n))
 	assert.Equal(t, 2, n)
 }
 
 func TestMigrate_FailingMigrationRollsBackAndIsNamed(t *testing.T) {
+	t.Parallel()
+
 	cfg, schema := schemaConfig(t)
 	db := newDB(t, cfg)
 	ctx := context.Background()
@@ -197,6 +248,7 @@ func TestMigrate_FailingMigrationRollsBackAndIsNamed(t *testing.T) {
 	assert.Contains(t, err.Error(), "002_broken.sql", "the error names the file")
 
 	assert.Equal(t, []int64{1}, appliedVersions(t, db), "earlier migrations stay, the failing one is not recorded")
+
 	for table, want := range map[string]bool{"ok_table": true, "half_done": false, "never_reached": false} {
 		var exists bool
 		require.NoError(t, db.Pool().QueryRow(ctx,
@@ -207,6 +259,8 @@ func TestMigrate_FailingMigrationRollsBackAndIsNamed(t *testing.T) {
 }
 
 func TestSessionTimeoutsAreApplied(t *testing.T) {
+	t.Parallel()
+
 	cfg, _ := schemaConfig(t)
 	cfg.StatementTimeout = 1500 * time.Millisecond
 	cfg.LockTimeout = 250 * time.Millisecond
@@ -217,6 +271,7 @@ func TestSessionTimeoutsAreApplied(t *testing.T) {
 	show := func(name string) string {
 		var v string
 		require.NoError(t, db.Pool().QueryRow(ctx, "SHOW "+name).Scan(&v))
+
 		return v
 	}
 	assert.Equal(t, "1500ms", show("statement_timeout"))
@@ -231,9 +286,12 @@ func TestSessionTimeoutsAreApplied(t *testing.T) {
 
 // DB_PASSWORD_FILE wins over the URL's password; a bad file fails the boot.
 func TestNew_PasswordFile(t *testing.T) {
+	t.Parallel()
+
 	cfg, _ := schemaConfig(t)
 	u, err := url.Parse(cfg.URL)
 	require.NoError(t, err)
+
 	right, _ := u.User.Password()
 	u.User = url.UserPassword(u.User.Username(), "wrong")
 	cfg.URL = u.String()
@@ -246,6 +304,7 @@ func TestNew_PasswordFile(t *testing.T) {
 
 	for name, path := range map[string]string{"missing": dir + "/nope", "empty": dir + "/empty"} {
 		require.NoError(t, os.WriteFile(dir+"/empty", []byte("\n"), 0o600))
+
 		cfg.PasswordFile = path
 		_, err := pgx.New(context.Background(), cfg, nil)
 		require.ErrorContains(t, err, "DB_PASSWORD_FILE", name)
@@ -267,6 +326,8 @@ func TestConfig_ValidatePasswordFile(t *testing.T) {
 }
 
 func TestReadyCheckFailsWhenClosed(t *testing.T) {
+	t.Parallel()
+
 	cfg, _ := schemaConfig(t)
 	ctx := context.Background()
 	db, err := pgx.New(ctx, cfg, nil)
@@ -277,6 +338,8 @@ func TestReadyCheckFailsWhenClosed(t *testing.T) {
 }
 
 func TestNew_ZeroConnectTimeoutStillPings(t *testing.T) {
+	t.Parallel()
+
 	cfg, _ := schemaConfig(t)
 	cfg.ConnectTimeout = 0 // a hand-built config: must not expire the boot ping immediately
 	db := newDB(t, cfg)
@@ -286,30 +349,35 @@ func TestNew_ZeroConnectTimeoutStillPings(t *testing.T) {
 // Every query is a client span inside the caller's trace, and the pool
 // statistics and query metrics move with real usage.
 func TestQueriesAreTracedAndMeasured(t *testing.T) {
+	t.Parallel()
+
 	cfg, _ := schemaConfig(t)
-	sr := testx.Recorder(t)
-	db := newDB(t, cfg)
+	recorder := testx.Recorder(t)
+	db := newDB(t, cfg, pgx.WithTracerProvider(recorder.Provider))
 	ctx := context.Background()
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(db.Collectors()...)
 
-	qctx, parent := otel.Tracer("test").Start(ctx, "handler")
+	qctx, parent := recorder.Tracer().Start(ctx, "handler")
+
 	var one int
 	require.NoError(t, db.Pool().QueryRow(qctx, "SELECT 1").Scan(&one))
-	_, err := db.Pool().Exec(pgx.WithOperation(qctx, "widgets.broken"), "SELECT * FROM no_such_table")
+	_, err := db.Pool().Exec(pgx.WithOperation(qctx, "widgets.broken"), "SELECT id FROM no_such_table")
 	require.Error(t, err)
 	parent.End()
 
 	// The query span is a direct child of the handler span (its prepare step,
 	// also named by the statement, is a child of the query span).
 	var query sdktrace.ReadOnlySpan
-	for _, s := range sr.Ended() {
+
+	for _, s := range recorder.Ended() {
 		if s.SpanKind() == trace.SpanKindClient && strings.HasPrefix(strings.ToUpper(s.Name()), "SELECT") &&
 			s.Parent().SpanID() == parent.SpanContext().SpanID() {
 			query = s
 			break
 		}
 	}
+
 	require.NotNil(t, query, "a client span named by the statement, child of the caller's span")
 	assert.Equal(t, parent.SpanContext().TraceID(), query.SpanContext().TraceID())
 
@@ -326,6 +394,8 @@ func TestQueriesAreTracedAndMeasured(t *testing.T) {
 }
 
 func TestNew_UnreachableDatabaseFailsFast(t *testing.T) {
+	t.Parallel()
+
 	start := time.Now()
 	_, err := pgx.New(context.Background(), pgx.Config{
 		URL: "postgres://app:app@127.0.0.1:1/app?sslmode=disable", ConnectTimeout: time.Second,

@@ -59,12 +59,12 @@ type ProducerClient interface {
 
 // ConsumerClient is a consumer-group member.
 type ConsumerClient interface {
-	// Poll returns up to max records, waiting while there are none until
+	// Poll returns up to maxRecords records, waiting while there are none until
 	// ctx ends. Fetch errors that do not stop the client are returned next
 	// to the records (errors.Join); [ErrClientClosed] once it is closed;
 	// an error wrapping [ErrClientFailed] when the client failed for good.
 	// Records of a partition revoked during the call are not returned.
-	Poll(ctx context.Context, max int) ([]Message, error)
+	Poll(ctx context.Context, maxRecords int) ([]Message, error)
 	// Commit commits the given next offsets (last processed + 1)
 	// synchronously.
 	Commit(ctx context.Context, offsets []Offset) error
@@ -127,6 +127,7 @@ var ErrClientClosed = errors.New("kafka: client closed")
 // polling a dead client while readiness stays green.
 var ErrClientFailed = errors.New("kafka: client failed")
 
+//nolint:gochecknoglobals // the provider registry: Register on import, like database/sql drivers
 var (
 	driverMu sync.Mutex
 	driver   Driver
@@ -138,15 +139,18 @@ var (
 func Register(d Driver) {
 	driverMu.Lock()
 	defer driverMu.Unlock()
+
 	if driver != nil {
 		panic(fmt.Sprintf("kafka: provider %q registered while %q already is: link exactly one of libs/kafka-rdkafka, libs/kafka-franz", d.Name(), driver.Name()))
 	}
+
 	driver = d
 }
 
 func registered() Driver {
 	driverMu.Lock()
 	defer driverMu.Unlock()
+
 	return driver
 }
 
@@ -155,6 +159,7 @@ func Provider() string {
 	if d := registered(); d != nil {
 		return d.Name()
 	}
+
 	return ""
 }
 
@@ -163,5 +168,6 @@ func mustDriver() (Driver, error) {
 	if d == nil {
 		return nil, errors.New("kafka: no provider linked: import libs/kafka-rdkafka or libs/kafka-franz for its side effect")
 	}
+
 	return d, nil
 }

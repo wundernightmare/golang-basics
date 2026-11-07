@@ -32,6 +32,7 @@ func tracedContext() context.Context {
 		TraceFlags: trace.FlagsSampled,
 	})
 	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
 	return httpx.WithRequestID(ctx, "req-1")
 }
 
@@ -40,6 +41,8 @@ func jsonLogger(buf *testx.LogBuffer) *slog.Logger {
 }
 
 func TestLogger_StampsTraceSpanAndRequestFromContext(t *testing.T) {
+	t.Parallel()
+
 	buf := &testx.LogBuffer{}
 	log := jsonLogger(buf)
 	log.InfoContext(tracedContext(), "with trace")
@@ -51,6 +54,7 @@ func TestLogger_StampsTraceSpanAndRequestFromContext(t *testing.T) {
 	assert.Equal(t, testSpanID, lines[0]["span_id"])
 	assert.Equal(t, "req-1", lines[0]["request_id"])
 	assert.Equal(t, "svc", lines[0]["service"])
+
 	for _, k := range []string{"trace_id", "span_id", "request_id"} {
 		assert.NotContains(t, lines[1], k)
 	}
@@ -59,6 +63,8 @@ func TestLogger_StampsTraceSpanAndRequestFromContext(t *testing.T) {
 // A backend joins logs to traces on a top-level trace_id: a logger scoped
 // with WithGroup must not bury the correlation ids inside the group.
 func TestLogger_CorrelationIDsStayTopLevelUnderWithGroup(t *testing.T) {
+	t.Parallel()
+
 	buf := &testx.LogBuffer{}
 	log := jsonLogger(buf).With("component", "store").WithGroup("db").With("table", "tasks").WithGroup("q")
 	log.InfoContext(tracedContext(), "query", "rows", 3)
@@ -79,6 +85,7 @@ func TestLogger_CorrelationIDsStayTopLevelUnderWithGroup(t *testing.T) {
 
 	// Without a trace the grouped logger still works and adds nothing.
 	log.Info("plain", "rows", 1)
+
 	plain := buf.Find(t, map[string]any{"msg": "plain"})
 	require.NotNil(t, plain)
 	assert.NotContains(t, plain, "trace_id")
@@ -86,9 +93,12 @@ func TestLogger_CorrelationIDsStayTopLevelUnderWithGroup(t *testing.T) {
 }
 
 func TestLogger_TextFormat(t *testing.T) {
+	t.Parallel()
+
 	buf := &testx.LogBuffer{}
 	log := httpx.NewLogger(httpx.LogConfig{Level: "debug", Format: "text", Writer: buf})
 	log.DebugContext(tracedContext(), "hello", "k", "v")
+
 	out := buf.String()
 	assert.Contains(t, out, "msg=hello")
 	assert.Contains(t, out, "trace_id="+testTraceID)
@@ -96,6 +106,8 @@ func TestLogger_TextFormat(t *testing.T) {
 }
 
 func TestLogger_UnknownLevelFallsBackToInfo(t *testing.T) {
+	t.Parallel()
+
 	buf := &testx.LogBuffer{}
 	log := httpx.NewLogger(httpx.LogConfig{Level: "chatty", Format: "json", Writer: buf})
 	log.Debug("hidden")
@@ -105,30 +117,41 @@ func TestLogger_UnknownLevelFallsBackToInfo(t *testing.T) {
 }
 
 func TestLogger_WritesToStdoutByDefault(t *testing.T) {
+	t.Parallel()
+
 	orig := os.Stdout
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
+
 	os.Stdout = w
 	log := httpx.NewLogger(httpx.LogConfig{Level: "info", Format: "json"}) // Writer nil
 	os.Stdout = orig
+
 	log.Info("to stdout")
 	require.NoError(t, w.Close())
+
 	var out bytes.Buffer
+
 	_, _ = out.ReadFrom(r)
 	assert.Contains(t, out.String(), `"msg":"to stdout"`)
 }
 
 func TestLogger_SamplesInfoButNeverWarn(t *testing.T) {
+	t.Parallel()
+
 	buf := &testx.LogBuffer{}
+
 	log := httpx.NewLogger(httpx.LogConfig{
 		Level: "info", Format: "json", Writer: buf, SampleInitial: 3, SampleThereafter: 10, SampleTick: time.Minute,
 	})
 	for range 30 {
 		log.Info("hot loop")
 	}
+
 	for range 30 {
 		log.Warn("always")
 	}
+
 	log.Info("other message") // its own budget
 
 	lines := buf.Lines(t)
@@ -139,24 +162,32 @@ func TestLogger_SamplesInfoButNeverWarn(t *testing.T) {
 }
 
 func TestLogger_SamplingOffWhenInitialIsZero(t *testing.T) {
+	t.Parallel()
+
 	buf := &testx.LogBuffer{}
+
 	log := httpx.NewLogger(httpx.LogConfig{Level: "info", Format: "json", Writer: buf})
 	for range 500 {
 		log.Info("unsampled")
 	}
+
 	assert.Len(t, buf.Lines(t), 500)
 }
 
 func TestLogger_DroppedCountIsExported(t *testing.T) {
+	t.Parallel()
+
 	// Records below the level never reach the sampler, so they are not
 	// counted as dropped.
 	buf := &testx.LogBuffer{}
+
 	log := httpx.NewLogger(httpx.LogConfig{
 		Level: "error", Format: "json", Writer: buf, SampleInitial: 1, SampleThereafter: 1000, SampleTick: time.Minute,
 	})
 	for range 10 {
 		log.Info("filtered")
 	}
+
 	assert.Empty(t, buf.String())
 	assert.Equal(t, 0.0, droppedInfo(t, log))
 
@@ -167,6 +198,7 @@ func TestLogger_DroppedCountIsExported(t *testing.T) {
 	for range 10 {
 		log.Info("dropped")
 	}
+
 	assert.Equal(t, 9.0, droppedInfo(t, log))
 }
 
@@ -174,11 +206,15 @@ func TestLogger_DroppedCountIsExported(t *testing.T) {
 // built around log, exactly as NewServer wires it.
 func droppedInfo(t testing.TB, log *slog.Logger) float64 {
 	t.Helper()
+
 	m := httpx.NewMetrics(httpx.Build("t"), log)
+
 	return testx.Metric(t, m.Registry, "log_dropped_total", map[string]string{"level": "info"})
 }
 
 func TestLogLevelOf(t *testing.T) {
+	t.Parallel()
+
 	log := httpx.NewLogger(httpx.LogConfig{Level: "warn", Writer: &testx.LogBuffer{}})
 	lvl := httpx.LogLevelOf(log)
 	require.NotNil(t, lvl)
@@ -187,6 +223,7 @@ func TestLogLevelOf(t *testing.T) {
 
 	prev := lvl.Set(slog.LevelDebug, 0)
 	assert.Equal(t, slog.LevelWarn, prev)
+
 	level, expires := lvl.Level()
 	assert.Equal(t, slog.LevelDebug, level)
 	assert.True(t, expires.IsZero(), "ttl 0 is permanent until reset")
@@ -196,6 +233,8 @@ func TestLogLevelOf(t *testing.T) {
 }
 
 func TestBuild_ReportsServiceAndVersion(t *testing.T) {
+	t.Parallel()
+
 	b := httpx.Build("svc")
 	assert.Equal(t, "svc", b.Service)
 	assert.Equal(t, httpx.Version, b.Version)
@@ -204,21 +243,27 @@ func TestBuild_ReportsServiceAndVersion(t *testing.T) {
 }
 
 func TestSignalContext_CancelledByTheFirstSignal(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS == "windows" {
 		t.Skip("no SIGTERM delivery to self on windows")
 	}
+
 	ctx, stop := httpx.SignalContext()
 	defer stop()
+
 	require.NoError(t, ctx.Err())
 
 	self, err := os.FindProcess(os.Getpid())
 	require.NoError(t, err)
 	require.NoError(t, self.Signal(syscall.SIGTERM))
+
 	select {
 	case <-ctx.Done():
 	case <-time.After(2 * time.Second):
 		t.Fatal("SIGTERM did not cancel the context")
 	}
+
 	assert.ErrorIs(t, ctx.Err(), context.Canceled)
 	// The handler is released right after the first signal, so a second one
 	// gets the default disposition and terminates the process — not asserted

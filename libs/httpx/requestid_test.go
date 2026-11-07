@@ -22,10 +22,13 @@ func requestIDServer(t testing.TB) (*httpx.Server, *testx.LogBuffer) {
 		srv.Logger().InfoContext(r.Context(), "in handler")
 		_, _ = io.WriteString(w, httpx.RequestIDFromContext(r.Context()))
 	})
+
 	return srv, buf
 }
 
 func TestRequestID_GeneratedEchoedAndLogged(t *testing.T) {
+	t.Parallel()
+
 	srv, buf := requestIDServer(t)
 	rec := get(srv.Handler(), "/ok")
 
@@ -40,6 +43,8 @@ func TestRequestID_GeneratedEchoedAndLogged(t *testing.T) {
 }
 
 func TestRequestID_InboundHonouredOnlyFromTrustedProxyAndWhenSane(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := requestIDServer(t)
 	for _, tc := range []struct {
 		name, in, peer string
@@ -54,15 +59,19 @@ func TestRequestID_InboundHonouredOnlyFromTrustedProxyAndWhenSane(t *testing.T) 
 		{"sane but untrusted peer", "01J9ZK4Q7W1X2Y3Z4A5B6C7D8E", "203.0.113.9:1234", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/ok", nil)
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodGet, "/ok", http.NoBody)
 			req.RemoteAddr = tc.peer
 			req.Header.Set(httpx.RequestIDHeader, tc.in)
 			rec := do(srv.Handler(), req)
+
 			out := rec.Header().Get(httpx.RequestIDHeader)
 			if tc.kept {
 				assert.Equal(t, tc.in, out)
 				return
 			}
+
 			assert.NotEqual(t, tc.in, out, "%q must be replaced", tc.in)
 			assert.Len(t, out, 16)
 		})
@@ -70,10 +79,18 @@ func TestRequestID_InboundHonouredOnlyFromTrustedProxyAndWhenSane(t *testing.T) 
 }
 
 func TestClientIP_XForwardedForWalk(t *testing.T) {
+	t.Parallel()
+
 	srv, buf := loggedServer(t, httpx.Config{TrustedProxies: []string{"10.0.0.0/8", "::1"}})
 	srv.Mux().HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, httpx.ClientIPFromContext(r.Context()))
 	})
+	// After every (parallel) sub-test: the access log attributes the request
+	// to the same address.
+	t.Cleanup(func() {
+		assert.NotNil(t, buf.Find(t, map[string]any{"msg": "request", "client_ip": "2001:db8::1"}))
+	})
+
 	for _, tc := range []struct {
 		name, peer string
 		xff        []string
@@ -90,20 +107,24 @@ func TestClientIP_XForwardedForWalk(t *testing.T) {
 		{"IPv4-mapped peer", "[::ffff:10.0.0.1]:1", []string{"203.0.113.8"}, "203.0.113.8"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+
 			req.RemoteAddr = tc.peer
 			for _, v := range tc.xff {
 				req.Header.Add("X-Forwarded-For", v)
 			}
+
 			rec := do(srv.Handler(), req)
 			assert.Equal(t, tc.want, rec.Body.String())
 		})
 	}
-	// The access log attributes the request to the same address.
-	assert.NotNil(t, buf.Find(t, map[string]any{"msg": "request", "client_ip": "2001:db8::1"}))
 }
 
 func TestRequestID_Helpers(t *testing.T) {
+	t.Parallel()
+
 	id := httpx.NewRequestID()
 	assert.Regexp(t, `^[0-9a-f]{16}$`, id)
 	assert.NotEqual(t, id, httpx.NewRequestID())

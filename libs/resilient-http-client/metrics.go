@@ -33,7 +33,7 @@ type metrics struct {
 }
 
 func newMetrics(reg prometheus.Registerer) (*metrics, error) {
-	m := &metrics{
+	instruments := &metrics{
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "http_client_requests_total",
 			Help: "Outbound HTTP attempts by target, method and outcome.",
@@ -69,14 +69,15 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		}, []string{"target"}),
 	}
 	for _, c := range []prometheus.Collector{
-		m.requests, m.duration, m.retries, m.budgetExhausted,
-		m.breakerState, m.transitions, m.bulkheadInUse, m.bulkheadReject,
+		instruments.requests, instruments.duration, instruments.retries, instruments.budgetExhausted,
+		instruments.breakerState, instruments.transitions, instruments.bulkheadInUse, instruments.bulkheadReject,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, err
 		}
 	}
-	return m, nil
+
+	return instruments, nil
 }
 
 // methodLabel bounds the method label to the standard methods.
@@ -88,6 +89,7 @@ func methodLabel(m string) string {
 		http.MethodDelete, http.MethodOptions, http.MethodConnect, http.MethodTrace:
 		return m
 	}
+
 	return "_OTHER"
 }
 
@@ -101,5 +103,6 @@ func statusOutcome(code int) string {
 	case code >= 300:
 		return "3xx"
 	}
+
 	return "2xx"
 }

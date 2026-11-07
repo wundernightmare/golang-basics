@@ -28,10 +28,12 @@ func newLRU(size int) *lru {
 func (l *lru) contains(id string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	if e, ok := l.items[id]; ok {
 		l.order.MoveToFront(e)
 		return true
 	}
+
 	return false
 }
 
@@ -39,15 +41,17 @@ func (l *lru) contains(id string) bool {
 func (l *lru) add(id string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	if e, ok := l.items[id]; ok {
 		l.order.MoveToFront(e)
 		return
 	}
+
 	l.items[id] = l.order.PushFront(id)
 	if l.order.Len() > l.size {
 		oldest := l.order.Back()
 		l.order.Remove(oldest)
-		delete(l.items, oldest.Value.(string))
+		delete(l.items, oldest.Value.(string)) //nolint:forcetypeassert // only ids are pushed (above): a non-string is a broken invariant and should panic
 	}
 }
 
@@ -55,5 +59,6 @@ func (l *lru) add(id string) {
 func (l *lru) len() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	return l.order.Len()
 }

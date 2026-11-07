@@ -37,31 +37,42 @@ func LoadMigrations(fsys fs.FS) ([]Migration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pgx: read migrations: %w", err)
 	}
+
 	var out []Migration
+
 	seen := map[int64]string{}
+
 	for _, e := range entries {
 		if e.IsDir() || path.Ext(e.Name()) != ".sql" {
 			continue
 		}
-		m := migrationFile.FindStringSubmatch(e.Name())
-		if m == nil {
+
+		match := migrationFile.FindStringSubmatch(e.Name())
+		if match == nil {
 			return nil, fmt.Errorf("pgx: migration %s: name must be NNN_snake_name.sql", e.Name())
 		}
-		v, err := strconv.ParseInt(m[1], 10, 64)
+
+		v, err := strconv.ParseInt(match[1], 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("pgx: migration %s: version: %w", e.Name(), err)
 		}
+
 		if prev, dup := seen[v]; dup {
 			return nil, fmt.Errorf("pgx: migrations %s and %s share version %d", prev, e.Name(), v)
 		}
+
 		seen[v] = e.Name()
+
 		body, err := fs.ReadFile(fsys, e.Name())
 		if err != nil {
 			return nil, fmt.Errorf("pgx: migration %s: %w", e.Name(), err)
 		}
-		out = append(out, Migration{Version: v, Name: m[2], File: e.Name(), SQL: string(body)})
+
+		out = append(out, Migration{Version: v, Name: match[2], File: e.Name(), SQL: string(body)})
 	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
+
 	return out, nil
 }
 
@@ -90,22 +101,29 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, log *slog.Logg
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+
 	migrations, err := LoadMigrations(fsys)
 	if err != nil {
 		return err
 	}
+
 	applied := 0
+
 	for _, m := range migrations {
 		ran, err := applyOne(ctx, pool, m)
 		if err != nil {
 			return err
 		}
+
 		if ran {
 			applied++
+
 			log.InfoContext(ctx, "postgres migration applied", "version", m.Version, "file", m.File)
 		}
 	}
+
 	log.InfoContext(ctx, "postgres schema up to date", "migrations", len(migrations), "applied", applied)
+
 	return nil
 }
 
@@ -121,42 +139,50 @@ const ensureTableSQL = `CREATE TABLE IF NOT EXISTS schema_migrations (
 
 // applyOne runs m in its own transaction unless it is already recorded; it
 // reports whether it ran.
-func applyOne(ctx context.Context, pool *pgxpool.Pool, m Migration) (ran bool, err error) {
+func applyOne(ctx context.Context, pool *pgxpool.Pool, mig Migration) (ran bool, err error) {
 	ctx = WithOperation(ctx, "pgx.migrate")
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("pgx: migration %s: begin: %w", m.File, err)
+		return false, fmt.Errorf("pgx: migration %s: begin: %w", mig.File, err)
 	}
+
 	defer func() {
 		if !ran || err != nil {
 			rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
+
 			_ = tx.Rollback(rbCtx)
 		}
 	}()
 
 	if _, err := tx.Exec(ctx, lockSQL); err != nil {
-		return false, fmt.Errorf("pgx: migration %s: lock: %w", m.File, err)
+		return false, fmt.Errorf("pgx: migration %s: lock: %w", mig.File, err)
 	}
+
 	if _, err := tx.Exec(ctx, ensureTableSQL); err != nil {
-		return false, fmt.Errorf("pgx: migration %s: schema_migrations: %w", m.File, err)
+		return false, fmt.Errorf("pgx: migration %s: schema_migrations: %w", mig.File, err)
 	}
+
 	var one int
-	switch err := tx.QueryRow(ctx, `SELECT 1 FROM schema_migrations WHERE version = $1`, m.Version).Scan(&one); {
+	switch err := tx.QueryRow(ctx, `SELECT 1 FROM schema_migrations WHERE version = $1`, mig.Version).Scan(&one); {
 	case err == nil:
 		return false, nil // applied (by an earlier boot or a concurrent runner)
 	case !errors.Is(err, pgx.ErrNoRows):
-		return false, fmt.Errorf("pgx: migration %s: read schema_migrations: %w", m.File, err)
+		return false, fmt.Errorf("pgx: migration %s: read schema_migrations: %w", mig.File, err)
 	}
 
-	if _, err := tx.Exec(ctx, m.SQL); err != nil {
-		return false, fmt.Errorf("pgx: migration %s: %w", m.File, err)
+	if _, err := tx.Exec(ctx, mig.SQL); err != nil {
+		return false, fmt.Errorf("pgx: migration %s: %w", mig.File, err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (version, name) VALUES ($1, $2)`, m.Version, m.Name); err != nil {
-		return false, fmt.Errorf("pgx: migration %s: record: %w", m.File, err)
+
+	if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (version, name) VALUES ($1, $2)`, mig.Version, mig.Name); err != nil {
+		return false, fmt.Errorf("pgx: migration %s: record: %w", mig.File, err)
 	}
+
 	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("pgx: migration %s: commit: %w", m.File, err)
+		return false, fmt.Errorf("pgx: migration %s: commit: %w", mig.File, err)
 	}
+
 	return true, nil
 }

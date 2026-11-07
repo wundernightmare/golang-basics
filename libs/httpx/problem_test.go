@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +19,8 @@ import (
 )
 
 func TestProblem_MarshalDefaults(t *testing.T) {
+	t.Parallel()
+
 	b, err := json.Marshal(httpx.NewProblem(http.StatusNotFound, "task 7 does not exist"))
 	require.NoError(t, err)
 
@@ -31,6 +34,8 @@ func TestProblem_MarshalDefaults(t *testing.T) {
 }
 
 func TestProblem_MarshalExtensions(t *testing.T) {
+	t.Parallel()
+
 	p := httpx.Problem{
 		Type:       "https://errors.example/conflict",
 		Title:      "Conflict",
@@ -51,12 +56,15 @@ func TestProblem_MarshalExtensions(t *testing.T) {
 }
 
 func TestProblem_IsAnError(t *testing.T) {
+	t.Parallel()
+
 	cause := errors.New("pgconn: connection refused")
 	p := httpx.Internal("could not persist", cause)
 	assert.Equal(t, "Internal Server Error: could not persist (pgconn: connection refused)", p.Error())
 	require.ErrorIs(t, p, cause, "Unwrap exposes the cause")
 
 	wrapped := fmt.Errorf("store: %w", httpx.NewProblem(http.StatusConflict, "exists"))
+
 	var got httpx.Problem
 	require.ErrorAs(t, wrapped, &got)
 	assert.Equal(t, http.StatusConflict, got.Status)
@@ -70,6 +78,8 @@ func TestProblem_IsAnError(t *testing.T) {
 }
 
 func TestWriteProblem_InvalidStatusDegradesTo500(t *testing.T) {
+	t.Parallel()
+
 	// Regression for the FuzzProblemJSON crasher kept in testdata/fuzz: an
 	// out-of-range status must produce a 500 problem, not a WriteHeader panic.
 	srv, _ := loggedServer(t, httpx.Config{})
@@ -84,8 +94,11 @@ func TestWriteProblem_InvalidStatusDegradesTo500(t *testing.T) {
 }
 
 func TestWriteProblem_FillsInstanceAndRequestID(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	ext := map[string]any{"code": "x"}
+
 	srv.Mux().HandleFunc("GET /fail", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, httpx.NewProblem(http.StatusConflict, "nope"))
 	})
@@ -114,8 +127,10 @@ func TestWriteProblem_FillsInstanceAndRequestID(t *testing.T) {
 }
 
 func TestWriteProblem_OutsideTheServer(t *testing.T) {
+	t.Parallel()
+
 	rec := httptest.NewRecorder()
-	httpx.WriteProblem(rec, httptest.NewRequest(http.MethodGet, "/x", nil), httpx.NewProblem(http.StatusTeapot, ""))
+	httpx.WriteProblem(rec, httptest.NewRequest(http.MethodGet, "/x", http.NoBody), httpx.NewProblem(http.StatusTeapot, ""))
 	assert.Equal(t, http.StatusTeapot, rec.Code)
 	m := decode(t, rec)
 	assert.Equal(t, "/x", m["instance"])
@@ -128,6 +143,8 @@ func TestWriteProblem_OutsideTheServer(t *testing.T) {
 }
 
 func TestWriteError(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name       string
 		err        error
@@ -142,6 +159,8 @@ func TestWriteError(t *testing.T) {
 		{"5xx problem with cause", httpx.Internal("could not persist", errors.New("disk full")), http.StatusInternalServerError, "could not persist", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			srv, buf := loggedServer(t, httpx.Config{})
 			srv.Mux().HandleFunc("GET /x", func(w http.ResponseWriter, r *http.Request) { httpx.WriteError(w, r, tc.err) })
 			rec := get(srv.Handler(), "/x")
@@ -155,6 +174,7 @@ func TestWriteError(t *testing.T) {
 				assert.Nil(t, line, "a 4xx is not an error to log")
 				return
 			}
+
 			require.NotNil(t, line)
 			assert.Equal(t, "ERROR", line["level"])
 			assert.Equal(t, float64(tc.wantStatus), line["status"])
@@ -166,9 +186,12 @@ func TestWriteError(t *testing.T) {
 }
 
 func TestDecodeJSON(t *testing.T) {
+	t.Parallel()
+
 	type in struct {
 		Title string `json:"title"`
 	}
+
 	for _, tc := range []struct {
 		name, body string
 		wantStatus int
@@ -182,16 +205,22 @@ func TestDecodeJSON(t *testing.T) {
 		{"too big", `{"title":"` + strings.Repeat("x", 100) + `"}`, http.StatusRequestEntityTooLarge},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.body))
 			req.Body = http.MaxBytesReader(rec, req.Body, 64)
+
 			var v in
+
 			err := httpx.DecodeJSON(req, &v)
 			if tc.wantStatus == 0 {
 				require.NoError(t, err)
 				assert.Equal(t, "x", v.Title)
+
 				return
 			}
+
 			var p httpx.Problem
 			require.ErrorAs(t, err, &p)
 			assert.Equal(t, tc.wantStatus, p.Status)
@@ -200,6 +229,8 @@ func TestDecodeJSON(t *testing.T) {
 }
 
 func TestWriteJSON(t *testing.T) {
+	t.Parallel()
+
 	rec := httptest.NewRecorder()
 	httpx.WriteJSON(rec, http.StatusCreated, map[string]int{"n": 1})
 	assert.Equal(t, http.StatusCreated, rec.Code)
@@ -208,9 +239,23 @@ func TestWriteJSON(t *testing.T) {
 	assert.JSONEq(t, `{"n":1}`, string(body))
 }
 
+// A value json cannot encode must not go out as the requested status with a
+// half-written body: it is a 500 with nothing after it.
+func TestWriteJSON_UnencodableIs500(t *testing.T) {
+	t.Parallel()
+
+	rec := httptest.NewRecorder()
+	httpx.WriteJSON(rec, http.StatusOK, map[string]float64{"n": math.NaN()})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Empty(t, rec.Header().Get("Content-Type"))
+	assert.Empty(t, rec.Body.String())
+}
+
 // Every error the API port emits is a problem: an unknown route is a 404
 // problem and a known route with the wrong method a 405 problem with Allow.
 func TestServer_NoRouteAndNoMethodAreProblems(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	srv.Mux().HandleFunc("GET /known", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	srv.Mux().HandleFunc("POST /known", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -220,7 +265,7 @@ func TestServer_NoRouteAndNoMethodAreProblems(t *testing.T) {
 	require.Equal(t, httpx.ProblemContentType, rec.Header().Get("Content-Type"))
 	assert.Equal(t, "no route for GET /nope", decode(t, rec)["detail"])
 
-	rec = do(srv.Handler(), httptest.NewRequest(http.MethodTrace, "/known", nil))
+	rec = do(srv.Handler(), httptest.NewRequest(http.MethodTrace, "/known", http.NoBody))
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 	require.Equal(t, httpx.ProblemContentType, rec.Header().Get("Content-Type"))
 	assert.Equal(t, "GET, HEAD, POST", rec.Header().Get("Allow"))

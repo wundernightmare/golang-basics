@@ -20,6 +20,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // ShutdownFunc flushes and tears down the tracer provider. Defer it in main so
@@ -27,8 +29,24 @@ import (
 // returned when tracing is disabled.
 type ShutdownFunc func(ctx context.Context) error
 
-// Init installs the global tracer provider, the W3C trace-context + baggage
-// propagators, and routes the SDK's own errors and diagnostics to log. With
+// Telemetry is what [Init] built. Pass TracerProvider / Propagator to the
+// libraries explicitly (httpx.WithTracerProvider, kafka.WithTracerProvider,
+// pgx / valkey / resilient WithTracerProvider, …): explicit wiring is what
+// lets tests run in parallel with their own providers. Init also installs
+// both globally, as the fallback for code that is not wired explicitly.
+type Telemetry struct {
+	// TracerProvider is the SDK provider, or a no-op one when tracing is disabled.
+	TracerProvider trace.TracerProvider
+	// Propagator is W3C trace context + baggage — always, even when disabled,
+	// so an incoming trace context is still forwarded to the next hop.
+	Propagator propagation.TextMapPropagator
+	// Shutdown flushes and stops the provider; it must be called on shutdown.
+	Shutdown ShutdownFunc
+}
+
+// Init builds the tracer provider and the W3C trace-context + baggage
+// propagators, installs both globally (see [Telemetry]), and routes the
+// SDK's own errors and diagnostics to log. With
 // cfg.Enabled false it wires only the propagators and leaves the no-op
 // provider — the service still threads context across hops, just without
 // exporting — so the same binary runs with or without a collector.
@@ -37,33 +55,39 @@ type ShutdownFunc func(ctx context.Context) error
 // cfg.Insecure; optional CA, mTLS and headers), describes the process in the
 // resource (service name / version / instance, deployment environment, host,
 // container, runtime, plus OTEL_RESOURCE_ATTRIBUTES), and applies
-// parent-based ratio head sampling. The returned [ShutdownFunc] must be called
-// on shutdown. Export failures — a collector that is down, a rejected batch —
+// parent-based ratio head sampling. [Telemetry.Shutdown] must be called on
+// shutdown. Export failures — a collector that is down, a rejected batch —
 // are logged at warn, at most once per errorLogInterval, and never affect the
 // service.
-func Init(ctx context.Context, cfg Config, log *slog.Logger) (ShutdownFunc, error) {
+func Init(ctx context.Context, cfg Config, log *slog.Logger) (*Telemetry, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+
 	cfg.withDefaults()
 
 	// Propagators are always installed: even an unsampled/disabled service must
 	// forward an incoming trace context to the next hop.
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{}, propagation.Baggage{},
-	))
+	prop := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
+	otel.SetTextMapPropagator(prop)
 	otel.SetErrorHandler(newErrorHandler(log))
 	otel.SetLogger(logr.FromSlogHandler(log.Handler()))
 
 	if !cfg.Enabled {
-		log.Info("tracing disabled (propagation only)")
-		return func(context.Context) error { return nil }, nil
+		log.InfoContext(ctx, "tracing disabled (propagation only)")
+
+		return &Telemetry{
+			TracerProvider: noop.NewTracerProvider(),
+			Propagator:     prop,
+			Shutdown:       func(context.Context) error { return nil },
+		}, nil
 	}
 
 	exporter, err := newExporter(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
+
 	res, err := newResource(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -81,16 +105,20 @@ func Init(ctx context.Context, cfg Config, log *slog.Logger) (ShutdownFunc, erro
 	)
 	otel.SetTracerProvider(tp)
 
-	log.Info("tracing enabled",
+	log.InfoContext(ctx, "tracing enabled",
 		"endpoint", cfg.Endpoint, "insecure", cfg.Insecure, "sampler_ratio", cfg.SamplerRatio,
 		"trust_remote_parent", cfg.TrustRemoteParent, "service", cfg.ServiceName, "version", cfg.Version)
-	return func(ctx context.Context) error {
+
+	shutdown := func(ctx context.Context) error {
 		if err := tp.Shutdown(ctx); err != nil {
-			log.Warn("tracing shutdown: spans may have been lost", "err", err)
+			log.WarnContext(ctx, "tracing shutdown: spans may have been lost", "err", err)
 			return err
 		}
+
 		return nil
-	}, nil
+	}
+
+	return &Telemetry{TracerProvider: tp, Propagator: prop, Shutdown: shutdown}, nil
 }
 
 // newSampler is parent-based ratio head sampling: a root span is sampled
@@ -100,16 +128,19 @@ func Init(ctx context.Context, cfg Config, log *slog.Logger) (ShutdownFunc, erro
 // cannot force 100% sampling on an internet-facing edge.
 func newSampler(cfg Config) sdktrace.Sampler {
 	var root sdktrace.Sampler
+
 	switch {
 	case cfg.SamplerRatio < 0:
 		root = sdktrace.NeverSample()
 	default:
 		root = sdktrace.TraceIDRatioBased(cfg.SamplerRatio)
 	}
+
 	var opts []sdktrace.ParentBasedSamplerOption
 	if !cfg.TrustRemoteParent {
 		opts = append(opts, sdktrace.WithRemoteParentSampled(root))
 	}
+
 	return sdktrace.ParentBased(root, opts...)
 }
 
@@ -125,6 +156,7 @@ func newExporter(ctx context.Context, cfg Config) (*otlptrace.Exporter, error) {
 	if len(cfg.Headers) > 0 {
 		opts = append(opts, otlptracehttp.WithHeaders(cfg.Headers))
 	}
+
 	if cfg.Insecure {
 		opts = append(opts, otlptracehttp.WithInsecure())
 	} else {
@@ -132,12 +164,15 @@ func newExporter(ctx context.Context, cfg Config) (*otlptrace.Exporter, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		opts = append(opts, otlptracehttp.WithTLSClientConfig(tlsCfg))
 	}
+
 	exporter, err := otlptracehttp.New(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("otelx: build otlp exporter: %w", err)
 	}
+
 	return exporter, nil
 }
 
@@ -145,30 +180,37 @@ func newExporter(ctx context.Context, cfg Config) (*otlptrace.Exporter, error) {
 // when given, and a client certificate for mTLS when both halves are set.
 func tlsConfig(cfg Config) (*tls.Config, error) {
 	tc := &tls.Config{MinVersion: tls.VersionTLS12}
+
 	if cfg.CACert != "" {
 		pem, err := os.ReadFile(cfg.CACert)
 		if err != nil {
 			return nil, fmt.Errorf("otelx: read OTLP CA certificate: %w", err)
 		}
+
 		pool, err := x509.SystemCertPool()
 		if err != nil || pool == nil {
 			pool = x509.NewCertPool()
 		}
+
 		if !pool.AppendCertsFromPEM(pem) {
 			return nil, errors.New("otelx: OTLP CA certificate: no PEM certificates found")
 		}
+
 		tc.RootCAs = pool
 	}
+
 	switch {
 	case cfg.ClientCert != "" && cfg.ClientKey != "":
 		cert, err := tls.LoadX509KeyPair(cfg.ClientCert, cfg.ClientKey)
 		if err != nil {
 			return nil, fmt.Errorf("otelx: load OTLP client certificate: %w", err)
 		}
+
 		tc.Certificates = []tls.Certificate{cert}
 	case cfg.ClientCert != "" || cfg.ClientKey != "":
 		return nil, errors.New("otelx: OTLP client certificate and key must both be set")
 	}
+
 	return tc, nil
 }
 
@@ -183,12 +225,15 @@ func newResource(ctx context.Context, cfg Config) (*resource.Resource, error) {
 	if cfg.ServiceName != "" {
 		attrs = append(attrs, semconv.ServiceName(cfg.ServiceName))
 	}
+
 	if cfg.Version != "" {
 		attrs = append(attrs, semconv.ServiceVersion(cfg.Version))
 	}
+
 	if cfg.Environment != "" {
 		attrs = append(attrs, semconv.DeploymentEnvironmentNameKey.String(cfg.Environment))
 	}
+
 	res, err := resource.New(ctx,
 		resource.WithFromEnv(),
 		resource.WithTelemetrySDK(),
@@ -206,12 +251,15 @@ func newResource(ctx context.Context, cfg Config) (*resource.Resource, error) {
 		if res == nil {
 			return nil, fmt.Errorf("otelx: build resource: %w", err)
 		}
+
 		otel.Handle(err)
 	}
+
 	merged, err := resource.Merge(resource.Default(), res)
 	if err != nil {
 		return res, nil //nolint:nilerr // the detected resource is complete without the SDK defaults
 	}
+
 	return merged, nil
 }
 
@@ -219,6 +267,7 @@ func instanceID() string {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		return h
 	}
+
 	return fmt.Sprintf("pid-%d", os.Getpid())
 }
 
@@ -243,11 +292,14 @@ func (h *errorHandler) Handle(err error) {
 	if err == nil {
 		return
 	}
+
 	now := time.Now().UnixNano()
+
 	last := h.lastLogged.Load()
 	if now-last < int64(errorLogInterval) || !h.lastLogged.CompareAndSwap(last, now) {
 		h.suppressed.Add(1)
 		return
 	}
+
 	h.log.Warn("opentelemetry: export error", "err", err, "suppressed_since_last", h.suppressed.Swap(0))
 }

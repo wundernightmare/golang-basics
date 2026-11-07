@@ -40,7 +40,12 @@ import (
 // default for a lib field, e.g. its admin port) counts as the default for
 // that field: the tag default does not replace it, the file and the
 // environment do.
-func LoadYAML[T any](path, prefix string, dst *T) error {
+func LoadYAML[T any](path, prefix string, dst *T) error { return LoadYAMLFrom(path, prefix, nil, dst) }
+
+// LoadYAMLFrom is [LoadYAML] reading environ instead of the process
+// environment (nil means the process environment). Tests pass a map, so they
+// need no t.Setenv and can run in parallel.
+func LoadYAMLFrom[T any](path, prefix string, environ map[string]string, dst *T) error {
 	// 1. Defaults: the envDefault tags parsed against an empty environment,
 	//    copied into every field dst still has at zero. Done first so that an
 	//    explicit zero in the file or the environment ("shutdown_delay: 0s",
@@ -57,8 +62,10 @@ func LoadYAML[T any](path, prefix string, dst *T) error {
 		if err != nil {
 			return fmt.Errorf("httpx: read yaml %q: %w", path, err)
 		}
+
 		dec := yaml.NewDecoder(bytes.NewReader(data))
 		dec.KnownFields(true)
+
 		if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) { // an empty file is an empty config
 			return fmt.Errorf("httpx: parse yaml %q: %w", path, err)
 		}
@@ -66,9 +73,10 @@ func LoadYAML[T any](path, prefix string, dst *T) error {
 
 	// 3. The environment, only the variables that are actually set (defaults
 	//    were applied in step 1, so an absent variable leaves the file's value).
-	if err := env.ParseWithOptions(dst, env.Options{Prefix: prefix, DefaultValueTagName: "envDefaultDisabled"}); err != nil {
+	if err := env.ParseWithOptions(dst, env.Options{Prefix: prefix, Environment: environ, DefaultValueTagName: "envDefaultDisabled"}); err != nil {
 		return fmt.Errorf("httpx: env overlay (prefix %q): %w", prefix, err)
 	}
+
 	return nil
 }
 
@@ -83,7 +91,9 @@ func Defaults[T any](prefix string, dst *T) error {
 	if err := env.ParseWithOptions(&defaults, env.Options{Prefix: prefix, Environment: map[string]string{}}); err != nil {
 		return fmt.Errorf("httpx: env defaults (prefix %q): %w", prefix, err)
 	}
+
 	fillZero(reflect.ValueOf(dst).Elem(), reflect.ValueOf(&defaults).Elem())
+
 	return nil
 }
 
@@ -95,11 +105,13 @@ func fillZero(dst, def reflect.Value) {
 		if !f.CanSet() {
 			continue
 		}
+
 		d := def.Field(i)
 		if f.Kind() == reflect.Struct && f.Type() != reflect.TypeFor[time.Time]() {
 			fillZero(f, d)
 			continue
 		}
+
 		if f.IsZero() && !d.IsZero() {
 			f.Set(d)
 		}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strings"
 
@@ -46,6 +47,7 @@ func (p Problem) status() int {
 	if p.Status < 100 || p.Status > 999 {
 		return http.StatusInternalServerError
 	}
+
 	return p.Status
 }
 
@@ -54,15 +56,18 @@ func (p Problem) status() int {
 func (p Problem) Error() string {
 	var b strings.Builder
 	b.WriteString(http.StatusText(p.status()))
+
 	if p.Detail != "" {
 		b.WriteString(": ")
 		b.WriteString(p.Detail)
 	}
+
 	if p.cause != nil {
 		b.WriteString(" (")
 		b.WriteString(p.cause.Error())
 		b.WriteString(")")
 	}
+
 	return b.String()
 }
 
@@ -81,28 +86,32 @@ func (p Problem) WithCause(err error) Problem {
 // members plus any extensions, per RFC 9457 §3. The status member is the one
 // the response carries (see status).
 func (p Problem) MarshalJSON() ([]byte, error) {
-	m := make(map[string]any, len(p.Extensions)+5)
-	for k, v := range p.Extensions {
-		m[k] = v
-	}
+	fields := make(map[string]any, len(p.Extensions)+5)
+	maps.Copy(fields, p.Extensions)
+
 	typ := p.Type
 	if typ == "" {
 		typ = "about:blank"
 	}
+
 	title := p.Title
 	if title == "" {
 		title = http.StatusText(p.status())
 	}
-	m["type"] = typ
-	m["title"] = title
-	m["status"] = p.status()
+
+	fields["type"] = typ
+	fields["title"] = title
+
+	fields["status"] = p.status()
 	if p.Detail != "" {
-		m["detail"] = p.Detail
+		fields["detail"] = p.Detail
 	}
+
 	if p.Instance != "" {
-		m["instance"] = p.Instance
+		fields["instance"] = p.Instance
 	}
-	return json.Marshal(m)
+
+	return json.Marshal(fields)
 }
 
 // NewProblem builds a [Problem] for status with an occurrence-specific detail,
@@ -131,11 +140,13 @@ func WriteProblem(w http.ResponseWriter, r *http.Request, p Problem) {
 		if p.Instance == "" && r.URL != nil {
 			p.Instance = r.URL.Path
 		}
+
 		p = withRequestIDExtension(p, RequestIDFromContext(r.Context()))
 		if p.status() >= http.StatusInternalServerError {
 			reportFailure(r.Context(), p)
 		}
 	}
+
 	writeProblem(w, r, p)
 }
 
@@ -156,27 +167,31 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	default:
 		p = Internal("internal error", err)
 	}
+
 	WriteProblem(w, r, p)
 }
 
 // reportFailure logs a 5xx with its cause and marks the span, with the
 // request's logger and context so trace_id / request_id are attached.
-func reportFailure(ctx context.Context, p Problem) {
+func reportFailure(ctx context.Context, problem Problem) {
 	log := slog.Default()
 	if info := infoFrom(ctx); info != nil && info.log != nil {
 		log = info.log
 	}
-	attrs := []slog.Attr{slog.Int("status", p.status()), slog.String("detail", p.Detail)}
-	if p.cause != nil {
-		attrs = append(attrs, slog.Any("err", p.cause))
+
+	attrs := []slog.Attr{slog.Int("status", problem.status()), slog.String("detail", problem.Detail)}
+	if problem.cause != nil {
+		attrs = append(attrs, slog.Any("err", problem.cause))
 	}
+
 	log.LogAttrs(ctx, slog.LevelError, "request failed", attrs...)
 
 	span := trace.SpanFromContext(ctx)
-	if p.cause != nil {
-		span.RecordError(p.cause)
+	if problem.cause != nil {
+		span.RecordError(problem.cause)
 	}
-	span.SetStatus(codes.Error, p.Detail)
+
+	span.SetStatus(codes.Error, problem.Detail)
 }
 
 // withRequestIDExtension adds request_id to p's extensions unless the caller
@@ -185,15 +200,17 @@ func withRequestIDExtension(p Problem, id string) Problem {
 	if id == "" {
 		return p
 	}
+
 	if _, set := p.Extensions["request_id"]; set {
 		return p
 	}
+
 	ext := make(map[string]any, len(p.Extensions)+1)
-	for k, v := range p.Extensions {
-		ext[k] = v
-	}
+	maps.Copy(ext, p.Extensions)
+
 	ext["request_id"] = id
 	p.Extensions = ext
+
 	return p
 }
 
@@ -204,21 +221,32 @@ func writeProblem(w http.ResponseWriter, r *http.Request, p Problem) {
 		p.Instance = r.URL.Path
 		p = withRequestIDExtension(p, RequestIDFromContext(r.Context()))
 	}
+
 	body, err := json.Marshal(p)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+
 	w.Header().Set("Content-Type", ProblemContentType)
 	w.WriteHeader(p.status())
 	_, _ = w.Write(body)
 }
 
-// WriteJSON writes v as application/json with the given status.
+// WriteJSON writes v as application/json with the given status. v is encoded
+// before anything is sent, so a value that cannot be encoded (NaN, a channel,
+// a failing MarshalJSON) is a bare 500 — never the given status with a
+// truncated body.
 func WriteJSON(w http.ResponseWriter, status int, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(append(body, '\n')) // same bytes json.Encoder wrote before
 }
 
 // DecodeJSON decodes the request body into v. It returns a [Problem]: 413
@@ -228,14 +256,16 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 func DecodeJSON(r *http.Request, v any) error {
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(v); err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			return NewProblem(http.StatusRequestEntityTooLarge, "request body is too large").WithCause(err)
 		}
+
 		return NewProblem(http.StatusBadRequest, "invalid JSON body").WithCause(err)
 	}
+
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return NewProblem(http.StatusBadRequest, "request body must contain a single JSON value")
 	}
+
 	return nil
 }

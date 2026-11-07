@@ -38,23 +38,29 @@ func parseRetryAfter(v string, now time.Time) (d time.Duration, ok bool) {
 	if v == "" {
 		return 0, false
 	}
+
 	if v[0] >= '0' && v[0] <= '9' {
 		secs, err := strconv.ParseUint(v, 10, 64)
 		if err != nil {
 			if errors.Is(err, strconv.ErrRange) { // all digits, just huge
 				return maxRetryAfter, true
 			}
+
 			return 0, false
 		}
+
 		if secs >= uint64(maxRetryAfter/time.Second) {
 			return maxRetryAfter, true
 		}
+
 		return time.Duration(secs) * time.Second, true
 	}
+
 	t, err := http.ParseTime(v)
 	if err != nil {
 		return 0, false
 	}
+
 	return min(max(t.Sub(now), 0), maxRetryAfter), true
 }
 
@@ -65,19 +71,26 @@ func idempotent(req *http.Request) bool {
 	case "", http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodPut, http.MethodDelete:
 		return true
 	}
+
 	return req.Header.Get("Idempotency-Key") != ""
 }
 
 // retryable reports whether a failed attempt is worth another one: a timeout,
 // a connection error, or a status that says "try again".
 func retryable(err *OutboundError) bool {
+	// Every Kind is listed (no default): a new Kind fails `exhaustive` until
+	// someone decides whether it is retryable.
 	switch err.Kind {
 	case KindTimeout, KindConnection:
 		return true
 	case KindStatus:
 		return retryableStatus(err.StatusCode)
+	case KindCircuitOpen, KindRateLimited, KindBulkheadFull, KindShutdown,
+		KindCanceled, KindRedirect, KindInvalid:
+		return false
 	}
-	return false
+
+	return false // unreachable for a valid Kind; the zero Kind is not retryable
 }
 
 func retryableStatus(code int) bool {
@@ -87,5 +100,6 @@ func retryableStatus(code int) bool {
 	case http.StatusNotImplemented, http.StatusHTTPVersionNotSupported:
 		return false
 	}
+
 	return code >= 500 && code <= 599
 }

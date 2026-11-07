@@ -18,23 +18,30 @@ import (
 // admin serves one admin request and returns the status and the decoded body.
 func admin(t testing.TB, srv *httpx.Server, method, target string, headers ...string) (int, map[string]any) {
 	t.Helper()
-	req := httptest.NewRequest(method, target, nil)
+
+	req := httptest.NewRequest(method, target, http.NoBody)
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
 	}
+
 	rec := do(srv.Admin(), req)
+
 	var body map[string]any
 	if rec.Body.Len() > 0 && strings.Contains(rec.Header().Get("Content-Type"), "json") {
 		body = decode(t, rec)
 	}
+
 	return rec.Code, body
 }
 
 func TestLogLevel_PutChangesWhatTheLoggerEmits(t *testing.T) {
+	t.Parallel()
+
 	srv, buf := loggedServer(t, httpx.Config{})
 	log := srv.Logger()
 
 	log.Debug("before")
+
 	code, body := admin(t, srv, http.MethodPut, "/admin/log-level?level=debug&ttl=1h")
 	require.Equal(t, http.StatusOK, code)
 	assert.Equal(t, "debug", body["level"])
@@ -58,9 +65,12 @@ func TestLogLevel_PutChangesWhatTheLoggerEmits(t *testing.T) {
 }
 
 func TestLogLevel_RevertsAfterTTL(t *testing.T) {
+	t.Parallel()
+
 	srv, buf := loggedServer(t, httpx.Config{})
 	code, _ := admin(t, srv, http.MethodPut, "/admin/log-level?level=debug&ttl=20ms")
 	require.Equal(t, http.StatusOK, code)
+
 	level, expires := srv.LogLevel.Level()
 	assert.Equal(t, slog.LevelDebug, level)
 	assert.False(t, expires.IsZero())
@@ -69,6 +79,7 @@ func TestLogLevel_RevertsAfterTTL(t *testing.T) {
 		l, _ := srv.LogLevel.Level()
 		return l == slog.LevelInfo
 	}, 2*time.Second, 5*time.Millisecond, "the level must revert on its own")
+
 	_, expires = srv.LogLevel.Level()
 	assert.True(t, expires.IsZero())
 	srv.Logger().Debug("late")
@@ -76,15 +87,20 @@ func TestLogLevel_RevertsAfterTTL(t *testing.T) {
 }
 
 func TestLogLevel_NewerChangeIsNotRevertedByAnOlderTimer(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	srv.LogLevel.Set(slog.LevelDebug, 20*time.Millisecond)
 	srv.LogLevel.Set(slog.LevelWarn, time.Hour)
 	time.Sleep(60 * time.Millisecond)
+
 	level, _ := srv.LogLevel.Level()
 	assert.Equal(t, slog.LevelWarn, level, "the first change's timer must not undo the second")
 }
 
 func TestLogLevel_TTLIsCappedAndDefaulted(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{LogLevelMaxTTL: time.Minute})
 
 	// No ttl → the cap; an over-long ttl → the cap. Either way it expires.
@@ -94,6 +110,7 @@ func TestLogLevel_TTLIsCappedAndDefaulted(t *testing.T) {
 		assert.Equal(t, "1m0s", body["max_ttl"])
 		raw, ok := body["expires_at"].(string)
 		require.True(t, ok, target)
+
 		exp, err := time.Parse(time.RFC3339Nano, raw)
 		require.NoError(t, err)
 		assert.WithinDuration(t, exp, time.Now().Add(time.Minute), 5*time.Second, target)
@@ -101,6 +118,8 @@ func TestLogLevel_TTLIsCappedAndDefaulted(t *testing.T) {
 }
 
 func TestLogLevel_DeleteResetsToBaseNow(t *testing.T) {
+	t.Parallel()
+
 	srv, buf := loggedServer(t, httpx.Config{})
 	code, _ := admin(t, srv, http.MethodPut, "/admin/log-level?level=error&ttl=1h")
 	require.Equal(t, http.StatusOK, code)
@@ -115,6 +134,8 @@ func TestLogLevel_DeleteResetsToBaseNow(t *testing.T) {
 }
 
 func TestLogLevel_RejectsBadInput(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	for _, target := range []string{
 		"/admin/log-level",                   // no level
@@ -127,14 +148,18 @@ func TestLogLevel_RejectsBadInput(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, code, target)
 		assert.Equal(t, float64(400), body["status"], "problem+json body")
 	}
+
 	level, _ := srv.LogLevel.Level()
 	assert.Equal(t, slog.LevelInfo, level, "a rejected request changes nothing")
 }
 
 func TestLogLevel_NotAvailableForForeignLogger(t *testing.T) {
+	t.Parallel()
+
 	srv, err := httpx.NewServer(httpx.Config{Service: "test", Addr: ":0"}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	assert.Nil(t, srv.LogLevel)
+
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		code, body := admin(t, srv, method, "/admin/log-level?level=debug")
 		assert.Equal(t, http.StatusNotImplemented, code, method)
@@ -143,6 +168,8 @@ func TestLogLevel_NotAvailableForForeignLogger(t *testing.T) {
 }
 
 func TestAdminToken_GuardsAdminAndDebugButNotProbes(t *testing.T) {
+	t.Parallel()
+
 	srv, buf := loggedServer(t, httpx.Config{Addr: ":0", AdminAddr: ":0", AdminToken: "s3cret"})
 
 	for _, path := range []string{"/healthz", "/livez", "/version", "/metrics"} {
@@ -171,6 +198,7 @@ func TestAdminToken_GuardsAdminAndDebugButNotProbes(t *testing.T) {
 			assert.Equal(t, float64(401), body["status"])
 		}
 	}
+
 	level, _ := srv.LogLevel.Level()
 	assert.Equal(t, slog.LevelInfo, level, "no rejected mutation took effect")
 	assert.NotNil(t, buf.Find(t, map[string]any{"msg": "admin: rejected unauthenticated request"}))
@@ -179,17 +207,22 @@ func TestAdminToken_GuardsAdminAndDebugButNotProbes(t *testing.T) {
 		code, _ := admin(t, srv, http.MethodPut, "/admin/log-level?level=debug", "Authorization", scheme+" s3cret")
 		assert.Equal(t, http.StatusOK, code, "scheme %q is accepted", scheme)
 	}
+
 	code, _ := admin(t, srv, http.MethodGet, "/debug/pprof/", "Authorization", "Bearer s3cret")
 	assert.Equal(t, http.StatusOK, code)
 }
 
 func TestAdminToken_EmptyMeansOpenOnLoopback(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{Addr: ":0", AdminAddr: "127.0.0.1:0"})
 	code, _ := admin(t, srv, http.MethodPut, "/admin/log-level?level=warn")
 	assert.Equal(t, http.StatusOK, code, "no token configured → no guard (loopback default)")
 }
 
 func TestAdminConfig_ShowsRedactedConfig(t *testing.T) {
+	t.Parallel()
+
 	// Default: the effective httpx.Config itself, with its tokens hidden and
 	// the defaults applied.
 	srv, _ := loggedServer(t, httpx.Config{Addr: ":1234", AdminAddr: ":0", AdminToken: "s3cret", DebugToken: "dbg"})
@@ -207,6 +240,7 @@ func TestAdminConfig_ShowsRedactedConfig(t *testing.T) {
 		APIKey      string `yaml:"api_key"`
 		Workers     int    `yaml:"workers"`
 	}
+
 	srv, _ = loggedServer(t, httpx.Config{},
 		httpx.WithConfig(svcConfig{DatabaseURL: "postgres://app:hunter2@db:5432/app", APIKey: "k", Workers: 4}))
 	code, body = admin(t, srv, http.MethodGet, "/admin/config")
@@ -218,6 +252,8 @@ func TestAdminConfig_ShowsRedactedConfig(t *testing.T) {
 }
 
 func TestVersion_CarriesBuildStartTimeAndUptime(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	code, body := admin(t, srv, http.MethodGet, "/version")
 	require.Equal(t, http.StatusOK, code)
@@ -227,6 +263,7 @@ func TestVersion_CarriesBuildStartTimeAndUptime(t *testing.T) {
 	assert.NotEmpty(t, body["revision"])
 	raw, ok := body["started_at"].(string)
 	require.True(t, ok)
+
 	started, err := time.Parse(time.RFC3339Nano, raw)
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now(), started, 5*time.Second)
@@ -234,6 +271,8 @@ func TestVersion_CarriesBuildStartTimeAndUptime(t *testing.T) {
 }
 
 func TestAdmin_PprofOnAdminOnly(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	rec := get(srv.Admin(), "/debug/pprof/")
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -246,14 +285,20 @@ func TestAdmin_PprofOnAdminOnly(t *testing.T) {
 }
 
 func TestAdminRun_AnnouncesAuthMode(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		token, want string
 	}{{"", "off"}, {"s3cret", "bearer"}} {
 		t.Run(tc.want, func(t *testing.T) {
+			t.Parallel()
+
 			srv, buf := loggedServer(t, httpx.Config{AdminAddr: "127.0.0.1:0", AdminToken: tc.token, ShutdownTimeout: time.Second})
 			ctx, cancel := context.WithCancel(t.Context())
+
 			done := make(chan error, 1)
 			go func() { done <- srv.Run(ctx) }()
+
 			require.Eventually(t, func() bool {
 				return strings.Contains(buf.String(), "admin server listening")
 			}, 3*time.Second, 10*time.Millisecond)

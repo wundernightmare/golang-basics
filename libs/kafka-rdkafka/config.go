@@ -19,7 +19,7 @@ const receiveMessageMaxBytesOverhead = 512
 // ownedProperties maps each librdkafka property a named key (or the
 // library) sets to what to use instead; *_EXTRA_PROPERTIES may not set them
 // — one source of truth per setting.
-var ownedProperties = map[string]string{ //nolint:gosec // G101: property names mapped to key names, no credentials
+var ownedProperties = map[string]string{ //nolint:gosec,gochecknoglobals // G101: property names mapped to key names, no credentials; read-only lookup table
 	"bootstrap.servers":                     "KAFKA_BROKERS",
 	"metadata.broker.list":                  "KAFKA_BROKERS",
 	"client.id":                             "KAFKA_CLIENT_ID",
@@ -65,6 +65,7 @@ var ownedProperties = map[string]string{ //nolint:gosec // G101: property names 
 // names are reported, never the values (one may be a password).
 func validate(cfg kafka.Config) []error {
 	var errs []error
+
 	for _, src := range []struct {
 		name  string
 		props kafka.Properties
@@ -81,6 +82,7 @@ func validate(cfg kafka.Config) []error {
 			}
 		}
 	}
+
 	return errs
 }
 
@@ -88,7 +90,7 @@ func validate(cfg kafka.Config) []error {
 // identity, security, statistics, and the logs routed to slog. A password
 // file is read here, once per client built.
 func commonProperties(cfg kafka.Config) (ckafka.ConfigMap, error) {
-	m := ckafka.ConfigMap{
+	props := ckafka.ConfigMap{
 		"bootstrap.servers":                  strings.Join(cfg.Brokers, ","),
 		"client.id":                          cfg.ClientID,
 		"socket.connection.setup.timeout.ms": int(cfg.DialTimeout.Milliseconds()),
@@ -100,26 +102,31 @@ func commonProperties(cfg kafka.Config) (ckafka.ConfigMap, error) {
 		"go.logs.channel.enable":   true,
 	}
 	if cfg.StatisticsInterval > 0 {
-		m["statistics.interval.ms"] = cfg.StatisticsInterval
+		props["statistics.interval.ms"] = cfg.StatisticsInterval
 	}
+
 	if cfg.SecurityProtocol != "" {
-		m["security.protocol"] = cfg.SecurityProtocol
+		props["security.protocol"] = cfg.SecurityProtocol
 	}
-	if cfg.SASLMechanism != "" {
+
+	if cfg.SASLMechanism != "" { //nolint:nestif // mirrors kafka-franz saslMechanism; moving the password-file read into libs/kafka is a separate design change
 		password := cfg.SASLPassword
 		if cfg.SASLPasswordFile != "" {
 			b, err := os.ReadFile(cfg.SASLPasswordFile)
 			if err != nil {
 				return nil, fmt.Errorf("kafka: KAFKA_SASL_PASSWORD_FILE: %w", err)
 			}
+
 			if password = strings.TrimRight(string(b), "\r\n"); password == "" {
 				return nil, fmt.Errorf("kafka: KAFKA_SASL_PASSWORD_FILE: %s is empty", cfg.SASLPasswordFile)
 			}
 		}
-		m["sasl.mechanism"] = cfg.SASLMechanism
-		m["sasl.username"] = cfg.SASLUsername
-		m["sasl.password"] = password
+
+		props["sasl.mechanism"] = cfg.SASLMechanism
+		props["sasl.username"] = cfg.SASLUsername
+		props["sasl.password"] = password
 	}
+
 	for k, v := range map[string]string{
 		"ssl.ca.location":                       cfg.SSLCALocation,
 		"ssl.certificate.location":              cfg.SSLCertificateLocation,
@@ -127,64 +134,72 @@ func commonProperties(cfg kafka.Config) (ckafka.ConfigMap, error) {
 		"ssl.endpoint.identification.algorithm": cfg.SSLEndpointIdentificationAlgorithm,
 	} {
 		if v != "" {
-			m[k] = v
+			props[k] = v
 		}
 	}
+
 	for k, v := range cfg.ExtraProperties {
-		m[k] = v
+		props[k] = v
 	}
-	return m, nil
+
+	return props, nil
 }
 
 // producerProperties are the produce-side properties, shared by the
 // producer and the consumer's dead-letter publishing: every in-sync replica
 // acknowledges, idempotent, compressed, with a bounded local queue.
 func producerProperties(cfg kafka.Config) (ckafka.ConfigMap, error) {
-	m, err := commonProperties(cfg)
+	props, err := commonProperties(cfg)
 	if err != nil {
 		return nil, err
 	}
-	m["acks"] = "all"
-	m["enable.idempotence"] = true
-	m["compression.type"] = cfg.CompressionType
-	m["linger.ms"] = cfg.LingerMs
-	m["message.timeout.ms"] = int(cfg.PublishTimeout.Milliseconds())
+
+	props["acks"] = "all"
+	props["enable.idempotence"] = true
+	props["compression.type"] = cfg.CompressionType
+	props["linger.ms"] = cfg.LingerMs
+	props["message.timeout.ms"] = int(cfg.PublishTimeout.Milliseconds())
 	// The local send queue. librdkafka's default holds up to 1 GiB: with
 	// the brokers away and acks=all, that is where the pod's memory goes.
 	// Full → QUEUE_FULL, which Send waits out within its budget.
-	m["queue.buffering.max.kbytes"] = cfg.ProducerQueueMaxKBytes
-	m["queue.buffering.max.messages"] = cfg.ProducerQueueMaxMessages
+	props["queue.buffering.max.kbytes"] = cfg.ProducerQueueMaxKBytes
+
+	props["queue.buffering.max.messages"] = cfg.ProducerQueueMaxMessages
 	for k, v := range cfg.ProducerExtraProperties {
-		m[k] = v
+		props[k] = v
 	}
-	return m, nil
+
+	return props, nil
 }
 
 // consumerProperties are the group member's: explicit commits only (the
 // loop commits what it finished), the assignment strategy and timeouts, a
 // bounded prefetch, and the offset reset for a group with no commit yet.
 func consumerProperties(cfg kafka.Config) (ckafka.ConfigMap, error) {
-	m, err := commonProperties(cfg)
+	props, err := commonProperties(cfg)
 	if err != nil {
 		return nil, err
 	}
-	m["group.id"] = cfg.Group
-	m["enable.auto.commit"] = false
-	m["enable.auto.offset.store"] = false
-	m["auto.offset.reset"] = cfg.AutoOffsetReset
-	m["partition.assignment.strategy"] = cfg.AssignmentStrategy
-	m["session.timeout.ms"] = cfg.SessionTimeoutMs
-	m["max.poll.interval.ms"] = cfg.MaxPollIntervalMs
+
+	props["group.id"] = cfg.Group
+	props["enable.auto.commit"] = false
+	props["enable.auto.offset.store"] = false
+	props["auto.offset.reset"] = cfg.AutoOffsetReset
+	props["partition.assignment.strategy"] = cfg.AssignmentStrategy
+	props["session.timeout.ms"] = cfg.SessionTimeoutMs
+	props["max.poll.interval.ms"] = cfg.MaxPollIntervalMs
 	// Bounded prefetch. librdkafka sizes its local queue for raw throughput
 	// (up to 64 MiB per partition): a consumer that handles one record at a
 	// time and wakes up to a deep backlog would pull hundreds of MB in
 	// faster than it drains them and be OOM-killed before its first commit.
-	m["queued.max.messages.kbytes"] = cfg.ConsumerQueueMaxKBytes
-	m["fetch.max.bytes"] = cfg.ConsumerFetchMaxBytes
-	m["receive.message.max.bytes"] = cfg.ConsumerFetchMaxBytes + receiveMessageMaxBytesOverhead
-	m["max.partition.fetch.bytes"] = cfg.ConsumerPartitionFetchMaxBytes
+	props["queued.max.messages.kbytes"] = cfg.ConsumerQueueMaxKBytes
+	props["fetch.max.bytes"] = cfg.ConsumerFetchMaxBytes
+	props["receive.message.max.bytes"] = cfg.ConsumerFetchMaxBytes + receiveMessageMaxBytesOverhead
+
+	props["max.partition.fetch.bytes"] = cfg.ConsumerPartitionFetchMaxBytes
 	for k, v := range cfg.ConsumerExtraProperties {
-		m[k] = v
+		props[k] = v
 	}
-	return m, nil
+
+	return props, nil
 }

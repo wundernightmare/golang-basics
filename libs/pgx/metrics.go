@@ -41,7 +41,9 @@ func (db *DB) Collectors() []prometheus.Collector {
 	counter := func(name, help string, f func() float64) prometheus.Collector {
 		return prometheus.NewCounterFunc(prometheus.CounterOpts{Name: name, Help: help}, f)
 	}
+
 	const conns, connsHelp = "db_pool_connections", "Connections in the pool by state."
+
 	return []prometheus.Collector{
 		gauge(conns, connsHelp, func() float64 { return float64(stat().IdleConns()) }, prometheus.Labels{"state": "idle"}),
 		gauge(conns, connsHelp, func() float64 { return float64(stat().AcquiredConns()) }, prometheus.Labels{"state": "in_use"}),
@@ -101,6 +103,7 @@ func (m *queryMetrics) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pg
 	if op == "" {
 		op = statementKeyword(data.SQL)
 	}
+
 	return context.WithValue(ctx, queryStartKey{}, queryStart{op: op, start: time.Now()})
 }
 
@@ -110,6 +113,7 @@ func (m *queryMetrics) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.
 	if !ok {
 		return
 	}
+
 	m.duration.WithLabelValues(qs.op).Observe(time.Since(qs.start).Seconds())
 	// "no rows" is an answer, not a failure (it surfaces at Scan, but guard anyway).
 	if data.Err != nil && !errors.Is(data.Err, pgx.ErrNoRows) {
@@ -118,7 +122,7 @@ func (m *queryMetrics) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.
 }
 
 // knownKeywords bounds the fallback label: anything else is "other".
-var knownKeywords = map[string]bool{
+var knownKeywords = map[string]bool{ //nolint:gochecknoglobals // read-only lookup table (Go has no const maps)
 	"select": true, "insert": true, "update": true, "delete": true, "with": true,
 	"begin": true, "commit": true, "rollback": true, "savepoint": true, "release": true,
 	"create": true, "alter": true, "drop": true, "truncate": true, "copy": true,
@@ -134,19 +138,24 @@ func statementKeyword(sql string) string {
 		if !strings.HasPrefix(s, "--") {
 			break
 		}
+
 		nl := strings.IndexByte(s, '\n')
 		if nl < 0 {
 			return "other"
 		}
+
 		s = s[nl+1:]
 	}
+
 	end := strings.IndexFunc(s, func(r rune) bool { return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') })
 	if end < 0 {
 		end = len(s)
 	}
+
 	kw := strings.ToLower(s[:end])
 	if knownKeywords[kw] {
 		return kw
 	}
+
 	return "other"
 }

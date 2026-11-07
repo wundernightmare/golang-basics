@@ -33,7 +33,7 @@ type cursorWire struct {
 // Encode returns the opaque form handed to clients (URL-safe base64 of a
 // small JSON document). Clients must not parse it; the format may change.
 func (c Cursor) Encode() string {
-	b, _ := json.Marshal(cursorWire{T: c.CreatedAt.UTC().Format(time.RFC3339Nano), I: c.ID})
+	b, _ := json.Marshal(cursorWire{T: c.CreatedAt.UTC().Format(time.RFC3339Nano), I: c.ID}) //nolint:errchkjson // two string fields: Marshal cannot fail
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
@@ -44,14 +44,17 @@ func DecodeCursor(s string) (Cursor, error) {
 	if err != nil {
 		return Cursor{}, fmt.Errorf("%w: %w", ErrInvalidCursor, err)
 	}
+
 	var w cursorWire
 	if err := json.Unmarshal(b, &w); err != nil {
 		return Cursor{}, fmt.Errorf("%w: %w", ErrInvalidCursor, err)
 	}
+
 	t, err := time.Parse(time.RFC3339Nano, w.T)
 	if err != nil || w.I == "" {
 		return Cursor{}, fmt.Errorf("%w: malformed position", ErrInvalidCursor)
 	}
+
 	return Cursor{CreatedAt: t, ID: w.I}, nil
 }
 

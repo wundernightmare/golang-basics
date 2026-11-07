@@ -34,6 +34,7 @@ func TestPing(t *testing.T) {
 
 	t.Run("ready on the admin port", func(t *testing.T) {
 		t.Parallel()
+
 		code, body, err := s.get(s.adminURL+"/readyz", "")
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusOK, code, "%s", body)
@@ -46,9 +47,11 @@ func TestPing(t *testing.T) {
 
 	t.Run("echoes msg", func(t *testing.T) {
 		t.Parallel()
+
 		code, body, err := s.get(s.apiURL+"/ping?msg=x", "")
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, code, "%s", body)
+
 		var pong struct {
 			Message string `json:"message"`
 			Echo    string `json:"echo"`
@@ -60,6 +63,7 @@ func TestPing(t *testing.T) {
 
 	t.Run("admin surface is not on the API port", func(t *testing.T) {
 		t.Parallel()
+
 		code, _, err := s.get(s.apiURL+"/metrics", "")
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusNotFound, code)
@@ -98,6 +102,7 @@ func TestHeartbeat(t *testing.T) {
 // ends by saying the servers stopped cleanly.
 func TestGracefulShutdown(t *testing.T) {
 	t.Parallel()
+
 	for _, sp := range []spec{pingSpec(), heartbeatSpec()} {
 		t.Run(sp.name, func(t *testing.T) {
 			t.Parallel()
@@ -118,14 +123,19 @@ func assertCleanExit(t *testing.T, s *service) {
 	require.Equal(t, 0, s.exitCode(), "%s exit status (%v)", s.name, s.err)
 	lines := s.logLines()
 	require.NotEmpty(t, lines, "%s logged nothing", s.name)
+
 	stopped := false
+
 	for _, l := range lines {
 		assert.NotEqual(t, "ERROR", l["level"], "%s logged an error: %v", s.name, l)
+
 		if l["msg"] == "servers stopped cleanly" {
 			stopped = true
 		}
 	}
+
 	require.True(t, stopped, "%s never logged \"servers stopped cleanly\"", s.name)
+
 	last, _ := lines[len(lines)-1]["msg"].(string)
 	assert.Contains(t, last, "stopped", "%s's last log line is not a clean stop", s.name)
 }
@@ -139,6 +149,7 @@ func assertBuildStamp(t *testing.T, s *service) {
 	assert.NotEmpty(t, bi.Revision, "revision")
 	assert.NotEmpty(t, bi.GoVersion, "go_version")
 	assert.NotEmpty(t, bi.StartedAt, "started_at")
+
 	if assert.NotNil(t, bi.UptimeSeconds, "uptime_seconds") {
 		assert.GreaterOrEqual(t, *bi.UptimeSeconds, int64(0))
 	}
@@ -149,6 +160,7 @@ func assertBuildStamp(t *testing.T, s *service) {
 // right one — without echoing the token back.
 func assertAdminGuarded(t *testing.T, s *service) {
 	t.Helper()
+
 	url := s.adminURL + "/admin/config"
 
 	code, _, err := s.get(url, "")
@@ -171,16 +183,19 @@ func assertAdminGuarded(t *testing.T, s *service) {
 // starting the service.
 func TestConfigFlagsAndExitCodes(t *testing.T) {
 	t.Parallel()
+
 	run := func(name, prefix string, env map[string]string, args ...string) (int, string) {
 		t.Helper()
-		cmd := exec.Command(filepath.Join(binDir(t), name), args...) //nolint:gosec // the harness's own build output
+		cmd := exec.Command(filepath.Join(binDir(t), name), args...) // the harness's own build output
 		cmd.Env = childEnv(prefix, env)
 		out, err := cmd.CombinedOutput()
-		var exit *exec.ExitError
-		if errors.As(err, &exit) {
+
+		if exit, ok := errors.AsType[*exec.ExitError](err); ok {
 			return exit.ExitCode(), string(out)
 		}
+
 		require.NoError(t, err, string(out))
+
 		return 0, string(out)
 	}
 

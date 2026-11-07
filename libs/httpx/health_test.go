@@ -23,6 +23,8 @@ func probe(srv *httpx.Server) (int, string) {
 }
 
 func TestHealthz_AlwaysOK(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	srv.Health.Register("db", func(context.Context) error { return errors.New("down") })
 	// /livez is the same handler under the Kubernetes-style name; liveness
@@ -35,6 +37,8 @@ func TestHealthz_AlwaysOK(t *testing.T) {
 }
 
 func TestReadyz_GateClosedThenOpen(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 
 	code, body := probe(srv)
@@ -52,6 +56,8 @@ func TestReadyz_GateClosedThenOpen(t *testing.T) {
 }
 
 func TestReadyz_CriticalFailureIsNotReady_OptionalIsDegraded(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	srv.Health.SetReady(true)
 	srv.Health.Register("db", func(context.Context) error { return errors.New("connection refused") })
@@ -76,13 +82,17 @@ func TestReadyz_CriticalFailureIsNotReady_OptionalIsDegraded(t *testing.T) {
 // dependency exactly one check, and concurrent probes on a cold cache trigger
 // a single refresh rather than a stampede.
 func TestReadyz_ProbesDoNotHitDependenciesMoreThanOncePerInterval(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{HealthInterval: time.Hour})
 	srv.Health.SetReady(true)
 
 	var calls atomic.Int32
+
 	srv.Health.Register("db", func(context.Context) error {
 		calls.Add(1)
 		time.Sleep(20 * time.Millisecond) // wide enough for the probes below to overlap
+
 		return nil
 	})
 
@@ -93,20 +103,27 @@ func TestReadyz_ProbesDoNotHitDependenciesMoreThanOncePerInterval(t *testing.T) 
 			assert.Equal(t, http.StatusOK, code)
 		})
 	}
+
 	wg.Wait()
+
 	for range 50 {
 		code, _ := probe(srv)
 		require.Equal(t, http.StatusOK, code)
 	}
+
 	assert.Equal(t, int32(1), calls.Load(), "100 probes, one dependency call")
 }
 
 // A check that hangs is bounded by the timeout and reported as failing; the
 // probe itself never hangs, even when the check ignores its context.
 func TestReadyz_HangingCheckIsBoundedByTimeout(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{HealthInterval: time.Hour, HealthTimeout: 30 * time.Millisecond})
 	srv.Health.SetReady(true)
+
 	release := make(chan struct{})
+
 	t.Cleanup(func() { close(release) })
 	srv.Health.Register("stuck", func(context.Context) error {
 		<-release // ignores its context, like a client blocked on a frozen broker
@@ -115,6 +132,7 @@ func TestReadyz_HangingCheckIsBoundedByTimeout(t *testing.T) {
 
 	start := time.Now()
 	code, body := probe(srv)
+
 	assert.Less(t, time.Since(start), 2*time.Second)
 	assert.Equal(t, http.StatusServiceUnavailable, code)
 	assert.Contains(t, body, "deadline exceeded")
@@ -123,16 +141,23 @@ func TestReadyz_HangingCheckIsBoundedByTimeout(t *testing.T) {
 // A check whose previous evaluation has not returned is not started again:
 // no goroutine piles onto the same hung call, however often the loop ticks.
 func TestHealth_StuckCheckIsNotRunTwice(t *testing.T) {
+	t.Parallel()
+
 	h := httpx.NewHealth(5*time.Millisecond, 2*time.Millisecond)
+
 	var calls atomic.Int32
+
 	release := make(chan struct{})
+
 	h.Register("stuck", func(context.Context) error {
 		calls.Add(1)
 		<-release
+
 		return nil
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+
+	ctx := t.Context()
+
 	go h.Run(ctx)
 
 	time.Sleep(100 * time.Millisecond) // ~20 ticks
@@ -145,18 +170,23 @@ func TestHealth_StuckCheckIsNotRunTwice(t *testing.T) {
 // Run refreshes in the background: a dependency that recovers is seen on the
 // next tick without any probe having to pay for the check.
 func TestReadyz_BackgroundLoopTracksRecovery(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{HealthInterval: 20 * time.Millisecond, HealthTimeout: 10 * time.Millisecond})
 	srv.Health.SetReady(true)
 
 	var healthy atomic.Bool
+
 	srv.Health.Register("db", func(context.Context) error {
 		if healthy.Load() {
 			return nil
 		}
+
 		return errors.New("down")
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+
+	ctx := t.Context()
+
 	go srv.Health.Run(ctx)
 
 	require.Eventually(t, func() bool { c, _ := probe(srv); return c == http.StatusServiceUnavailable },
@@ -170,6 +200,8 @@ func TestReadyz_BackgroundLoopTracksRecovery(t *testing.T) {
 }
 
 func TestHealth_DurationHistogram(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{HealthInterval: time.Hour})
 	srv.Health.SetReady(true)
 	srv.Health.Register("db", func(context.Context) error {
@@ -188,6 +220,8 @@ func TestHealth_DurationHistogram(t *testing.T) {
 // critical to optional must not leave health_check_up{critical="true"} 0
 // behind to fire an alert forever.
 func TestHealth_ReRegisterClearsStaleSeries(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{HealthInterval: time.Hour})
 	srv.Health.SetReady(true)
 	reg := srv.Metrics.Registry
@@ -207,6 +241,8 @@ func TestHealth_ReRegisterClearsStaleSeries(t *testing.T) {
 }
 
 func TestHealth_StandaloneCollectorsLint(t *testing.T) {
+	t.Parallel()
+
 	h := httpx.NewHealth(0, 0) // defaults
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(h.Collectors()...)

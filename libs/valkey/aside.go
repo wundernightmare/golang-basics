@@ -29,9 +29,11 @@ func (c *Cache) Tombstone(ctx context.Context, key string, ttl time.Duration) er
 	if ttl <= 0 {
 		return fmt.Errorf("valkey: tombstone %q: ttl must be positive", key)
 	}
+
 	if err := c.Set(ctx, key, tombstoneValue, ttl); err != nil {
 		return fmt.Errorf("valkey: tombstone: %w", err)
 	}
+
 	return nil
 }
 
@@ -42,10 +44,12 @@ func Jitter(ttl time.Duration) time.Duration {
 	if ttl <= 0 {
 		return ttl
 	}
+
 	spread := int64(ttl) / 10
 	if spread == 0 {
 		return ttl
 	}
+
 	return ttl + time.Duration(rand.Int64N(2*spread+1)-spread) //nolint:gosec // jitter, not security
 }
 
@@ -65,43 +69,51 @@ func Jitter(ttl time.Duration) time.Duration {
 //   - A corrupt entry, a failed lookup or a failed fill is a miss / a warning:
 //     the source of truth (load) always wins, so caching never turns a
 //     readable value into an error. load's own error is returned as is.
-func Aside[T any](ctx context.Context, c *Cache, key string, ttl time.Duration, load func(ctx context.Context) (T, error)) (T, bool, error) {
+func Aside[T any](ctx context.Context, cache *Cache, key string, ttl time.Duration, load func(ctx context.Context) (T, error)) (T, bool, error) {
 	var zero T
-	raw, ok, err := c.Get(ctx, key)
+
+	raw, ok, err := cache.Get(ctx, key)
 	if err != nil {
-		c.log.WarnContext(ctx, "valkey: lookup failed, loading from source", "key", key, "err", err)
+		cache.log.WarnContext(ctx, "valkey: lookup failed, loading from source", "key", key, "err", err)
 	}
+
 	if ok {
 		var v T
 		if json.Unmarshal([]byte(raw), &v) == nil {
 			return v, true, nil
 		}
-		c.log.WarnContext(ctx, "valkey: discarding corrupt cache entry", "key", key)
+
+		cache.log.WarnContext(ctx, "valkey: discarding corrupt cache entry", "key", key)
 	}
 
-	ch := c.flight.DoChan(key, func() (any, error) {
+	result := cache.flight.DoChan(key, func() (any, error) {
 		lctx := context.WithoutCancel(ctx)
 		if dl, ok := ctx.Deadline(); ok {
 			var cancel context.CancelFunc
+
 			lctx, cancel = context.WithDeadline(lctx, dl)
 			defer cancel()
 		}
+
 		v, err := load(lctx)
 		if err != nil {
 			return v, err
 		}
+
 		if b, err := json.Marshal(v); err != nil {
-			c.log.WarnContext(lctx, "valkey: cannot encode value for the cache", "key", key, "err", err)
-		} else if _, err := c.SetNX(lctx, key, string(b), Jitter(ttl)); err != nil {
-			c.log.WarnContext(lctx, "valkey: cache write failed", "key", key, "err", err)
+			cache.log.WarnContext(lctx, "valkey: cannot encode value for the cache", "key", key, "err", err)
+		} else if _, err := cache.SetNX(lctx, key, string(b), Jitter(ttl)); err != nil {
+			cache.log.WarnContext(lctx, "valkey: cache write failed", "key", key, "err", err)
 		}
+
 		return v, nil
 	})
 	select {
-	case res := <-ch:
+	case res := <-result:
 		if res.Err != nil {
 			return zero, false, res.Err
 		}
+
 		return res.Val.(T), false, nil //nolint:forcetypeassert // the closure above only ever returns T
 	case <-ctx.Done():
 		return zero, false, ctx.Err()

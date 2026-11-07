@@ -29,11 +29,14 @@ func ping(ctx context.Context, cl metadataClient) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	timeout := pingTimeout
 	if dl, ok := ctx.Deadline(); ok {
 		timeout = min(time.Until(dl), timeout)
 	}
+
 	_, err := cl.GetMetadata(nil, false, max(int(timeout.Milliseconds()), 1))
+
 	return err
 }
 
@@ -55,29 +58,36 @@ func pumpLogs(logs <-chan ckafka.LogEvent, log *slog.Logger, role string) {
 		at         time.Time
 		suppressed int
 	}
+
 	last := map[string]*seen{}
-	for ev := range logs {
-		key := ev.Tag + "|" + ev.Message
+
+	for logEvent := range logs {
+		key := logEvent.Tag + "|" + logEvent.Message
+
 		now := time.Now()
 		if s, ok := last[key]; ok && now.Sub(s.at) < logFoldWindow {
 			s.suppressed++
 			continue
 		}
-		attrs := []any{"kafka_client", role, "facility", ev.Tag, "client_name", ev.Name}
+
+		attrs := []any{"kafka_client", role, "facility", logEvent.Tag, "client_name", logEvent.Name}
 		if s, ok := last[key]; ok && s.suppressed > 0 {
 			attrs = append(attrs, "suppressed", s.suppressed)
 		}
+
 		last[key] = &seen{at: now}
 		if len(last) > 1000 { // a stream of distinct lines: start over rather than grow
 			last = map[string]*seen{key: last[key]}
 		}
-		log.Log(context.Background(), logLevel(ev), "librdkafka: "+ev.Message, attrs...)
+
+		log.Log(context.Background(), logLevel(logEvent), "librdkafka: "+logEvent.Message, attrs...)
 	}
 }
 
 // logLevel maps a librdkafka log line to slog (see pumpLogs).
 func logLevel(ev ckafka.LogEvent) slog.Level {
 	level := slog.LevelDebug
+
 	switch {
 	case ev.Level <= 3 && ev.Tag == "FAIL":
 		level = slog.LevelWarn
@@ -88,6 +98,7 @@ func logLevel(ev ckafka.LogEvent) slog.Level {
 	case ev.Level <= 6:
 		level = slog.LevelInfo
 	}
+
 	return level
 }
 
@@ -122,17 +133,23 @@ func parseStats(raw string) (statsSnapshot, error) {
 	if err := json.Unmarshal([]byte(raw), &s); err != nil {
 		return statsSnapshot{}, fmt.Errorf("kafka: parse statistics: %w", err)
 	}
-	snap := statsSnapshot{at: time.Now(), queueBytes: s.MsgSize, queueMaxBytes: s.MsgSizeMax,
-		brokerErrors: make(map[string]int64, len(s.Brokers))}
+
+	snap := statsSnapshot{
+		at: time.Now(), queueBytes: s.MsgSize, queueMaxBytes: s.MsgSizeMax,
+		brokerErrors: make(map[string]int64, len(s.Brokers)),
+	}
 	for name, b := range s.Brokers {
 		if b.NodeID < 0 { // bootstrap and coordinator entries, not real brokers
 			continue
 		}
+
 		if b.State == "UP" {
 			snap.brokersUp++
 		}
+
 		snap.brokerErrors[name] = b.ReqTimeouts + b.TxErrs + b.RxErrs
 	}
+
 	return snap, nil
 }
 
@@ -154,19 +171,24 @@ func (h *statsHolder) update(raw string) {
 	if err != nil {
 		return
 	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
 	if h.seen == nil {
 		h.seen = map[string]int64{}
 	}
+
 	for name, n := range snap.brokerErrors {
 		if prev := h.seen[name]; n >= prev {
 			h.total += n - prev
 		} else {
 			h.total += n // a new handle under an old name: its count started at zero
 		}
+
 		h.seen[name] = n
 	}
+
 	snap.requestErrors = h.total
 	h.snap = snap
 }
@@ -176,9 +198,11 @@ func (h *statsHolder) update(raw string) {
 func (h *statsHolder) latest(maxAge time.Duration) (statsSnapshot, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
 	if h.snap.at.IsZero() || time.Since(h.snap.at) > maxAge {
 		return statsSnapshot{}, false
 	}
+
 	return h.snap, true
 }
 
@@ -194,6 +218,9 @@ func (h *statsHolder) clientStats(cfg kafka.Config) kafka.ClientStats {
 	if !ok {
 		return kafka.ClientStats{}
 	}
-	return kafka.ClientStats{Valid: true, BrokersUp: int64(s.brokersUp), RequestErrors: s.requestErrors,
-		QueueBytes: s.queueBytes, QueueMaxBytes: s.queueMaxBytes}
+
+	return kafka.ClientStats{
+		Valid: true, BrokersUp: int64(s.brokersUp), RequestErrors: s.requestErrors,
+		QueueBytes: s.queueBytes, QueueMaxBytes: s.queueMaxBytes,
+	}
 }

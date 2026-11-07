@@ -20,6 +20,7 @@ func newRetryBudget(cfg *TargetConfig, now func() time.Time) *retryBudget {
 	if cfg.RetryBudgetWindow <= 0 {
 		return nil
 	}
+
 	return &retryBudget{
 		w:          newWindow(cfg.RetryBudgetWindow),
 		ratio:      cfg.RetryBudgetRatio,
@@ -33,6 +34,7 @@ func (b *retryBudget) request() {
 	if b == nil {
 		return
 	}
+
 	b.mu.Lock()
 	b.w.add(b.now(), 1, 0)
 	b.mu.Unlock()
@@ -43,13 +45,18 @@ func (b *retryBudget) tryRetry() bool {
 	if b == nil {
 		return true
 	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	now := b.now()
+
 	requests, retries := b.w.sum(now)
 	if float64(retries) >= float64(b.minRetries)+b.ratio*float64(requests) {
 		return false
 	}
+
 	b.w.add(now, 0, 1)
+
 	return true
 }

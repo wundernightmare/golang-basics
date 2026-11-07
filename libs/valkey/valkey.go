@@ -36,29 +36,43 @@ type Cache struct {
 // New builds a client from cfg, verifies connectivity with a single PING (so a
 // misconfigured cache fails fast at boot) and returns a ready [Cache]. The
 // caller owns it and must call [Cache.Close].
-func New(cfg Config, log *slog.Logger) (*Cache, error) {
+func New(cfg Config, log *slog.Logger, opts ...Option) (*Cache, error) {
+	var applied options
+	for _, opt := range opts {
+		opt(&applied)
+	}
+
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+
 	if cfg.DialTimeout <= 0 {
 		cfg.DialTimeout = defaultDialTimeout
 	}
+
 	if cfg.OpTimeout <= 0 {
 		cfg.OpTimeout = defaultOpTimeout
 	}
+
 	opt, err := cfg.clientOption()
 	if err != nil {
 		return nil, err
 	}
 	// valkeyotel wraps the client so each command becomes a span; with the
 	// no-op provider installed by default this costs one interface call.
-	client, err := valkeyotel.NewClient(opt)
+	var traceOpts []valkeyotel.Option
+	if applied.tp != nil {
+		traceOpts = append(traceOpts, valkeyotel.WithTracerProvider(applied.tp))
+	}
+
+	client, err := valkeyotel.NewClient(opt, traceOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("valkey: connect: %w", err)
 	}
 
 	pingCtx, cancel := context.WithTimeout(context.Background(), cfg.DialTimeout)
 	defer cancel()
+
 	if err := client.Do(pingCtx, client.B().Ping().Build()).Error(); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("valkey: initial ping: %w", err)
@@ -66,6 +80,7 @@ func New(cfg Config, log *slog.Logger) (*Cache, error) {
 
 	// The resolved address (the URL's, when one is set), not the discrete field.
 	log.Info("valkey cache ready", "addr", opt.InitAddress, "db", opt.SelectDB, "op_timeout", cfg.OpTimeout.String())
+
 	return &Cache{client: client, log: log, metrics: newMetrics(), opTimeout: cfg.OpTimeout}, nil
 }
 
@@ -74,12 +89,15 @@ func New(cfg Config, log *slog.Logger) (*Cache, error) {
 func (c *Cache) do(ctx context.Context, op string, cmd valkeygo.Completed) valkeygo.ValkeyResult {
 	ctx, cancel := context.WithTimeout(ctx, c.opTimeout)
 	defer cancel()
+
 	start := time.Now()
 	res := c.client.Do(ctx, cmd)
 	c.metrics.duration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+
 	if err := res.Error(); err != nil && !valkeygo.IsValkeyNil(err) {
 		c.metrics.errors.WithLabelValues(op).Inc()
 	}
+
 	return res
 }
 
@@ -103,7 +121,9 @@ func (c *Cache) Get(ctx context.Context, key string) (string, bool, error) {
 		c.metrics.lookups.WithLabelValues("miss").Inc()
 		return "", false, nil
 	}
+
 	c.metrics.lookups.WithLabelValues("hit").Inc()
+
 	return v, true, nil
 }
 
@@ -118,9 +138,11 @@ func (c *Cache) Set(ctx context.Context, key, value string, ttl time.Duration) e
 	} else {
 		cmd = c.client.B().Set().Key(key).Value(value).Build()
 	}
+
 	if err := c.do(ctx, "set", cmd).Error(); err != nil {
 		return fmt.Errorf("valkey: set %q: %w", key, err)
 	}
+
 	return nil
 }
 
@@ -132,6 +154,7 @@ func (c *Cache) SetNX(ctx context.Context, key, value string, ttl time.Duration)
 	if ttl <= 0 {
 		return false, fmt.Errorf("valkey: setnx %q: ttl must be positive", key)
 	}
+
 	err := c.do(ctx, "set", c.client.B().Set().Key(key).Value(value).Nx().Px(ttl).Build()).Error()
 	switch {
 	case valkeygo.IsValkeyNil(err):
@@ -139,6 +162,7 @@ func (c *Cache) SetNX(ctx context.Context, key, value string, ttl time.Duration)
 	case err != nil:
 		return false, fmt.Errorf("valkey: setnx %q: %w", key, err)
 	}
+
 	return true, nil
 }
 
@@ -147,9 +171,11 @@ func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
+
 	if err := c.do(ctx, "del", c.client.B().Del().Key(keys...).Build()).Error(); err != nil {
 		return fmt.Errorf("valkey: del: %w", err)
 	}
+
 	return nil
 }
 
@@ -159,9 +185,11 @@ func (c *Cache) ReadyCheck() func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
+
 		if err := c.client.Do(ctx, c.client.B().Ping().Build()).Error(); err != nil {
 			return fmt.Errorf("valkey unreachable: %w", err)
 		}
+
 		return nil
 	}
 }

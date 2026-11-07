@@ -91,11 +91,17 @@ const defaultConnectTimeout = 5 * time.Second
 // LoadConfig parses a [Config] from the environment using the given key prefix
 // (use "" for no prefix). Every field is defaulted, so callers can rely on a
 // usable config even when nothing is set.
-func LoadConfig(prefix string) (Config, error) {
+func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, nil) }
+
+// LoadConfigFrom is [LoadConfig] reading environ instead of the process
+// environment (nil means the process environment). Tests pass a map, so they
+// need no t.Setenv and can run in parallel.
+func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	var cfg Config
-	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix}); err != nil {
+	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix, Environment: environ}); err != nil {
 		return Config{}, fmt.Errorf("pgx: parse config (prefix %q): %w", prefix, err)
 	}
+
 	return cfg, nil
 }
 
@@ -106,6 +112,7 @@ func (c Config) DSN() string {
 	if c.URL != "" {
 		return c.URL
 	}
+
 	u := url.URL{
 		Scheme: "postgres",
 		User:   url.UserPassword(c.User, c.Password),
@@ -115,6 +122,7 @@ func (c Config) DSN() string {
 	q := url.Values{}
 	q.Set("sslmode", c.SSLMode)
 	u.RawQuery = q.Encode()
+
 	return u.String()
 }
 
@@ -123,6 +131,7 @@ func (c Config) DSN() string {
 // (or the DSN's) value stands.
 func (c Config) runtimeParams() map[string]string {
 	out := map[string]string{}
+
 	for name, d := range map[string]time.Duration{
 		"statement_timeout":                   c.StatementTimeout,
 		"lock_timeout":                        c.LockTimeout,
@@ -133,6 +142,7 @@ func (c Config) runtimeParams() map[string]string {
 			out[name] = strconv.FormatInt(max(d.Milliseconds(), 1), 10)
 		}
 	}
+
 	return out
 }
 
@@ -146,6 +156,7 @@ func (c Config) Validate() error {
 			return fmt.Errorf("DB_PASSWORD_FILE: %w", err)
 		}
 	}
+
 	return nil
 }
 
@@ -158,9 +169,11 @@ func readSecretFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	s := strings.TrimRight(string(b), "\r\n")
 	if s == "" {
 		return "", fmt.Errorf("%s is empty", path)
 	}
+
 	return s, nil
 }

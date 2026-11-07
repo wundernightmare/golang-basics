@@ -10,7 +10,7 @@ import (
 
 // Buckets for per-record handler / per-send latency: sub-millisecond for a
 // local ack up to the minute a slow downstream or a broker outage costs.
-var latencyBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60}
+var latencyBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60} //nolint:gochecknoglobals // read-only bucket boundaries: part of the metrics contract
 
 // The metric names are the workspace's metrics contract (docs/METRICS.md),
 // shared with nodejs-basics and the same whichever provider is linked: a
@@ -31,6 +31,7 @@ type sendMetrics struct {
 
 func newSendMetrics(role string) *sendMetrics {
 	l := prometheus.Labels{"client": role}
+
 	return &sendMetrics{
 		records: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name:        "kafka_producer_records_total",
@@ -51,11 +52,12 @@ func (m *sendMetrics) observe(topic string, start time.Time, err error) {
 	result := "ok"
 	if err != nil {
 		result = KindUnknown
-		var se *SendError
-		if errors.As(err, &se) {
+
+		if se, ok := errors.AsType[*SendError](err); ok {
 			result = se.Kind
 		}
 	}
+
 	m.duration.WithLabelValues(topic).Observe(time.Since(start).Seconds())
 	m.records.WithLabelValues(topic, result).Inc()
 }
@@ -112,11 +114,13 @@ type consumerMetrics struct {
 
 func newConsumerMetrics(stats func() ClientStats, provider string, topics []string) *consumerMetrics {
 	known := map[string]bool{}
+
 	for _, t := range topics {
 		if !strings.HasPrefix(t, "^") {
 			known[t] = true
 		}
 	}
+
 	return &consumerMetrics{
 		records: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "kafka_consumer_records_total",
@@ -154,6 +158,7 @@ func (m *consumerMetrics) topic(t string) string {
 	if m.topics[t] {
 		return t
 	}
+
 	return otherTopic
 }
 
@@ -180,8 +185,11 @@ func (m *consumerMetrics) topic(t string) string {
 // when the client stops reporting.
 func (c *Consumer) Collectors() []prometheus.Collector {
 	m := c.metrics
-	return []prometheus.Collector{m.records, m.duration, m.commitErrs, m.fetchErrs, m.assigned, m.rebalances,
-		m.dlq.records, m.dlq.duration, m.client}
+
+	return []prometheus.Collector{
+		m.records, m.duration, m.commitErrs, m.fetchErrs, m.assigned, m.rebalances,
+		m.dlq.records, m.dlq.duration, m.client,
+	}
 }
 
 // clientCollector exposes a driver's [ClientStats] at scrape time.
@@ -194,6 +202,7 @@ type clientCollector struct {
 
 func newClientCollector(role, provider string, stats func() ClientStats) *clientCollector {
 	l := prometheus.Labels{"client": role}
+
 	return &clientCollector{
 		role:  role,
 		stats: stats,
@@ -213,10 +222,14 @@ func newClientCollector(role, provider string, stats func() ClientStats) *client
 // Describe implements prometheus.Collector.
 func (c *clientCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.info
+
 	ch <- c.brokersUp
+
 	ch <- c.requestErrors
+
 	if c.role == "producer" {
 		ch <- c.queueBytes
+
 		ch <- c.queueMax
 	}
 }
@@ -224,14 +237,19 @@ func (c *clientCollector) Describe(ch chan<- *prometheus.Desc) {
 // Collect implements prometheus.Collector.
 func (c *clientCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.info, prometheus.GaugeValue, 1)
+
 	s := c.stats()
 	if !s.Valid {
 		return
 	}
+
 	ch <- prometheus.MustNewConstMetric(c.brokersUp, prometheus.GaugeValue, float64(s.BrokersUp))
+
 	ch <- prometheus.MustNewConstMetric(c.requestErrors, prometheus.CounterValue, float64(s.RequestErrors))
+
 	if c.role == "producer" {
 		ch <- prometheus.MustNewConstMetric(c.queueBytes, prometheus.GaugeValue, float64(s.QueueBytes))
+
 		ch <- prometheus.MustNewConstMetric(c.queueMax, prometheus.GaugeValue, float64(s.QueueMaxBytes))
 	}
 }

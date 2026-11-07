@@ -35,7 +35,7 @@
 # golangci-lint must be built with a Go at least as new as the directive, and
 # the pinned release is built with go1.27.0 (see CLAUDE.md "Go version").
 go            = "1.27.3"
-golangci-lint = "2.14.0"
+golangci-lint = "2.15.0"
 # just: CI installs the same version — GitHub via extractions/setup-just,
 # GitLab from the npm registry (`rust-just`, the just README's npm package,
 # so a closed network gets it through its npm mirror). Only bump to a version
@@ -44,7 +44,7 @@ just          = "1.57.0"
 shellcheck    = "0.11.0" # `just lint` runs it over scripts/ and benchmarks/
 # TypeSpec (api/) only. Full semver: CI derives image tags from it. pnpm is
 # kept equal to package.json's packageManager (corepack is not used).
-node = "24.21.0"
+node = "24.22.2"
 pnpm = "12.11.2"
 
 # `go:` backend = `go install` from source against the Go pinned above; the

@@ -220,8 +220,11 @@ alias allure-report := allure
 
 # ── Lint & format ─────────────────────────────────────────────────────────────
 
-# golangci-lint in every module (config: .golangci.yml) + shellcheck
+# golangci-lint in every module (config: .golangci.yml) + shellcheck.
+# `config verify` first: `run` silently ignores an unknown or misspelt key
+# (CI's golangci-lint-action verifies too).
 lint: lint-sh
+    {{MISE}} golangci-lint config verify
     for m in {{MODULES}}; do echo "── lint $m"; (cd "$m" && {{MISE}} golangci-lint run --build-tags e2e); done
 
 # shellcheck every shell script (scripts/, benchmarks/)
@@ -235,9 +238,17 @@ lint-fix:
 # Scoped to the module dirs, never `.`: CI keeps GOMODCACHE under .cache/,
 # whose test fixtures a bare `gofmt .` would walk into.
 
-# Format all Go source in place (gofmt + golangci-lint fmt)
+# Layout linters that are part of "formatting": every one of them must be
+# auto-fixable (`golangci-lint linters` marks it [auto-fix]) — a formatting
+# rule nobody can apply mechanically does not belong in .golangci.yml.
+FMT_LINTERS := "wsl_v5,whitespace,godot"
+
+# Format all Go source in place: the formatters (gofmt, gofumpt, goimports,
+# gci — `golangci-lint fmt`) then the auto-fixable layout linters (FMT_LINTERS).
+# Idempotent; `just lint` checks the same rules.
 fmt:
     gofmt -w {{MODULES}}
+    for m in {{MODULES}}; do (cd "$m" && {{MISE}} golangci-lint fmt && {{MISE}} golangci-lint run --build-tags e2e --fix --enable-only {{FMT_LINTERS}}); done
     for m in {{MODULES}}; do (cd "$m" && {{MISE}} golangci-lint fmt); done
 
 # Formatting gate (CI) — same module scope as `fmt`

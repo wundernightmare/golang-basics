@@ -33,113 +33,127 @@ func proxied(t *testing.T) (*wired, *containers.Proxy, *containers.Proxy) {
 		valkey:   "valkey://" + vk.Addr,
 		brokers:  containers.Kafka(t),
 	})
+
 	return w, pg, vk
 }
 
+//nolint:paralleltest // serial: chaos via the shared Toxiproxy proxies (one per dependency); Down/Latency here would hit every proxied test
 func TestChaos_ValkeyDown(t *testing.T) {
-	w, _, vk := proxied(t)
-	r := w.do(t, http.MethodPost, "/tasks", `{"title":"survives the cache"}`)
-	require.Equal(t, http.StatusCreated, r.status)
-	var task tasksapi.Task
-	r.decode(t, &task)
+	app, _, valkeyProxy := proxied(t)
+	resp := app.do(t, http.MethodPost, "/tasks", `{"title":"survives the cache"}`)
+	require.Equal(t, http.StatusCreated, resp.status)
 
-	vk.Down()
+	var task tasksapi.Task
+	resp.decode(t, &task)
+
+	valkeyProxy.Down()
 
 	start := time.Now()
-	r = w.do(t, http.MethodGet, "/tasks/"+task.Id, "")
-	require.Equal(t, http.StatusOK, r.status, "reads fall through to Postgres")
-	assert.Equal(t, "miss", r.header.Get("X-Cache"))
+	resp = app.do(t, http.MethodGet, "/tasks/"+task.Id, "")
+	require.Equal(t, http.StatusOK, resp.status, "reads fall through to Postgres")
+	assert.Equal(t, "miss", resp.header.Get("X-Cache"))
 	assert.Less(t, time.Since(start), 3*time.Second, "bounded by VALKEY_OP_TIMEOUT, not hanging")
 
-	r = w.do(t, http.MethodPost, "/tasks", `{"title":"no cache"}`)
-	require.Equal(t, http.StatusCreated, r.status, "writes succeed; the cache warm-up is best-effort")
-	assert.NotNil(t, w.log.Find(t, map[string]any{"msg": "cache write failed"}), "a warn line, not an error")
+	resp = app.do(t, http.MethodPost, "/tasks", `{"title":"no cache"}`)
+	require.Equal(t, http.StatusCreated, resp.status, "writes succeed; the cache warm-up is best-effort")
+	assert.NotNil(t, app.log.Find(t, map[string]any{"msg": "cache write failed"}), "a warn line, not an error")
 
-	r = w.do(t, http.MethodPatch, "/tasks/"+task.Id, `{"done":true}`)
-	require.Equal(t, http.StatusOK, r.status, "a failed invalidation does not fail the committed change")
+	resp = app.do(t, http.MethodPatch, "/tasks/"+task.Id, `{"done":true}`)
+	require.Equal(t, http.StatusOK, resp.status, "a failed invalidation does not fail the committed change")
 
-	body := w.waitReadyz(t, "degraded")
-	code, _ := w.readyz(t)
+	body := app.waitReadyz(t, "degraded")
+	code, _ := app.readyz(t)
 	assert.Equal(t, http.StatusOK, code, "an optional dependency never pulls the pod")
 	assert.Contains(t, body, `"postgres":"ok"`)
-	assert.Equal(t, 0.0, testx.Metric(t, w.srv.Metrics.Registry, "health_check_up", map[string]string{"check": "valkey", "critical": "false"}))
-	assert.Greater(t, testx.Metric(t, w.srv.Metrics.Registry, "cache_command_errors_total", map[string]string{"operation": "get"}), 0.0)
+	assert.Equal(t, 0.0, testx.Metric(t, app.srv.Metrics.Registry, "health_check_up", map[string]string{"check": "valkey", "critical": "false"}))
+	assert.Greater(t, testx.Metric(t, app.srv.Metrics.Registry, "cache_command_errors_total", map[string]string{"operation": "get"}), 0.0)
 
-	vk.Up()
-	w.waitReadyz(t, "ready")
+	valkeyProxy.Up()
+	app.waitReadyz(t, "ready")
 }
 
+//nolint:paralleltest // serial: chaos via the shared Toxiproxy proxies (one per dependency); Down/Latency here would hit every proxied test
 func TestChaos_PostgresSlowThenDown(t *testing.T) {
-	w, pg, _ := proxied(t)
-	w.waitReadyz(t, "ready")
+	app, pgProxy, _ := proxied(t)
+	app.waitReadyz(t, "ready")
 
-	pg.Latency(3 * time.Second) // > the 900ms check timeout: the check gives up, it does not hang
-	w.waitReadyz(t, "not_ready")
+	pgProxy.Latency(3 * time.Second) // > the 900ms check timeout: the check gives up, it does not hang
+	app.waitReadyz(t, "not_ready")
+
 	start := time.Now()
-	code, body := w.readyz(t)
+	code, body := app.readyz(t)
 	assert.Less(t, time.Since(start), time.Second, "probes answer from the cached result")
 	assert.Equal(t, http.StatusServiceUnavailable, code)
 	assert.Contains(t, body, "postgres")
 
-	pg.Reset()
-	pg.Down()
-	r := w.do(t, http.MethodGet, "/tasks", "")
+	pgProxy.Reset()
+	pgProxy.Down()
+
+	r := app.do(t, http.MethodGet, "/tasks", "")
 	assert.Equal(t, http.StatusInternalServerError, r.status)
 	assert.Equal(t, "application/problem+json", r.header.Get("Content-Type"))
-	line := w.log.Find(t, map[string]any{"msg": "request failed", "detail": "could not list tasks"})
+	line := app.log.Find(t, map[string]any{"msg": "request failed", "detail": "could not list tasks"})
 	require.NotNil(t, line, "the 5xx is logged with its cause")
 	assert.NotEmpty(t, line["err"])
-	w.waitReadyz(t, "not_ready")
+	app.waitReadyz(t, "not_ready")
 
-	pg.Up()
-	w.waitReadyz(t, "ready")
+	pgProxy.Up()
+	app.waitReadyz(t, "ready")
 	assert.Eventually(t, func() bool {
-		return w.do(t, http.MethodGet, "/tasks", "").status == http.StatusOK
+		return app.do(t, http.MethodGet, "/tasks", "").status == http.StatusOK
 	}, 20*time.Second, 200*time.Millisecond, "requests succeed again once Postgres is back")
 }
 
 // The broker hangs: writes stay fast (no publish on the request path), the
 // outbox backlog grows and is visible, readiness degrades; once the broker is
 // back the relay delivers every event.
+//
+//nolint:paralleltest // serial: pauses the shared Kafka container; parallel tests wait until serial ones finish
 func TestChaos_KafkaPaused(t *testing.T) {
-	d := directDeps(t)
-	w := wire(t, d)
-	w.waitReadyz(t, "ready")
+	backends := directDeps(t)
+	app := wire(t, backends)
+	app.waitReadyz(t, "ready")
 
 	unpause := containers.Pause(t, "kafka")
+
 	const n = 5
 	for i := range n {
 		start := time.Now()
-		r := w.do(t, http.MethodPost, "/tasks", `{"title":"broker hangs"}`)
+		r := app.do(t, http.MethodPost, "/tasks", `{"title":"broker hangs"}`)
 		require.Equal(t, http.StatusCreated, r.status, "request %d", i)
 		assert.Less(t, time.Since(start), time.Second, "the request does not wait on Kafka")
 	}
+
 	require.Eventually(t, func() bool {
-		return testx.Metric(t, w.srv.Metrics.Registry, "outbox_pending", nil) >= n
+		return testx.Metric(t, app.srv.Metrics.Registry, "outbox_pending", nil) >= n
 	}, 20*time.Second, 100*time.Millisecond, "the backlog is visible on /metrics")
-	assert.Positive(t, failedSends(t, w.srv.Metrics.Registry), "the failed publishes are counted by the producer")
-	body := w.waitReadyz(t, "degraded")
+	assert.Positive(t, failedSends(t, app.srv.Metrics.Registry), "the failed publishes are counted by the producer")
+	body := app.waitReadyz(t, "degraded")
 	assert.Contains(t, body, "kafka")
 
 	unpause()
-	assert.Eventually(t, func() bool { return w.pending(t) == 0 }, 60*time.Second, 200*time.Millisecond,
+	assert.Eventually(t, func() bool { return app.pending(t) == 0 }, 60*time.Second, 200*time.Millisecond,
 		"the relay catches up once the broker is back")
-	events := w.readEvents(t, d.brokers, n, 30*time.Second)
+	events := app.readEvents(t, backends.brokers, n, 30*time.Second)
 	assert.GreaterOrEqual(t, len(events), n, "every event delivered (at least once)")
-	assert.Equal(t, 0.0, testx.Metric(t, w.srv.Metrics.Registry, "outbox_pending", nil))
-	w.waitReadyz(t, "ready")
+	assert.Equal(t, 0.0, testx.Metric(t, app.srv.Metrics.Registry, "outbox_pending", nil))
+	app.waitReadyz(t, "ready")
 }
 
 // failedSends sums kafka_producer_records_total over every result but ok.
 func failedSends(t *testing.T, g prometheus.Gatherer) float64 {
 	t.Helper()
+
 	mfs, err := g.Gather()
 	require.NoError(t, err)
+
 	var n float64
+
 	for _, mf := range mfs {
 		if mf.GetName() != "kafka_producer_records_total" {
 			continue
 		}
+
 		for _, m := range mf.GetMetric() {
 			for _, l := range m.GetLabel() {
 				if l.GetName() == "result" && l.GetValue() != "ok" {
@@ -148,5 +162,6 @@ func failedSends(t *testing.T, g prometheus.Gatherer) float64 {
 			}
 		}
 	}
+
 	return n
 }
