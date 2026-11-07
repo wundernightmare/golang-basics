@@ -10,6 +10,10 @@ import (
 	"net/netip"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Server wires an [http.ServeMux] for the service's API together with the
@@ -45,6 +49,21 @@ type Option func(*serverOptions)
 type serverOptions struct {
 	outer  []Middleware
 	config any
+	tp     trace.TracerProvider
+	prop   propagation.TextMapPropagator
+}
+
+// WithTracerProvider sets the provider the server spans come from. Without it
+// the global provider (otel.GetTracerProvider, installed by otelx.Init) is
+// used — the OpenTelemetry convention for instrumentation.
+func WithTracerProvider(tp trace.TracerProvider) Option {
+	return func(o *serverOptions) { o.tp = tp }
+}
+
+// WithPropagator sets the propagator that reads the caller's trace context
+// from the request headers. Without it the global one is used.
+func WithPropagator(p propagation.TextMapPropagator) Option {
+	return func(o *serverOptions) { o.prop = p }
 }
 
 // WithMiddleware installs middleware — an authenticator, a tenant resolver, a
@@ -79,30 +98,42 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("httpx: config: %w", err)
 	}
+
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	var o serverOptions
+
+	var applied serverOptions
 	for _, opt := range opts {
-		opt(&o)
+		opt(&applied)
 	}
-	if o.config == nil {
-		o.config = cfg // the effective one, defaults applied
+
+	if applied.tp == nil {
+		applied.tp = otel.GetTracerProvider() // a delegating proxy: picks up a later otelx.Init too
 	}
+
+	if applied.prop == nil {
+		applied.prop = otel.GetTextMapPropagator()
+	}
+
+	if applied.config == nil {
+		applied.config = cfg // the effective one, defaults applied
+	}
+
 	proxies, _ := parsePrefixes(cfg.TrustedProxies) // validated above
 	build := Build(cfg.Service)
 
-	m := NewMetrics(build, log)
+	metrics := NewMetrics(build, log)
 	h := NewHealth(cfg.HealthInterval, cfg.HealthTimeout)
-	m.Registry.MustRegister(h.Collectors()...)
+	metrics.Registry.MustRegister(h.Collectors()...)
 
 	s := &Server{
 		cfg: cfg, log: log, mux: http.NewServeMux(),
 		proxies:    proxies,
 		startedAt:  time.Now(),
-		configView: o.config,
+		configView: applied.config,
 		Build:      build,
-		Metrics:    m, Health: h,
+		Metrics:    metrics, Health: h,
 		LogLevel: LogLevelOf(log),
 	}
 
@@ -110,18 +141,20 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
 	if cfg.DebugToken != "" {
 		mws = append(mws, debugToken(cfg.DebugToken))
 	}
+
 	mws = append(mws,
-		tracing,
+		tracing(applied.tp, applied.prop),
 		accessLog(log, cfg.SlowRequest),
-		m.Middleware(),
+		metrics.Middleware(),
 	)
-	mws = append(mws, o.outer...)
+	mws = append(mws, applied.outer...)
 	mws = append(mws,
 		s.recovery,
 		bodyLimit(cfg.MaxBodyBytes),
 	)
 	s.handler = chain(route(s.mux), mws...)
 	s.admin = newAdminMux(s)
+
 	return s, nil
 }
 
@@ -154,6 +187,7 @@ func derefString(p *string) string {
 	if p == nil {
 		return ""
 	}
+
 	return *p
 }
 
@@ -179,11 +213,17 @@ func derefString(p *string) string {
 // port in use is returned from Run directly rather than reported from a
 // goroutine.
 func (s *Server) Run(ctx context.Context) error {
+	// Request contexts are deliberately NOT derived from ctx: cancelling Run
+	// must drain in-flight requests within ShutdownTimeout, not abort them.
+	// cancelBase (step 3 above) is what ends them.
 	baseCtx, cancelBase := context.WithCancel(context.Background())
 	defer cancelBase()
 
-	var api, admin *http.Server
-	var apiLn, adminLn net.Listener
+	var (
+		api, admin     *http.Server
+		apiLn, adminLn net.Listener
+	)
+
 	if s.cfg.Addr != "" {
 		api = &http.Server{
 			Handler:           s.handler,
@@ -194,14 +234,17 @@ func (s *Server) Run(ctx context.Context) error {
 			MaxHeaderBytes:    s.cfg.MaxHeaderBytes,
 			BaseContext:       func(net.Listener) context.Context { return baseCtx },
 		}
-		ln, err := net.Listen("tcp", s.cfg.Addr)
+
+		ln, err := net.Listen("tcp", s.cfg.Addr) //nolint:noctx // bind is immediate; a cancelled ctx must still bind and then shut down cleanly (Run returns nil)
 		if err != nil {
 			return fmt.Errorf("httpx: bind API listener %s: %w", s.cfg.Addr, err)
 		}
+
 		apiLn = ln
 		addr := ln.Addr().String()
 		s.apiAddr.Store(&addr)
 	}
+
 	if s.cfg.AdminAddr != "" {
 		// No WriteTimeout: /debug/pprof/profile streams for its ?seconds= budget.
 		admin = &http.Server{
@@ -211,17 +254,21 @@ func (s *Server) Run(ctx context.Context) error {
 			MaxHeaderBytes:    s.cfg.MaxHeaderBytes,
 			BaseContext:       func(net.Listener) context.Context { return baseCtx },
 		}
-		ln, err := net.Listen("tcp", s.cfg.AdminAddr)
+
+		ln, err := net.Listen("tcp", s.cfg.AdminAddr) //nolint:noctx // as for the API listener above
 		if err != nil {
 			if apiLn != nil {
 				_ = apiLn.Close()
 			}
+
 			return fmt.Errorf("httpx: bind admin listener %s: %w", s.cfg.AdminAddr, err)
 		}
+
 		adminLn = ln
 		addr := ln.Addr().String()
 		s.adminAddr.Store(&addr)
 	}
+
 	if api == nil && admin == nil {
 		return errors.New("httpx: neither HTTP_ADDR nor ADMIN_ADDR is set")
 	}
@@ -231,12 +278,15 @@ func (s *Server) Run(ctx context.Context) error {
 		if srv == nil {
 			return
 		}
+
 		go func() {
-			s.log.Info(name+" listening", append([]any{"addr", ln.Addr().String()}, attrs...)...)
+			s.log.InfoContext(ctx, name+" listening", append([]any{"addr", ln.Addr().String()}, attrs...)...)
+
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				serveErr <- fmt.Errorf("%s: %w", name, err)
 				return
 			}
+
 			serveErr <- nil
 		}()
 	}
@@ -247,33 +297,42 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.cfg.AdminToken == "" {
 		adminAuth = "off"
 	}
+
 	serve("admin server", admin, adminLn, "auth", adminAuth)
 	serve("http server", api, apiLn, "debug_token", s.cfg.DebugToken != "")
 
 	// Readiness: one synchronous pass so the first probe answers from real
 	// results, then the background loop for the lifetime of the server.
 	s.Health.refresh(ctx)
+
 	healthCtx, stopHealth := context.WithCancel(ctx)
 	defer stopHealth()
+
 	go s.Health.Run(healthCtx)
+
 	s.Health.SetReady(true)
 
 	select {
 	case err := <-serveErr:
 		s.Health.SetReady(false)
-		_ = s.shutdown(api, admin, cancelBase) // the listener failure is the error worth returning
+		_ = s.shutdown(api, admin, cancelBase) // own timeout context; the listener failure is the error worth returning
+
 		return err
 	case <-ctx.Done():
 		s.Health.SetReady(false)
-		s.log.Info("shutdown requested, draining",
+		s.log.InfoContext(ctx, "shutdown requested, draining",
 			"delay", s.cfg.ShutdownDelay.String(), "timeout", s.cfg.ShutdownTimeout.String())
+
 		if s.cfg.ShutdownDelay > 0 {
 			time.Sleep(s.cfg.ShutdownDelay)
 		}
-		if err := s.shutdown(api, admin, cancelBase); err != nil {
+
+		if err := s.shutdown(api, admin, cancelBase); err != nil { // ctx is done: shutdown runs on its own ShutdownTimeout context
 			return err
 		}
-		s.log.Info("servers stopped cleanly")
+
+		s.log.InfoContext(ctx, "servers stopped cleanly")
+
 		return nil
 	}
 }
@@ -286,28 +345,38 @@ const adminShutdownBudget = 2 * time.Second
 // it, then stops the admin listener.
 func (s *Server) shutdown(api, admin *http.Server, cancelBase context.CancelFunc) error {
 	var first error
+
 	if api != nil {
 		shutCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 		err := api.Shutdown(shutCtx)
+
 		cancel()
+
 		if err != nil {
 			s.log.Warn("drain budget exhausted, closing remaining connections", "err", err)
-			cancelBase()    // every in-flight request context is cancelled
+			cancelBase() // every in-flight request context is cancelled
+
 			_ = api.Close() // and its connection closed
 			first = fmt.Errorf("httpx: drain: %w", err)
 		}
 	}
+
 	if admin != nil {
 		shutCtx, cancel := context.WithTimeout(context.Background(), adminShutdownBudget)
 		err := admin.Shutdown(shutCtx)
+
 		cancel()
+
 		if err != nil {
 			_ = admin.Close()
+
 			if first == nil {
 				first = fmt.Errorf("httpx: admin drain: %w", err)
 			}
 		}
 	}
+
 	cancelBase()
+
 	return first
 }

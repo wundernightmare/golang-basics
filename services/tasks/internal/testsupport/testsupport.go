@@ -28,9 +28,11 @@ var seq atomic.Uint64
 // dropped when the test ends.
 func SchemaDSN(t testing.TB, direct, via string) string {
 	t.Helper()
+
 	if via == "" {
 		via = direct
 	}
+
 	schema := fmt.Sprintf("t_%d_%d", os.Getpid(), seq.Add(1))
 	exec(t, direct, `CREATE SCHEMA `+schema)
 	t.Cleanup(func() { exec(t, direct, `DROP SCHEMA IF EXISTS `+schema+` CASCADE`) })
@@ -39,20 +41,25 @@ func SchemaDSN(t testing.TB, direct, via string) string {
 	if err != nil {
 		t.Fatalf("testsupport: parse dsn: %v", err)
 	}
+
 	q := u.Query()
 	q.Set("search_path", schema)
 	u.RawQuery = q.Encode()
+
 	return u.String()
 }
 
 func exec(t testing.TB, dsn, sql string) {
 	t.Helper()
+
 	ctx := context.Background()
+
 	admin, err := pgx.New(ctx, pgx.Config{URL: dsn, MaxConns: 1}, nil)
 	if err != nil {
 		t.Fatalf("testsupport: connect: %v", err)
 	}
 	defer admin.Close()
+
 	if _, err := admin.Pool().Exec(ctx, sql); err != nil {
 		t.Fatalf("testsupport: %s: %v", sql, err)
 	}
@@ -65,17 +72,23 @@ func DB(t testing.TB, direct string) *pgx.DB {
 	return MigratedDB(t, SchemaDSN(t, direct, ""))
 }
 
-// MigratedDB opens dsn and applies the service's migrations.
-func MigratedDB(t testing.TB, dsn string) *pgx.DB {
+// MigratedDB opens dsn (with opts, e.g. pgx.WithTracerProvider) and applies
+// the service's migrations.
+func MigratedDB(t testing.TB, dsn string, opts ...pgx.Option) *pgx.DB {
 	t.Helper()
+
 	ctx := context.Background()
-	db, err := pgx.New(ctx, pgx.Config{URL: dsn, ConnectTimeout: 5 * time.Second, MaxConns: 8}, nil)
+
+	db, err := pgx.New(ctx, pgx.Config{URL: dsn, ConnectTimeout: 5 * time.Second, MaxConns: 8}, nil, opts...)
 	if err != nil {
 		t.Fatalf("testsupport: connect: %v", err)
 	}
+
 	t.Cleanup(db.Close)
+
 	if err := pgx.Migrate(ctx, db.Pool(), migrations.FS, nil); err != nil {
 		t.Fatalf("testsupport: migrate: %v", err)
 	}
+
 	return db
 }

@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
@@ -49,15 +48,19 @@ func (c *Config) withDefaults() {
 	if c.PollInterval <= 0 {
 		c.PollInterval = time.Second
 	}
+
 	if c.BatchSize <= 0 {
 		c.BatchSize = 100
 	}
+
 	if c.MaxBackoff <= 0 {
 		c.MaxBackoff = 30 * time.Second
 	}
+
 	if c.MaxAttempts <= 0 {
 		c.MaxAttempts = 10
 	}
+
 	if c.RejectBackoff <= 0 {
 		c.RejectBackoff = time.Second
 	}
@@ -78,6 +81,7 @@ type Relay struct {
 	log     *slog.Logger
 	wake    chan struct{}
 	tracer  trace.Tracer
+	prop    propagation.TextMapPropagator
 	metrics relayMetrics
 }
 
@@ -89,15 +93,20 @@ type relayMetrics struct {
 
 // NewRelay builds a relay over pool (the service's database, schema migrated)
 // publishing through pub (nil: watch the backlog, publish nothing).
-func NewRelay(pool *pgxpool.Pool, pub Publisher, cfg Config, log *slog.Logger) *Relay {
+func NewRelay(pool *pgxpool.Pool, pub Publisher, cfg Config, log *slog.Logger, opts ...Option) *Relay {
+	tel := resolve(opts)
+
 	cfg.withDefaults()
+
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+
 	return &Relay{
 		pool: pool, pub: pub, cfg: cfg, log: log,
 		wake:   make(chan struct{}, 1),
-		tracer: otel.Tracer("github.com/tracehubmmp/golang-basics/services/tasks/internal/outbox"),
+		tracer: tel.tp.Tracer(tracerName),
+		prop:   tel.prop,
 		metrics: relayMetrics{
 			pending: prometheus.NewGauge(prometheus.GaugeOpts{
 				Name: "outbox_pending",
@@ -148,13 +157,18 @@ func (r *Relay) Run(ctx context.Context) error {
 	if r.pub == nil {
 		return r.watch(ctx)
 	}
+
 	r.log.InfoContext(ctx, "outbox relay started", "topic", r.cfg.Topic,
 		"poll_interval", r.cfg.PollInterval.String(), "batch_size", r.cfg.BatchSize)
+
 	failures := 0
+
 	for {
 		_, taken, err := r.relayOnce(ctx)
 		r.refreshGauges(ctx)
+
 		var wait time.Duration
+
 		switch {
 		case err != nil:
 			failures++
@@ -168,6 +182,7 @@ func (r *Relay) Run(ctx context.Context) error {
 			failures = 0
 			wait = r.cfg.PollInterval
 		}
+
 		if wait == 0 {
 			select {
 			case <-ctx.Done():
@@ -177,15 +192,18 @@ func (r *Relay) Run(ctx context.Context) error {
 				continue
 			}
 		}
+
 		wake := r.wake
 		if err != nil {
 			wake = nil // back off for real
 		}
+
 		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			t.Stop()
 			r.log.InfoContext(ctx, "outbox relay stopped")
+
 			return nil
 		case <-t.C:
 		case <-wake:
@@ -199,10 +217,13 @@ func (r *Relay) Run(ctx context.Context) error {
 func (r *Relay) watch(ctx context.Context) error {
 	r.log.WarnContext(ctx, "outbox relay idle: no Kafka configured, events wait in the outbox",
 		"poll_interval", r.cfg.PollInterval.String())
+
 	t := time.NewTicker(r.cfg.PollInterval)
 	defer t.Stop()
+
 	for {
 		r.refreshGauges(ctx)
+
 		select {
 		case <-ctx.Done():
 			return nil
@@ -217,11 +238,14 @@ func backoff(n int, interval, maxDelay time.Duration) time.Duration {
 	for i := 1; i < n && d < maxDelay; i++ {
 		d *= 2
 	}
+
 	d = min(d, maxDelay)
+
 	half := d / 2
 	if half <= 0 {
 		return d
 	}
+
 	return half + rand.N(half+1) //nolint:gosec // jitter, not a secret
 }
 
@@ -276,8 +300,10 @@ func (r *Relay) relayOnce(ctx context.Context) (sent, taken int, _ error) {
 	if r.pub == nil {
 		return 0, 0, nil
 	}
+
 	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), batchBudget)
 	defer cancel()
+
 	bctx = pgxlib.WithOperation(bctx, "outbox.relay")
 
 	tx, err := r.pool.Begin(bctx)
@@ -290,6 +316,7 @@ func (r *Relay) relayOnce(ctx context.Context) (sent, taken int, _ error) {
 	if err := tx.QueryRow(bctx, relayLockSQL).Scan(&leader); err != nil {
 		return 0, 0, fmt.Errorf("outbox: relay lock: %w", err)
 	}
+
 	if !leader {
 		return 0, 0, nil
 	}
@@ -302,29 +329,38 @@ func (r *Relay) relayOnce(ctx context.Context) (sent, taken int, _ error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("outbox: select batch: %w", err)
 	}
+
 	batch, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (pending, error) {
-		var x pending
-		var headers []byte
+		var (
+			x       pending
+			headers []byte
+		)
+
 		err := r.Scan(&x.id, &x.eventID, &x.aggregateID, &x.eventType, &x.payload, &headers)
 		if err == nil && len(headers) > 0 {
 			err = json.Unmarshal(headers, &x.headers)
 		}
+
 		return x, err
 	})
 	if err != nil {
 		return 0, 0, fmt.Errorf("outbox: read batch: %w", err)
 	}
+
 	if len(batch) == 0 {
 		return 0, 0, nil
 	}
 
 	done := make([]int64, 0, len(batch))
+
 	var pubErr error
-	for _, x := range batch {
+
+	for _, item := range batch {
 		if ctx.Err() != nil {
 			break // shutting down: commit what is done
 		}
-		if err := r.publish(bctx, x); err != nil {
+
+		if err := r.publish(bctx, item); err != nil {
 			if kafka.Rejected(err) {
 				taken++
 				// The SET expressions see the row before the update: the
@@ -335,23 +371,28 @@ func (r *Relay) relayOnce(ctx context.Context) (sent, taken int, _ error) {
 					   SET rejections = rejections + 1, last_error = $2,
 					       next_attempt_at = now() + least($3::float8 * power(2, rejections), $4::float8) * interval '1 second'
 					 WHERE id = $1 RETURNING rejections`,
-					x.id, truncate(err.Error(), 1000), r.cfg.RejectBackoff.Seconds(), maxRejectDelay.Seconds()).Scan(&rejections); uerr != nil {
+					item.id, truncate(err.Error(), 1000), r.cfg.RejectBackoff.Seconds(), maxRejectDelay.Seconds()).Scan(&rejections); uerr != nil {
 					pubErr = fmt.Errorf("outbox: record rejection: %w", uerr)
 					break
 				}
-				r.log.WarnContext(ctx, "outbox event rejected by the broker", "event_id", x.eventID,
-					"event_type", x.eventType, "rejections", rejections, "max_attempts", r.cfg.MaxAttempts,
+
+				r.log.WarnContext(ctx, "outbox event rejected by the broker", "event_id", item.eventID,
+					"event_type", item.eventType, "rejections", rejections, "max_attempts", r.cfg.MaxAttempts,
 					"dead", rejections >= r.cfg.MaxAttempts, "err", err)
+
 				continue // the record is the problem, not the broker: the rest can go
 			}
-			pubErr = fmt.Errorf("outbox: publish %s %s (event %s): %w", x.eventType, x.aggregateID, x.eventID, err)
+
+			pubErr = fmt.Errorf("outbox: publish %s %s (event %s): %w", item.eventType, item.aggregateID, item.eventID, err)
 			if _, uerr := tx.Exec(bctx, `UPDATE outbox SET last_error = $2 WHERE id = $1`,
-				x.id, truncate(err.Error(), 1000)); uerr != nil {
+				item.id, truncate(err.Error(), 1000)); uerr != nil {
 				pubErr = errors.Join(pubErr, fmt.Errorf("outbox: record failure: %w", uerr))
 			}
+
 			break
 		}
-		done = append(done, x.id)
+
+		done = append(done, item.id)
 		taken++
 	}
 
@@ -360,41 +401,47 @@ func (r *Relay) relayOnce(ctx context.Context) (sent, taken int, _ error) {
 			return 0, 0, errors.Join(pubErr, fmt.Errorf("outbox: delete published: %w", err))
 		}
 	}
+
 	if err := tx.Commit(bctx); err != nil {
 		return 0, 0, errors.Join(pubErr, fmt.Errorf("outbox: commit: %w", err))
 	}
+
 	return len(done), taken, pubErr
 }
 
 // publish sends one row, continuing the trace of the request that wrote it.
-func (r *Relay) publish(ctx context.Context, x pending) error {
-	parent := otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(x.headers))
-	ctx, span := r.tracer.Start(parent, "outbox relay "+x.eventType,
+func (r *Relay) publish(ctx context.Context, item pending) error {
+	parent := r.prop.Extract(ctx, propagation.MapCarrier(item.headers))
+
+	ctx, span := r.tracer.Start(parent, "outbox relay "+item.eventType,
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
-			attribute.String("messaging.message.id", x.eventID),
+			attribute.String("messaging.message.id", item.eventID),
 			attribute.String("messaging.destination.name", r.cfg.Topic),
-			attribute.String("tasks.event_type", x.eventType),
+			attribute.String("tasks.event_type", item.eventType),
 		))
 	defer span.End()
 
 	headers := []kafka.Header{
-		{Key: kafka.HeaderEventID, Value: []byte(x.eventID)},
-		{Key: kafka.HeaderEventType, Value: []byte(x.eventType)},
+		{Key: kafka.HeaderEventID, Value: []byte(item.eventID)},
+		{Key: kafka.HeaderEventType, Value: []byte(item.eventType)},
 		{Key: kafka.HeaderContentType, Value: []byte("application/json")},
 	}
 	// The trace context stored at insert time. With tracing on, the producer
 	// replaces traceparent with its own span — a child in the same trace.
 	for _, k := range []string{kafka.HeaderTraceparent, "tracestate"} {
-		if v := x.headers[k]; v != "" {
+		if v := item.headers[k]; v != "" {
 			headers = append(headers, kafka.Header{Key: k, Value: []byte(v)})
 		}
 	}
-	if err := r.pub.Send(ctx, kafka.Message{Topic: r.cfg.Topic, Key: []byte(x.aggregateID), Value: x.payload, Headers: headers}); err != nil {
+
+	if err := r.pub.Send(ctx, kafka.Message{Topic: r.cfg.Topic, Key: []byte(item.aggregateID), Value: item.payload, Headers: headers}); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "publish failed")
+
 		return err
 	}
+
 	return nil
 }
 
@@ -409,13 +456,18 @@ const statsSQL = `SELECT count(*) FILTER (WHERE rejections < $1),
 func (r *Relay) refreshGauges(ctx context.Context) {
 	qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	var n, dead int64
-	var lag float64
+
+	var (
+		n, dead int64
+		lag     float64
+	)
+
 	err := r.pool.QueryRow(pgxlib.WithOperation(qctx, "outbox.stats"), statsSQL, r.cfg.MaxAttempts).Scan(&n, &dead, &lag)
 	if err != nil {
 		r.log.DebugContext(ctx, "outbox stats unavailable", "err", err)
 		return
 	}
+
 	r.metrics.pending.Set(float64(n))
 	r.metrics.dead.Set(float64(dead))
 	r.metrics.oldestAge.Set(max(lag, 0))
@@ -424,9 +476,13 @@ func (r *Relay) refreshGauges(ctx context.Context) {
 // Stats returns the backlog size (dead rows aside) and the age of its oldest
 // event, for tests and tooling.
 func (r *Relay) Stats(ctx context.Context) (pending int64, oldest time.Duration, err error) {
-	var dead int64
-	var lag float64
+	var (
+		dead int64
+		lag  float64
+	)
+
 	err = r.pool.QueryRow(ctx, statsSQL, r.cfg.MaxAttempts).Scan(&pending, &dead, &lag)
+
 	return pending, time.Duration(lag * float64(time.Second)), err
 }
 
@@ -434,5 +490,6 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
+
 	return strings.ToValidUTF8(s[:n], "") // never cut a rune in half: TEXT must be valid UTF-8
 }

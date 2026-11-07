@@ -26,10 +26,12 @@ func newWindow(length time.Duration) window {
 // add counts a and b at now.
 func (w *window) add(now time.Time, a, b int) {
 	idx := now.UnixNano() / int64(w.slot)
+
 	s := &w.slots[idx%windowSlots]
 	if s.idx != idx {
 		*s = windowSlot{idx: idx}
 	}
+
 	s.a += a
 	s.b += b
 }
@@ -43,6 +45,7 @@ func (w *window) sum(now time.Time) (a, b int) {
 			b += s.b
 		}
 	}
+
 	return a, b
 }
 

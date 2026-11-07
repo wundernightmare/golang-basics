@@ -10,17 +10,22 @@ import (
 	"github.com/tracehubmmp/golang-basics/services/heartbeat/internal/config"
 )
 
-// setenv sets HEARTBEAT_-prefixed variables for the test.
-func setenv(t *testing.T, kv map[string]string) {
-	t.Helper()
+// environ returns kv as a HEARTBEAT_-prefixed environment: exactly these
+// variables (never nil, so never the process environment). A key mapped to
+// "" is set-to-empty; a key left out is unset.
+func environ(kv map[string]string) map[string]string {
+	out := make(map[string]string, len(kv))
 	for k, v := range kv {
-		t.Setenv(config.Prefix+k, v)
+		out[config.Prefix+k] = v
 	}
+
+	return out
 }
 
 func TestLoad_Defaults(t *testing.T) {
-	setenv(t, map[string]string{"ADMIN_TOKEN": "s3cret"})
-	cfg, err := config.Load()
+	t.Parallel()
+
+	cfg, err := config.LoadFrom(environ(map[string]string{"ADMIN_TOKEN": "s3cret"}))
 	require.NoError(t, err)
 	assert.Equal(t, "heartbeat", cfg.Service)
 	assert.Equal(t, ":9081", cfg.AdminAddr, "off ping's default admin port")
@@ -35,8 +40,9 @@ func TestLoad_Defaults(t *testing.T) {
 	assert.Equal(t, 10*time.Second, cfg.HealthInterval)
 }
 
+//nolint:paralleltest // exercises the process-environment path; t.Setenv in a loop, which paralleltest does not see
 func TestLoad_Overrides(t *testing.T) {
-	setenv(t, map[string]string{
+	for k, v := range map[string]string{
 		"ADMIN_ADDR":            "127.0.0.1:9999",
 		"HTTP_ADDR":             ":8080", // ignored: no API listener
 		"INTERVAL":              "250ms",
@@ -44,7 +50,10 @@ func TestLoad_Overrides(t *testing.T) {
 		"LOG_FORMAT":            "text",
 		"HTTP_SHUTDOWN_DELAY":   "0s",
 		"HTTP_SHUTDOWN_TIMEOUT": "3s",
-	})
+	} {
+		t.Setenv(config.Prefix+k, v)
+	}
+
 	cfg, err := config.Load()
 	require.NoError(t, err)
 	assert.Equal(t, "127.0.0.1:9999", cfg.AdminAddr)
@@ -57,6 +66,8 @@ func TestLoad_Overrides(t *testing.T) {
 }
 
 func TestLoad_Rejects(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name string
 		env  map[string]string
@@ -69,21 +80,23 @@ func TestLoad_Rejects(t *testing.T) {
 		{"no admin listener either", map[string]string{"ADMIN_ADDR": ""}, "neither HTTP_ADDR nor ADMIN_ADDR"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			setenv(t, tc.env)
-			_, err := config.Load()
+			t.Parallel()
+
+			_, err := config.LoadFrom(environ(tc.env))
 			require.ErrorContains(t, err, tc.want)
 		})
 	}
 
-	setenv(t, map[string]string{"ADMIN_INSECURE": "true"})
-	_, err := config.Load()
+	_, err := config.LoadFrom(environ(map[string]string{"ADMIN_INSECURE": "true"}))
 	require.NoError(t, err, "an explicitly insecure admin listener is accepted")
 }
 
 func TestHTTP_IsTheEmbeddedConfig(t *testing.T) {
-	setenv(t, map[string]string{"ADMIN_TOKEN": "s3cret", "DEBUG_TOKEN": "dbg"})
-	cfg, err := config.Load()
+	t.Parallel()
+
+	cfg, err := config.LoadFrom(environ(map[string]string{"ADMIN_TOKEN": "s3cret", "DEBUG_TOKEN": "dbg"}))
 	require.NoError(t, err)
+
 	h := cfg.HTTP()
 	assert.Equal(t, cfg.Config, h, "a projection, not a hand copy")
 	assert.Equal(t, "s3cret", h.AdminToken)

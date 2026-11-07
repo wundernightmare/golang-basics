@@ -4,7 +4,7 @@ import (
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
-	"net/http/pprof" //nolint:gosec // registered on the admin mux only, never on the API listener
+	"net/http/pprof" // registered on the admin mux only, never on the API listener
 	"strings"
 	"time"
 )
@@ -54,6 +54,7 @@ func newAdminMux(s *Server) *http.ServeMux {
 	mux.Handle("/debug/pprof/profile", guard(http.HandlerFunc(pprof.Profile)))
 	mux.Handle("/debug/pprof/symbol", guard(http.HandlerFunc(pprof.Symbol)))
 	mux.Handle("/debug/pprof/trace", guard(http.HandlerFunc(pprof.Trace)))
+
 	return mux
 }
 
@@ -89,6 +90,7 @@ type logLevelResponse struct {
 
 func (s *Server) logLevelResponse(previous string) logLevelResponse {
 	level, expires := s.LogLevel.Level()
+
 	resp := logLevelResponse{
 		Level:    levelString(level),
 		Base:     levelString(s.LogLevel.Base()),
@@ -98,6 +100,7 @@ func (s *Server) logLevelResponse(previous string) logLevelResponse {
 	if !expires.IsZero() {
 		resp.ExpiresAt = &expires
 	}
+
 	return resp
 }
 
@@ -109,6 +112,7 @@ func (s *Server) getLogLevel(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, errLoggerNotAdjustable)
 		return
 	}
+
 	WriteJSON(w, http.StatusOK, s.logLevelResponse(""))
 }
 
@@ -121,18 +125,22 @@ func (s *Server) putLogLevel(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, errLoggerNotAdjustable)
 		return
 	}
+
 	level, err := parseLevelStrict(r.FormValue("level"))
 	if err != nil {
 		writeProblem(w, r, NewProblem(http.StatusBadRequest, err.Error()))
 		return
 	}
+
 	ttl := s.cfg.LogLevelMaxTTL
+
 	if raw := r.FormValue("ttl"); raw != "" {
 		d, err := time.ParseDuration(raw)
 		if err != nil || d <= 0 {
 			writeProblem(w, r, NewProblem(http.StatusBadRequest, "ttl must be a positive duration such as 30m or 2h"))
 			return
 		}
+
 		ttl = min(d, s.cfg.LogLevelMaxTTL)
 	}
 
@@ -151,6 +159,7 @@ func (s *Server) deleteLogLevel(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, errLoggerNotAdjustable)
 		return
 	}
+
 	previous := s.LogLevel.Reset()
 	resp := s.logLevelResponse(levelString(previous))
 	s.log.LogAttrs(WithDebugLogging(r.Context()), slog.LevelWarn, "log level reset",
@@ -170,17 +179,21 @@ func requireBearer(token string, log *slog.Logger) func(http.Handler) http.Handl
 	if token == "" {
 		return func(next http.Handler) http.Handler { return next }
 	}
+
 	want := tokenDigest(token)
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			scheme, got, _ := strings.Cut(r.Header.Get("Authorization"), " ")
 			if !strings.EqualFold(scheme, "Bearer") || subtle.ConstantTimeCompare(tokenDigest(strings.TrimSpace(got)), want) != 1 {
-				log.Warn("admin: rejected unauthenticated request",
+				log.WarnContext(r.Context(), "admin: rejected unauthenticated request",
 					"method", r.Method, "path", r.URL.Path, "client", r.RemoteAddr)
 				w.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
 				writeProblem(w, r, NewProblem(http.StatusUnauthorized, "a valid Authorization: Bearer <ADMIN_TOKEN> header is required"))
+
 				return
 			}
+
 			next.ServeHTTP(w, r)
 		})
 	}

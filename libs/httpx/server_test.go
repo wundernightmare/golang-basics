@@ -19,22 +19,27 @@ import (
 
 func newTestServer(t testing.TB, buf *testx.LogBuffer, opts ...httpx.Option) *httpx.Server {
 	t.Helper()
+
 	log := httpx.NewLogger(httpx.LogConfig{Level: "info", Format: "json", Writer: buf})
 	srv, err := httpx.NewServer(httpx.Config{
 		Service: "test", Addr: ":0", ShutdownTimeout: time.Second, MaxBodyBytes: 64,
 		TrustedProxies: []string{"10.0.0.0/8"},
 	}, log, opts...)
 	require.NoError(t, err)
+
 	return srv
 }
 
 func do(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
+
 	return rec
 }
 
 func TestNewServer_RejectsInvalidConfig(t *testing.T) {
+	t.Parallel()
+
 	log := httpx.NewLogger(httpx.LogConfig{Level: "error", Format: "text", Writer: io.Discard})
 	_, err := httpx.NewServer(httpx.Config{Addr: ":0", LogLevel: "verbos"}, log)
 	require.ErrorContains(t, err, "LOG_LEVEL")
@@ -50,23 +55,25 @@ func TestNewServer_RejectsInvalidConfig(t *testing.T) {
 }
 
 func TestRouting_UnknownRouteAndMethodAreProblems(t *testing.T) {
+	t.Parallel()
+
 	buf := &testx.LogBuffer{}
 	srv := newTestServer(t, buf)
 	srv.Mux().HandleFunc("GET /items/{id}", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": r.PathValue("id")})
 	})
 
-	rec := do(srv.Handler(), httptest.NewRequest(http.MethodGet, "/items/42", nil))
+	rec := do(srv.Handler(), httptest.NewRequest(http.MethodGet, "/items/42", http.NoBody))
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.JSONEq(t, `{"id":"42"}`, rec.Body.String())
 	assert.Len(t, rec.Header().Get(httpx.RequestIDHeader), 16, "a request id is minted and echoed")
 
-	rec = do(srv.Handler(), httptest.NewRequest(http.MethodGet, "/nope", nil))
+	rec = do(srv.Handler(), httptest.NewRequest(http.MethodGet, "/nope", http.NoBody))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Equal(t, httpx.ProblemContentType, rec.Header().Get("Content-Type"))
 	assert.Contains(t, rec.Body.String(), `"request_id"`)
 
-	rec = do(srv.Handler(), httptest.NewRequest(http.MethodDelete, "/items/42", nil))
+	rec = do(srv.Handler(), httptest.NewRequest(http.MethodDelete, "/items/42", http.NoBody))
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 	assert.Equal(t, "GET, HEAD", rec.Header().Get("Allow"))
 	assert.Equal(t, httpx.ProblemContentType, rec.Header().Get("Content-Type"))
@@ -86,11 +93,13 @@ func TestRouting_UnknownRouteAndMethodAreProblems(t *testing.T) {
 }
 
 func TestPanic_IsA500AndCounted(t *testing.T) {
+	t.Parallel()
+
 	buf := &testx.LogBuffer{}
 	srv := newTestServer(t, buf)
 	srv.Mux().HandleFunc("GET /boom", func(http.ResponseWriter, *http.Request) { panic("kaboom") })
 
-	rec := do(srv.Handler(), httptest.NewRequest(http.MethodGet, "/boom", nil))
+	rec := do(srv.Handler(), httptest.NewRequest(http.MethodGet, "/boom", http.NoBody))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Equal(t, httpx.ProblemContentType, rec.Header().Get("Content-Type"))
 	assert.NotContains(t, rec.Body.String(), "kaboom", "the panic value stays in the log")
@@ -111,16 +120,21 @@ func TestPanic_IsA500AndCounted(t *testing.T) {
 }
 
 func TestBodyLimit_And_DecodeJSON(t *testing.T) {
+	t.Parallel()
+
 	srv := newTestServer(t, &testx.LogBuffer{})
+
 	type in struct {
 		Title string `json:"title"`
 	}
+
 	srv.Mux().HandleFunc("POST /items", func(w http.ResponseWriter, r *http.Request) {
 		var v in
 		if err := httpx.DecodeJSON(r, &v); err != nil {
 			httpx.WriteError(w, r, err)
 			return
 		}
+
 		httpx.WriteJSON(w, http.StatusCreated, v)
 	})
 
@@ -135,12 +149,14 @@ func TestBodyLimit_And_DecodeJSON(t *testing.T) {
 }
 
 func TestWriteError_LogsTheCauseOfA500(t *testing.T) {
+	t.Parallel()
+
 	buf := &testx.LogBuffer{}
 	srv := newTestServer(t, buf)
 	srv.Mux().HandleFunc("GET /fail", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, httpx.Internal("could not persist", errors.New("pgconn: connection refused")))
 	})
-	rec := do(srv.Handler(), httptest.NewRequest(http.MethodGet, "/fail", nil))
+	rec := do(srv.Handler(), httptest.NewRequest(http.MethodGet, "/fail", http.NoBody))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Contains(t, rec.Body.String(), "could not persist")
 	assert.NotContains(t, rec.Body.String(), "pgconn")
@@ -152,6 +168,8 @@ func TestWriteError_LogsTheCauseOfA500(t *testing.T) {
 }
 
 func TestTrustedProxy_ClientIPAndRequestID(t *testing.T) {
+	t.Parallel()
+
 	buf := &testx.LogBuffer{}
 	srv := newTestServer(t, buf)
 	srv.Mux().HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +177,7 @@ func TestTrustedProxy_ClientIPAndRequestID(t *testing.T) {
 	})
 
 	// Untrusted peer: the header is ignored, the id is minted.
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.Header.Set("X-Forwarded-For", "6.6.6.6")
 	req.Header.Set(httpx.RequestIDHeader, "client-chosen")
 	rec := do(srv.Handler(), req)
@@ -167,7 +185,7 @@ func TestTrustedProxy_ClientIPAndRequestID(t *testing.T) {
 	assert.NotEqual(t, "client-chosen", rec.Header().Get(httpx.RequestIDHeader))
 
 	// Trusted peer: the first untrusted hop from the right is the client.
-	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req = httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "10.1.2.3:4444"
 	req.Header.Set("X-Forwarded-For", "6.6.6.6, 203.0.113.7, 10.0.0.9")
 	req.Header.Set(httpx.RequestIDHeader, "ingress-id")
@@ -177,20 +195,24 @@ func TestTrustedProxy_ClientIPAndRequestID(t *testing.T) {
 }
 
 func TestAdmin_TokenGuardsAdminAndDebug(t *testing.T) {
+	t.Parallel()
+
 	log := httpx.NewLogger(httpx.LogConfig{Level: "error", Format: "text", Writer: io.Discard})
 	srv, err := httpx.NewServer(httpx.Config{Addr: ":0", AdminAddr: ":9099", AdminToken: "s3cret"}, log)
 	require.NoError(t, err)
 
 	for _, path := range []string{"/healthz", "/livez", "/metrics", "/version"} {
-		rec := do(srv.Admin(), httptest.NewRequest(http.MethodGet, path, nil))
+		rec := do(srv.Admin(), httptest.NewRequest(http.MethodGet, path, http.NoBody))
 		assert.NotEqual(t, http.StatusUnauthorized, rec.Code, path)
 	}
+
 	for _, path := range []string{"/admin/config", "/admin/log-level", "/debug/pprof/", "/debug/pprof/cmdline"} {
-		rec := do(srv.Admin(), httptest.NewRequest(http.MethodGet, path, nil))
+		rec := do(srv.Admin(), httptest.NewRequest(http.MethodGet, path, http.NoBody))
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, path)
 		assert.Equal(t, `Bearer realm="admin"`, rec.Header().Get("WWW-Authenticate"))
 	}
-	req := httptest.NewRequest(http.MethodGet, "/admin/config", nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/config", http.NoBody)
 	req.Header.Set("Authorization", "bearer s3cret") // scheme is case-insensitive
 	rec := do(srv.Admin(), req)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -198,6 +220,8 @@ func TestAdmin_TokenGuardsAdminAndDebug(t *testing.T) {
 }
 
 func TestReadyz_ProbeCancellationDoesNotPoisonTheCache(t *testing.T) {
+	t.Parallel()
+
 	srv := newTestServer(t, &testx.LogBuffer{})
 	srv.Health.SetReady(true)
 	srv.Health.Register("db", func(ctx context.Context) error {
@@ -211,39 +235,49 @@ func TestReadyz_ProbeCancellationDoesNotPoisonTheCache(t *testing.T) {
 	// A probe that gives up after 5ms: the inline refresh must not inherit it.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
-	rec := do(srv.Admin(), httptest.NewRequest(http.MethodGet, "/readyz", nil).WithContext(ctx))
+
+	rec := do(srv.Admin(), httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody).WithContext(ctx))
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), `"db":"ok"`)
 }
 
 func TestRun_DrainsThenForcesClose(t *testing.T) {
+	t.Parallel()
+
 	log := httpx.NewLogger(httpx.LogConfig{Level: "error", Format: "text", Writer: io.Discard})
 	srv, err := httpx.NewServer(httpx.Config{
 		Addr: "127.0.0.1:0", AdminAddr: "127.0.0.1:0",
 		ShutdownDelay: 0, ShutdownTimeout: 200 * time.Millisecond, RequestTimeout: time.Minute,
 	}, log)
 	require.NoError(t, err)
+
 	started := make(chan struct{}, 1)
 	sawCancel := make(chan bool, 1)
+
 	srv.Mux().HandleFunc("GET /slow", func(w http.ResponseWriter, r *http.Request) {
 		started <- struct{}{}
+
 		select {
 		case <-time.After(5 * time.Second):
 			sawCancel <- false
 		case <-r.Context().Done():
 			sawCancel <- true // the forced close cancelled the base context
 		}
+
 		_, _ = io.WriteString(w, "done")
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+
 	done := make(chan error, 1)
 	go func() { done <- srv.Run(ctx) }()
+
 	require.Eventually(t, func() bool { return srv.ListenAddr() != "" && srv.AdminListenAddr() != "" }, 2*time.Second, 5*time.Millisecond)
 
 	// Readiness is open once Run has bound and evaluated the checks.
 	resp, err := http.Get("http://" + srv.AdminListenAddr() + "/readyz")
 	require.NoError(t, err)
+
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -253,10 +287,13 @@ func TestRun_DrainsThenForcesClose(t *testing.T) {
 			_ = resp.Body.Close()
 		}
 	}()
+
 	<-started
 
 	shutdownStart := time.Now()
+
 	cancel()
+
 	select {
 	case err := <-done:
 		require.Error(t, err, "the drain budget was exhausted by the stuck request")
@@ -264,5 +301,6 @@ func TestRun_DrainsThenForcesClose(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not return")
 	}
+
 	assert.True(t, <-sawCancel, "the in-flight request's context was cancelled by the forced close")
 }

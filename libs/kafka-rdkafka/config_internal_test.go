@@ -17,53 +17,62 @@ import (
 func defaulted(t *testing.T, cfg kafka.Config) kafka.Config {
 	t.Helper()
 	require.NoError(t, cfg.Validate())
+
 	return cfg
 }
 
 // Every buffer is bounded by a named key, never left to librdkafka's
 // defaults (1 GiB send queue, 64 MiB prefetch per partition).
 func TestProperties_EveryBufferIsNamed(t *testing.T) {
-	cfg := defaulted(t, kafka.Config{Brokers: []string{"b1:9092", "b2:9092"}})
-	p, err := producerProperties(cfg)
-	require.NoError(t, err)
-	assert.Equal(t, 65536, p["queue.buffering.max.kbytes"])
-	assert.Equal(t, 100000, p["queue.buffering.max.messages"])
-	assert.Equal(t, 1000000, p["message.max.bytes"])
-	assert.Equal(t, "lz4", p["compression.type"])
-	assert.Equal(t, "all", p["acks"])
-	assert.Equal(t, true, p["enable.idempotence"])
-	assert.Equal(t, 5000, p["message.timeout.ms"])
-	assert.Equal(t, "b1:9092,b2:9092", p["bootstrap.servers"])
+	t.Parallel()
 
-	c, err := consumerProperties(cfg)
+	cfg := defaulted(t, kafka.Config{Brokers: []string{"b1:9092", "b2:9092"}})
+	producerProps, err := producerProperties(cfg)
 	require.NoError(t, err)
-	assert.Equal(t, 4096, c["queued.max.messages.kbytes"])
-	assert.Equal(t, 4<<20, c["fetch.max.bytes"])
-	assert.Equal(t, 4<<20+512, c["receive.message.max.bytes"])
-	assert.Equal(t, 1<<20, c["max.partition.fetch.bytes"])
-	assert.Equal(t, "cooperative-sticky", c["partition.assignment.strategy"])
-	assert.Equal(t, false, c["enable.auto.commit"])
-	assert.Equal(t, false, c["enable.auto.offset.store"])
-	assert.Equal(t, "earliest", c["auto.offset.reset"])
+	assert.Equal(t, 65536, producerProps["queue.buffering.max.kbytes"])
+	assert.Equal(t, 100000, producerProps["queue.buffering.max.messages"])
+	assert.Equal(t, 1000000, producerProps["message.max.bytes"])
+	assert.Equal(t, "lz4", producerProps["compression.type"])
+	assert.Equal(t, "all", producerProps["acks"])
+	assert.Equal(t, true, producerProps["enable.idempotence"])
+	assert.Equal(t, 5000, producerProps["message.timeout.ms"])
+	assert.Equal(t, "b1:9092,b2:9092", producerProps["bootstrap.servers"])
+
+	consumerProps, err := consumerProperties(cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 4096, consumerProps["queued.max.messages.kbytes"])
+	assert.Equal(t, 4<<20, consumerProps["fetch.max.bytes"])
+	assert.Equal(t, 4<<20+512, consumerProps["receive.message.max.bytes"])
+	assert.Equal(t, 1<<20, consumerProps["max.partition.fetch.bytes"])
+	assert.Equal(t, "cooperative-sticky", consumerProps["partition.assignment.strategy"])
+	assert.Equal(t, false, consumerProps["enable.auto.commit"])
+	assert.Equal(t, false, consumerProps["enable.auto.offset.store"])
+	assert.Equal(t, "earliest", consumerProps["auto.offset.reset"])
 
 	// librdkafka accepts the result: every property name and value is valid.
-	pr, err := ckafka.NewProducer(&p)
+	pr, err := ckafka.NewProducer(&producerProps)
 	require.NoError(t, err)
 	pr.Close()
-	co, err := ckafka.NewConsumer(&c)
+
+	co, err := ckafka.NewConsumer(&consumerProps)
 	require.NoError(t, err)
 	require.NoError(t, co.Close())
 }
 
 func TestProperties_SecurityAndPassthrough(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	pw := filepath.Join(dir, "password")
 	require.NoError(t, os.WriteFile(pw, []byte("s3cret\n"), 0o600))
+
 	ca := filepath.Join(dir, "ca.crt")
 	require.NoError(t, os.WriteFile(ca, []byte("x"), 0o600))
-	cfg := defaulted(t, kafka.Config{Brokers: []string{"b:9093"}, SecurityProtocol: "SASL_SSL", SASLMechanism: "scram-sha-512",
+	cfg := defaulted(t, kafka.Config{
+		Brokers: []string{"b:9093"}, SecurityProtocol: "SASL_SSL", SASLMechanism: "scram-sha-512",
 		SASLUsername: "app", SASLPasswordFile: pw, SSLCALocation: ca,
-		ExtraProperties: kafka.Properties{"socket.timeout.ms": "30000"}, ConsumerExtraProperties: kafka.Properties{"fetch.wait.max.ms": "100"}})
+		ExtraProperties: kafka.Properties{"socket.timeout.ms": "30000"}, ConsumerExtraProperties: kafka.Properties{"fetch.wait.max.ms": "100"},
+	})
 	c, err := consumerProperties(cfg)
 	require.NoError(t, err)
 	assert.Equal(t, "sasl_ssl", c["security.protocol"])
@@ -73,12 +82,15 @@ func TestProperties_SecurityAndPassthrough(t *testing.T) {
 	assert.Equal(t, ca, c["ssl.ca.location"])
 	assert.Equal(t, "30000", c["socket.timeout.ms"])
 	assert.Equal(t, "100", c["fetch.wait.max.ms"])
+
 	p, err := producerProperties(cfg)
 	require.NoError(t, err)
 	assert.NotContains(t, p, "fetch.wait.max.ms", "consumer passthrough stays on consumers")
 }
 
 func TestSendError_Taxonomy(t *testing.T) {
+	t.Parallel()
+
 	for code, want := range map[ckafka.ErrorCode]string{
 		ckafka.ErrQueueFull:                kafka.KindQueueFull,
 		ckafka.ErrMsgTimedOut:              kafka.KindUnavailable,
@@ -89,15 +101,19 @@ func TestSendError_Taxonomy(t *testing.T) {
 		ckafka.ErrUnknown:                  kafka.KindUnknown,
 	} {
 		err := sendError(ckafka.NewError(code, "x", false))
+
 		var se *kafka.SendError
 		require.ErrorAs(t, err, &se)
 		assert.Equal(t, want, se.Kind, code.String())
 		assert.Equal(t, want != kafka.KindRejected, se.Retryable)
 	}
+
 	assert.NoError(t, sendError(nil))
 }
 
 func TestParseStats(t *testing.T) {
+	t.Parallel()
+
 	s, err := parseStats(`{"msg_size":10,"msg_size_max":67108864,
 	  "brokers":{"b:9092/1":{"nodeid":1,"state":"UP","req_timeouts":1,"txerrs":2,"rxerrs":3},
 	             "b:9092/bootstrap":{"nodeid":-1,"state":"UP"},
@@ -107,6 +123,7 @@ func TestParseStats(t *testing.T) {
 	assert.Equal(t, map[string]int64{"b:9092/1": 6, "c:9092/2": 0}, s.brokerErrors)
 	assert.Equal(t, int64(10), s.queueBytes)
 	assert.Equal(t, int64(67108864), s.queueMaxBytes)
+
 	_, err = parseStats("{")
 	require.Error(t, err)
 }
@@ -115,12 +132,17 @@ func TestParseStats(t *testing.T) {
 // when a broker's own count drops (librdkafka replaced its handle) or the
 // broker leaves the statistics and comes back.
 func TestStatsHolder_RequestErrorsNeverDecrease(t *testing.T) {
-	var h statsHolder
+	t.Parallel()
+
+	var holder statsHolder
+
 	cfg := kafka.Config{StatisticsInterval: 1000}
 	broker := func(a, b int64) string {
 		return fmt.Sprintf(`{"brokers":{"a/1":{"nodeid":1,"state":"UP","txerrs":%d},"b/2":{"nodeid":2,"state":"UP","txerrs":%d}}}`, a, b)
 	}
+
 	var got []int64
+
 	for _, raw := range []string{
 		broker(2, 3), // 5
 		broker(4, 3), // +2 → 7
@@ -128,9 +150,10 @@ func TestStatsHolder_RequestErrorsNeverDecrease(t *testing.T) {
 		`{"brokers":{"a/1":{"nodeid":1,"state":"UP","txerrs":1}}}`, // b gone: 8
 		broker(1, 5), // b back with its old handle: +2 → 10
 	} {
-		h.update(raw)
-		got = append(got, h.clientStats(cfg).RequestErrors)
+		holder.update(raw)
+		got = append(got, holder.clientStats(cfg).RequestErrors)
 	}
+
 	assert.Equal(t, []int64{5, 7, 8, 8, 10}, got)
 }
 
@@ -138,6 +161,8 @@ func TestStatsHolder_RequestErrorsNeverDecrease(t *testing.T) {
 // an error (localhost resolves to [::1] first, so it shows up on every boot).
 // Every other level-3 line stays an error.
 func TestLogLevel(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		ev   ckafka.LogEvent
 		want slog.Level

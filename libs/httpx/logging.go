@@ -47,6 +47,7 @@ func NewLogger(cfg LogConfig) *slog.Logger {
 	// decision is levelHandler's: slog consults only the outermost Enabled,
 	// and Handle does not re-check the level.
 	opts := &slog.HandlerOptions{Level: &level.lv}
+
 	w := cfg.Writer
 	if w == nil {
 		w = os.Stdout
@@ -58,15 +59,19 @@ func NewLogger(cfg LogConfig) *slog.Logger {
 	} else {
 		h = slog.NewJSONHandler(w, opts)
 	}
+
 	h = &ctxHandler{inner: h}
 	if cfg.SampleInitial > 0 {
 		h = newSamplingHandler(h, cfg.SampleInitial, cfg.SampleThereafter, cfg.SampleTick)
 	}
+
 	h = levelHandler{Handler: h, level: level}
+
 	log := slog.New(h)
 	if cfg.Service != "" {
 		log = log.With("service", cfg.Service)
 	}
+
 	return log
 }
 
@@ -117,20 +122,25 @@ func (h *ctxHandler) Handle(ctx context.Context, r slog.Record) error {
 			slog.String("span_id", sc.SpanID().String()),
 		)
 	}
+
 	if id := RequestIDFromContext(ctx); id != "" {
 		attrs = append(attrs, slog.String("request_id", id))
 	}
+
 	if len(h.ops) == 0 {
 		if len(attrs) > 0 {
 			r = r.Clone()
 			r.AddAttrs(attrs...)
 		}
+
 		return h.inner.Handle(ctx, r)
 	}
+
 	inner := h.inner
 	if len(attrs) > 0 {
 		inner = inner.WithAttrs(attrs)
 	}
+
 	for _, op := range h.ops {
 		if op.group != "" {
 			inner = inner.WithGroup(op.group)
@@ -138,6 +148,7 @@ func (h *ctxHandler) Handle(ctx context.Context, r slog.Record) error {
 			inner = inner.WithAttrs(op.attrs)
 		}
 	}
+
 	return inner.Handle(ctx, r)
 }
 
@@ -145,7 +156,9 @@ func (h *ctxHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	if len(h.ops) == 0 {
 		return &ctxHandler{inner: h.inner.WithAttrs(attrs)}
 	}
+
 	ops := append(append([]handlerOp(nil), h.ops...), handlerOp{attrs: attrs})
+
 	return &ctxHandler{inner: h.inner, ops: ops}
 }
 
@@ -153,7 +166,9 @@ func (h *ctxHandler) WithGroup(name string) slog.Handler {
 	if name == "" {
 		return h
 	}
+
 	ops := append(append([]handlerOp(nil), h.ops...), handlerOp{group: name})
+
 	return &ctxHandler{inner: h.inner, ops: ops}
 }
 
@@ -169,5 +184,6 @@ func SignalContext() (context.Context, context.CancelFunc) {
 		<-ctx.Done()
 		stop()
 	}()
+
 	return ctx, stop
 }

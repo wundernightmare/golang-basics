@@ -32,6 +32,7 @@ type LogLevel struct {
 func newLogLevel(base slog.Level) *LogLevel {
 	l := &LogLevel{base: base}
 	l.lv.Set(base)
+
 	return l
 }
 
@@ -45,6 +46,7 @@ func (l *LogLevel) Base() slog.Level { return l.base }
 func (l *LogLevel) Level() (slog.Level, time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	return l.lv.Level(), l.expires
 }
 
@@ -56,19 +58,24 @@ func (l *LogLevel) Level() (slog.Level, time.Time) {
 func (l *LogLevel) Set(level slog.Level, ttl time.Duration) (previous slog.Level) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	previous = l.lv.Level()
 	l.gen++
+
 	gen := l.gen
 	if l.timer != nil {
 		l.timer.Stop()
 		l.timer = nil
 	}
+
 	l.expires = time.Time{}
 	l.lv.Set(level)
+
 	if ttl > 0 {
 		l.expires = time.Now().Add(ttl)
 		l.timer = time.AfterFunc(ttl, func() { l.revert(gen) })
 	}
+
 	return previous
 }
 
@@ -83,9 +90,11 @@ func (l *LogLevel) Reset() (previous slog.Level) {
 func (l *LogLevel) revert(gen uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	if l.gen != gen {
 		return
 	}
+
 	l.lv.Set(l.base)
 	l.expires = time.Time{}
 	l.timer = nil
@@ -104,6 +113,7 @@ func (h levelHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	if DebugLogging(ctx) {
 		return true
 	}
+
 	return level >= h.level.lv.Level()
 }
 
@@ -122,6 +132,7 @@ func LogLevelOf(log *slog.Logger) *LogLevel {
 	if lh, ok := log.Handler().(levelHandler); ok {
 		return lh.level
 	}
+
 	return nil
 }
 

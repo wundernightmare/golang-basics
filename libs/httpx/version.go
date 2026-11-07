@@ -13,12 +13,14 @@ import (
 //	go build -ldflags "-X github.com/tracehubmmp/golang-basics/libs/httpx.Version=v1.4.2"
 //
 // (scripts/build-service.sh and the Dockerfiles do this from VERSION.)
-var Version = "dev"
+var Version = "dev" //nolint:gochecknoglobals // set by -ldflags -X, which needs a variable
 
 // Revision and BuildTime are the VCS revision and build timestamp. They come
 // from the toolchain's embedded VCS info when the binary is built inside a
 // checkout, and from -ldflags (-X …httpx.Revision=<sha>) in a Docker build,
 // whose context has no .git.
+//
+//nolint:gochecknoglobals // set by -ldflags -X / embedded VCS info, which needs variables
 var (
 	Revision  = ""
 	BuildTime = ""
@@ -40,26 +42,29 @@ type BuildInfo struct {
 // when the binary is built inside a git checkout (`-buildvcs`, on by default),
 // with the injected Revision / BuildTime as the fallback.
 func Build(service string) BuildInfo {
-	bi := BuildInfo{Service: service, Version: Version, Revision: Revision, BuildTime: BuildTime}
-	if bi.Revision == "" {
-		bi.Revision = "unknown"
+	build := BuildInfo{Service: service, Version: Version, Revision: Revision, BuildTime: BuildTime}
+	if build.Revision == "" {
+		build.Revision = "unknown"
 	}
+
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
-		return bi
+		return build
 	}
-	bi.GoVersion = info.GoVersion
+
+	build.GoVersion = info.GoVersion
 	for _, s := range info.Settings {
 		switch s.Key {
 		case "vcs.revision":
-			bi.Revision = s.Value
+			build.Revision = s.Value
 		case "vcs.time":
-			bi.BuildTime = s.Value
+			build.BuildTime = s.Value
 		case "vcs.modified":
-			bi.Modified = s.Value == "true"
+			build.Modified = s.Value == "true"
 		}
 	}
-	return bi
+
+	return build
 }
 
 // defaultServiceName is what Config.Service falls back to: the executable's
@@ -69,5 +74,6 @@ func defaultServiceName() string {
 	if err != nil {
 		return "service"
 	}
+
 	return filepath.Base(exe)
 }

@@ -56,6 +56,7 @@ func New(c *valkey.Cache, ttl, tombstoneTTL time.Duration, log *slog.Logger) *Ta
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+
 	return &Tasks{c: c, ttl: ttl, tombstoneTTL: tombstoneTTL, log: log}
 }
 
@@ -71,6 +72,7 @@ func (t *Tasks) Get(ctx context.Context, id string, load func(context.Context) (
 	if err != nil {
 		return domain.Task{}, false, err
 	}
+
 	return e.task(), hit, nil
 }
 
@@ -78,10 +80,12 @@ func (t *Tasks) Get(ctx context.Context, id string, load func(context.Context) (
 // Best-effort — a failure is logged, the next read loads it.
 func (t *Tasks) Warm(ctx context.Context, task domain.Task) {
 	e := toEntry(task)
+
 	b, err := json.Marshal(e)
 	if err == nil {
 		_, err = t.c.SetNX(ctx, Key(task.ID), string(b), valkey.Jitter(t.ttl))
 	}
+
 	if err != nil {
 		t.log.WarnContext(ctx, "cache write failed", "key", Key(task.ID), "err", err)
 	}

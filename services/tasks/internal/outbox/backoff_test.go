@@ -8,6 +8,8 @@ import (
 )
 
 func TestBackoffGrowsAndIsCapped(t *testing.T) {
+	t.Parallel()
+
 	const interval, maxDelay = time.Second, 30 * time.Second
 	for n, want := range map[int]time.Duration{1: time.Second, 2: 2 * time.Second, 3: 4 * time.Second, 6: 30 * time.Second, 50: 30 * time.Second} {
 		for range 50 {
@@ -19,6 +21,8 @@ func TestBackoffGrowsAndIsCapped(t *testing.T) {
 }
 
 func TestTruncateKeepsValidUTF8(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(t, "abc", truncate("abc", 10))
 	assert.Equal(t, "ж", truncate("жж", 3), "a rune cut in half is dropped")
 }

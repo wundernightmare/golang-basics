@@ -311,6 +311,9 @@ lint:
   cache: *cache-pull
   timeout: 30m
   script:
+    # Schema check first: `run` silently ignores an unknown or misspelt key
+    # (the GitHub golangci-lint-action does the same check via `verify: true`).
+    - golangci-lint config verify
     - |
       status=0
       for m in $(scripts/touched-modules.sh --all); do

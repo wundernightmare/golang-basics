@@ -1,13 +1,15 @@
 package worker
 
 import (
-	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestLRU_BoundedAndRecencyOrdered(t *testing.T) {
+	t.Parallel()
+
 	l := newLRU(2)
 	l.add("a")
 	l.add("b")
@@ -20,8 +22,9 @@ func TestLRU_BoundedAndRecencyOrdered(t *testing.T) {
 
 	big := newLRU(100)
 	for i := range 1000 {
-		big.add(fmt.Sprint(i))
+		big.add(strconv.Itoa(i))
 	}
+
 	assert.Equal(t, 100, big.len(), "never grows past its size")
 	assert.True(t, big.contains("999"))
 	assert.False(t, big.contains("0"))

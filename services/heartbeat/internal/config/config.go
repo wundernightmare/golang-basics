@@ -44,37 +44,49 @@ type Config struct {
 
 // Load parses the configuration from HEARTBEAT_-prefixed environment
 // variables and validates it.
-func Load() (Config, error) {
+func Load() (Config, error) { return LoadFrom(nil) }
+
+// LoadFrom is [Load] reading environ instead of the process environment
+// (nil means the process environment). Tests pass a map, so they need no
+// t.Setenv and can run in parallel.
+func LoadFrom(environ map[string]string) (Config, error) {
 	var cfg Config
-	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: Prefix}); err != nil {
+	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: Prefix, Environment: environ}); err != nil {
 		return Config{}, fmt.Errorf("heartbeat: parse config: %w", err)
 	}
 	// Our own default for the admin address; an explicitly empty value stays
 	// empty (and is rejected: a worker without its admin listener is blind)
 	// instead of falling back to the envDefault as the env parser would.
-	if v, set := os.LookupEnv(Prefix + "ADMIN_ADDR"); set {
+	if v, set := lookupEnv(environ, Prefix+"ADMIN_ADDR"); set {
 		cfg.AdminAddr = v
 	} else {
 		cfg.AdminAddr = defaultAdminAddr
 	}
+
 	cfg.Addr = "" // a worker serves no API
+
 	cfg.Service = "heartbeat"
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("heartbeat: config: %w", err)
 	}
+
 	return cfg, nil
 }
 
 // Defaults is the configuration with nothing set: what --config-reference
 // prints.
 func Defaults() (Config, error) {
-	cfg := Config{}
-	cfg.Service = "heartbeat"
-	cfg.AdminAddr = defaultAdminAddr
+	cfg := Config{
+		Service: "heartbeat",
+
+		AdminAddr: defaultAdminAddr,
+	}
 	if err := httpx.Defaults(Prefix, &cfg); err != nil {
 		return Config{}, err
 	}
+
 	cfg.Addr = "" // as Load: no API listener
+
 	return cfg, nil
 }
 
@@ -84,9 +96,21 @@ func (c *Config) Validate() error {
 	if c.Interval <= 0 {
 		return fmt.Errorf("%sINTERVAL must be positive, got %s", Prefix, c.Interval)
 	}
+
 	return c.Config.Validate()
 }
 
 // HTTP is the libs/httpx part of the configuration, what the admin server is
 // built from.
 func (c Config) HTTP() httpx.Config { return c.Config }
+
+// lookupEnv is os.LookupEnv, or a lookup in environ when one is given.
+func lookupEnv(environ map[string]string, key string) (string, bool) {
+	if environ == nil {
+		return os.LookupEnv(key)
+	}
+
+	v, ok := environ[key]
+
+	return v, ok
+}

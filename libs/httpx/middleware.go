@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"net/netip"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
@@ -28,9 +28,10 @@ type Middleware func(http.Handler) http.Handler
 
 // chain applies mws to h, first middleware outermost.
 func chain(h http.Handler, mws ...Middleware) http.Handler {
-	for i := len(mws) - 1; i >= 0; i-- {
-		h = mws[i](h)
+	for _, mw := range slices.Backward(mws) {
+		h = mw(h)
 	}
+
 	return h
 }
 
@@ -83,6 +84,7 @@ func (i *reqInfo) routeLabel() string {
 	if i == nil || i.route == "" {
 		return "unmatched"
 	}
+
 	return i.route
 }
 
@@ -93,6 +95,7 @@ func RouteFromContext(ctx context.Context) string {
 	if i := infoFrom(ctx); i != nil {
 		return i.route
 	}
+
 	return ""
 }
 
@@ -103,6 +106,7 @@ func ClientIPFromContext(ctx context.Context) string {
 	if i := infoFrom(ctx); i != nil {
 		return i.clientIP
 	}
+
 	return ""
 }
 
@@ -122,6 +126,7 @@ func (w *responseWriter) WriteHeader(code int) {
 		w.status = code
 		w.wroteHeader = true
 	}
+
 	w.ResponseWriter.WriteHeader(code)
 }
 
@@ -129,8 +134,10 @@ func (w *responseWriter) Write(b []byte) (int, error) {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
+
 	n, err := w.ResponseWriter.Write(b)
 	w.bytes += int64(n)
+
 	return n, err
 }
 
@@ -138,6 +145,7 @@ func (w *responseWriter) Flush() {
 	if !w.wroteHeader {
 		w.WriteHeader(http.StatusOK)
 	}
+
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -159,7 +167,7 @@ func (w *responseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 // choose how its requests are correlated.
 func (s *Server) entry(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rw := &responseWriter{ResponseWriter: w}
+		wrapped := &responseWriter{ResponseWriter: w}
 		peer := peerAddr(r.RemoteAddr)
 		trusted := s.isTrusted(peer)
 
@@ -170,20 +178,24 @@ func (s *Server) entry(next http.Handler) http.Handler {
 				id = ""
 			}
 		}
+
 		if id == "" {
 			id = newRequestID()
 		}
 
-		info := &reqInfo{id: id, rw: rw, log: s.log, clientIP: s.clientIP(r, peer, trusted)}
+		info := &reqInfo{id: id, rw: wrapped, log: s.log, clientIP: s.clientIP(r, peer, trusted)}
 		ctx := context.WithValue(r.Context(), reqInfoKey{}, info)
 		ctx = WithRequestID(ctx, id)
+
 		if budget := requestBudget(s.cfg.RequestTimeout, s.cfg.RequestTimeoutMin, r.Header.Get(RequestTimeoutHeader)); budget > 0 {
 			var cancel context.CancelFunc
+
 			ctx, cancel = context.WithTimeout(ctx, budget)
 			defer cancel()
 		}
+
 		w.Header().Set(RequestIDHeader, id)
-		next.ServeHTTP(rw, r.WithContext(ctx))
+		next.ServeHTTP(wrapped, r.WithContext(ctx))
 	})
 }
 
@@ -203,14 +215,17 @@ func requestBudget(configured, floor time.Duration, header string) time.Duration
 	if header == "" || len(header) > 9 || strings.Trim(header, "0123456789") != "" {
 		return configured
 	}
+
 	ms, _ := strconv.Atoi(header) // 9 digits always fit
 	if ms <= 0 {
 		return configured
 	}
+
 	asked := max(time.Duration(ms)*time.Millisecond, floor)
 	if configured > 0 && configured < asked {
 		return configured
 	}
+
 	return asked
 }
 
@@ -219,7 +234,9 @@ func peerAddr(remote string) netip.Addr {
 	if err != nil {
 		host = remote
 	}
+
 	a, _ := netip.ParseAddr(host)
+
 	return a.Unmap()
 }
 
@@ -227,11 +244,13 @@ func (s *Server) isTrusted(a netip.Addr) bool {
 	if !a.IsValid() {
 		return false
 	}
+
 	for _, p := range s.proxies {
 		if p.Contains(a) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -242,17 +261,20 @@ func (s *Server) clientIP(r *http.Request, peer netip.Addr, trusted bool) string
 	if !trusted {
 		return peer.String()
 	}
+
 	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
-	for i := len(hops) - 1; i >= 0; i-- {
-		a, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+	for _, hop := range slices.Backward(hops) {
+		a, err := netip.ParseAddr(strings.TrimSpace(hop))
 		if err != nil {
 			break // a malformed hop: trust nothing to its left
 		}
+
 		a = a.Unmap()
 		if !s.isTrusted(a) {
 			return a.String()
 		}
 	}
+
 	return peer.String()
 }
 
@@ -263,6 +285,7 @@ func (s *Server) clientIP(r *http.Request, peer netip.Addr, trusted bool) string
 // answering "wrong token" would make it an oracle and a log-flood vector.
 func debugToken(token string) Middleware {
 	want := tokenDigest(token)
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			got := r.Header.Get(DebugTokenHeader)
@@ -270,6 +293,7 @@ func debugToken(token string) Middleware {
 				next.ServeHTTP(w, r)
 				return
 			}
+
 			w.Header().Set(DebugLoggingHeader, "on")
 			next.ServeHTTP(w, r.WithContext(WithDebugLogging(r.Context())))
 		})
@@ -279,17 +303,24 @@ func debugToken(token string) Middleware {
 // tracerName is the instrumentation scope of the server spans.
 const tracerName = "github.com/tracehubmmp/golang-basics/libs/httpx"
 
-// tracing starts one server span per request from the global tracer
-// provider, continuing the trace context the propagator finds in the headers,
-// and names it by the matched route once the handler ran. With no provider
-// installed (otelx.Init not called, or tracing disabled) the spans are
-// non-recording and cost a few allocations; the propagator is still whatever
-// was installed, so context is forwarded even when nothing is exported.
-func tracing(next http.Handler) http.Handler {
-	tracer := otel.Tracer(tracerName)
+// tracing starts one server span per request from tp, continuing the trace
+// context prop finds in the headers, and names it by the matched route once
+// the handler ran. With no SDK provider (otelx.Init not called, or tracing
+// disabled) the spans are non-recording and cost a few allocations; the
+// propagator still forwards context even when nothing is exported.
+func tracing(tp trace.TracerProvider, prop propagation.TextMapPropagator) Middleware {
+	tracer := tp.Tracer(tracerName)
+
+	return func(next http.Handler) http.Handler {
+		return tracingHandler(tracer, prop, next)
+	}
+}
+
+func tracingHandler(tracer trace.Tracer, prop propagation.TextMapPropagator, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx := prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 		method := methodLabel(r.Method)
+
 		attrs := []attribute.KeyValue{
 			semconv.HTTPRequestMethodKey.String(method),
 			semconv.URLPath(r.URL.Path),
@@ -300,15 +331,19 @@ func tracing(next http.Handler) http.Handler {
 		if method == methodOther {
 			attrs = append(attrs, semconv.HTTPRequestMethodOriginal(r.Method))
 		}
+
 		if q := r.URL.RawQuery; q != "" {
 			attrs = append(attrs, semconv.URLQuery(q))
 		}
+
 		if ua := r.UserAgent(); ua != "" {
 			attrs = append(attrs, semconv.UserAgentOriginal(ua))
 		}
+
 		if ip := ClientIPFromContext(ctx); ip != "" {
 			attrs = append(attrs, semconv.ClientAddress(ip))
 		}
+
 		ctx, span := tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(attrs...))
 		defer span.End()
 
@@ -319,8 +354,10 @@ func tracing(next http.Handler) http.Handler {
 			span.SetName(method + " " + info.route)
 			span.SetAttributes(semconv.HTTPRoute(info.route))
 		}
+
 		status := info.status(r.Context())
 		span.SetAttributes(semconv.HTTPResponseStatusCode(status))
+
 		if status >= http.StatusInternalServerError {
 			span.SetStatus(codes.Error, http.StatusText(status))
 		}
@@ -331,6 +368,7 @@ func scheme(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
 	}
+
 	return "http"
 }
 
@@ -347,6 +385,7 @@ func accessLog(log *slog.Logger, slow time.Duration) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+
 			defer func() {
 				info := infoFrom(r.Context())
 				status := info.status(r.Context())
@@ -361,14 +400,17 @@ func accessLog(log *slog.Logger, slow time.Duration) Middleware {
 					slog.String("client_ip", info.clientIP),
 				}
 				level, msg := slog.LevelInfo, "request"
+
 				switch {
 				case status >= http.StatusInternalServerError:
 					level = slog.LevelError
 				case slow > 0 && latency > slow:
 					level, msg = slog.LevelWarn, "slow request"
 				}
+
 				log.LogAttrs(r.Context(), level, msg, attrs...)
 			}()
+
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -383,30 +425,37 @@ func accessLog(log *slog.Logger, slow time.Duration) Middleware {
 func (s *Server) recovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			p := recover()
-			if p == nil {
+			recovered := recover()
+			if recovered == nil {
 				return
 			}
+
 			info := infoFrom(r.Context())
-			if err, ok := p.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+			if err, ok := recovered.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 				if info != nil {
 					info.aborted = true
 				}
-				panic(p)
+
+				panic(recovered)
 			}
+
 			s.Metrics.unhandled.Inc()
-			err := fmt.Errorf("panic: %v", p)
+
+			err := fmt.Errorf("panic: %v", recovered)
 			s.log.LogAttrs(r.Context(), slog.LevelError, "panic in handler",
-				slog.Any("panic", p), slog.String("method", r.Method), slog.String("path", r.URL.Path),
+				slog.Any("panic", recovered), slog.String("method", r.Method), slog.String("path", r.URL.Path),
 				slog.String("stack", string(debug.Stack())))
 			span := trace.SpanFromContext(r.Context())
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "panic")
+
 			if info != nil && info.rw.wroteHeader {
 				return // the response is already on the wire; nothing sensible to add
 			}
+
 			writeProblem(w, r, NewProblem(http.StatusInternalServerError, "internal error"))
 		}()
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -420,6 +469,7 @@ func bodyLimit(limit int64) Middleware {
 			if r.Body != nil && r.Body != http.NoBody {
 				r.Body = http.MaxBytesReader(w, r.Body, limit)
 			}
+
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -435,16 +485,22 @@ func route(mux *http.ServeMux) http.Handler {
 		if _, pattern := mux.Handler(r); pattern == "" {
 			probe := &headerProbe{header: http.Header{}}
 			mux.ServeHTTP(probe, r)
+
 			status := probe.status
 			if status == 0 {
 				status = http.StatusNotFound
 			}
+
 			detail := "no route for " + r.Method + " " + r.URL.Path
+
 			if allow := probe.header.Get("Allow"); allow != "" {
 				w.Header().Set("Allow", allow)
+
 				detail = r.Method + " is not allowed on " + r.URL.Path
 			}
+
 			writeProblem(w, r, NewProblem(status, detail))
+
 			return
 		}
 		// The mux sets r.Pattern before it calls the handler; record it in a
@@ -454,6 +510,7 @@ func route(mux *http.ServeMux) http.Handler {
 				info.route = routeOf(r.Pattern)
 			}
 		}()
+
 		mux.ServeHTTP(w, r)
 	})
 }
@@ -475,9 +532,11 @@ func routeOf(pattern string) string {
 	if i := strings.IndexByte(pattern, ' '); i >= 0 {
 		pattern = pattern[i+1:]
 	}
+
 	if i := strings.IndexByte(pattern, '/'); i > 0 {
 		pattern = pattern[i:]
 	}
+
 	return pattern
 }
 
@@ -492,5 +551,6 @@ func methodLabel(m string) string {
 		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
 		return m
 	}
+
 	return methodOther
 }

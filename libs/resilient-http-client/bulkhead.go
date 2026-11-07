@@ -16,6 +16,7 @@ func newBulkhead(cfg *TargetConfig) *bulkhead {
 	if cfg.MaxConcurrent <= 0 {
 		return nil
 	}
+
 	return &bulkhead{slots: make(chan struct{}, cfg.MaxConcurrent), wait: cfg.MaxConcurrentWait}
 }
 
@@ -26,16 +27,20 @@ func (b *bulkhead) acquire(ctx context.Context) bool {
 	if b == nil {
 		return true
 	}
+
 	select {
 	case b.slots <- struct{}{}:
 		return true
 	default:
 	}
+
 	if b.wait <= 0 || ctx.Err() != nil {
 		return false
 	}
+
 	t := time.NewTimer(b.wait)
 	defer t.Stop()
+
 	select {
 	case b.slots <- struct{}{}:
 		return true

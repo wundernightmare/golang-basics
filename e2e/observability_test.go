@@ -63,15 +63,22 @@ func promQLNames(expr string) []string {
 	} {
 		expr = re.ReplaceAllString(expr, " ")
 	}
-	skip := map[string]bool{"by": true, "without": true, "on": true, "ignoring": true, "and": true,
-		"or": true, "unless": true, "bool": true, "offset": true, "group_left": true, "group_right": true, "up": true}
+
+	skip := map[string]bool{
+		"by": true, "without": true, "on": true, "ignoring": true, "and": true,
+		"or": true, "unless": true, "bool": true, "offset": true, "group_left": true, "group_right": true, "up": true,
+	}
+
 	var out []string
+
 	for _, m := range regexp.MustCompile(`[a-zA-Z_:][a-zA-Z0-9_:]*(\s*\()?`).FindAllString(expr, -1) {
 		if strings.HasSuffix(m, "(") || skip[m] {
 			continue // a function call or a keyword
 		}
+
 		out = append(out, m)
 	}
+
 	return out
 }
 
@@ -79,10 +86,12 @@ func promQLNames(expr string) []string {
 // read, with the file that reads it.
 func referencedMetrics(t *testing.T) map[string]string {
 	t.Helper()
+
 	refs := map[string]string{}
 
 	raw, err := os.ReadFile(rulesFile)
 	require.NoError(t, err)
+
 	var rules struct {
 		Groups []struct {
 			Rules []struct {
@@ -92,6 +101,7 @@ func referencedMetrics(t *testing.T) map[string]string {
 		} `yaml:"groups"`
 	}
 	require.NoError(t, yaml.Unmarshal(raw, &rules))
+
 	for _, g := range rules.Groups {
 		for _, r := range g.Rules {
 			for _, n := range promQLNames(r.Expr) {
@@ -107,7 +117,9 @@ func referencedMetrics(t *testing.T) map[string]string {
 			}
 		}
 	}
+
 	require.NotEmpty(t, refs)
+
 	return refs
 }
 
@@ -116,17 +128,23 @@ func referencedMetrics(t *testing.T) map[string]string {
 // by file name.
 func dashboardExprs(t *testing.T) map[string][]string {
 	t.Helper()
+
 	files, err := filepath.Glob(filepath.Join(dashboardsDir, "*.json"))
 	require.NoError(t, err)
 	require.NotEmpty(t, files)
+
 	out := map[string][]string{}
+
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
 		require.NoError(t, err)
+
 		var dash any
 		require.NoError(t, json.Unmarshal(raw, &dash), f)
 		name := filepath.Base(f)
+
 		var walk func(any)
+
 		walk = func(v any) {
 			switch v := v.(type) {
 			case map[string]any:
@@ -135,6 +153,7 @@ func dashboardExprs(t *testing.T) map[string][]string {
 						out[name] = append(out[name], s)
 						continue
 					}
+
 					walk(x)
 				}
 			case []any:
@@ -145,6 +164,7 @@ func dashboardExprs(t *testing.T) map[string][]string {
 		}
 		walk(dash)
 	}
+
 	return out
 }
 
@@ -158,35 +178,45 @@ func dashboardExprs(t *testing.T) map[string][]string {
 //
 // Static (no binaries needed), so it never skips.
 func TestDashboards_Lint(t *testing.T) {
+	t.Parallel()
+
 	fixedWindow := regexp.MustCompile(`\[\d+[smhdwy]\]`)
 	jobMatcher := regexp.MustCompile(`\bjob\s*(=|!=|=~|!~)`)
+
 	var problems []string
+
 	for file, exprs := range dashboardExprs(t) {
-		for _, e := range exprs {
-			if fixedWindow.MatchString(e) {
-				problems = append(problems, file+": fixed window, use $__rate_interval: "+e)
+		for _, expr := range exprs {
+			if fixedWindow.MatchString(expr) {
+				problems = append(problems, file+": fixed window, use $__rate_interval: "+expr)
 			}
-			if jobMatcher.MatchString(e) {
-				problems = append(problems, file+": selects on job, use service: "+e)
+
+			if jobMatcher.MatchString(expr) {
+				problems = append(problems, file+": selects on job, use service: "+expr)
 			}
-			for _, n := range promQLNames(e) {
+
+			for _, n := range promQLNames(expr) {
 				if _, broker := brokerMetrics[n]; broker {
 					continue
 				}
+
 				sel := regexp.MustCompile(`\b` + regexp.QuoteMeta(n) + `\b(\{[^}]*\})?`)
-				for _, m := range sel.FindAllStringSubmatch(e, -1) {
+				for _, m := range sel.FindAllStringSubmatch(expr, -1) {
 					if !strings.Contains(m[1], `service=~"$service"`) || !strings.Contains(m[1], `instance=~"$instance"`) {
-						problems = append(problems, file+": "+n+" without the $service/$instance filter: "+e)
+						problems = append(problems, file+": "+n+" without the $service/$instance filter: "+expr)
 					}
 				}
 			}
 		}
 	}
+
 	sort.Strings(problems)
 	require.Empty(t, problems)
 }
 
 func TestPromQLNames(t *testing.T) {
+	t.Parallel()
+
 	require.Equal(t, []string{"go_gc_gomemlimit_bytes"}, promQLNames(`go_gc_gomemlimit_bytes{service=~"$service"} < 1e18`))
 	require.Equal(t, []string{"http_request_duration_seconds_bucket"},
 		promQLNames(`histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{x="y"}[$__rate_interval])))`))
@@ -197,25 +227,32 @@ func TestPromQLNames(t *testing.T) {
 // included) on the admin /metrics of the given services.
 func exportedMetrics(t *testing.T, services ...*service) map[string]bool {
 	t.Helper()
+
 	out := map[string]bool{}
+
 	for _, s := range services {
 		code, body, err := s.get(s.adminURL+"/metrics", "")
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, code)
+
 		sc := bufio.NewScanner(bytes.NewReader(body))
 		sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+
 		for sc.Scan() {
 			line := sc.Text()
 			if line == "" || line[0] == '#' {
 				continue
 			}
+
 			name := line
 			if i := strings.IndexAny(line, "{ "); i >= 0 {
 				name = line[:i]
 			}
+
 			out[name] = true
 		}
 	}
+
 	return out
 }
 
@@ -226,19 +263,25 @@ func assertMetricsExist(t *testing.T, services ...*service) {
 	t.Helper()
 	have := exportedMetrics(t, services...)
 	refs := referencedMetrics(t)
+
 	var missing []string
+
 	for name, where := range refs {
 		_, broker := brokerMetrics[name]
+
 		_, errorOnly := errorOnlyMetrics[name]
 		if !broker && !errorOnly && !have[name] {
 			missing = append(missing, name+"  ← "+where)
 		}
 	}
+
 	sort.Strings(missing)
 	require.Empty(t, missing, "metrics referenced by the alerts/dashboard but not exported")
+
 	for name := range errorOnlyMetrics {
 		require.Contains(t, refs, name, "errorOnlyMetrics lists %s, which nothing references", name)
 	}
+
 	for name := range brokerMetrics {
 		require.Contains(t, refs, name, "brokerMetrics lists %s, which nothing references", name)
 		require.False(t, have[name], "%s is the broker's metric; a service must not export it", name)

@@ -61,11 +61,17 @@ type Config struct {
 // LoadConfig parses a [Config] from the environment using the given key prefix
 // (use "" for no prefix). Every field is defaulted; tracing export is off
 // unless OTEL_ENABLED is set.
-func LoadConfig(prefix string) (Config, error) {
+func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, nil) }
+
+// LoadConfigFrom is [LoadConfig] reading environ instead of the process
+// environment (nil means the process environment). Tests pass a map, so they
+// need no t.Setenv and can run in parallel.
+func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	var cfg Config
-	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix}); err != nil {
+	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix, Environment: environ}); err != nil {
 		return Config{}, fmt.Errorf("otelx: parse config (prefix %q): %w", prefix, err)
 	}
+
 	return cfg, nil
 }
 
@@ -74,18 +80,23 @@ func (c *Config) withDefaults() {
 	if c.Endpoint == "" {
 		c.Endpoint = "localhost:4318"
 	}
+
 	if c.ExportTimeout == 0 {
 		c.ExportTimeout = 10 * time.Second
 	}
+
 	if c.SamplerRatio == 0 {
 		c.SamplerRatio = 1.0
 	}
+
 	if c.BatchTimeout == 0 {
 		c.BatchTimeout = 5 * time.Second
 	}
+
 	if c.MaxQueueSize == 0 {
 		c.MaxQueueSize = 2048
 	}
+
 	if c.MaxExportBatchSize == 0 {
 		c.MaxExportBatchSize = 512
 	}

@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -46,6 +46,7 @@ type Consumer struct {
 	cfg     Config
 	log     *slog.Logger
 	metrics *consumerMetrics
+	tel     telemetry
 
 	mu      sync.Mutex
 	pending map[TopicPartition]int64 // processed, not yet committed: the latest offset per partition
@@ -61,50 +62,61 @@ type Consumer struct {
 // are off: offsets advance only past records a [Handler] has accepted or
 // that were parked on the dead-letter topic. The caller owns it and must
 // call [Consumer.Close] if it never calls [Consumer.Run].
-func NewConsumer(ctx context.Context, cfg Config, log *slog.Logger) (*Consumer, error) {
+func NewConsumer(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) (*Consumer, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	d, err := mustDriver()
+
+	drv, err := mustDriver()
 	if err != nil {
 		return nil, err
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("kafka: consumer config: %w", err)
 	}
+
 	if len(cfg.Topics) == 0 || cfg.Group == "" {
 		return nil, errors.New("kafka: consumer needs KAFKA_TOPICS (or KAFKA_TOPIC) and KAFKA_GROUP")
 	}
-	c := &Consumer{
+
+	consumer := &Consumer{
 		cfg:     cfg,
 		log:     log,
+		tel:     newTelemetry(opts),
 		pending: map[TopicPartition]int64{},
 		owned:   map[TopicPartition]struct{}{},
 	}
-	cl, err := d.NewConsumer(cfg, log, Rebalance{Assigned: c.onAssigned, Revoked: c.onRevoked, Lost: c.onLost})
+
+	cl, err := drv.NewConsumer(cfg, log, Rebalance{Assigned: consumer.onAssigned, Revoked: consumer.onRevoked, Lost: consumer.onLost})
 	if err != nil {
-		return nil, fmt.Errorf("kafka: new %s consumer: %w", d.Name(), err)
+		return nil, fmt.Errorf("kafka: new %s consumer: %w", drv.Name(), err)
 	}
-	c.cl = cl
-	c.metrics = newConsumerMetrics(cl.Stats, d.Name(), cfg.Topics)
+
+	consumer.cl = cl
+	consumer.metrics = newConsumerMetrics(cl.Stats, drv.Name(), cfg.Topics)
 
 	pingCtx, cancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer cancel()
+
 	if err := cl.Ping(pingCtx); err != nil {
 		cl.Close()
 		return nil, fmt.Errorf("kafka: consumer: brokers unreachable: %w", err)
 	}
+
 	warnPlaintextSASL(ctx, cfg, log)
 
 	dlq := cfg.DeadLetterTopic
 	if cfg.deadLetterTopic("x") == "" {
 		dlq = "disabled"
 	}
-	log.InfoContext(ctx, "kafka consumer ready", "provider", d.Name(), "brokers", cfg.brokersString(),
+
+	log.InfoContext(ctx, "kafka consumer ready", "provider", drv.Name(), "brokers", cfg.brokersString(),
 		"group", cfg.Group, "topics", cfg.Topics, "assignment_strategy", cfg.AssignmentStrategy,
 		"max_retries", cfg.maxRetries(), "dead_letter_topic", dlq, "queue_max_kbytes", cfg.ConsumerQueueMaxKBytes,
 		"security_protocol", cfg.SecurityProtocol, "sasl", cfg.SASLMechanism)
-	return c, nil
+
+	return consumer, nil
 }
 
 // Run polls and dispatches records to handler until ctx is cancelled (a clean
@@ -137,16 +149,20 @@ func (c *Consumer) Run(ctx context.Context, handler Handler) error {
 		return errors.New("kafka: Consumer.Run called twice")
 	}
 	defer c.Close()
+
 	c.log.InfoContext(ctx, "kafka consumer loop started", "group", c.cfg.Group, "topics", c.cfg.Topics)
 
 	// Handlers run under procCtx, which outlives ctx by DrainTimeout so the
 	// in-flight batch can finish; its values (logger fields, etc.) are ctx's.
 	procCtx, cancelProc := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelProc()
+
 	var drain atomic.Pointer[time.Timer]
+
 	stopDrain := context.AfterFunc(ctx, func() { drain.Store(time.AfterFunc(c.cfg.DrainTimeout, cancelProc)) })
 	defer func() {
 		stopDrain()
+
 		if t := drain.Load(); t != nil {
 			t.Stop()
 		}
@@ -157,34 +173,41 @@ func (c *Consumer) Run(ctx context.Context, handler Handler) error {
 			c.log.InfoContext(ctx, "kafka consumer loop stopping")
 			return nil
 		}
+
 		records, err := c.cl.Poll(ctx, c.cfg.MaxPollRecords)
 		if errors.Is(err, ErrClientClosed) {
 			return nil
 		}
+
 		if errors.Is(err, ErrClientFailed) {
 			// Nothing of this poll is processed: the records go to the
 			// group's next owner from the last commit.
 			c.log.ErrorContext(ctx, "kafka consumer client failed; stopping the loop", "err", err)
 			return err
 		}
+
 		if err != nil && ctx.Err() == nil {
 			c.fetchError(ctx, err)
 		}
+
 		if ctx.Err() != nil {
 			// Shutdown arrived with the poll: nothing of this batch has
 			// started, so leave all of it for the next owner.
 			c.cl.AllowRebalance()
 			c.log.InfoContext(ctx, "kafka consumer loop stopping")
+
 			return nil
 		}
 
 		err = c.processBatch(procCtx, records, handler)
 		c.commitPending(ctx)
 		c.cl.AllowRebalance()
+
 		switch {
 		case errors.Is(err, errDraining):
 			c.log.WarnContext(ctx, "kafka consumer drain budget exhausted; unfinished records will be redelivered",
 				"drain_timeout", c.cfg.DrainTimeout)
+
 			return nil
 		case err != nil:
 			c.log.ErrorContext(ctx, "kafka consumer stopping on a record it could not handle or park", "err", err)
@@ -199,6 +222,7 @@ func (c *Consumer) Run(ctx context.Context, handler Handler) error {
 // kafka_consumer_fetch_errors_total is what an alert watches.
 func (c *Consumer) fetchError(ctx context.Context, err error) {
 	c.metrics.fetchErrs.Inc()
+
 	now := time.Now().UnixNano()
 	if last := c.lastFetchWarn.Load(); now-last >= int64(fetchWarnEvery) && c.lastFetchWarn.CompareAndSwap(last, now) {
 		c.log.WarnContext(ctx, "kafka fetch error; the client retries (further ones within a minute are counted, not logged)", "err", err)
@@ -213,53 +237,67 @@ func (c *Consumer) processBatch(ctx context.Context, records []Message, handler 
 		if ctx.Err() != nil {
 			return errDraining
 		}
+
 		if !c.owns(r) {
 			continue // its partition moved during the poll: the new owner gets it
 		}
+
 		if err := c.process(ctx, r, handler); err != nil {
 			return err
 		}
+
 		c.markDone(r)
 	}
+
 	return nil
 }
 
 func (c *Consumer) owns(r Message) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	_, ok := c.owned[TopicPartition{r.Topic, r.Partition}]
+
 	return ok
 }
 
 // process runs one record through the handler with retries, then the DLQ.
 // nil means "done, commit it".
-func (c *Consumer) process(ctx context.Context, r Message, handler Handler) error {
-	reqID := requestID(r)
+func (c *Consumer) process(ctx context.Context, msg Message, handler Handler) error {
+	reqID := requestID(msg)
 	// logCtx: the record's trace (continued from its headers) and request
 	// id, for the loop's own log lines about this record.
-	logCtx := httpx.WithRequestID(recordContext(context.WithoutCancel(ctx), r), reqID)
+	logCtx := httpx.WithRequestID(c.recordContext(context.WithoutCancel(ctx), msg), reqID)
 	maxRetries := c.cfg.maxRetries()
+
 	var err error
+
 	attempt := 1
 	for ; ; attempt++ {
-		err = c.invoke(ctx, r, handler, attempt, reqID)
+		err = c.invoke(ctx, msg, handler, attempt, reqID)
 		if err == nil {
 			result := consumeOK
 			if attempt > 1 {
 				result = consumeRetried
 			}
-			c.metrics.records.WithLabelValues(c.metrics.topic(r.Topic), result).Inc()
+
+			c.metrics.records.WithLabelValues(c.metrics.topic(msg.Topic), result).Inc()
+
 			return nil
 		}
+
 		if ctx.Err() != nil {
 			return errDraining
 		}
+
 		if IsPermanent(err) || attempt > maxRetries {
 			break
 		}
+
 		wait := backoff(attempt-1, c.cfg.RetryBackoff, c.cfg.RetryBackoffMax)
 		c.log.WarnContext(logCtx, "kafka handler failed; retrying",
-			"topic", r.Topic, "partition", r.Partition, "offset", r.Offset, "attempt", attempt, "backoff", wait, "err", err)
+			"topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "attempt", attempt, "backoff", wait, "err", err)
+
 		if !sleep(ctx, wait) {
 			return errDraining
 		}
@@ -269,68 +307,82 @@ func (c *Consumer) process(ctx context.Context, r Message, handler Handler) erro
 	if IsPermanent(err) {
 		reason = "permanent"
 	}
-	dlqTopic := c.cfg.deadLetterTopic(r.Topic)
+
+	dlqTopic := c.cfg.deadLetterTopic(msg.Topic)
 	if dlqTopic == "" {
-		c.metrics.records.WithLabelValues(c.metrics.topic(r.Topic), consumeFailed).Inc()
+		c.metrics.records.WithLabelValues(c.metrics.topic(msg.Topic), consumeFailed).Inc()
+
 		return fmt.Errorf("kafka: record %s/%d@%d failed after %d attempt(s) (%s) and the dead-letter topic is disabled: %w",
-			r.Topic, r.Partition, r.Offset, attempt, reason, err)
+			msg.Topic, msg.Partition, msg.Offset, attempt, reason, err)
 	}
-	if dlqErr := c.deadLetter(ctx, logCtx, r, dlqTopic, reason, err, attempt); dlqErr != nil {
+
+	if dlqErr := c.deadLetter(ctx, logCtx, msg, dlqTopic, reason, err, attempt); dlqErr != nil {
 		if errors.Is(dlqErr, errDraining) {
 			return errDraining
 		}
-		c.metrics.records.WithLabelValues(c.metrics.topic(r.Topic), consumeFailed).Inc()
+
+		c.metrics.records.WithLabelValues(c.metrics.topic(msg.Topic), consumeFailed).Inc()
+
 		return fmt.Errorf("kafka: record %s/%d@%d failed and could not be dead-lettered to %q: %w",
-			r.Topic, r.Partition, r.Offset, dlqTopic, errors.Join(err, dlqErr))
+			msg.Topic, msg.Partition, msg.Offset, dlqTopic, errors.Join(err, dlqErr))
 	}
-	c.metrics.records.WithLabelValues(c.metrics.topic(r.Topic), consumeDeadLettered).Inc()
+
+	c.metrics.records.WithLabelValues(c.metrics.topic(msg.Topic), consumeDeadLettered).Inc()
+
 	return nil
 }
 
 // recordContext is ctx with the trace context the record's headers carry as
 // the remote parent.
-func recordContext(ctx context.Context, r Message) context.Context {
+func (c *Consumer) recordContext(ctx context.Context, r Message) context.Context {
 	hs := r.Headers
-	return otel.GetTextMapPropagator().Extract(ctx, headerCarrier{&hs})
+	return c.tel.prop.Extract(ctx, headerCarrier{&hs})
 }
 
 // invoke runs one handler attempt inside a process span continued from the
 // record's trace, with the request id and the per-attempt deadline, and
 // turns a panic into an error (retried like any other).
-func (c *Consumer) invoke(ctx context.Context, r Message, handler Handler, attempt int, reqID string) (err error) {
+func (c *Consumer) invoke(ctx context.Context, msg Message, handler Handler, attempt int, reqID string) (err error) {
 	// The span's parent comes from the record, its cancellation from the
 	// loop (the drain deadline): ctx's values are kept, its span replaced.
-	rctx, span := tracer().Start(recordContext(ctx, r), "process "+r.Topic,
+	rctx, span := c.tel.tracer.Start(c.recordContext(ctx, msg), "process "+msg.Topic,
 		trace.WithSpanKind(trace.SpanKindConsumer),
 		trace.WithAttributes(
 			attribute.String("messaging.system", "kafka"),
 			attribute.String("messaging.operation.type", "process"),
 			attribute.String("messaging.operation.name", "process"),
-			attribute.String("messaging.destination.name", r.Topic),
+			attribute.String("messaging.destination.name", msg.Topic),
 			attribute.String("messaging.consumer.group.name", c.cfg.Group),
-			attribute.Int("messaging.destination.partition.id", int(r.Partition)),
-			attribute.Int64("messaging.kafka.offset", r.Offset),
+			attribute.Int("messaging.destination.partition.id", int(msg.Partition)),
+			attribute.Int64("messaging.kafka.offset", msg.Offset),
 			attribute.Int("messaging.kafka.attempt", attempt),
 		))
 	defer span.End()
+
 	rctx, cancel := context.WithTimeout(rctx, c.cfg.HandlerTimeout)
 	defer cancel()
+
 	rctx = httpx.WithRequestID(rctx, reqID)
 
 	start := time.Now()
+
 	defer func() {
 		if p := recover(); p != nil {
 			c.log.ErrorContext(rctx, "kafka handler panicked", "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
 			err = fmt.Errorf("kafka: handler panic: %v", p)
 		}
-		c.metrics.duration.WithLabelValues(c.metrics.topic(r.Topic)).Observe(time.Since(start).Seconds())
+
+		c.metrics.duration.WithLabelValues(c.metrics.topic(msg.Topic)).Observe(time.Since(start).Seconds())
+
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
 	}()
-	r.Attempt = attempt
-	return handler(rctx, r)
+
+	msg.Attempt = attempt
+
+	return handler(rctx, msg)
 }
 
 // requestID is the record's event_id header when it is a usable correlation
@@ -339,55 +391,66 @@ func requestID(r Message) string {
 	if id, ok := headerValue(r.Headers, HeaderEventID); ok && httpx.ValidRequestID(id) {
 		return id
 	}
+
 	return httpx.NewRequestID()
 }
 
 // deadLetter publishes r to topic with its original headers plus the dlq_*
 // ones, retrying the publish like a handler. The publish span continues the
 // record's trace.
-func (c *Consumer) deadLetter(ctx, logCtx context.Context, r Message, topic, reason string, cause error, attempts int) error {
+func (c *Consumer) deadLetter(ctx, logCtx context.Context, record Message, topic, reason string, cause error, attempts int) error {
 	errText := cause.Error()
 	if len(errText) > maxDLQErrorBytes {
 		errText = errText[:maxDLQErrorBytes]
 	}
-	headers := make([]Header, 0, len(r.Headers)+6)
-	for _, h := range r.Headers {
+
+	headers := make([]Header, 0, len(record.Headers)+6)
+	for _, h := range record.Headers {
 		switch h.Key {
 		case HeaderDLQReason, HeaderDLQError, HeaderDLQSourceTopic, HeaderDLQSourcePartition, HeaderDLQSourceOffset, HeaderDLQAttempts:
 			continue // a record re-parked from a DLQ replay gets fresh ones
 		}
+
 		headers = append(headers, h)
 	}
+
 	headers = append(headers,
 		Header{Key: HeaderDLQReason, Value: []byte(reason)},
 		Header{Key: HeaderDLQError, Value: []byte(errText)},
-		Header{Key: HeaderDLQSourceTopic, Value: []byte(r.Topic)},
-		Header{Key: HeaderDLQSourcePartition, Value: []byte(strconv.Itoa(int(r.Partition)))},
-		Header{Key: HeaderDLQSourceOffset, Value: []byte(strconv.FormatInt(r.Offset, 10))},
+		Header{Key: HeaderDLQSourceTopic, Value: []byte(record.Topic)},
+		Header{Key: HeaderDLQSourcePartition, Value: []byte(strconv.Itoa(int(record.Partition)))},
+		Header{Key: HeaderDLQSourceOffset, Value: []byte(strconv.FormatInt(record.Offset, 10))},
 		Header{Key: HeaderDLQAttempts, Value: []byte(strconv.Itoa(attempts))},
 	)
 
-	msg := Message{Topic: topic, Key: r.Key, Value: r.Value, Headers: headers}
+	msg := Message{Topic: topic, Key: record.Key, Value: record.Value, Headers: headers}
+
 	for n := 0; ; n++ {
 		// The record's traceparent travels along: the dead-letter publish
 		// continues the record's trace.
 		start := time.Now()
-		err := send(ctx, c.cl.DeadLetter(), c.cfg.PublishTimeout, msg)
+		err := send(ctx, c.tel, c.cl.DeadLetter(), c.cfg.PublishTimeout, msg)
 		c.metrics.dlq.observe(topic, start, err)
+
 		if err == nil {
 			c.log.WarnContext(logCtx, "kafka record dead-lettered",
-				"topic", r.Topic, "partition", r.Partition, "offset", r.Offset, "dead_letter_topic", topic,
+				"topic", record.Topic, "partition", record.Partition, "offset", record.Offset, "dead_letter_topic", topic,
 				"reason", reason, "attempts", attempts, "err", cause)
+
 			return nil
 		}
+
 		if ctx.Err() != nil {
 			return errDraining
 		}
+
 		if n >= c.cfg.maxRetries() {
 			return err
 		}
+
 		wait := backoff(n, c.cfg.RetryBackoff, c.cfg.RetryBackoffMax)
 		c.log.WarnContext(logCtx, "kafka dead-letter publish failed; retrying", "dead_letter_topic", topic, "backoff", wait, "err", err)
+
 		if !sleep(ctx, wait) {
 			return errDraining
 		}
@@ -398,6 +461,7 @@ func (c *Consumer) deadLetter(ctx, logCtx context.Context, r Message, topic, rea
 func (c *Consumer) markDone(r Message) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	c.pending[TopicPartition{r.Topic, r.Partition}] = r.Offset
 }
 
@@ -409,6 +473,7 @@ func (c *Consumer) markDone(r Message) {
 func (c *Consumer) commitPending(ctx context.Context) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	c.commitLocked(ctx, nil)
 }
 
@@ -421,25 +486,32 @@ func (c *Consumer) commitPending(ctx context.Context) {
 // held.
 func (c *Consumer) commitLocked(ctx context.Context, only []TopicPartition) {
 	var offsets []Offset
+
 	for tp, off := range c.pending {
 		if _, ok := c.owned[tp]; !ok {
 			delete(c.pending, tp)
 			continue
 		}
+
 		if only == nil || containsPartition(only, tp) {
 			offsets = append(offsets, Offset{TopicPartition: tp, Next: off + 1})
 		}
 	}
+
 	if len(offsets) == 0 {
 		return
 	}
+
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.DrainTimeout)
 	defer cancel()
+
 	if err := c.cl.Commit(cctx, offsets); err != nil {
 		c.metrics.commitErrs.Inc()
 		c.log.ErrorContext(ctx, "kafka offset commit failed; records stay pending", "partitions", len(offsets), "err", err)
+
 		return
 	}
+
 	for _, o := range offsets {
 		if c.pending[o.TopicPartition] == o.Next-1 {
 			delete(c.pending, o.TopicPartition)
@@ -448,22 +520,20 @@ func (c *Consumer) commitLocked(ctx context.Context, only []TopicPartition) {
 }
 
 func containsPartition(ps []TopicPartition, p TopicPartition) bool {
-	for _, q := range ps {
-		if q == p {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ps, p)
 }
 
 // onAssigned tracks the partitions this member now owns.
 func (c *Consumer) onAssigned(ctx context.Context, parts []TopicPartition) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	for _, p := range parts {
 		c.owned[p] = struct{}{}
 	}
+
 	c.metrics.assigned.Set(float64(len(c.owned)))
+
 	if len(parts) > 0 {
 		c.metrics.rebalances.WithLabelValues("assigned").Inc()
 		c.log.InfoContext(ctx, "kafka partitions assigned", "partitions", partitionList(parts))
@@ -480,11 +550,15 @@ func (c *Consumer) onAssigned(ctx context.Context, parts []TopicPartition) {
 func (c *Consumer) onRevoked(ctx context.Context, parts []TopicPartition) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	c.commitLocked(ctx, parts)
+
 	for _, p := range parts {
 		delete(c.pending, p)
 	}
+
 	c.forgetLocked(parts)
+
 	if len(parts) > 0 {
 		c.metrics.rebalances.WithLabelValues("revoked").Inc()
 		c.log.InfoContext(ctx, "kafka partitions revoked", "partitions", partitionList(parts))
@@ -496,14 +570,19 @@ func (c *Consumer) onRevoked(ctx context.Context, parts []TopicPartition) {
 func (c *Consumer) onLost(ctx context.Context, parts []TopicPartition) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	dropped := 0
+
 	for _, p := range parts {
 		if _, ok := c.pending[p]; ok {
 			delete(c.pending, p)
+
 			dropped++
 		}
 	}
+
 	c.forgetLocked(parts)
+
 	if len(parts) > 0 {
 		c.metrics.rebalances.WithLabelValues("lost").Inc()
 		c.log.WarnContext(ctx, "kafka partitions lost; uncommitted records will be redelivered to the new owner",
@@ -516,6 +595,7 @@ func (c *Consumer) forgetLocked(gone []TopicPartition) {
 	for _, p := range gone {
 		delete(c.owned, p)
 	}
+
 	c.metrics.assigned.Set(float64(len(c.owned)))
 }
 
@@ -524,6 +604,7 @@ func partitionList(parts []TopicPartition) []string {
 	for i, p := range parts {
 		out[i] = p.Topic + "/" + strconv.Itoa(int(p.Partition))
 	}
+
 	return out
 }
 

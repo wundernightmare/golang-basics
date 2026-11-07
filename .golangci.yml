@@ -1,10 +1,29 @@
 # golangci-lint configuration (v2 schema).
 #
-# Driven by `just lint` (per-module `golangci-lint run`) and `just fmt`
-# (`golangci-lint fmt`). The linter set is the rough analogue of the Rust
-# sibling repo's clippy gate (`-D warnings -D pedantic -D perf -D suspicious`):
-# correctness + style + a few opinionated checks, without being so strict it
-# blocks routine code.
+# Policy: EVERYTHING is on (`default: all`); what is off is listed under
+# `disable` with the reason. A golangci-lint bump that adds a linter turns it
+# on — the bump PR is where it gets fixed or argued into `disable`. A single
+# deviation in code is a `//nolint:<linter> // <why>` (nolintlint enforces
+# both parts) — the equivalent of a documented deviation record.
+#
+# A finding is a SIGNAL, not an order. A change made "for the linter" must
+# stand on its own — it fixes a bug, reads clearer, or closes a class of
+# errors — and must not change behaviour silently. Otherwise:
+#   • a one-off  → `//nolint:<linter> // <why>` (a documented deviation);
+#   • systematic → `disable` below, with the reason.
+# In particular:
+#   • never trade a loud failure for a quiet one: a broken invariant may keep
+#     its panic (unchecked assertion + nolint) rather than be skipped silently;
+#   • never change API or semantics to lower a metric (a new exported method,
+#     a different error on a cancelled ctx, …) — that is a design decision of
+#     its own, made and reviewed separately;
+#   • duplication: the rule of three — two similar blocks are not yet an
+#     abstraction, unless they encode the same contract (then decide it as a
+#     design change, not as a lint fix).
+#
+# Formatting is autofixed, never hand-fixed: `just fmt` runs the formatters
+# below plus the fixable layout linters (FMT_LINTERS in the justfile);
+# `just lint` / CI / the pre-commit hook check the same rules.
 version: "2"
 
 run:
@@ -12,25 +31,92 @@ run:
   tests: true
 
 linters:
-  default: standard # govet, ineffassign, staticcheck, unused, errcheck
-  enable:
-    - bodyclose      # HTTP response bodies must be closed
-    - depguard       # test-only modules stay out of production code (rule below)
-    - errorlint      # correct errors.Is/As usage
-    - gocritic       # opinionated correctness/perf/style diagnostics
-    - gosec          # security-focused checks (the SAST-ish layer)
-    - misspell       # spelling in comments/strings
-    - nilerr         # `return nil` after a non-nil error
-    - revive         # configurable style lint (golint successor)
-    - unconvert      # redundant type conversions
-    - unparam        # unused function parameters
-    # Test hygiene — what the README "Tests" rules say, checked mechanically:
-    - testifylint    # correct testify usage (require vs assert, Error vs ErrorIs, expected/actual order)
-    - thelper        # helpers call t.Helper() first and take t as the first parameter
-    - tparallel      # t.Parallel used consistently between a test and its sub-tests
-    - usetesting     # t.Context / t.TempDir / t.Setenv instead of the os/context equivalents
+  default: all
+  disable:
+    # ── Layout / taste ──────────────────────────────────────────────────────
+    - lll             # no line-length limit: wrapping invites short names and hides logic in diffs
+    - wsl             # deprecated (v4); wsl_v5 is on
+    - nlreturn        # blank line before return/break — the same ground as wsl_v5, stricter and unconfigurable
+    - funcorder       # declaration order inside a file is the author's narrative
+    - tagalign        # aligned struct tags: churn on every new field
+    - embeddedstructfieldcheck # field layout rule without an auto-fix (formatting must be fixable)
+    # ── Constants ───────────────────────────────────────────────────────────
+    - mnd             # ~1/3 signal; fixing the rest yields `const two = 2`. usestdlibvars covers stdlib constants
+    - goconst         # proposes constants for log keys / test data — names without meaning
+    # ── Size / complexity ───────────────────────────────────────────────────
+    - cyclop          # counts branches: punishes flat Validate() lists; gocognit (on, 30) measures what is hard to read
+    - nonamedreturns  # named results document meaning (`previous slog.Level`); nakedret guards the naked-return risk
+    - funlen          # length is not complexity (gocognit is); wsl_v5's blank lines would inflate line counts
+    - contextcheck    # 7/7 hits: closures in middleware that already pass r.Context(), or a deliberate detach; sloglint/noctx/fatcontext cover ctx
+    - recvcheck       # Config: pointer methods apply defaults, value methods are read-only accessors — on purpose
+    # ── Conflicts with how this repo is built ───────────────────────────────
+    - gomoddirectives # go.mod `replace … => ../../libs/x` is deliberate (builds outside go.work, Docker)
+    - testpackage     # *_internal_test.go white-box tests are deliberate next to the _test packages
+    - exhaustruct     # zero value is the documented default of every Config; listing all fields defeats it
+    - exhaustruct_v5  # (same)
+    - tagliatelle     # JSON field names are the TypeSpec contract, not a casing rule
+    - ireturn         # returning interfaces is the design (kafka.Driver, ConsumerClient)
+    - errname         # renaming exported Problem / Kind* breaks the public API of httpx / resilient
+    - noinlineerr     # `if err := f(); err != nil` is idiomatic Go
+    - canonicalheader # wants "X-Request-ID"; Go's canonical key (what http.Header stores) is "X-Request-Id"
+    - gomodguard      # depguard (below) is the import policy
+    # ── Pending a decision (error-handling policy, not a mechanical fix) ─────
+    - err113          # sentinel errors everywhere instead of ad-hoc errors.New
+    - wrapcheck       # wrap every error crossing a package boundary
 
   settings:
+    exhaustive:
+      default-signifies-exhaustive: true # an explicit `default:` is a deliberate catch-all
+    # govet `shadow` stays off: 16/16 hits were the idiomatic
+    # `if err := f(); err != nil` after an outer `x, err :=` — no lost error.
+    # The real lost-error shape (shadowed named result + naked return) is
+    # blocked by nakedret.
+    gocritic:
+      enabled-checks:
+        - httpNoBody # http.NoBody instead of nil for an empty request body
+    varnamelen:
+      # Short names for short scopes (Go Code Review Comments): a 1–2 letter
+      # name is fine within 15 lines of its declaration, and the idiomatic
+      # ones are fine anywhere.
+      max-distance: 15
+      min-name-length: 3
+      check-return: true
+      ignore-type-assert-ok: true
+      ignore-map-index-ok: true
+      ignore-chan-recv-ok: true
+      ignore-names: [err, ok, id, db, tx, ip, to, at, i, j, k, n, v, b, s, tc, tt]
+      ignore-decls:
+        - w http.ResponseWriter
+        - r *http.Request
+        - t testing.TB
+        - t *testing.T
+        - b *testing.B
+        - f *testing.F
+        - m *testing.M
+        - ctx context.Context
+        - wg sync.WaitGroup
+        - mu sync.Mutex
+        # Go-wide conventions (the stdlib uses these names):
+        - r slog.Record          # every slog.Handler.Handle
+        - rv reflect.Value
+        - rt reflect.Type
+        - f reflect.StructField
+        - u *url.URL
+        - fs *flag.FlagSet
+        - e os.DirEntry
+        - e fs.DirEntry
+        - tp *sdktrace.TracerProvider
+        # This repo's conventions (one meaning each, used across the code):
+        - p *policy              # resilient: the per-target policy, throughout the client
+        - sr *tracetest.SpanRecorder # testx.Recorder(t)
+        - st *store.Store
+    nolintlint:
+      require-explanation: true # `//nolint:gosec // why` — never a bare directive
+      require-specific: true    # `//nolint:gosec`, never `//nolint`
+    sloglint:
+      context: scope # a ctx in scope → InfoContext/WarnContext/…; bare calls only where there is none
+      # kv-only / attr-only stay off: both styles are used on purpose (LogAttrs on hot paths);
+      # no-mixed-args (default) keeps a single call consistent.
     depguard:
       rules:
         # The test harness modules and assertion/container libraries are
@@ -53,6 +139,8 @@ linters:
             - pkg: github.com/testcontainers
               desc: containers belong in _test.go files (via libs/testx/containers)
     revive:
+      # Explicit rule list on purpose: enable-all-rules brings back
+      # line-length-limit and add-constant (see lll / mnd above).
       rules:
         - name: exported          # exported symbols need doc comments
         - name: indent-error-flow
@@ -70,18 +158,48 @@ linters:
   exclusions:
     generated: lax
     rules:
-      # Test files: relax doc-comment and security noise.
+      # Test files: relax doc-comment, security, and size noise. A test reads
+      # top to bottom; its length is the scenario, not complexity.
       - path: _test\.go
         linters:
           - revive
           - gosec
           - unparam
+          - gocognit
+          - maintidx
+          - dupl
+          - noctx # httptest.NewRequest / loopback http.Get in tests carry no deadline to lose
+          - gochecknoglobals # TestMain-owned containers / fixtures: one per test binary by design
+          - forcetypeassert  # a failed assertion panics the test: that is the failure, with a stack
+          - prealloc         # allocation counts do not matter in a test
+      # Test-only harness packages (non-_test files, imported only by tests —
+      # depguard keeps them out of production): same relaxations as tests.
+      - path: (libs/testx/|libs/kafka/kafkatest/|internal/testsupport/)
+        linters:
+          - gochecknoglobals
+          - prealloc
+
+issues:
+  # Report everything: the defaults (50 per linter, 3 identical) hide the size
+  # of a problem behind the first few hits.
+  max-issues-per-linter: 0
+  max-same-issues: 0
 
 formatters:
   enable:
     - gofmt
-    - goimports
+    - gofumpt   # stricter gofmt: no blank line at block start, `var x = 1` not `var ( x = 1 )`, …
+    - goimports # adds/removes imports
+    - gci       # strict section order — goimports does not reorder existing blocks
   settings:
+    gci:
+      # Three sections, always in this order: std, third-party, this workspace.
+      # `prefix(...)`, not `localmodule`: under go.work every lib/service is its
+      # own module, and localmodule would file libs/httpx under third-party.
+      sections:
+        - standard
+        - default
+        - prefix(github.com/tracehubmmp/golang-basics)
     goimports:
       local-prefixes:
         - github.com/tracehubmmp/golang-basics

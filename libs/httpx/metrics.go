@@ -40,12 +40,12 @@ type Metrics struct {
 // path in the first bucket. Native histograms are enabled alongside, so a
 // scraper that speaks them (Prometheus ≥ 2.40, VictoriaMetrics) gets exact
 // quantiles at no extra series.
-var latencyBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10}
+var latencyBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10} //nolint:gochecknoglobals // read-only bucket boundaries: part of the metrics contract
 
 // schedLatencies selects the scheduler-latency histogram from runtime/metrics
 // (and nothing else: MetricsScheduler would also add a goroutine count that
 // duplicates go_goroutines).
-var schedLatencies = collectors.GoRuntimeMetricsRule{Matcher: regexp.MustCompile(`^/sched/latencies:seconds$`)}
+var schedLatencies = collectors.GoRuntimeMetricsRule{Matcher: regexp.MustCompile(`^/sched/latencies:seconds$`)} //nolint:gochecknoglobals // read-only, compiled once
 
 // NewMetrics builds a registry pre-populated with the Go-runtime and process
 // collectors, the build identity, and the canonical HTTP metrics:
@@ -90,7 +90,7 @@ func NewMetrics(build BuildInfo, log *slog.Logger) *Metrics {
 	buildInfo.Set(1)
 
 	labels := []string{"method", "route"}
-	m := &Metrics{
+	metrics := &Metrics{
 		Registry: reg,
 		reqTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "http_requests_total",
@@ -113,7 +113,7 @@ func NewMetrics(build BuildInfo, log *slog.Logger) *Metrics {
 			Help: "Requests that failed outside the handler's own error handling (a recovered panic, answered 500).",
 		}),
 	}
-	reg.MustRegister(buildInfo, m.reqTotal, m.reqDur, m.inFlight, m.unhandled)
+	reg.MustRegister(buildInfo, metrics.reqTotal, metrics.reqDur, metrics.inFlight, metrics.unhandled)
 
 	if dropped := logDropped(log); dropped != nil {
 		reg.MustRegister(
@@ -127,7 +127,8 @@ func NewMetrics(build BuildInfo, log *slog.Logger) *Metrics {
 			}, func() float64 { _, i := dropped(); return float64(i) }),
 		)
 	}
-	return m
+
+	return metrics
 }
 
 // Middleware records request count, latency and the in-flight gauge
@@ -144,21 +145,37 @@ func (m *Metrics) Middleware() Middleware {
 				info = &reqInfo{rw: rw}
 				w = rw
 			}
+
 			m.inFlight.Inc()
+
 			start := time.Now()
+
 			defer func() {
 				m.inFlight.Dec()
+
 				method, route := methodLabel(r.Method), info.routeLabel()
 				status := strconv.Itoa(info.status(r.Context()))
 				elapsed := time.Since(start).Seconds()
-				if ex := exemplar(r); ex != nil {
-					m.reqTotal.WithLabelValues(method, route, status).(prometheus.ExemplarAdder).AddWithExemplar(1, ex)
-					m.reqDur.WithLabelValues(method, route).(prometheus.ExemplarObserver).ObserveWithExemplar(elapsed, ex)
+				ex := exemplar(r)
+
+				// client_golang's counters / histograms implement the exemplar
+				// interfaces; the checked assertion keeps a custom collector from
+				// panicking a request — it is then counted without the exemplar.
+				total := m.reqTotal.WithLabelValues(method, route, status)
+				if adder, ok := total.(prometheus.ExemplarAdder); ok && ex != nil {
+					adder.AddWithExemplar(1, ex)
 				} else {
-					m.reqTotal.WithLabelValues(method, route, status).Inc()
-					m.reqDur.WithLabelValues(method, route).Observe(elapsed)
+					total.Inc()
+				}
+
+				dur := m.reqDur.WithLabelValues(method, route)
+				if observer, ok := dur.(prometheus.ExemplarObserver); ok && ex != nil {
+					observer.ObserveWithExemplar(elapsed, ex)
+				} else {
+					dur.Observe(elapsed)
 				}
 			}()
+
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -170,6 +187,7 @@ func exemplar(r *http.Request) prometheus.Labels {
 	if !sc.IsValid() || !sc.IsSampled() {
 		return nil
 	}
+
 	return prometheus.Labels{"trace_id": sc.TraceID().String()}
 }
 

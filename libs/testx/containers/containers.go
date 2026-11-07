@@ -12,6 +12,9 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	tcvalkey "github.com/testcontainers/testcontainers-go/modules/valkey"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"go.uber.org/goleak"
+
+	"github.com/tracehubmmp/golang-basics/libs/testx"
 )
 
 // Images the shared fixtures run. testcontainers prefixes them with
@@ -50,20 +53,33 @@ var (
 // GitLab integration job runs with Ryuk disabled).
 func Main(m *testing.M) int {
 	code := m.Run()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
 	for _, term := range []func(context.Context) error{postgres.terminate, valkey.terminate, kafka.terminate, toxi.terminate} {
 		if term != nil {
 			_ = term(ctx)
 		}
 	}
-	return code
+
+	if code != 0 {
+		return code
+	}
+
+	// After the containers are gone, nothing the tests started may still run.
+	return testx.CheckLeaks(leakIgnores...)
 }
+
+// leakIgnores are goroutines that belong to the container tooling, not to
+// the code under test.
+var leakIgnores []goleak.Option
 
 // Postgres returns the DSN of the package's shared Postgres, starting it on
 // first use. Skips under -short and, outside CI, when Docker is unavailable.
 func Postgres(tb testing.TB) string {
 	tb.Helper()
+
 	return use(tb, &postgres, "postgres", func(ctx context.Context) (string, testcontainers.Container, error) {
 		c, err := tcpostgres.Run(ctx, PostgresImage,
 			tcpostgres.WithDatabase("app"), tcpostgres.WithUsername("app"), tcpostgres.WithPassword("app"),
@@ -76,7 +92,9 @@ func Postgres(tb testing.TB) string {
 		if err != nil {
 			return "", nil, err
 		}
+
 		dsn, err := c.ConnectionString(ctx, "sslmode=disable")
+
 		return dsn, c, err
 	})
 }
@@ -84,6 +102,7 @@ func Postgres(tb testing.TB) string {
 // Valkey returns the URL of the package's shared Valkey.
 func Valkey(tb testing.TB) string {
 	tb.Helper()
+
 	return use(tb, &valkey, "valkey", func(ctx context.Context) (string, testcontainers.Container, error) {
 		// Log + listening port, not the module's exec-based default: exec
 		// stalls on rootless podman under concurrent starts, and the log line
@@ -99,7 +118,9 @@ func Valkey(tb testing.TB) string {
 		if err != nil {
 			return "", nil, err
 		}
+
 		url, err := c.ConnectionString(ctx)
+
 		return url, c, err
 	})
 }
@@ -107,12 +128,15 @@ func Valkey(tb testing.TB) string {
 // Kafka returns the broker seed list of the package's shared Kafka (KRaft).
 func Kafka(tb testing.TB) []string {
 	tb.Helper()
+
 	return use(tb, &kafka, "kafka", func(ctx context.Context) ([]string, testcontainers.Container, error) {
 		c, err := tckafka.Run(ctx, KafkaImage)
 		if err != nil {
 			return nil, nil, err
 		}
+
 		brokers, err := c.Brokers(ctx)
+
 		return brokers, c, err
 	})
 }
@@ -124,9 +148,11 @@ func use[V any](tb testing.TB, s *shared[V], name string,
 	start func(context.Context) (V, testcontainers.Container, error),
 ) V {
 	tb.Helper()
+
 	if testing.Short() {
 		tb.Skip("skipping container-backed test in -short mode")
 	}
+
 	s.once.Do(func() {
 		ctx := context.Background()
 		for attempt := 1; attempt <= 3; attempt++ {
@@ -142,15 +168,19 @@ func use[V any](tb testing.TB, s *shared[V], name string,
 				_ = testcontainers.TerminateContainer(s.container)
 				s.container = nil
 			}
+
 			tb.Logf("%s: start attempt %d/3 failed: %v", name, attempt, s.err)
 		}
 	})
+
 	if s.err != nil {
 		if _, inCI := os.LookupEnv("CI"); inCI {
 			tb.Fatalf("%s container must start in CI: %v", name, s.err)
 		}
+
 		tb.Skipf("could not start %s container (docker unavailable?): %v", name, s.err)
 	}
+
 	return s.value
 }
 

@@ -24,7 +24,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
@@ -68,12 +67,14 @@ func newProducer(t testing.TB, h Harness, topic string) *kafka.Producer {
 	}, nil)
 	require.NoError(t, err)
 	t.Cleanup(p.Close)
+
 	return p
 }
 
 // consumerConfig is a fast-retrying consumer on topic with its own group.
 func consumerConfig(t testing.TB, h Harness, topic string) kafka.Config {
 	t.Helper()
+
 	return kafka.Config{
 		Brokers: h.Brokers(t), Topics: []string{topic}, Group: testx.Unique("group"),
 		ClientID: testx.Unique("cons"), StatisticsInterval: -1,
@@ -92,6 +93,7 @@ type running struct {
 // wait returns Run's result, failing the test if it does not return in time.
 func (r *running) wait(t testing.TB) error {
 	t.Helper()
+
 	select {
 	case <-r.done:
 		return r.err
@@ -103,26 +105,33 @@ func (r *running) wait(t testing.TB) error {
 
 // start builds a consumer from cfg and runs it with h in the background;
 // cleanup cancels it and waits for Run to return.
-func start(t testing.TB, cfg kafka.Config, h kafka.Handler) *running {
+func start(t testing.TB, cfg kafka.Config, h kafka.Handler, opts ...kafka.Option) *running {
 	t.Helper()
-	c, err := kafka.NewConsumer(t.Context(), cfg, nil)
+	c, err := kafka.NewConsumer(t.Context(), cfg, nil, opts...)
 	require.NoError(t, err)
+
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(c.Collectors()...)
+
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &running{cancel: cancel, done: make(chan struct{}), reg: reg}
+
+	run := &running{cancel: cancel, done: make(chan struct{}), reg: reg}
 	go func() {
-		defer close(r.done)
-		r.err = c.Run(ctx, h)
+		defer close(run.done)
+
+		run.err = c.Run(ctx, h)
 	}()
+
 	t.Cleanup(func() {
 		cancel()
+
 		select {
-		case <-r.done:
+		case <-run.done:
 		case <-time.After(30 * time.Second):
 		}
 	})
-	return r
+
+	return run
 }
 
 // seen collects what a handler received, safe for concurrent use.
@@ -135,6 +144,7 @@ type seen struct {
 func (s *seen) add(ctx context.Context, m kafka.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	s.msgs = append(s.msgs, m)
 	s.ctxs = append(s.ctxs, ctx)
 }
@@ -142,12 +152,14 @@ func (s *seen) add(ctx context.Context, m kafka.Message) {
 func (s *seen) len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	return len(s.msgs)
 }
 
 func (s *seen) snapshot() []kafka.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	return slices.Clone(s.msgs)
 }
 
@@ -156,13 +168,16 @@ func (s *seen) offsets() map[int64]int {
 	for _, m := range s.snapshot() {
 		out[m.Offset]++
 	}
+
 	return out
 }
 
 // readAll reads n records from topic with a fresh group from the start.
 func readAll(t testing.TB, h Harness, topic string, n int) []kafka.Message {
 	t.Helper()
+
 	var got seen
+
 	r := start(t, consumerConfig(t, h, topic), func(ctx context.Context, m kafka.Message) error {
 		got.add(ctx, m)
 		return nil
@@ -171,6 +186,7 @@ func readAll(t testing.TB, h Harness, topic string, n int) []kafka.Message {
 		"read %d records from %s", n, topic)
 	r.cancel()
 	require.NoError(t, r.wait(t))
+
 	return got.snapshot()
 }
 
@@ -181,9 +197,12 @@ func header(m kafka.Message, key string) string {
 
 func sendN(t testing.TB, p *kafka.Producer, topic string, n int) {
 	t.Helper()
+
 	for i := range n {
-		require.NoError(t, p.Send(t.Context(), kafka.Message{Topic: topic, Key: fmt.Appendf(nil, "k-%d", i), Value: fmt.Appendf(nil, "v-%d", i),
-			Headers: []kafka.Header{{Key: kafka.HeaderEventID, Value: fmt.Appendf(nil, "e-%d", i)}}}))
+		require.NoError(t, p.Send(t.Context(), kafka.Message{
+			Topic: topic, Key: fmt.Appendf(nil, "k-%d", i), Value: fmt.Appendf(nil, "v-%d", i),
+			Headers: []kafka.Header{{Key: kafka.HeaderEventID, Value: fmt.Appendf(nil, "e-%d", i)}},
+		}))
 	}
 }
 
@@ -192,37 +211,45 @@ func sendN(t testing.TB, p *kafka.Producer, topic string, n int) {
 // One trip through the broker proves delivery, headers, both trace paths
 // (the caller's span, and a traceparent header replayed by an outbox relay),
 // the per-record context, the counters and the client gauges.
-func produceConsume(t *testing.T, h Harness) {
+func produceConsume(t *testing.T, harness Harness) {
 	t.Helper()
-	sr := testx.Recorder(t)
+	recorder := testx.Recorder(t)
 	topic := testx.Unique("roundtrip")
-	h.CreateTopic(t, 1, topic)
-	pcfg := kafka.Config{Brokers: h.Brokers(t), Topic: topic, ClientID: testx.Unique("prod"), StatisticsInterval: 200}
-	prod, err := kafka.NewProducer(t.Context(), pcfg, nil)
+	harness.CreateTopic(t, 1, topic)
+	pcfg := kafka.Config{Brokers: harness.Brokers(t), Topic: topic, ClientID: testx.Unique("prod"), StatisticsInterval: 200}
+	traced := []kafka.Option{kafka.WithTracerProvider(recorder.Provider), kafka.WithPropagator(recorder.Propagator)}
+	prod, err := kafka.NewProducer(t.Context(), pcfg, nil, traced...)
 	require.NoError(t, err)
 	t.Cleanup(prod.Close)
+
 	preg := prometheus.NewRegistry()
 	preg.MustRegister(prod.Collectors()...)
 
 	const n = 3
-	pctx, parent := otel.Tracer("test").Start(t.Context(), "create-task")
+
+	pctx, parent := recorder.Tracer().Start(t.Context(), "create-task")
 	for i := range n {
-		require.NoError(t, prod.Send(pctx, kafka.Message{Key: fmt.Appendf(nil, "k-%d", i), Value: fmt.Appendf(nil, "v-%d", i),
+		require.NoError(t, prod.Send(pctx, kafka.Message{
+			Key: fmt.Appendf(nil, "k-%d", i), Value: fmt.Appendf(nil, "v-%d", i),
 			Headers: []kafka.Header{
 				{Key: kafka.HeaderEventID, Value: fmt.Appendf(nil, "evt-%d", i)},
 				{Key: kafka.HeaderEventType, Value: []byte("task.created")},
-			}}))
+			},
+		}))
 	}
+
 	parent.End()
 	parentTrace := parent.SpanContext().TraceID()
 
 	// The outbox path: the event carries the context of the request that
 	// wrote it; the relay publishes later under its own span.
-	_, stored := otel.Tracer("test").Start(context.Background(), "POST /tasks (earlier)")
+	_, stored := recorder.Tracer().Start(context.Background(), "POST /tasks (earlier)")
 	stored.End()
+
 	carrier := propagation.MapCarrier{}
-	otel.GetTextMapPropagator().Inject(trace.ContextWithSpan(context.Background(), stored), carrier)
-	relayCtx, relay := otel.Tracer("test").Start(t.Context(), "outbox relay")
+	recorder.Propagator.Inject(trace.ContextWithSpan(context.Background(), stored), carrier)
+
+	relayCtx, relay := recorder.Tracer().Start(t.Context(), "outbox relay")
 	require.NoError(t, prod.Send(relayCtx, kafka.Message{Key: []byte("k-outbox"), Value: []byte("v"), Headers: []kafka.Header{
 		{Key: kafka.HeaderEventID, Value: []byte("evt-outbox")},
 		{Key: kafka.HeaderTraceparent, Value: []byte(carrier.Get("traceparent"))},
@@ -236,122 +263,141 @@ func produceConsume(t *testing.T, h Harness) {
 	}, 20*time.Second, 100*time.Millisecond, "the producer's client gauges report its bound and its brokers")
 
 	var got seen
-	cfg := consumerConfig(t, h, topic)
+
+	cfg := consumerConfig(t, harness, topic)
 	cfg.StatisticsInterval = 200
-	r := start(t, cfg, func(ctx context.Context, m kafka.Message) error {
+	run := start(t, cfg, func(ctx context.Context, m kafka.Message) error {
 		got.add(ctx, m)
 		return nil
-	})
+	}, traced...)
 	require.Eventually(t, func() bool { return got.len() == n+1 }, 30*time.Second, 50*time.Millisecond)
 
 	got.mu.Lock()
-	for i, m := range got.msgs {
+	for i, msg := range got.msgs {
 		ctx := got.ctxs[i]
-		eventID, ok := m.Header(kafka.HeaderEventID)
+		eventID, ok := msg.Header(kafka.HeaderEventID)
 		require.True(t, ok)
 		assert.Equal(t, string(eventID), httpx.RequestIDFromContext(ctx), "the event id is the request id")
 		_, hasDeadline := ctx.Deadline()
 		assert.True(t, hasDeadline, "every attempt has a deadline")
-		assert.Equal(t, 1, m.Attempt)
+		assert.Equal(t, 1, msg.Attempt)
+
 		sc := trace.SpanContextFromContext(ctx)
 		require.True(t, sc.IsValid())
-		if string(m.Key) == "k-outbox" {
+
+		if string(msg.Key) == "k-outbox" {
 			assert.Equal(t, stored.SpanContext().TraceID(), sc.TraceID(), "the stored traceparent wins over the relay's span")
 			continue
 		}
-		assert.Equal(t, fmt.Sprintf("v-%d", i), string(m.Value), "in order within the partition")
+
+		assert.Equal(t, fmt.Sprintf("v-%d", i), string(msg.Value), "in order within the partition")
 		assert.Equal(t, parentTrace, sc.TraceID(), "the consumer continues the producer's trace")
-		assert.Equal(t, "task.created", header(m, kafka.HeaderEventType))
+		assert.Equal(t, "task.created", header(msg, kafka.HeaderEventType))
 	}
 	got.mu.Unlock()
 
 	require.Eventually(t, func() bool {
-		return testx.Metric(t, r.reg, "kafka_client_brokers_up", map[string]string{"client": "consumer"}) >= 1
+		return testx.Metric(t, run.reg, "kafka_client_brokers_up", map[string]string{"client": "consumer"}) >= 1
 	}, 30*time.Second, 100*time.Millisecond, "the consumer's client gauges report its brokers")
-	assert.Equal(t, -1.0, testx.Metric(t, r.reg, "kafka_consumer_lag", nil), "group lag is the broker's to export")
-	assert.Equal(t, 1.0, testx.Metric(t, r.reg, "kafka_consumer_assigned_partitions", nil))
+	assert.Equal(t, -1.0, testx.Metric(t, run.reg, "kafka_consumer_lag", nil), "group lag is the broker's to export")
+	assert.Equal(t, 1.0, testx.Metric(t, run.reg, "kafka_consumer_assigned_partitions", nil))
 
-	r.cancel()
-	require.NoError(t, r.wait(t))
-	assert.Equal(t, float64(n+1), testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}))
-	assert.Equal(t, float64(n+1), testx.Metric(t, r.reg, "kafka_consumer_handler_duration_seconds", map[string]string{"topic": topic}))
-	assert.Equal(t, -1.0, testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "failed"}), "no failure series")
-	assert.Equal(t, 0.0, testx.Metric(t, r.reg, "kafka_consumer_commit_errors_total", nil))
-	testx.LintMetrics(t, r.reg)
+	run.cancel()
+	require.NoError(t, run.wait(t))
+	assert.Equal(t, float64(n+1), testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}))
+	assert.Equal(t, float64(n+1), testx.Metric(t, run.reg, "kafka_consumer_handler_duration_seconds", map[string]string{"topic": topic}))
+	assert.Equal(t, -1.0, testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "failed"}), "no failure series")
+	assert.Equal(t, 0.0, testx.Metric(t, run.reg, "kafka_consumer_commit_errors_total", nil))
+	testx.LintMetrics(t, run.reg)
 	testx.LintMetrics(t, preg)
 
 	kinds := map[string]int{}
-	for _, s := range sr.Ended() {
+
+	for _, s := range recorder.Ended() {
 		if s.SpanContext().TraceID() != parentTrace {
 			continue
 		}
+
 		switch {
 		case strings.HasPrefix(s.Name(), "publish "):
 			kinds["publish"]++
+
 			assert.Equal(t, trace.SpanKindProducer, s.SpanKind())
 		case strings.HasPrefix(s.Name(), "process "):
 			kinds["process"]++
+
 			assert.Equal(t, trace.SpanKindConsumer, s.SpanKind())
 		}
 	}
+
 	assert.Equal(t, map[string]int{"publish": n, "process": n}, kinds)
 }
 
 func retriesThenSucceeds(t *testing.T, h Harness) {
 	t.Helper()
+
 	topic := testx.Unique("retry")
 	h.CreateTopic(t, 1, topic)
 	sendN(t, newProducer(t, h, topic), topic, 3)
 
 	var got seen
-	r := start(t, consumerConfig(t, h, topic), func(ctx context.Context, m kafka.Message) error {
+
+	run := start(t, consumerConfig(t, h, topic), func(ctx context.Context, m kafka.Message) error {
 		got.add(ctx, m)
+
 		if string(m.Key) == "k-1" && m.Attempt < 3 {
 			return errors.New("downstream unavailable")
 		}
+
 		return nil
 	})
 	require.Eventually(t, func() bool {
-		return testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}) == 2 &&
-			testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "retried"}) == 1
+		return testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}) == 2 &&
+			testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "retried"}) == 1
 	}, 30*time.Second, 50*time.Millisecond)
 
 	var attempts []int
+
 	for _, m := range got.snapshot() {
 		if string(m.Key) == "k-1" {
 			attempts = append(attempts, m.Attempt)
 		}
 	}
+
 	assert.Equal(t, []int{1, 2, 3}, attempts)
-	assert.Equal(t, 5.0, testx.Metric(t, r.reg, "kafka_consumer_handler_duration_seconds", map[string]string{"topic": topic}), "one observation per attempt: 1 + 3 + 1")
-	assert.Equal(t, -1.0, testx.Metric(t, r.reg, "kafka_producer_records_total", map[string]string{"client": "consumer"}), "nothing dead-lettered")
+	assert.Equal(t, 5.0, testx.Metric(t, run.reg, "kafka_consumer_handler_duration_seconds", map[string]string{"topic": topic}), "one observation per attempt: 1 + 3 + 1")
+	assert.Equal(t, -1.0, testx.Metric(t, run.reg, "kafka_producer_records_total", map[string]string{"client": "consumer"}), "nothing dead-lettered")
 }
 
-func deadLetter(t *testing.T, h Harness) {
+func deadLetter(t *testing.T, harness Harness) {
 	t.Helper()
+
 	topic := testx.Unique("dlq")
 	dlq := topic + ".dlq"
-	h.CreateTopic(t, 1, topic, dlq)
-	sendN(t, newProducer(t, h, topic), topic, 4)
+	harness.CreateTopic(t, 1, topic, dlq)
+	sendN(t, newProducer(t, harness, topic), topic, 4)
 
-	cfg := consumerConfig(t, h, topic)
+	cfg := consumerConfig(t, harness, topic)
 	cfg.MaxRetries = 2
-	r := start(t, cfg, func(_ context.Context, m kafka.Message) error {
+	run := start(t, cfg, func(_ context.Context, m kafka.Message) error {
 		switch string(m.Key) {
 		case "k-1":
 			return kafka.Permanent(errors.New("undecodable payload"))
 		case "k-2":
 			return errors.New("still broken")
 		}
+
 		return nil
 	})
 
-	recs := readAll(t, h, dlq, 2)
+	recs := readAll(t, harness, dlq, 2)
 	require.Len(t, recs, 2)
+
 	byKey := map[string]kafka.Message{}
 	for _, rec := range recs {
 		byKey[string(rec.Key)] = rec
 	}
+
 	perm, exhausted := byKey["k-1"], byKey["k-2"]
 	assert.Equal(t, "v-1", string(perm.Value), "the value is parked unchanged")
 	assert.Equal(t, "e-1", header(perm, kafka.HeaderEventID), "original headers are kept")
@@ -365,77 +411,91 @@ func deadLetter(t *testing.T, h Harness) {
 	assert.Equal(t, "3", header(exhausted, kafka.HeaderDLQAttempts), "first attempt + MaxRetries")
 	assert.Equal(t, "2", header(exhausted, kafka.HeaderDLQSourceOffset))
 
-	require.Eventually(t, func() bool { return h.Committed(t, cfg.Group, topic)[0] == 4 }, 20*time.Second, 100*time.Millisecond,
+	require.Eventually(t, func() bool { return harness.Committed(t, cfg.Group, topic)[0] == 4 }, 20*time.Second, 100*time.Millisecond,
 		"everything is committed (offset + 1), the parked records included")
-	assert.Equal(t, 2.0, testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "dead_lettered"}))
-	assert.Equal(t, 2.0, testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}))
-	assert.Equal(t, 2.0, testx.Metric(t, r.reg, "kafka_producer_records_total", map[string]string{"client": "consumer", "topic": dlq, "result": "ok"}),
+	assert.Equal(t, 2.0, testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "dead_lettered"}))
+	assert.Equal(t, 2.0, testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}))
+	assert.Equal(t, 2.0, testx.Metric(t, run.reg, "kafka_producer_records_total", map[string]string{"client": "consumer", "topic": dlq, "result": "ok"}),
 		"dead-letter publishes are counted as sends of the consumer's producer")
 
 	select {
-	case <-r.done:
-		t.Fatalf("the consumer keeps running past parked records, but Run returned %v", r.err)
+	case <-run.done:
+		t.Fatalf("the consumer keeps running past parked records, but Run returned %v", run.err)
 	default:
 	}
 }
 
-func dlqDisabled(t *testing.T, h Harness) {
+func dlqDisabled(t *testing.T, harness Harness) {
 	t.Helper()
-	topic := testx.Unique("poison")
-	h.CreateTopic(t, 1, topic)
-	sendN(t, newProducer(t, h, topic), topic, 3)
 
-	cfg := consumerConfig(t, h, topic)
+	topic := testx.Unique("poison")
+	harness.CreateTopic(t, 1, topic)
+	sendN(t, newProducer(t, harness, topic), topic, 3)
+
+	cfg := consumerConfig(t, harness, topic)
 	cfg.DeadLetterTopic = kafka.DeadLetterDisabled
 	cfg.MaxRetries = 1
+
 	var got seen
-	r := start(t, cfg, func(ctx context.Context, m kafka.Message) error {
+
+	run := start(t, cfg, func(ctx context.Context, m kafka.Message) error {
 		got.add(ctx, m)
+
 		if string(m.Key) == "k-1" {
 			return errors.New("poison")
 		}
+
 		return nil
 	})
 
-	err := r.wait(t)
+	err := run.wait(t)
 	require.ErrorContains(t, err, "dead-letter topic is disabled")
 	require.ErrorContains(t, err, "poison")
+
 	for _, m := range got.snapshot() {
 		assert.NotEqual(t, "k-2", string(m.Key), "nothing past the poison record is processed")
 	}
-	assert.Equal(t, int64(1), h.Committed(t, cfg.Group, topic)[0], "the record before the poison is committed, the poison is not")
-	assert.Equal(t, 1.0, testx.Metric(t, r.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "failed"}))
+
+	assert.Equal(t, int64(1), harness.Committed(t, cfg.Group, topic)[0], "the record before the poison is committed, the poison is not")
+	assert.Equal(t, 1.0, testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "failed"}))
 }
 
 // A shutdown mid-batch commits exactly what was processed: a restarted
 // member of the same group resumes after it, with no redelivery.
-func gracefulShutdown(t *testing.T, h Harness) {
+func gracefulShutdown(t *testing.T, harness Harness) {
 	t.Helper()
 	t.Run("drain deadline cuts the batch", func(t *testing.T) {
 		topic := testx.Unique("drain-cut")
-		h.CreateTopic(t, 1, topic)
-		sendN(t, newProducer(t, h, topic), topic, 10)
+		harness.CreateTopic(t, 1, topic)
+		sendN(t, newProducer(t, harness, topic), topic, 10)
 
-		cfg := consumerConfig(t, h, topic)
+		cfg := consumerConfig(t, harness, topic)
 		cfg.DrainTimeout = 300 * time.Millisecond
+
 		var first seen
+
 		reached := make(chan struct{})
 		r := start(t, cfg, func(ctx context.Context, m kafka.Message) error {
 			if m.Offset == 5 {
 				close(reached)
 				<-ctx.Done() // a handler that only stops when told to
+
 				return ctx.Err()
 			}
+
 			first.add(ctx, m)
+
 			return nil
 		})
+
 		<-reached
 		r.cancel()
 		require.NoError(t, r.wait(t), "running out of drain budget is still a clean shutdown")
 		assert.Equal(t, map[int64]int{0: 1, 1: 1, 2: 1, 3: 1, 4: 1}, first.offsets())
-		assert.Equal(t, int64(5), h.Committed(t, cfg.Group, topic)[0])
+		assert.Equal(t, int64(5), harness.Committed(t, cfg.Group, topic)[0])
 
 		var second seen
+
 		start(t, cfg, func(ctx context.Context, m kafka.Message) error { second.add(ctx, m); return nil })
 		require.Eventually(t, func() bool { return second.len() >= 5 }, 30*time.Second, 50*time.Millisecond)
 		assert.Equal(t, map[int64]int{5: 1, 6: 1, 7: 1, 8: 1, 9: 1}, second.offsets(), "no redelivery of processed records")
@@ -443,11 +503,13 @@ func gracefulShutdown(t *testing.T, h Harness) {
 
 	t.Run("drain finishes the batch", func(t *testing.T) {
 		topic := testx.Unique("drain-finish")
-		h.CreateTopic(t, 1, topic)
-		sendN(t, newProducer(t, h, topic), topic, 10)
+		harness.CreateTopic(t, 1, topic)
+		sendN(t, newProducer(t, harness, topic), topic, 10)
 
-		cfg := consumerConfig(t, h, topic)
+		cfg := consumerConfig(t, harness, topic)
+
 		var first seen
+
 		reached := make(chan struct{})
 		release := make(chan struct{})
 		r := start(t, cfg, func(ctx context.Context, m kafka.Message) error {
@@ -455,23 +517,29 @@ func gracefulShutdown(t *testing.T, h Harness) {
 				close(reached)
 				<-release // shutdown arrives while this record is in flight
 			}
+
 			first.add(ctx, m)
+
 			return nil
 		})
+
 		<-reached
 		r.cancel()
 		close(release)
 		require.NoError(t, r.wait(t))
+
 		done := first.offsets()
 		require.Contains(t, done, int64(2), "the in-flight record finished")
 		last := slices.Max(slices.Collect(maps.Keys(done)))
 		assert.Len(t, done, int(last)+1, "a contiguous prefix was processed")
-		assert.Equal(t, last+1, h.Committed(t, cfg.Group, topic)[0], "and all of it committed")
+		assert.Equal(t, last+1, harness.Committed(t, cfg.Group, topic)[0], "and all of it committed")
 
 		if last < 9 {
 			var second seen
+
 			start(t, cfg, func(ctx context.Context, m kafka.Message) error { second.add(ctx, m); return nil })
 			require.Eventually(t, func() bool { return second.len() >= int(9-last) }, 30*time.Second, 50*time.Millisecond)
+
 			for off := range second.offsets() {
 				assert.Greater(t, off, last, "no redelivery of processed records")
 			}
@@ -484,14 +552,17 @@ func gracefulShutdown(t *testing.T, h Harness) {
 // leaving mid-stream), each reporting its own client gauges.
 func rebalance(t *testing.T, h Harness) {
 	t.Helper()
+
 	topic := testx.Unique("rebalance")
 	h.CreateTopic(t, 4, topic)
 	prod := newProducer(t, h, topic)
 
 	var got seen
+
 	handler := func(ctx context.Context, m kafka.Message) error {
 		got.add(ctx, m)
 		time.Sleep(2 * time.Millisecond)
+
 		return nil
 	}
 	cfg := consumerConfig(t, h, topic)
@@ -501,45 +572,51 @@ func rebalance(t *testing.T, h Harness) {
 	cfgB.ClientID = testx.Unique("cons-b")
 
 	sendN(t, prod, topic, 100)
-	a := start(t, cfg, handler)
+	memberA := start(t, cfg, handler)
 	require.Eventually(t, func() bool { return got.len() >= 100 }, 30*time.Second, 50*time.Millisecond)
 
 	// B joins while records keep arriving.
 	publishing := make(chan struct{})
 	go func() {
 		defer close(publishing)
+
 		for i := 100; i < 200; i++ {
 			if err := prod.Send(context.Background(), kafka.Message{Topic: topic, Key: fmt.Appendf(nil, "k-%d", i), Value: fmt.Appendf(nil, "v-%d", i)}); err != nil {
 				return
 			}
+
 			time.Sleep(5 * time.Millisecond)
 		}
 	}()
+
 	b := start(t, cfgB, handler)
 	assigned := func(r *running) float64 {
 		return testx.Metric(t, r.reg, "kafka_consumer_assigned_partitions", nil)
 	}
-	require.Eventually(t, func() bool { return assigned(a) > 0 && assigned(b) > 0 && assigned(a)+assigned(b) == 4 },
+
+	require.Eventually(t, func() bool { return assigned(memberA) > 0 && assigned(b) > 0 && assigned(memberA)+assigned(b) == 4 },
 		60*time.Second, 50*time.Millisecond, "the group settles with both members")
 	<-publishing
 	require.Eventually(t, func() bool {
 		up := map[string]string{"client": "consumer"}
-		return testx.Metric(t, a.reg, "kafka_client_brokers_up", up) >= 1 && testx.Metric(t, b.reg, "kafka_client_brokers_up", up) >= 1
+		return testx.Metric(t, memberA.reg, "kafka_client_brokers_up", up) >= 1 && testx.Metric(t, b.reg, "kafka_client_brokers_up", up) >= 1
 	}, 30*time.Second, 100*time.Millisecond, "both members report their client gauges")
 
 	// A leaves mid-stream; B takes everything over.
 	publishing = make(chan struct{})
 	go func() {
 		defer close(publishing)
+
 		for i := 200; i < 300; i++ {
 			if err := prod.Send(context.Background(), kafka.Message{Topic: topic, Key: fmt.Appendf(nil, "k-%d", i), Value: fmt.Appendf(nil, "v-%d", i)}); err != nil {
 				return
 			}
 		}
 	}()
+
 	require.Eventually(t, func() bool { return got.len() >= 220 }, 30*time.Second, 20*time.Millisecond)
-	a.cancel()
-	require.NoError(t, a.wait(t))
+	memberA.cancel()
+	require.NoError(t, memberA.wait(t))
 	require.Eventually(t, func() bool { return assigned(b) == 4 }, 60*time.Second, 50*time.Millisecond)
 	<-publishing
 
@@ -548,9 +625,12 @@ func rebalance(t *testing.T, h Harness) {
 		for _, m := range got.snapshot() {
 			out[string(m.Key)]++
 		}
+
 		return out
 	}
+
 	require.Eventually(t, func() bool { return len(keys()) == 300 }, 30*time.Second, 50*time.Millisecond, "no record is lost")
+
 	dups := got.len() - 300
 	t.Logf("deliveries=%d unique=300 duplicates=%d", got.len(), dups)
 	assert.LessOrEqual(t, dups, 2*cfg.MaxPollRecords, "duplicates are bounded by the in-flight batch")
@@ -559,6 +639,7 @@ func rebalance(t *testing.T, h Harness) {
 
 func stopsOnCancel(t *testing.T, h Harness) {
 	t.Helper()
+
 	topic := testx.Unique("idle")
 	h.CreateTopic(t, 1, topic)
 	r := start(t, consumerConfig(t, h, topic), func(context.Context, kafka.Message) error { return nil })
@@ -577,12 +658,15 @@ func errorTaxonomy(t *testing.T, h Harness) {
 	missing := testx.Unique("missing")
 	p, err := kafka.NewProducer(t.Context(), kafka.Config{Brokers: brokers, ClientID: testx.Unique("prod"), PublishTimeout: 10 * time.Second}, nil)
 	require.NoError(t, err)
+
 	defer p.Close()
+
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(p.Collectors()...)
 
 	err = p.Send(t.Context(), kafka.Message{Topic: missing, Value: []byte("x")})
 	require.Error(t, err)
+
 	var se *kafka.SendError
 	require.ErrorAs(t, err, &se)
 	assert.Contains(t, []string{kafka.KindNotProvisioned, kafka.KindUnavailable}, se.Kind,
@@ -592,7 +676,9 @@ func errorTaxonomy(t *testing.T, h Harness) {
 
 	auto, err := kafka.NewProducer(t.Context(), kafka.Config{Brokers: brokers, ClientID: testx.Unique("prod"), AllowAutoTopicCreation: true}, nil)
 	require.NoError(t, err)
+
 	defer auto.Close()
+
 	require.NoError(t, auto.Send(t.Context(), kafka.Message{Topic: missing, Value: []byte("x")}), "the broker creates it when asked")
 
 	err = auto.Send(t.Context(), kafka.Message{Topic: missing, Value: make([]byte, 2<<20)})
@@ -612,14 +698,17 @@ func errorTaxonomy(t *testing.T, h Harness) {
 //	KAFKA_SASL_SSL_TOPIC          a topic the user may write and read (default "tasks.events")
 func SASLSSL(t *testing.T) {
 	t.Helper()
+
 	brokers := os.Getenv("KAFKA_SASL_SSL_BROKERS")
 	if brokers == "" {
 		t.Skip("KAFKA_SASL_SSL_BROKERS not set: run `just kafka-sasl-ssl-up` (examples/kafka-sasl-ssl)")
 	}
+
 	topic := os.Getenv("KAFKA_SASL_SSL_TOPIC")
 	if topic == "" {
 		topic = "tasks.events"
 	}
+
 	cfg := kafka.Config{
 		Brokers:          strings.Split(brokers, ","),
 		Topic:            topic,
@@ -635,15 +724,17 @@ func SASLSSL(t *testing.T) {
 		AllowAutoTopicCreation: true,
 		RetryBackoff:           10 * time.Millisecond, RetryBackoffMax: 50 * time.Millisecond,
 	}
-	p, err := kafka.NewProducer(t.Context(), cfg, nil)
+	producer, err := kafka.NewProducer(t.Context(), cfg, nil)
 	require.NoError(t, err, "connect over SASL_SSL with the custom CA")
-	defer p.Close()
+
+	defer producer.Close()
 
 	want := testx.Unique("sasl-ssl-record")
 	got := make(chan string, 16)
 	c, err := kafka.NewConsumer(t.Context(), cfg, nil)
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
+
 	done := make(chan error, 1)
 	go func() {
 		done <- c.Run(ctx, func(_ context.Context, m kafka.Message) error {
@@ -651,15 +742,19 @@ func SASLSSL(t *testing.T) {
 			return nil
 		})
 	}()
-	defer func() { cancel(); <-done }()
+
+	defer func() { cancel(); assert.NoError(t, <-done, "Run returns nil once ctx is cancelled") }()
 
 	// The consumer starts at the end: keep sending until it has joined and
 	// sees one.
 	deadline := time.After(60 * time.Second)
+
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
+
 	for {
-		require.NoError(t, p.Send(t.Context(), kafka.Message{Value: []byte(want)}))
+		require.NoError(t, producer.Send(t.Context(), kafka.Message{Value: []byte(want)}))
+
 		select {
 		case v := <-got:
 			if v == want {

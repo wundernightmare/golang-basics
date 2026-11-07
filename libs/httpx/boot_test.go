@@ -30,9 +30,11 @@ func testBoot(load func() (bootConfig, error)) httpx.Boot[bootConfig] {
 		Name: "svc", Prefix: "SVC_", File: "SVC_CONFIG",
 		Load: load,
 		Defaults: func() (bootConfig, error) {
-			cfg := bootConfig{}
-			cfg.Service = "svc"
+			cfg := bootConfig{
+				Service: "svc",
+			}
 			err := httpx.Defaults("SVC_", &cfg)
+
 			return cfg, err
 		},
 	}
@@ -40,11 +42,15 @@ func testBoot(load func() (bootConfig, error)) httpx.Boot[bootConfig] {
 
 func runBoot(b httpx.Boot[bootConfig], args ...string) (cfg bootConfig, code int, ok bool, stdout, stderr string) {
 	var out, errOut bytes.Buffer
+
 	cfg, code, ok = b.Config(args, &out, &errOut)
+
 	return cfg, code, ok, out.String(), errOut.String()
 }
 
 func TestBoot_LoadsAndGoesOn(t *testing.T) {
+	t.Parallel()
+
 	b := testBoot(func() (bootConfig, error) { return bootConfig{Size: 3}, nil })
 	cfg, code, ok, out, errOut := runBoot(b)
 	assert.True(t, ok)
@@ -54,6 +60,8 @@ func TestBoot_LoadsAndGoesOn(t *testing.T) {
 }
 
 func TestBoot_ConfigErrorExits78(t *testing.T) {
+	t.Parallel()
+
 	b := testBoot(func() (bootConfig, error) { return bootConfig{}, errors.New("SVC_SIZE must be positive") })
 	for _, args := range [][]string{nil, {"--check-config"}} {
 		_, code, ok, out, errOut := runBoot(b, args...)
@@ -65,6 +73,8 @@ func TestBoot_ConfigErrorExits78(t *testing.T) {
 }
 
 func TestBoot_CheckConfigPasses(t *testing.T) {
+	t.Parallel()
+
 	b := testBoot(func() (bootConfig, error) { return bootConfig{}, nil })
 	_, code, ok, out, _ := runBoot(b, "--check-config")
 	assert.False(t, ok, "a check never starts the service")
@@ -73,7 +83,10 @@ func TestBoot_CheckConfigPasses(t *testing.T) {
 }
 
 func TestBoot_Help(t *testing.T) {
+	t.Parallel()
+
 	loaded := false
+
 	b := testBoot(func() (bootConfig, error) { loaded = true; return bootConfig{}, nil })
 	for _, flag := range []string{"--help", "-h"} {
 		_, code, ok, out, errOut := runBoot(b, flag)
@@ -84,10 +97,13 @@ func TestBoot_Help(t *testing.T) {
 		assert.Contains(t, out, "SVC_*, over the optional YAML file named by SVC_CONFIG")
 		assert.Contains(t, out, "-check-config")
 	}
+
 	assert.False(t, loaded, "--help needs no valid config")
 }
 
 func TestBoot_BadCommandLineExits64(t *testing.T) {
+	t.Parallel()
+
 	b := testBoot(func() (bootConfig, error) { return bootConfig{}, nil })
 	for _, args := range [][]string{{"--nope"}, {"serve"}} {
 		_, code, ok, out, errOut := runBoot(b, args...)
@@ -99,17 +115,21 @@ func TestBoot_BadCommandLineExits64(t *testing.T) {
 }
 
 func TestBoot_ConfigReference(t *testing.T) {
+	t.Parallel()
+
 	b := testBoot(func() (bootConfig, error) { t.Fatal("the reference needs no valid config"); return bootConfig{}, nil })
 	_, code, ok, out, _ := runBoot(b, "--config-reference")
 	assert.False(t, ok)
 	assert.Zero(t, code)
 
 	rows := map[string][]string{}
+
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n")[1:] {
 		f := strings.Fields(line)
 		require.Len(t, f, 3, line)
 		rows[f[0]] = f[1:]
 	}
+
 	assert.Equal(t, []string{"service_name", "svc"}, rows["SVC_SERVICE_NAME"], "inline struct, service preset")
 	assert.Equal(t, []string{"http_addr", ":8080"}, rows["SVC_HTTP_ADDR"], "tag default")
 	assert.Equal(t, []string{"admin_token", "-"}, rows["SVC_ADMIN_TOKEN"], "unset")
@@ -121,6 +141,8 @@ func TestBoot_ConfigReference(t *testing.T) {
 }
 
 func TestConfigReference_HidesSecrets(t *testing.T) {
+	t.Parallel()
+
 	var out bytes.Buffer
 	httpx.ConfigReference(&out, "SVC_", httpx.Config{AdminToken: "s3cret", DebugToken: ""})
 	assert.NotContains(t, out.String(), "s3cret")
@@ -129,6 +151,8 @@ func TestConfigReference_HidesSecrets(t *testing.T) {
 }
 
 func TestBoot_UnexpectedArgumentIsUsage(t *testing.T) {
+	t.Parallel()
+
 	b := testBoot(func() (bootConfig, error) { return bootConfig{}, nil })
 	_, code, ok, _, errOut := runBoot(b, "serve")
 	assert.False(t, ok)
@@ -139,6 +163,8 @@ func TestBoot_UnexpectedArgumentIsUsage(t *testing.T) {
 // The reference skips unexported fields, shows a key kept out of YAML as
 // "-", and never prints a secret that has a value.
 func TestConfigReference_HiddenAndSecretFields(t *testing.T) {
+	t.Parallel()
+
 	type cfg struct {
 		hidden   string        //nolint:unused // proves unexported fields are skipped
 		Token    string        `env:"TOKEN" secret:"true" yaml:"token"`
@@ -146,6 +172,7 @@ func TestConfigReference_HiddenAndSecretFields(t *testing.T) {
 		Empty    string        `env:"EMPTY" yaml:"empty"`
 		Duration time.Duration `env:"WAIT" yaml:"wait"`
 	}
+
 	var out bytes.Buffer
 	httpx.ConfigReference(&out, "SVC_", cfg{Token: "s3cret", EnvOnly: "x", Duration: time.Second})
 	ref := out.String()

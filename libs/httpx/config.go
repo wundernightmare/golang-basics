@@ -109,14 +109,21 @@ const (
 // LoadConfig parses a [Config] from the environment using the given key
 // prefix (use "" for no prefix), validates it and returns it fully defaulted,
 // so callers can rely on every field being set.
-func LoadConfig(prefix string) (Config, error) {
+func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, nil) }
+
+// LoadConfigFrom is [LoadConfig] reading environ instead of the process
+// environment (nil means the process environment). Tests pass a map, so they
+// need no t.Setenv and can run in parallel.
+func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	var cfg Config
-	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix}); err != nil {
+	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix, Environment: environ}); err != nil {
 		return Config{}, fmt.Errorf("httpx: parse config (prefix %q): %w", prefix, err)
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("httpx: config (prefix %q): %w", prefix, err)
 	}
+
 	return cfg, nil
 }
 
@@ -128,39 +135,51 @@ func (c *Config) withDefaults() {
 	if c.Service == "" {
 		c.Service = defaultServiceName()
 	}
+
 	if c.LogLevelMaxTTL == 0 {
 		c.LogLevelMaxTTL = defaultLogLevelMaxTTL
 	}
+
 	if c.ReadHeaderTimeout == 0 {
 		c.ReadHeaderTimeout = defaultReadHeaderTimeout
 	}
+
 	if c.ReadTimeout == 0 {
 		c.ReadTimeout = defaultReadTimeout
 	}
+
 	if c.WriteTimeout == 0 {
 		c.WriteTimeout = defaultWriteTimeout
 	}
+
 	if c.IdleTimeout == 0 {
 		c.IdleTimeout = defaultIdleTimeout
 	}
+
 	if c.MaxHeaderBytes == 0 {
 		c.MaxHeaderBytes = defaultMaxHeaderBytes
 	}
+
 	if c.MaxBodyBytes == 0 {
 		c.MaxBodyBytes = defaultMaxBodyBytes
 	}
+
 	if c.ShutdownTimeout == 0 {
 		c.ShutdownTimeout = defaultShutdownTimeout
 	}
+
 	if c.HealthInterval == 0 {
 		c.HealthInterval = defaultHealthInterval
 	}
+
 	if c.HealthTimeout == 0 {
 		c.HealthTimeout = defaultHealthTimeout
 	}
+
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
+
 	if c.LogFormat == "" {
 		c.LogFormat = "json"
 	}
@@ -173,54 +192,70 @@ func (c *Config) withDefaults() {
 // an unauthenticated admin listener on a routable address (see AdminInsecure).
 func (c *Config) Validate() error {
 	c.withDefaults()
+
 	var errs []error
 	if _, err := parseLevelStrict(c.LogLevel); err != nil {
 		errs = append(errs, fmt.Errorf("LOG_LEVEL: %w", err))
 	}
+
 	switch strings.ToLower(c.LogFormat) {
 	case "json", "text":
 	default:
 		errs = append(errs, fmt.Errorf("LOG_FORMAT: unknown format %q (want json|text)", c.LogFormat))
 	}
+
 	if c.Addr == "" && c.AdminAddr == "" {
 		errs = append(errs, errors.New("neither HTTP_ADDR nor ADMIN_ADDR is set"))
 	}
+
 	if c.Addr != "" && c.Addr == c.AdminAddr && !strings.HasSuffix(c.Addr, ":0") { // ":0" binds two ephemeral ports
 		errs = append(errs, fmt.Errorf("HTTP_ADDR and ADMIN_ADDR are both %q", c.Addr))
 	}
+
 	if c.ShutdownTimeout <= 0 {
 		errs = append(errs, errors.New("HTTP_SHUTDOWN_TIMEOUT must be positive"))
 	}
+
 	if c.RequestTimeoutMin < 0 {
 		errs = append(errs, errors.New("HTTP_REQUEST_TIMEOUT_MIN must not be negative"))
 	}
+
 	if c.RequestTimeout > 0 && c.RequestTimeoutMin > c.RequestTimeout {
 		errs = append(errs, fmt.Errorf("HTTP_REQUEST_TIMEOUT_MIN (%s) must not exceed HTTP_REQUEST_TIMEOUT (%s)", c.RequestTimeoutMin, c.RequestTimeout))
 	}
+
 	if c.ShutdownDelay < 0 {
 		errs = append(errs, errors.New("HTTP_SHUTDOWN_DELAY must not be negative"))
 	}
+
 	if c.MaxBodyBytes <= 0 {
 		errs = append(errs, errors.New("HTTP_MAX_BODY_BYTES must be positive"))
 	}
+
 	if c.MaxHeaderBytes <= 0 {
 		errs = append(errs, errors.New("HTTP_MAX_HEADER_BYTES must be positive"))
 	}
+
 	if c.HealthTimeout >= c.HealthInterval {
 		errs = append(errs, fmt.Errorf("HEALTH_CHECK_TIMEOUT (%s) must be shorter than HEALTH_CHECK_INTERVAL (%s)", c.HealthTimeout, c.HealthInterval))
 	}
+
 	if c.LogLevelMaxTTL <= 0 {
 		errs = append(errs, errors.New("LOG_LEVEL_MAX_TTL must be positive"))
 	}
+
 	if c.LogSampleInitial < 0 || c.LogSampleThereafter < 0 {
 		errs = append(errs, errors.New("LOG_SAMPLE_INITIAL / LOG_SAMPLE_THEREAFTER must not be negative"))
 	}
+
 	if _, err := parsePrefixes(c.TrustedProxies); err != nil {
 		errs = append(errs, fmt.Errorf("HTTP_TRUSTED_PROXIES: %w", err))
 	}
+
 	if c.AdminAddr != "" && c.AdminToken == "" && !c.AdminInsecure && !isLoopback(c.AdminAddr) {
 		errs = append(errs, fmt.Errorf("ADMIN_TOKEN is empty and ADMIN_ADDR %q is not loopback: set a token, or ADMIN_INSECURE=true for local development", c.AdminAddr))
 	}
+
 	return errors.Join(errs...)
 }
 
@@ -243,16 +278,20 @@ func parsePrefixes(cidrs []string) ([]netip.Prefix, error) {
 		if s == "" {
 			continue
 		}
+
 		if p, err := netip.ParsePrefix(s); err == nil {
 			out = append(out, p.Masked())
 			continue
 		}
+
 		a, err := netip.ParseAddr(s)
 		if err != nil {
 			return nil, fmt.Errorf("%q is not a CIDR or IP", s)
 		}
+
 		out = append(out, netip.PrefixFrom(a, a.BitLen()))
 	}
+
 	return out, nil
 }
 
@@ -263,9 +302,12 @@ func isLoopback(addr string) bool {
 	if err != nil || host == "" {
 		return false
 	}
+
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
+
 	ip, err := netip.ParseAddr(host)
+
 	return err == nil && ip.IsLoopback()
 }

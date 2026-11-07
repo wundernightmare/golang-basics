@@ -12,6 +12,8 @@ import (
 )
 
 func TestNormalizeTitle(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name, in, want string
 		ok             bool
@@ -29,11 +31,14 @@ func TestNormalizeTitle(t *testing.T) {
 		{"invalid UTF-8", "a\xffb", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			got, err := domain.NormalizeTitle(tc.in)
 			if !tc.ok {
 				require.ErrorIs(t, err, domain.ErrInvalidTitle)
 				return
 			}
+
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
@@ -41,6 +46,8 @@ func TestNormalizeTitle(t *testing.T) {
 }
 
 func TestPatch(t *testing.T) {
+	t.Parallel()
+
 	_, err := domain.Patch{}.Normalize()
 	require.ErrorIs(t, err, domain.ErrEmptyPatch)
 
@@ -64,6 +71,8 @@ func TestPatch(t *testing.T) {
 }
 
 func TestCursorRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	at := time.Date(2026, 9, 25, 12, 30, 45, 123456000, time.UTC) // microseconds, as Postgres stores them
 	c := domain.CursorAfter(domain.Task{ID: "abc", CreatedAt: at})
 	enc := c.Encode()

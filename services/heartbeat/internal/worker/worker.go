@@ -29,6 +29,7 @@ func New(interval time.Duration, log *slog.Logger, reg prometheus.Registerer) *W
 		Help: "Total number of heartbeats emitted since process start.",
 	})
 	reg.MustRegister(beats)
+
 	return &Worker{interval: interval, log: log, beats: beats}
 }
 
@@ -39,7 +40,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer t.Stop()
 
 	w.log.InfoContext(ctx, "heartbeat worker started", "interval", w.interval)
+
 	var count uint64
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -47,6 +50,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			return nil
 		case <-t.C:
 			count++
+
 			w.beats.Inc()
 			w.log.InfoContext(ctx, "heartbeat", "count", count)
 		}

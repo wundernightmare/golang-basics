@@ -18,12 +18,15 @@ import (
 // A producer and a consumer share one registry: the consumer's dead-letter
 // publishes land in the producer families under client="consumer".
 func TestMetrics_AreLintClean(t *testing.T) {
+	t.Parallel()
+
 	stats := func() ClientStats {
 		return ClientStats{Valid: true, BrokersUp: 3, RequestErrors: 2, QueueBytes: 10, QueueMaxBytes: 64 << 20}
 	}
 	reg := prometheus.NewRegistry()
 	p := &Producer{metrics: newProducerMetrics(stats, "test")}
 	c := &Consumer{metrics: newConsumerMetrics(stats, "test", []string{"t", "^re.*"})}
+
 	reg.MustRegister(p.Collectors()...)
 	reg.MustRegister(c.Collectors()...)
 	p.metrics.send.observe("t", time.Now(), nil)
@@ -45,6 +48,7 @@ func TestMetrics_AreLintClean(t *testing.T) {
 	assert.Equal(t, 3.0, testx.Metric(t, reg, "kafka_client_brokers_up", map[string]string{"client": "producer"}))
 	assert.Equal(t, 2.0, testx.Metric(t, reg, "kafka_client_request_errors_total", map[string]string{"client": "consumer"}))
 	assert.Equal(t, float64(64<<20), testx.Metric(t, reg, "kafka_producer_queue_max_bytes", nil))
+
 	for _, gone := range []string{"kafka_consumer_lag", "kafka_consumer_lag_max", "kafka_consumer_dlq_total", "kafka_publish_total", "kafka_consume_total"} {
 		assert.Equal(t, -1.0, testx.Metric(t, reg, gone, nil), "%s is not part of the metrics contract", gone)
 	}
@@ -53,6 +57,8 @@ func TestMetrics_AreLintClean(t *testing.T) {
 // A client that stopped reporting shows no client gauges rather than its
 // last numbers.
 func TestClientCollector_StaleSnapshotIsNotExposed(t *testing.T) {
+	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(newClientCollector("consumer", "test", func() ClientStats { return ClientStats{BrokersUp: 2} }))
 	assert.Equal(t, -1.0, testx.Metric(t, reg, "kafka_client_brokers_up", nil))
@@ -60,7 +66,10 @@ func TestClientCollector_StaleSnapshotIsNotExposed(t *testing.T) {
 }
 
 func TestPermanent(t *testing.T) {
+	t.Parallel()
+
 	base := errors.New("bad payload")
+
 	require.NoError(t, Permanent(nil))
 	p := Permanent(base)
 	assert.True(t, IsPermanent(p))
@@ -71,38 +80,51 @@ func TestPermanent(t *testing.T) {
 }
 
 func TestBackoff_ExponentialJitteredCapped(t *testing.T) {
+	t.Parallel()
+
 	initial, maxDelay := 100*time.Millisecond, time.Second
-	for n, ceiling := range []time.Duration{100, 200, 400, 800, 1000, 1000, 1000} {
-		ceiling *= time.Millisecond
+	for n, ms := range []int64{100, 200, 400, 800, 1000, 1000, 1000} {
+		ceiling := time.Duration(ms) * time.Millisecond
+
 		for range 50 {
 			d := backoff(n, initial, maxDelay)
 			assert.GreaterOrEqual(t, d, ceiling/2, "retry %d", n)
 			assert.LessOrEqual(t, d, ceiling, "retry %d", n)
 		}
 	}
+
 	assert.LessOrEqual(t, backoff(1000, initial, maxDelay), maxDelay, "no overflow on a large retry count")
 }
 
 func TestMessage_Header(t *testing.T) {
+	t.Parallel()
+
 	m := Message{Topic: "t", Headers: []Header{{Key: "event_id", Value: []byte("e1")}, {Key: "event_id", Value: []byte("e2")}}}
 	v, ok := m.Header("event_id")
 	assert.True(t, ok)
 	assert.Equal(t, "e1", string(v), "first wins")
+
 	_, ok = m.Header("missing")
 	assert.False(t, ok)
 }
 
 func TestRequestID_FromEventIDOrFresh(t *testing.T) {
+	t.Parallel()
+
 	rec := func(id string) Message { return Message{Headers: []Header{{Key: HeaderEventID, Value: []byte(id)}}} }
 	assert.Equal(t, "0190c8a2-7b4e-7c1d-9f00-000000000001", requestID(rec("0190c8a2-7b4e-7c1d-9f00-000000000001")))
+
 	for _, bad := range []string{"", "has space", "new\nline", string(make([]byte, 200))} {
 		id := requestID(rec(bad))
 		assert.Len(t, id, 16, "%q is replaced by a fresh id", bad)
 	}
+
 	assert.Len(t, requestID(Message{}), 16)
 }
 
 func TestHeaderCarrier(t *testing.T) {
+	t.Parallel()
+
 	hs := []Header{{Key: "traceparent", Value: []byte("old")}}
 	c := headerCarrier{&hs}
 	c.Set("traceparent", "new")

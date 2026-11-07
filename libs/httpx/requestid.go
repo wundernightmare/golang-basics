@@ -44,11 +44,13 @@ func validRequestID(s string) bool {
 	if s == "" || len(s) > maxRequestIDLen {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+
+	for i := range len(s) {
 		if s[i] <= ' ' || s[i] > '~' {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -58,6 +60,8 @@ func NewRequestID() string { return newRequestID() }
 
 func newRequestID() string {
 	var b [8]byte
+
 	_, _ = rand.Read(b[:]) // crypto/rand.Read does not fail on supported platforms
+
 	return hex.EncodeToString(b[:])
 }

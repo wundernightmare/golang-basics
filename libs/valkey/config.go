@@ -1,6 +1,7 @@
 package valkey
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -44,11 +45,17 @@ type Config struct {
 
 // LoadConfig parses a [Config] from the environment using the given key prefix
 // (use "" for no prefix). Every field but the address is defaulted.
-func LoadConfig(prefix string) (Config, error) {
+func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, nil) }
+
+// LoadConfigFrom is [LoadConfig] reading environ instead of the process
+// environment (nil means the process environment). Tests pass a map, so they
+// need no t.Setenv and can run in parallel.
+func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	var cfg Config
-	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix}); err != nil {
+	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix, Environment: environ}); err != nil {
 		return Config{}, fmt.Errorf("valkey: parse config (prefix %q): %w", prefix, err)
 	}
+
 	return cfg, nil
 }
 
@@ -60,23 +67,28 @@ func (c Config) Configured() bool { return c.URL != "" || c.Addr != "" }
 // the URL form when present.
 func (c Config) clientOption() (valkeygo.ClientOption, error) {
 	if !c.Configured() {
-		return valkeygo.ClientOption{}, fmt.Errorf("valkey: VALKEY_URL or VALKEY_ADDR must be set")
+		return valkeygo.ClientOption{}, errors.New("valkey: VALKEY_URL or VALKEY_ADDR must be set")
 	}
+
 	if c.URL != "" {
 		opt, err := valkeygo.ParseURL(c.URL)
 		if err != nil {
 			return valkeygo.ClientOption{}, fmt.Errorf("valkey: parse url: %w", err)
 		}
+
 		if c.DialTimeout > 0 {
 			opt.Dialer.Timeout = c.DialTimeout
 		}
+
 		return opt, nil
 	}
+
 	opt := valkeygo.ClientOption{
 		InitAddress: []string{c.Addr},
 		Password:    c.Password,
 		SelectDB:    c.DB,
 	}
 	opt.Dialer.Timeout = c.DialTimeout
+
 	return opt, nil
 }

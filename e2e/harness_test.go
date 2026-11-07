@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -66,16 +67,16 @@ type spec struct {
 // its admin port answers 200 and /version names it. The process is stopped
 // (SIGTERM, wait, SIGKILL past the deadline) in t.Cleanup, and its output is
 // logged when the test failed.
-func start(t *testing.T, sp spec) *service {
+func start(t *testing.T, svcSpec spec) *service {
 	t.Helper()
 
-	bin := filepath.Join(binDir(t), sp.name)
+	bin := filepath.Join(binDir(t), svcSpec.name)
 	if _, err := os.Stat(bin); err != nil {
 		t.Fatalf("service binary %s: %v — build it first: scripts/build-service.sh %s %s (set E2E_BIN_DIR for another dir)",
-			bin, err, sp.name, bin)
+			bin, err, svcSpec.name, bin)
 	}
 
-	s := &service{name: sp.name, token: randomToken(t), out: &syncBuffer{}, done: make(chan struct{})}
+	s := &service{name: svcSpec.name, token: randomToken(t), out: &syncBuffer{}, done: make(chan struct{})}
 	env := map[string]string{
 		"ADMIN_ADDR":          freeAddr(t),
 		"ADMIN_TOKEN":         s.token,
@@ -83,20 +84,21 @@ func start(t *testing.T, sp spec) *service {
 		"LOG_FORMAT":          "json",
 		"LOG_LEVEL":           "info",
 	}
+
 	s.adminURL = "http://" + env["ADMIN_ADDR"]
-	if sp.api {
+	if svcSpec.api {
 		env["HTTP_ADDR"] = freeAddr(t)
 		s.apiURL = "http://" + env["HTTP_ADDR"]
 	}
-	for k, v := range sp.env {
-		env[k] = v
-	}
 
-	s.cmd = exec.Command(bin) //nolint:gosec // the binary path is the harness's own build output
-	s.cmd.Env = childEnv(sp.prefix, env)
+	maps.Copy(env, svcSpec.env)
+
+	s.cmd = exec.Command(bin) // the binary path is the harness's own build output
+	s.cmd.Env = childEnv(svcSpec.prefix, env)
 	s.cmd.Stdout = s.out
 	s.cmd.Stderr = s.out
-	require.NoError(t, s.cmd.Start(), "start %s", sp.name)
+
+	require.NoError(t, s.cmd.Start(), "start %s", svcSpec.name)
 	go func() {
 		s.err = s.cmd.Wait()
 		close(s.done)
@@ -104,6 +106,7 @@ func start(t *testing.T, sp spec) *service {
 
 	t.Cleanup(func() {
 		s.stop(t)
+
 		if t.Failed() {
 			t.Logf("── %s output ──\n%s", s.name, s.out.String())
 		}
@@ -111,6 +114,7 @@ func start(t *testing.T, sp spec) *service {
 
 	s.waitReady(t)
 	s.checkVersion(t)
+
 	return s
 }
 
@@ -118,19 +122,24 @@ func start(t *testing.T, sp spec) *service {
 // child's output) when the process exits first.
 func (s *service) waitReady(t *testing.T) {
 	t.Helper()
+
 	deadline := time.Now().Add(readyTimeout)
+
 	for {
 		select {
 		case <-s.done:
 			t.Fatalf("%s exited before becoming ready (%v); its output follows", s.name, s.err)
 		default:
 		}
+
 		if code, _, err := s.get(s.adminURL+"/readyz", ""); err == nil && code == http.StatusOK {
 			break
 		}
+
 		if time.Now().After(deadline) {
 			t.Fatalf("%s: /readyz not 200 within %s", s.name, readyTimeout)
 		}
+
 		time.Sleep(50 * time.Millisecond)
 	}
 	// Ready and still running: a child that raced to exit right after the
@@ -163,11 +172,14 @@ func (s *service) checkVersion(t *testing.T) {
 
 func (s *service) version(t *testing.T) buildInfo {
 	t.Helper()
+
 	code, body, err := s.get(s.adminURL+"/version", "")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, code, "GET /version: %s", body)
+
 	var bi buildInfo
 	require.NoError(t, json.Unmarshal(body, &bi), "GET /version body: %s", body)
+
 	return bi
 }
 
@@ -187,14 +199,17 @@ func (s *service) terminate(timeout time.Duration) bool {
 // written), SIGKILL past the deadline.
 func (s *service) stop(t *testing.T) {
 	t.Helper()
+
 	select {
 	case <-s.done:
 		return
 	default:
 	}
+
 	if s.terminate(stopTimeout) {
 		return
 	}
+
 	t.Errorf("%s did not exit within %s of SIGTERM; killing it", s.name, stopTimeout)
 	_ = s.cmd.Process.Kill()
 	<-s.done
@@ -216,18 +231,24 @@ func do(method, url, token string, body io.Reader) (int, []byte, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
+
 	defer func() { _ = resp.Body.Close() }()
+
 	b, err := io.ReadAll(resp.Body)
+
 	return resp.StatusCode, b, err
 }
 
@@ -235,15 +256,19 @@ func do(method, url, token string, body io.Reader) (int, []byte, error) {
 // (all label sets). A missing metric reads as 0.
 func (s *service) metric(t *testing.T, name string) float64 {
 	t.Helper()
+
 	code, body, err := s.get(s.adminURL+"/metrics", "")
 	if err != nil || code != http.StatusOK {
 		t.Logf("%s /metrics: %d %v", s.name, code, err)
 		return 0
 	}
+
 	var sum float64
+
 	sc := bufio.NewScanner(bytes.NewReader(body))
 	for sc.Scan() {
 		line := sc.Text()
+
 		rest, ok := strings.CutPrefix(line, name)
 		if !ok || (rest != "" && rest[0] != ' ' && rest[0] != '{') {
 			continue
@@ -252,28 +277,34 @@ func (s *service) metric(t *testing.T, name string) float64 {
 		if i := strings.LastIndexByte(rest, '}'); i >= 0 {
 			rest = rest[i+1:]
 		}
+
 		fields := strings.Fields(rest)
 		if len(fields) == 0 {
 			continue
 		}
+
 		if v, err := strconv.ParseFloat(fields[0], 64); err == nil {
 			sum += v
 		}
 	}
+
 	return sum
 }
 
 // logLines decodes the child's JSON log lines (non-JSON output is skipped).
 func (s *service) logLines() []map[string]any {
 	var lines []map[string]any
+
 	sc := bufio.NewScanner(strings.NewReader(s.out.String()))
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+
 	for sc.Scan() {
 		var m map[string]any
 		if json.Unmarshal(sc.Bytes(), &m) == nil {
 			lines = append(lines, m)
 		}
 	}
+
 	return lines
 }
 
@@ -282,12 +313,15 @@ func (s *service) logLines() []map[string]any {
 // binDir is E2E_BIN_DIR, default ../.build (the workspace root's .build/).
 func binDir(t *testing.T) string {
 	t.Helper()
+
 	dir := os.Getenv("E2E_BIN_DIR")
 	if dir == "" {
 		dir = filepath.Join("..", ".build")
 	}
+
 	abs, err := filepath.Abs(dir)
 	require.NoError(t, err)
+
 	return abs
 }
 
@@ -296,21 +330,26 @@ func binDir(t *testing.T) string {
 // the prefixed harness settings, plus GOCOVERDIR when E2E_COVER_DIR is set.
 func childEnv(prefix string, env map[string]string) []string {
 	var out []string
+
 	for _, kv := range os.Environ() {
 		if strings.HasPrefix(kv, prefix) || strings.HasPrefix(kv, "GOCOVERDIR=") {
 			continue
 		}
+
 		out = append(out, kv)
 	}
+
 	for k, v := range env {
 		out = append(out, prefix+k+"="+v)
 	}
+
 	if dir := os.Getenv("E2E_COVER_DIR"); dir != "" {
 		if abs, err := filepath.Abs(dir); err == nil {
 			_ = os.MkdirAll(abs, 0o755)
 			out = append(out, "GOCOVERDIR="+abs)
 		}
 	}
+
 	return out
 }
 
@@ -319,18 +358,23 @@ func childEnv(prefix string, env map[string]string) []string {
 // far smaller than the fixed-port collisions it replaces.
 func freeAddr(t *testing.T) string {
 	t.Helper()
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+
 	addr := ln.Addr().String()
 	require.NoError(t, ln.Close())
+
 	return addr
 }
 
 func randomToken(t *testing.T) string {
 	t.Helper()
+
 	b := make([]byte, 16)
 	_, err := rand.Read(b)
 	require.NoError(t, err)
+
 	return hex.EncodeToString(b)
 }
 
@@ -338,10 +382,12 @@ func randomToken(t *testing.T) string {
 // when any is unset.
 func dataEnv(t *testing.T) (dbURL, valkeyURL, brokers string) {
 	t.Helper()
+
 	dbURL, valkeyURL, brokers = os.Getenv("E2E_DATABASE_URL"), os.Getenv("E2E_VALKEY_URL"), os.Getenv("E2E_KAFKA_BROKERS")
 	if dbURL == "" || valkeyURL == "" || brokers == "" {
 		t.Skip("set E2E_DATABASE_URL, E2E_VALKEY_URL and E2E_KAFKA_BROKERS to run the tasks/consumer suite (just infra-up)")
 	}
+
 	return dbURL, valkeyURL, brokers
 }
 
@@ -361,11 +407,13 @@ type syncBuffer struct {
 func (b *syncBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return b.buf.Write(p)
 }
 
 func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	return b.buf.String()
 }

@@ -21,18 +21,20 @@ func main() {
 		Name: "heartbeat", Prefix: config.Prefix,
 		Load: config.Load, Defaults: config.Defaults,
 	}
+
 	cfg, code, ok := boot.Config(os.Args[1:], os.Stdout, os.Stderr)
 	if !ok {
 		os.Exit(code)
 	}
+
 	if err := run(cfg); err != nil {
 		os.Exit(1)
 	}
 }
 
 func run(cfg config.Config) error {
-
 	logger := httpx.NewLogger(cfg.LogConfig())
+
 	srv, err := httpx.NewServer(cfg.HTTP(), logger, httpx.WithConfig(cfg))
 	if err != nil {
 		logger.Error("heartbeat: invalid configuration", "err", err)
@@ -59,6 +61,8 @@ func run(cfg config.Config) error {
 		logger.Error("heartbeat exited with error", "err", err)
 		return err
 	}
+
 	logger.Info("heartbeat stopped cleanly")
+
 	return nil
 }

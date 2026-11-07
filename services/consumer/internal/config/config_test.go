@@ -13,15 +13,20 @@ import (
 )
 
 func TestLoad_DefaultsAreSecure(t *testing.T) {
-	_, err := config.Load("")
+	t.Parallel()
+
+	env := map[string]string{}
+	_, err := config.LoadFrom("", env)
 	require.ErrorContains(t, err, "ADMIN_TOKEN is empty", "an open admin listener on :9083 must be asked for")
 
-	t.Setenv("CONSUMER_ADMIN_INSECURE", "true")
-	_, err = config.Load("")
+	env["CONSUMER_ADMIN_INSECURE"] = "true"
+
+	_, err = config.LoadFrom("", env)
 	require.ErrorContains(t, err, "KAFKA_BROKERS must be set", "a consumer without a broker has nothing to do")
 
-	t.Setenv("CONSUMER_KAFKA_BROKERS", "k:9092")
-	cfg, err := config.Load("")
+	env["CONSUMER_KAFKA_BROKERS"] = "k:9092"
+
+	cfg, err := config.LoadFrom("", env)
 	require.NoError(t, err)
 	assert.Equal(t, "consumer", cfg.Service)
 	assert.Empty(t, cfg.Addr, "a worker has no API listener")
@@ -36,6 +41,7 @@ func TestLoad_DefaultsAreSecure(t *testing.T) {
 	assert.Equal(t, 10000, cfg.DedupeSize)
 }
 
+// Serial on purpose: exercises the process-environment path (t.Setenv cannot run in parallel).
 func TestLoad_YAMLThenEnv(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
@@ -75,15 +81,18 @@ otel:
 }
 
 func TestLoad_RejectsBadConfig(t *testing.T) {
+	t.Parallel()
+
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte("admin_insecure: true\nkafka:\n  topicz: typo\n"), 0o600))
-	_, err := config.Load(path)
+	_, err := config.LoadFrom(path, map[string]string{})
 	require.ErrorContains(t, err, "topicz", "an unknown key is an error, not a silent default")
 
-	t.Setenv("CONSUMER_ADMIN_INSECURE", "true")
-	t.Setenv("CONSUMER_KAFKA_SASL_MECHANISM", "kerberos")
-	t.Setenv("CONSUMER_DEDUPE_SIZE", "-1")
-	_, err = config.Load("")
+	_, err = config.LoadFrom("", map[string]string{
+		"CONSUMER_ADMIN_INSECURE":       "true",
+		"CONSUMER_KAFKA_SASL_MECHANISM": "kerberos",
+		"CONSUMER_DEDUPE_SIZE":          "-1",
+	})
 	require.ErrorContains(t, err, "KAFKA_SASL_")
 	require.ErrorContains(t, err, "DEDUPE_SIZE", "all problems are reported at once")
 }

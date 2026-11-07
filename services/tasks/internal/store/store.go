@@ -16,6 +16,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/tracehubmmp/golang-basics/libs/contracts/events"
 	pgxlib "github.com/tracehubmmp/golang-basics/libs/pgx"
@@ -26,16 +28,40 @@ import (
 // Store is the task repository.
 type Store struct {
 	pool *pgxpool.Pool
+	prop propagation.TextMapPropagator
+}
+
+// Option configures [New].
+type Option func(*Store)
+
+// WithPropagator sets the propagator the outbox rows store the request's
+// trace context with; the relay must read them with the same one. Without it
+// the global propagator (installed by otelx.Init) is used.
+func WithPropagator(p propagation.TextMapPropagator) Option {
+	return func(s *Store) { s.prop = p }
 }
 
 // New wraps a pool whose schema is migrated (see the migrations package).
-func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+func New(pool *pgxpool.Pool, opts ...Option) *Store {
+	s := &Store{pool: pool}
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	if s.prop == nil {
+		s.prop = otel.GetTextMapPropagator()
+	}
+
+	return s
+}
 
 const taskColumns = `id, title, done, version, created_at`
 
 func scanTask(row pgx.Row) (domain.Task, error) {
 	var t domain.Task
+
 	err := row.Scan(&t.ID, &t.Title, &t.Done, &t.Version, &t.CreatedAt)
+
 	return t, err
 }
 
@@ -46,12 +72,15 @@ func (s *Store) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 		return fmt.Errorf("store: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }() // no-op after commit
+
 	if err := fn(tx); err != nil {
 		return err
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("store: commit: %w", err)
 	}
+
 	return nil
 }
 
@@ -64,13 +93,16 @@ func (s *Store) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 // waits for the first to commit, then replays it.
 func (s *Store) Create(ctx context.Context, id, title string, idem *domain.IdempotencyKey) (task domain.Task, replayed bool, err error) {
 	ctx = pgxlib.WithOperation(ctx, "tasks.create")
+
 	var replayID string
+
 	err = s.inTx(ctx, func(tx pgx.Tx) error {
-		t, err := scanTask(tx.QueryRow(ctx,
+		created, err := scanTask(tx.QueryRow(ctx,
 			`INSERT INTO tasks (id, title) VALUES ($1, $2) RETURNING `+taskColumns, id, title))
 		if err != nil {
 			return fmt.Errorf("store: insert task: %w", err)
 		}
+
 		if idem != nil {
 			var existingHash, existingID string
 			// DO UPDATE of nothing (not DO NOTHING) so RETURNING yields the
@@ -80,24 +112,30 @@ func (s *Store) Create(ctx context.Context, id, title string, idem *domain.Idemp
 				`INSERT INTO idempotency_keys (key, request_hash, task_id) VALUES ($1, $2, $3)
 				 ON CONFLICT (key) DO UPDATE SET key = EXCLUDED.key
 				 RETURNING request_hash, task_id, xmax = 0`,
-				idem.Key, idem.Hash, t.ID).Scan(&existingHash, &existingID, &inserted); err != nil {
+				idem.Key, idem.Hash, created.ID).Scan(&existingHash, &existingID, &inserted); err != nil {
 				return fmt.Errorf("store: record idempotency key: %w", err)
 			}
+
 			if !inserted {
 				if existingHash != idem.Hash {
 					return domain.ErrIdempotencyKeyReused
 				}
+
 				replayID = existingID
+
 				return errReplay // roll back this attempt's task
 			}
 		}
-		payload, eventID, err := createdEvent(t)
+
+		payload, eventID, err := createdEvent(created)
 		if err != nil {
 			return err
 		}
-		task = t
-		return outbox.Enqueue(ctx, tx, outbox.Event{
-			ID: eventID, AggregateID: t.ID, Type: outbox.TypeTaskCreated, Payload: payload,
+
+		task = created
+
+		return outbox.Enqueue(ctx, s.prop, tx, outbox.Event{
+			ID: eventID, AggregateID: created.ID, Type: outbox.TypeTaskCreated, Payload: payload,
 		})
 	})
 	if errors.Is(err, errReplay) {
@@ -105,11 +143,14 @@ func (s *Store) Create(ctx context.Context, id, title string, idem *domain.Idemp
 		if gerr != nil {
 			return domain.Task{}, false, fmt.Errorf("store: replay idempotent create: %w", gerr)
 		}
+
 		return t, true, nil
 	}
+
 	if err != nil {
 		return domain.Task{}, false, err
 	}
+
 	return task, false, nil
 }
 
@@ -120,13 +161,16 @@ var errReplay = errors.New("store: idempotent replay")
 // Get returns the task with id, or [domain.ErrNotFound] if there is none.
 func (s *Store) Get(ctx context.Context, id string) (domain.Task, error) {
 	ctx = pgxlib.WithOperation(ctx, "tasks.get")
+
 	t, err := scanTask(s.pool.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Task{}, domain.ErrNotFound
 	}
+
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("store: get task %q: %w", id, err)
 	}
+
 	return t, nil
 }
 
@@ -135,12 +179,16 @@ func (s *Store) Get(ctx context.Context, id string) (domain.Task, error) {
 // a next page exists, and serves the query from tasks_created_at_id_idx.
 func (s *Store) List(ctx context.Context, req domain.PageRequest) (domain.Page, error) {
 	ctx = pgxlib.WithOperation(ctx, "tasks.list")
+
 	limit := req.Limit
 	if limit <= 0 || limit > domain.MaxPageSize {
 		limit = domain.DefaultPageSize
 	}
-	var rows pgx.Rows
-	var err error
+
+	var (
+		rows pgx.Rows
+		err  error
+	)
 	if req.Cursor == nil {
 		rows, err = s.pool.Query(ctx,
 			`SELECT `+taskColumns+` FROM tasks ORDER BY created_at DESC, id DESC LIMIT $1`, limit+1)
@@ -150,19 +198,23 @@ func (s *Store) List(ctx context.Context, req domain.PageRequest) (domain.Page, 
 			`SELECT `+taskColumns+` FROM tasks WHERE (created_at, id) < ($1, $2)
 			 ORDER BY created_at DESC, id DESC LIMIT $3`, req.Cursor.CreatedAt, req.Cursor.ID, limit+1)
 	}
+
 	if err != nil {
 		return domain.Page{}, fmt.Errorf("store: list tasks: %w", err)
 	}
+
 	tasks, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (domain.Task, error) { return scanTask(r) })
 	if err != nil {
 		return domain.Page{}, fmt.Errorf("store: list tasks: %w", err)
 	}
+
 	page := domain.Page{Tasks: tasks}
 	if len(tasks) > limit {
 		page.Tasks = tasks[:limit]
 		next := domain.CursorAfter(page.Tasks[limit-1])
 		page.Next = &next
 	}
+
 	return page, nil
 }
 
@@ -172,30 +224,38 @@ func (s *Store) List(ctx context.Context, req domain.PageRequest) (domain.Page, 
 // [domain.ErrVersionMismatch]; an unknown id is [domain.ErrNotFound].
 func (s *Store) Update(ctx context.Context, id string, patch domain.Patch, expect *int64) (domain.Task, error) {
 	ctx = pgxlib.WithOperation(ctx, "tasks.update")
+
 	var out domain.Task
+
 	err := s.inTx(ctx, func(tx pgx.Tx) error {
-		t, err := scanTask(tx.QueryRow(ctx,
+		updated, err := scanTask(tx.QueryRow(ctx,
 			`UPDATE tasks SET title = coalesce($2, title), done = coalesce($3, done), version = version + 1
 			  WHERE id = $1 AND ($4::bigint IS NULL OR version = $4)
 			  RETURNING `+taskColumns, id, patch.Title, patch.Done, expect))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return s.missOrMismatch(ctx, tx, id)
 		}
+
 		if err != nil {
 			return fmt.Errorf("store: update task %q: %w", id, err)
 		}
+
 		eventID := outbox.NewID()
+
 		payload, err := json.Marshal(events.TaskUpdatedEvent{
-			EventId: eventID, Id: t.ID, Title: t.Title, Done: t.Done, Version: int(t.Version),
+			EventId: eventID, Id: updated.ID, Title: updated.Title, Done: updated.Done, Version: int(updated.Version),
 		})
 		if err != nil {
 			return fmt.Errorf("store: encode task.updated: %w", err)
 		}
-		out = t
-		return outbox.Enqueue(ctx, tx, outbox.Event{
-			ID: eventID, AggregateID: t.ID, Type: outbox.TypeTaskUpdated, Payload: payload,
+
+		out = updated
+
+		return outbox.Enqueue(ctx, s.prop, tx, outbox.Event{
+			ID: eventID, AggregateID: updated.ID, Type: outbox.TypeTaskUpdated, Payload: payload,
 		})
 	})
+
 	return out, err
 }
 
@@ -204,23 +264,29 @@ func (s *Store) Update(ctx context.Context, id string, patch domain.Patch, expec
 // idempotency keys go with it (ON DELETE CASCADE).
 func (s *Store) Delete(ctx context.Context, id string, expect *int64) error {
 	ctx = pgxlib.WithOperation(ctx, "tasks.delete")
+
 	return s.inTx(ctx, func(tx pgx.Tx) error {
 		var version int64
+
 		err := tx.QueryRow(ctx,
 			`DELETE FROM tasks WHERE id = $1 AND ($2::bigint IS NULL OR version = $2) RETURNING version`,
 			id, expect).Scan(&version)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return s.missOrMismatch(ctx, tx, id)
 		}
+
 		if err != nil {
 			return fmt.Errorf("store: delete task %q: %w", id, err)
 		}
+
 		eventID := outbox.NewID()
+
 		payload, err := json.Marshal(events.TaskDeletedEvent{EventId: eventID, Id: id, Version: int(version)})
 		if err != nil {
 			return fmt.Errorf("store: encode task.deleted: %w", err)
 		}
-		return outbox.Enqueue(ctx, tx, outbox.Event{
+
+		return outbox.Enqueue(ctx, s.prop, tx, outbox.Event{
 			ID: eventID, AggregateID: id, Type: outbox.TypeTaskDeleted, Payload: payload,
 		})
 	})
@@ -232,21 +298,25 @@ func (s *Store) missOrMismatch(ctx context.Context, tx pgx.Tx, id string) error 
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1)`, id).Scan(&exists); err != nil {
 		return fmt.Errorf("store: check task %q: %w", id, err)
 	}
+
 	if exists {
 		return domain.ErrVersionMismatch
 	}
+
 	return domain.ErrNotFound
 }
 
 func createdEvent(t domain.Task) (payload []byte, eventID string, err error) {
 	eventID = outbox.NewID()
 	version := int(t.Version)
+
 	payload, err = json.Marshal(events.TaskCreatedEvent{
 		Id: t.ID, Title: t.Title, CreatedAt: t.CreatedAt.UTC(), EventId: &eventID, Version: &version,
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("store: encode task.created: %w", err)
 	}
+
 	return payload, eventID, nil
 }
 
@@ -257,6 +327,7 @@ func (s *Store) PurgeIdempotencyKeys(ctx context.Context, ttl time.Duration) (in
 	if err != nil {
 		return 0, fmt.Errorf("store: purge idempotency keys: %w", err)
 	}
+
 	return tag.RowsAffected(), nil
 }
 
@@ -265,6 +336,7 @@ func (s *Store) PurgeIdempotencyKeys(ctx context.Context, ttl time.Duration) (in
 func (s *Store) RunJanitor(ctx context.Context, ttl, interval time.Duration, log *slog.Logger) error {
 	t := time.NewTicker(interval)
 	defer t.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -275,8 +347,10 @@ func (s *Store) RunJanitor(ctx context.Context, ttl, interval time.Duration, log
 				if ctx.Err() == nil {
 					log.WarnContext(ctx, "idempotency key purge failed", "err", err)
 				}
+
 				continue
 			}
+
 			if n > 0 {
 				log.InfoContext(ctx, "idempotency keys purged", "count", n)
 			}

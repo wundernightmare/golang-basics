@@ -44,7 +44,7 @@ const (
 	KindInvalid
 )
 
-var kindNames = map[Kind]string{
+var kindNames = map[Kind]string{ //nolint:gochecknoglobals // read-only lookup table (Go has no const maps)
 	KindTimeout:      "timeout",
 	KindConnection:   "connection",
 	KindStatus:       "status",
@@ -62,6 +62,7 @@ func (k Kind) String() string {
 	if s, ok := kindNames[k]; ok {
 		return s
 	}
+
 	return fmt.Sprintf("kind(%d)", int(k))
 }
 
@@ -91,9 +92,11 @@ func (e *OutboundError) Error() string {
 	if e.StatusCode != 0 {
 		msg += fmt.Sprintf(" %d", e.StatusCode)
 	}
+
 	if e.Err != nil {
 		msg += ": " + e.Err.Error()
 	}
+
 	return msg
 }
 

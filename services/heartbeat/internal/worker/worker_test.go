@@ -2,7 +2,6 @@ package worker_test
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"testing"
 	"time"
@@ -18,12 +17,14 @@ import (
 
 func TestWorker_BeatsThenStopsOnCancel(t *testing.T) {
 	t.Parallel()
+
 	reg := prometheus.NewRegistry()
 	buf := &testx.LogBuffer{}
 	log := httpx.NewLogger(httpx.LogConfig{Level: "info", Format: "json", Writer: buf})
 	w := worker.New(20*time.Millisecond, log, reg)
 
 	ctx, cancel := context.WithCancel(context.Background())
+
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 
@@ -50,9 +51,10 @@ func TestWorker_BeatsThenStopsOnCancel(t *testing.T) {
 
 func TestWorker_CounterOnTheServerRegistry(t *testing.T) {
 	t.Parallel()
+
 	srv, err := httpx.NewServer(httpx.Config{Service: "heartbeat", AdminAddr: "127.0.0.1:0"}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
-	worker.New(time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)), srv.Metrics.Registry)
+	worker.New(time.Hour, slog.New(slog.DiscardHandler), srv.Metrics.Registry)
 	assert.Equal(t, 0.0, testx.Metric(t, srv.Metrics.Registry, "heartbeat_beats_total", nil),
 		"exported (at zero) on the admin /metrics from the start")
 }

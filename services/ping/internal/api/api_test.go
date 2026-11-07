@@ -19,10 +19,12 @@ import (
 
 func newServer(t testing.TB) *httpx.Server {
 	t.Helper()
+
 	log := httpx.NewLogger(httpx.LogConfig{Level: "error", Format: "json", Writer: io.Discard})
 	srv, err := httpx.NewServer(httpx.Config{Service: "ping", Addr: ":0", AdminAddr: "127.0.0.1:0"}, log)
 	require.NoError(t, err)
 	api.Register(srv)
+
 	return srv
 }
 
@@ -30,35 +32,43 @@ func newServer(t testing.TB) *httpx.Server {
 // against the OpenAPI contract (api/tsp/ping.tsp) and decodes a 200 body.
 func getJSON[V any](t testing.TB, oas *contract.OpenAPI, srv *httpx.Server, target string) (int, V) {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, target, nil)
+
+	req := httptest.NewRequest(http.MethodGet, target, http.NoBody)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	oas.Validate(t, req, nil, rec.Code, rec.Header(), rec.Body.Bytes())
+
 	var v V
 	if rec.Code == http.StatusOK {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &v), rec.Body.String())
 	}
+
 	return rec.Code, v
 }
 
 func TestPing(t *testing.T) {
 	t.Parallel()
+
 	oas := contract.LoadOpenAPI(t, "openapi3/ping.openapi.yaml")
 	for _, msg := range []string{"", "hello", "привет мир", "a&b=c"} {
 		t.Run("msg="+msg, func(t *testing.T) {
 			t.Parallel()
 			srv := newServer(t)
+
 			target := "/ping"
 			if msg != "" {
 				target += "?msg=" + url.QueryEscape(msg)
 			}
+
 			code, body := getJSON[api.PongResponse](t, oas, srv, target)
 			require.Equal(t, http.StatusOK, code)
 			assert.Equal(t, pingapi.Pong, body.Message)
+
 			if msg == "" {
 				assert.Nil(t, body.Echo, "no echo member when ?msg= is absent")
 				return
 			}
+
 			require.NotNil(t, body.Echo)
 			assert.Equal(t, msg, *body.Echo, "echo mirrors ?msg=")
 		})
@@ -80,6 +90,7 @@ func TestVersion(t *testing.T) {
 func TestErrorsAreProblems(t *testing.T) {
 	t.Parallel()
 	srv := newServer(t)
+
 	for _, tc := range []struct {
 		method, target string
 		status         int
@@ -89,7 +100,7 @@ func TestErrorsAreProblems(t *testing.T) {
 		{http.MethodDelete, "/version", http.StatusMethodNotAllowed},
 	} {
 		rec := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(rec, httptest.NewRequest(tc.method, tc.target, nil))
+		srv.Handler().ServeHTTP(rec, httptest.NewRequest(tc.method, tc.target, http.NoBody))
 		assert.Equal(t, tc.status, rec.Code, "%s %s", tc.method, tc.target)
 		assert.Equal(t, httpx.ProblemContentType, rec.Header().Get("Content-Type"))
 	}
@@ -97,12 +108,14 @@ func TestErrorsAreProblems(t *testing.T) {
 
 func TestMetricsCountPingByRoute(t *testing.T) {
 	t.Parallel()
+
 	srv := newServer(t)
 	for range 3 {
-		srv.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ping?msg=x", nil))
+		srv.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ping?msg=x", http.NoBody))
 	}
+
 	rec := httptest.NewRecorder()
-	srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 	assert.Contains(t, rec.Body.String(), `http_requests_total{method="GET",route="/ping",status="200"} 3`)
 }
 
@@ -113,18 +126,21 @@ func TestAdminEndpoints(t *testing.T) {
 	t.Parallel()
 	srv := newServer(t)
 	srv.Health.SetReady(true)
+
 	for _, path := range []string{"/healthz", "/livez", "/readyz", "/metrics", "/version", "/debug/pprof/"} {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
+
 			rec := httptest.NewRecorder()
-			srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, http.NoBody))
 			assert.Equal(t, http.StatusOK, rec.Code, "served on admin")
 
 			if path == "/version" {
 				return // deliberately public on the API too
 			}
+
 			rec = httptest.NewRecorder()
-			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, http.NoBody))
 			assert.Equal(t, http.StatusNotFound, rec.Code, "absent from the API port")
 		})
 	}

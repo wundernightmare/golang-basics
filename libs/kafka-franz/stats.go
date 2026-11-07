@@ -37,6 +37,7 @@ func (s *stats) OnBrokerConnect(meta kgo.BrokerMetadata, _ time.Duration, _ net.
 		s.addError()
 		return
 	}
+
 	s.mu.Lock()
 	s.conns[meta.NodeID]++
 	s.mu.Unlock()
@@ -75,11 +76,13 @@ func (s *stats) addError() {
 // brokers of the cluster.
 func (s *stats) common() kafka.ClientStats {
 	up := int64(0)
+
 	for id := range s.conns {
 		if id >= 0 {
 			up++
 		}
 	}
+
 	return kafka.ClientStats{Valid: s.cfg.StatisticsInterval > 0, BrokersUp: up, RequestErrors: s.reqErrors}
 }
 
@@ -87,15 +90,19 @@ func (s *stats) producer() kafka.ClientStats {
 	s.mu.Lock()
 	st := s.common()
 	s.mu.Unlock()
+
 	if s.cl != nil {
 		st.QueueBytes = s.cl.BufferedProduceBytes()
 	}
+
 	st.QueueMaxBytes = int64(s.cfg.ProducerQueueMaxKBytes) * 1024
+
 	return st
 }
 
 func (s *stats) consumer() kafka.ClientStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	return s.common()
 }

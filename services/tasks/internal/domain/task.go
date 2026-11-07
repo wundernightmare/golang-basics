@@ -67,13 +67,16 @@ func (p Patch) Normalize() (Patch, error) {
 	if p.Title == nil && p.Done == nil {
 		return Patch{}, ErrEmptyPatch
 	}
+
 	if p.Title != nil {
 		t, err := NormalizeTitle(*p.Title)
 		if err != nil {
 			return Patch{}, err
 		}
+
 		p.Title = &t
 	}
+
 	return p, nil
 }
 
@@ -83,9 +86,11 @@ func (p Patch) Apply(t Task) Task {
 	if p.Title != nil {
 		t.Title = *p.Title
 	}
+
 	if p.Done != nil {
 		t.Done = *p.Done
 	}
+
 	return t
 }
 
@@ -95,22 +100,25 @@ func (p Patch) Apply(t Task) Task {
 // (PostgreSQL TEXT rejects it — found by Schemathesis as a 500 from the
 // store) and no other control characters except tab.
 func NormalizeTitle(title string) (string, error) {
-	t := strings.TrimSpace(title)
+	trimmed := strings.TrimSpace(title)
 	switch {
-	case t == "":
+	case trimmed == "":
 		return "", fmt.Errorf("%w: must not be empty or blank", ErrInvalidTitle)
-	case !utf8.ValidString(t):
+	case !utf8.ValidString(trimmed):
 		return "", fmt.Errorf("%w: must be valid UTF-8", ErrInvalidTitle)
-	case utf8.RuneCountInString(t) > MaxTitleRunes:
+	case utf8.RuneCountInString(trimmed) > MaxTitleRunes:
 		return "", fmt.Errorf("%w: must be at most %d characters", ErrInvalidTitle, MaxTitleRunes)
 	}
-	for _, r := range t {
+
+	for _, r := range trimmed {
 		if r == 0 {
 			return "", fmt.Errorf("%w: must not contain NUL", ErrInvalidTitle)
 		}
+
 		if r < 0x20 && r != '\t' || r == 0x7f {
 			return "", fmt.Errorf("%w: must not contain control characters", ErrInvalidTitle)
 		}
 	}
-	return t, nil
+
+	return trimmed, nil
 }

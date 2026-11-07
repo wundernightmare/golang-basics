@@ -73,7 +73,8 @@ func New(consumer Consumer, log *slog.Logger, reg prometheus.Registerer, opts Op
 	if opts.DedupeSize <= 0 {
 		opts.DedupeSize = DefaultDedupeSize
 	}
-	w := &Worker{
+
+	worker := &Worker{
 		consumer: consumer,
 		log:      log,
 		inject:   opts.Inject,
@@ -91,8 +92,9 @@ func New(consumer Consumer, log *slog.Logger, reg prometheus.Registerer, opts Op
 			Help: "Events rejected as permanent failures (dead-lettered), by reason (undecodable|unknown_type).",
 		}, []string{"reason"}),
 	}
-	reg.MustRegister(w.byType, w.duplicates, w.rejected)
-	return w
+	reg.MustRegister(worker.byType, worker.duplicates, worker.rejected)
+
+	return worker
 }
 
 // Run drains the topic until ctx is cancelled (graceful shutdown → nil) or the
@@ -124,6 +126,7 @@ func (e taskEvent) taskID() string {
 	case e.Task != nil:
 		return e.Task.ID
 	}
+
 	return ""
 }
 
@@ -145,19 +148,23 @@ func (w *Worker) Handle(ctx context.Context, msg kafka.Message) error {
 		w.rejected.WithLabelValues("undecodable").Inc()
 		return kafka.Permanent(fmt.Errorf("decode task event (%d bytes): %w", len(msg.Value), err))
 	}
+
 	eventType := evt.EventType
 	if h, ok := msg.Header(kafka.HeaderEventType); ok {
 		eventType = string(h)
 	}
+
 	if eventType == "" {
 		eventType = TaskCreated
 	}
+
 	switch eventType {
 	case TaskCreated, TaskUpdated, TaskDeleted:
 	default:
 		w.rejected.WithLabelValues("unknown_type").Inc()
 		return kafka.Permanent(fmt.Errorf("unknown event type %q", truncate(eventType, 64)))
 	}
+
 	eventID := evt.EventID
 	if h, ok := msg.Header(kafka.HeaderEventID); ok && len(h) > 0 {
 		eventID = string(h)
@@ -167,8 +174,10 @@ func (w *Worker) Handle(ctx context.Context, msg kafka.Message) error {
 		w.duplicates.Inc()
 		w.log.InfoContext(ctx, "duplicate event skipped",
 			"event_type", eventType, "event_id", eventID, "partition", msg.Partition, "offset", msg.Offset)
+
 		return nil
 	}
+
 	if w.inject != nil {
 		if err := w.inject(ctx, eventType, msg); err != nil {
 			return err
@@ -181,10 +190,12 @@ func (w *Worker) Handle(ctx context.Context, msg kafka.Message) error {
 	if eventID != "" {
 		w.seen.add(eventID)
 	}
+
 	w.byType.WithLabelValues(eventType).Inc()
 	w.log.InfoContext(ctx, "task event applied",
 		"event_type", eventType, "event_id", eventID, "task_id", evt.taskID(),
 		"bytes", len(msg.Value), "partition", msg.Partition, "offset", msg.Offset, "attempt", msg.Attempt)
+
 	return nil
 }
 
@@ -192,5 +203,6 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
+
 	return s[:n]
 }

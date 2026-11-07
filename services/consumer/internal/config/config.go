@@ -47,27 +47,37 @@ type Config struct {
 // overlays the CONSUMER_ environment and validates the result. Service-level
 // defaults (name, admin port, client id) are set before loading, so the file
 // and the environment still override them.
-func Load(path string) (Config, error) {
+func Load(path string) (Config, error) { return LoadFrom(path, nil) }
+
+// LoadFrom is [Load] reading environ instead of the process environment
+// (nil means the process environment). Tests pass a map, so they need no
+// t.Setenv and can run in parallel.
+func LoadFrom(path string, environ map[string]string) (Config, error) {
 	cfg := preset()
-	if err := httpx.LoadYAML(path, Prefix, &cfg); err != nil {
+	if err := httpx.LoadYAMLFrom(path, Prefix, environ, &cfg); err != nil {
 		return Config{}, err
 	}
+
 	cfg.Addr = "" // a worker serves no API: admin listener only
 	if cfg.OTel.Version == "" {
 		cfg.OTel.Version = httpx.Version
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
+
 	return cfg, nil
 }
 
 func preset() Config {
 	var cfg Config
+
 	cfg.Service = "consumer"
 	cfg.AdminAddr = ":9083"
 	cfg.Kafka.ClientID = "consumer"
 	cfg.OTel.ServiceName = "consumer"
+
 	return cfg
 }
 
@@ -78,7 +88,9 @@ func Defaults() (Config, error) {
 	if err := httpx.Defaults(Prefix, &cfg); err != nil {
 		return Config{}, err
 	}
+
 	cfg.Addr = "" // as Load: no API listener
+
 	return cfg, nil
 }
 
@@ -88,14 +100,18 @@ func (c *Config) Validate() error {
 	if err := c.Config.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("http: %w", err))
 	}
+
 	if err := c.Kafka.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("kafka: %w", err))
 	}
+
 	if c.DedupeSize <= 0 {
 		errs = append(errs, errors.New("DEDUPE_SIZE must be positive"))
 	}
+
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("consumer config: %w", err)
 	}
+
 	return nil
 }

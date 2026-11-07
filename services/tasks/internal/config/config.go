@@ -93,13 +93,15 @@ type IdempotencyConfig struct {
 // [httpx.LoadYAML] fills the libs' tag defaults only into fields still at
 // zero, so a preset survives, and the file and the environment override it.
 func preset() Config {
-	cfg := Config{}
-	cfg.Service = "tasks"
-	cfg.Addr = ":8082"
-	cfg.AdminAddr = ":9082"
+	cfg := Config{
+		Service:   "tasks",
+		Addr:      ":8082",
+		AdminAddr: ":9082",
+	}
 	cfg.Kafka.ClientID = "tasks"
 	cfg.OTel.ServiceName = "tasks"
 	cfg.OTel.Version = httpx.Version
+
 	return cfg
 }
 
@@ -109,20 +111,28 @@ func preset() Config {
 func Defaults() (Config, error) {
 	cfg := preset()
 	err := httpx.Defaults(EnvPrefix, &cfg)
+
 	return cfg, err
 }
 
 // Load reads the config from the YAML file at yamlPath (optional: a missing
 // file means env-only), overlays TASKS_ environment variables and validates
 // the result.
-func Load(yamlPath string) (Config, error) {
+func Load(yamlPath string) (Config, error) { return LoadFrom(yamlPath, nil) }
+
+// LoadFrom is [Load] reading environ instead of the process environment
+// (nil means the process environment). Tests pass a map, so they need no
+// t.Setenv and can run in parallel.
+func LoadFrom(yamlPath string, environ map[string]string) (Config, error) {
 	cfg := preset()
-	if err := httpx.LoadYAML(yamlPath, EnvPrefix, &cfg); err != nil {
+	if err := httpx.LoadYAMLFrom(yamlPath, EnvPrefix, environ, &cfg); err != nil {
 		return Config{}, err
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
+
 	return cfg, nil
 }
 
@@ -140,13 +150,16 @@ func (c Config) strayKeys(def Config) []error {
 	if !c.ValkeyEnabled() && !reflect.DeepEqual(c.Valkey, def.Valkey) {
 		errs = append(errs, errors.New("VALKEY_* keys are set but neither VALKEY_URL nor VALKEY_ADDR: set the address to turn the cache on, or drop the keys"))
 	}
+
 	if !c.KafkaEnabled() {
 		k := c.Kafka
+
 		k.Brokers = def.Kafka.Brokers // nil or [] alike
 		if !reflect.DeepEqual(k, def.Kafka) {
 			errs = append(errs, errors.New("KAFKA_* keys are set but KAFKA_BROKERS is not: set the brokers to turn the event relay on, or drop the keys"))
 		}
 	}
+
 	return errs
 }
 
@@ -158,44 +171,57 @@ func (c *Config) Validate() error {
 	if err != nil {
 		return err
 	}
+
 	errs := c.strayKeys(def)
 	if err := c.Config.Validate(); err != nil {
 		errs = append(errs, err)
 	}
+
 	if c.Postgres.URL == "" && c.Postgres.Host == "" {
 		errs = append(errs, errors.New("DATABASE_URL or DB_HOST must be set"))
 	}
+
 	if err := c.Postgres.Validate(); err != nil {
 		errs = append(errs, err)
 	}
+
 	if c.KafkaEnabled() {
 		if c.Kafka.Topic == "" {
 			errs = append(errs, errors.New("KAFKA_TOPIC must be set: it is where the task events go"))
 		}
+
 		if err := c.Kafka.Validate(); err != nil {
 			errs = append(errs, err)
 		}
 	}
+
 	if c.Cache.TTL <= 0 || c.Cache.TombstoneTTL <= 0 {
 		errs = append(errs, errors.New("CACHE_TTL and CACHE_TOMBSTONE_TTL must be positive"))
 	}
+
 	if c.Outbox.PollInterval <= 0 || c.Outbox.MaxBackoff < c.Outbox.PollInterval {
 		errs = append(errs, errors.New("OUTBOX_POLL_INTERVAL must be positive and at most OUTBOX_MAX_BACKOFF"))
 	}
+
 	if c.Outbox.BatchSize < 1 || c.Outbox.BatchSize > 1000 {
 		errs = append(errs, fmt.Errorf("OUTBOX_BATCH_SIZE must be 1..1000, got %d", c.Outbox.BatchSize))
 	}
+
 	if c.Outbox.MaxAttempts < 1 {
 		errs = append(errs, fmt.Errorf("OUTBOX_MAX_ATTEMPTS must be at least 1, got %d", c.Outbox.MaxAttempts))
 	}
+
 	if c.Outbox.RejectBackoff <= 0 {
 		errs = append(errs, fmt.Errorf("OUTBOX_REJECT_BACKOFF must be positive, got %s", c.Outbox.RejectBackoff))
 	}
+
 	if c.Idempotency.TTL <= 0 || c.Idempotency.PurgeInterval <= 0 {
 		errs = append(errs, errors.New("IDEMPOTENCY_KEY_TTL and IDEMPOTENCY_PURGE_INTERVAL must be positive"))
 	}
+
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+
 	return nil
 }

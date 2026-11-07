@@ -53,27 +53,31 @@ func directDeps(t testing.TB) deps {
 
 // wired is the running service.
 type wired struct {
-	base  string // http://127.0.0.1:port
-	srv   *httpx.Server
-	db    *pgx.DB
-	store *store.Store
-	relay *outbox.Relay // publishes nothing without brokers
-	log   *testx.LogBuffer
-	topic string
+	base   string // http://127.0.0.1:port
+	srv    *httpx.Server
+	db     *pgx.DB
+	store  *store.Store
+	relay  *outbox.Relay // publishes nothing without brokers
+	log    *testx.LogBuffer
+	topic  string
+	traces *testx.TraceRecorder // every component traces into it, wired explicitly as in main.go
 }
 
 // wire assembles the service as main.go does — migrations, store, cache,
 // relay, optional checks for cache and broker, every lib's collectors — and
 // runs it (server + relay) until the test ends. The logger writes into a
 // buffer the test can search.
-func wire(t testing.TB, d deps) *wired {
+func wire(t testing.TB, backends deps) *wired {
 	t.Helper()
+
 	ctx := context.Background()
 	buf := &testx.LogBuffer{}
 	log := httpx.NewLogger(httpx.LogConfig{Service: "tasks", Level: "info", Format: "json", Writer: buf})
 	topic := testx.Unique("tasks.events")
+	traces := testx.Recorder(t)
+	provider, propagator := traces.Provider, traces.Propagator
 
-	db := testsupport.MigratedDB(t, testsupport.SchemaDSN(t, containers.Postgres(t), d.postgres))
+	db := testsupport.MigratedDB(t, testsupport.SchemaDSN(t, containers.Postgres(t), backends.postgres), pgx.WithTracerProvider(provider))
 
 	// Health re-evaluated every second so the chaos tests see it move; the
 	// check timeout below the interval, as Validate demands.
@@ -81,14 +85,15 @@ func wire(t testing.TB, d deps) *wired {
 		Service: "tasks", Addr: "127.0.0.1:0", AdminAddr: "127.0.0.1:0",
 		HealthInterval: time.Second, HealthTimeout: 900 * time.Millisecond,
 		ShutdownTimeout: 5 * time.Second,
-	}, log)
+	}, log, httpx.WithTracerProvider(provider), httpx.WithPropagator(propagator))
 	require.NoError(t, err)
 	srv.Health.Register("postgres", db.ReadyCheck())
 	srv.Metrics.Registry.MustRegister(db.Collectors()...)
 
 	var taskCache api.Cache = cache.None{}
-	if d.valkey != "" {
-		vk, err := valkey.New(valkey.Config{URL: d.valkey, DialTimeout: 5 * time.Second, OpTimeout: 300 * time.Millisecond}, log)
+
+	if backends.valkey != "" {
+		vk, err := valkey.New(valkey.Config{URL: backends.valkey, DialTimeout: 5 * time.Second, OpTimeout: 300 * time.Millisecond}, log, valkey.WithTracerProvider(provider))
 		require.NoError(t, err)
 		t.Cleanup(vk.Close)
 		srv.Health.Register("valkey", vk.ReadyCheck(), httpx.Optional())
@@ -97,40 +102,47 @@ func wire(t testing.TB, d deps) *wired {
 	}
 
 	var pub outbox.Publisher // nil without brokers: the relay only watches the backlog
+
 	committed := func() {}
-	if len(d.brokers) > 0 {
+
+	if len(backends.brokers) > 0 {
 		producer, err := kafka.NewProducer(ctx, kafka.Config{
-			Brokers: d.brokers, Topic: topic, ClientID: testx.Unique("tasks-it"),
+			Brokers: backends.brokers, Topic: topic, ClientID: testx.Unique("tasks-it"),
 			DialTimeout: 10 * time.Second, PublishTimeout: 2 * time.Second, AllowAutoTopicCreation: true,
-		}, log)
+		}, log, kafka.WithTracerProvider(provider), kafka.WithPropagator(propagator))
 		require.NoError(t, err)
 		t.Cleanup(producer.Close)
 		srv.Health.Register("kafka", producer.ReadyCheck(), httpx.Optional())
 		srv.Metrics.Registry.MustRegister(producer.Collectors()...)
 		pub = producer
 	}
+
 	relay := outbox.NewRelay(db.Pool(), pub, outbox.Config{
 		Topic: topic, PollInterval: 200 * time.Millisecond, MaxBackoff: time.Second,
-	}, log)
+	}, log, outbox.WithTracerProvider(provider), outbox.WithPropagator(propagator))
 	srv.Metrics.Registry.MustRegister(relay.Collectors()...)
+
 	if pub != nil {
 		committed = relay.Wake
 	}
 
-	st := store.New(db.Pool())
+	st := store.New(db.Pool(), store.WithPropagator(propagator))
 	api.Register(srv, api.Deps{Store: st, Cache: taskCache, Logger: log, Committed: committed})
 
 	runCtx, stop := context.WithCancel(ctx)
+
 	serverDone, relayDone := make(chan error, 1), make(chan error, 1)
 	go func() { serverDone <- srv.Run(runCtx) }()
 	go func() { relayDone <- relay.Run(runCtx) }()
+
 	t.Cleanup(func() {
 		stop()
-		<-serverDone
-		<-relayDone
+		require.NoError(t, <-serverDone, "server Run returns nil on cancel")
+		require.NoError(t, <-relayDone, "relay Run returns nil on cancel")
 	})
 	require.Eventually(t, func() bool { return srv.ListenAddr() != "" }, 10*time.Second, 10*time.Millisecond)
-	return &wired{base: "http://" + srv.ListenAddr(), srv: srv, db: db, store: st, relay: relay, log: buf, topic: topic}
+
+	return &wired{base: "http://" + srv.ListenAddr(), srv: srv, db: db, store: st, relay: relay, log: buf, topic: topic, traces: traces}
 }
 
 // --- HTTP helpers ------------------------------------------------------------
@@ -150,48 +162,62 @@ var client = &http.Client{Timeout: 30 * time.Second}
 
 func (w *wired) do(t testing.TB, method, path, body string, headers ...string) response {
 	t.Helper()
+
 	var rd io.Reader
 	if body != "" {
 		rd = strings.NewReader(body)
 	}
+
 	req, err := http.NewRequest(method, w.base+path, rd)
 	require.NoError(t, err)
+
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
 	}
+
 	resp, err := client.Do(req)
 	require.NoError(t, err)
+
 	defer func() { _ = resp.Body.Close() }()
+
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
+
 	return response{status: resp.StatusCode, header: resp.Header, body: bytes.TrimSpace(raw)}
 }
 
 // readyz returns the admin listener's readiness status and body.
 func (w *wired) readyz(t testing.TB) (int, string) {
 	t.Helper()
+
 	rec := httptest.NewRecorder()
-	w.srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	w.srv.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody))
+
 	return rec.Code, rec.Body.String()
 }
 
 func (w *wired) waitReadyz(t testing.TB, want string) string {
 	t.Helper()
+
 	var body string
 	require.Eventually(t, func() bool {
 		_, body = w.readyz(t)
 		return strings.Contains(body, `"status":"`+want+`"`)
 	}, 40*time.Second, 100*time.Millisecond, "readyz never reported %q (last: %s)", want, body)
+
 	return body
 }
 
 func (w *wired) pending(t testing.TB) int64 {
 	t.Helper()
+
 	n, _, err := w.relay.Stats(context.Background())
 	require.NoError(t, err)
+
 	return n
 }
 
@@ -222,22 +248,31 @@ func (w *wired) readEvents(t testing.TB, brokers []string, n int, timeout time.D
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	var mu sync.Mutex
-	var out []consumed
+
+	var (
+		mu  sync.Mutex
+		out []consumed
+	)
+
 	_ = c.Run(ctx, func(_ context.Context, m kafka.Message) error {
 		h := map[string]string{}
 		for _, x := range m.Headers {
 			h[x.Key] = string(x.Value)
 		}
+
 		mu.Lock()
 		defer mu.Unlock()
+
 		out = append(out, consumed{key: string(m.Key), value: m.Value, headers: h})
 		if len(out) >= n {
 			cancel()
 		}
+
 		return nil
 	})
+
 	mu.Lock()
 	defer mu.Unlock()
+
 	return out
 }

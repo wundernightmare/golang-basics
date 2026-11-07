@@ -142,6 +142,7 @@ func DefaultConfig(targets ...string) Config {
 	for _, name := range targets {
 		c.Targets = append(c.Targets, DefaultTarget(name))
 	}
+
 	return c
 }
 
@@ -171,9 +172,11 @@ func LoadConfig(data []byte) (Config, error) {
 	if err := strictDecode(data, &c); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("resilient: parse config: %w", err)
 	}
+
 	if err := c.Validate(); err != nil {
 		return Config{}, err
 	}
+
 	return c, nil
 }
 
@@ -181,20 +184,25 @@ func LoadConfig(data []byte) (Config, error) {
 // their defaults. yaml.Node.Decode forgets KnownFields, hence the re-encode.
 func (t *TargetConfig) UnmarshalYAML(n *yaml.Node) error {
 	type plain TargetConfig
+
 	raw, err := yaml.Marshal(n)
 	if err != nil {
 		return err
 	}
+
 	v := plain(DefaultTarget(""))
 	if err := strictDecode(raw, &v); err != nil {
 		return fmt.Errorf("target at line %d: %w", n.Line, err)
 	}
+
 	*t = TargetConfig(v)
+
 	return nil
 }
 
 func strictDecode(data []byte, v any) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
+
 	return dec.Decode(v)
 }

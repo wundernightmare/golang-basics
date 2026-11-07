@@ -45,10 +45,13 @@ type sampleCounter struct {
 func (c *sampleCounter) inc(now, tick int64) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if now >= c.resetAt {
 		c.resetAt, c.n = now+tick, 0
 	}
+
 	c.n++
+
 	return c.n
 }
 
@@ -56,13 +59,15 @@ func newSamplingHandler(next slog.Handler, initial, thereafter int, tick time.Du
 	if thereafter <= 0 {
 		thereafter = 100
 	}
+
 	if tick <= 0 {
 		tick = time.Second
 	}
+
 	return &samplingHandler{
 		Handler:    next,
 		initial:    uint64(initial),    //nolint:gosec // validated > 0 by the caller
-		thereafter: uint64(thereafter), //nolint:gosec // validated > 0 above
+		thereafter: uint64(thereafter), // validated > 0 above
 		tick:       int64(tick),
 		counters:   new([samplingSlots]sampleCounter),
 		dropped:    new([2]atomic.Uint64),
@@ -74,26 +79,32 @@ func (h *samplingHandler) Handle(ctx context.Context, r slog.Record) error {
 	if r.Level >= slog.LevelWarn || DebugLogging(ctx) {
 		return h.Handler.Handle(ctx, r)
 	}
+
 	c := &h.counters[h.slot(r)]
+
 	now := r.Time.UnixNano()
 	if now == 0 {
 		now = time.Now().UnixNano()
 	}
+
 	n := c.inc(now, h.tick)
 	if n <= h.initial || (n-h.initial)%h.thereafter == 0 {
 		return h.Handler.Handle(ctx, r)
 	}
+
 	if r.Level >= slog.LevelInfo {
 		h.dropped[1].Add(1)
 	} else {
 		h.dropped[0].Add(1)
 	}
+
 	return nil
 }
 
 func (h *samplingHandler) slot(r slog.Record) uint64 {
 	f := fnv.New64a()
 	_, _ = f.Write([]byte(r.Message))
+
 	return (f.Sum64() ^ uint64(r.Level+128)) % samplingSlots //nolint:gosec // level offset keeps it non-negative
 }
 
@@ -105,12 +116,14 @@ func (h *samplingHandler) Dropped() (debug, info uint64) {
 func (h *samplingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	c := *h
 	c.Handler = h.Handler.WithAttrs(attrs)
+
 	return &c
 }
 
 func (h *samplingHandler) WithGroup(name string) slog.Handler {
 	c := *h
 	c.Handler = h.Handler.WithGroup(name)
+
 	return &c
 }
 
@@ -120,12 +133,15 @@ func logDropped(log *slog.Logger) func() (debug, info uint64) {
 	if log == nil {
 		return nil
 	}
+
 	h := log.Handler()
 	if lh, ok := h.(levelHandler); ok { // NewLogger's outermost wrapper
 		h = lh.Handler
 	}
+
 	if sh, ok := h.(*samplingHandler); ok {
 		return sh.Dropped
 	}
+
 	return nil
 }

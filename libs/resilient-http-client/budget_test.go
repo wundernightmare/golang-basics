@@ -10,6 +10,7 @@ import (
 
 func testBudget(t *testing.T, ratio float64, minRetries int) (*retryBudget, *fakeClock) {
 	t.Helper()
+
 	tc := DefaultTarget("t")
 	tc.RetryBudgetRatio = ratio
 	tc.RetryBudgetMinRetries = minRetries
@@ -17,6 +18,7 @@ func testBudget(t *testing.T, ratio float64, minRetries int) (*retryBudget, *fak
 	clk := newFakeClock()
 	b := newRetryBudget(&tc, clk.now)
 	require.NotNil(t, b)
+
 	return b, clk
 }
 
@@ -26,10 +28,13 @@ func retries(b *retryBudget, n int) (granted int) {
 			granted++
 		}
 	}
+
 	return granted
 }
 
 func TestRetryBudget_Disabled(t *testing.T) {
+	t.Parallel()
+
 	tc := DefaultTarget("t")
 	tc.RetryBudgetWindow = 0
 	b := newRetryBudget(&tc, time.Now)
@@ -39,15 +44,20 @@ func TestRetryBudget_Disabled(t *testing.T) {
 }
 
 func TestRetryBudget_MinRetriesWithoutRequests(t *testing.T) {
+	t.Parallel()
+
 	b, _ := testBudget(t, 0.2, 3)
 	assert.Equal(t, 3, retries(b, 10))
 }
 
 func TestRetryBudget_RatioOfRequests(t *testing.T) {
+	t.Parallel()
+
 	b, _ := testBudget(t, 0.2, 0)
 	for range 100 {
 		b.request()
 	}
+
 	assert.Equal(t, 20, retries(b, 50), "20% of 100 requests")
 
 	b.request()
@@ -58,6 +68,8 @@ func TestRetryBudget_RatioOfRequests(t *testing.T) {
 }
 
 func TestRetryBudget_RatioBoundaryIsExclusive(t *testing.T) {
+	t.Parallel()
+
 	b, _ := testBudget(t, 0.5, 1)
 	b.request()
 	b.request()
@@ -65,6 +77,8 @@ func TestRetryBudget_RatioBoundaryIsExclusive(t *testing.T) {
 }
 
 func TestRetryBudget_WindowSlides(t *testing.T) {
+	t.Parallel()
+
 	b, clk := testBudget(t, 0, 2)
 	assert.Equal(t, 2, retries(b, 5))
 	clk.advance(5 * time.Second)
@@ -74,6 +88,8 @@ func TestRetryBudget_WindowSlides(t *testing.T) {
 }
 
 func TestWindow_SumAndReset(t *testing.T) {
+	t.Parallel()
+
 	w := newWindow(time.Second)
 	now := time.Unix(100, 0)
 	w.add(now, 1, 2)

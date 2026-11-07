@@ -10,6 +10,8 @@ import (
 )
 
 func TestLoadConfig_OverlaysDefaults(t *testing.T) {
+	t.Parallel()
+
 	cfg, err := LoadConfig([]byte(`
 max_idle_conns_per_host: 8
 http2_ping_interval: 0s
@@ -32,12 +34,16 @@ targets:
 }
 
 func TestLoadConfig_EmptyIsDefault(t *testing.T) {
+	t.Parallel()
+
 	cfg, err := LoadConfig(nil)
 	require.NoError(t, err)
 	assert.Equal(t, DefaultConfig(), cfg)
 }
 
 func TestLoadConfig_RejectsUnknownKeysAndInvalid(t *testing.T) {
+	t.Parallel()
+
 	for name, doc := range map[string]string{
 		"top-level typo": "max_idle_conn: 3",
 		"target typo":    "targets:\n  - name: a\n    time_out: 1s",
@@ -51,7 +57,10 @@ func TestLoadConfig_RejectsUnknownKeysAndInvalid(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
+	t.Parallel()
+
 	require.NoError(t, (&Config{}).Validate(), "the zero config is valid: everything disabled")
+
 	def := DefaultConfig("a", "b")
 	require.NoError(t, def.Validate())
 
@@ -91,6 +100,7 @@ func TestValidate(t *testing.T) {
 	} {
 		c := DefaultConfig("a", "b")
 		tc.mut(&c)
+
 		err := c.Validate()
 		if assert.Error(t, err, tc.name) {
 			assert.Contains(t, err.Error(), tc.msg, tc.name)
@@ -98,25 +108,25 @@ func TestValidate(t *testing.T) {
 	}
 
 	// Bounds are inclusive where the doc says so.
-	c := DefaultConfig("a")
-	c.Targets[0].BreakerFailureRatio = 1
-	c.Targets[0].RetryBudgetRatio = 1
-	c.Targets[0].RetryMaxDelay = c.Targets[0].RetryBaseDelay
-	c.Targets[0].BreakerMinRequests = 1
-	c.Targets[0].BreakerHalfOpenProbes = 1
-	require.NoError(t, c.Validate())
+	defaults := DefaultConfig("a")
+	defaults.Targets[0].BreakerFailureRatio = 1
+	defaults.Targets[0].RetryBudgetRatio = 1
+	defaults.Targets[0].RetryMaxDelay = defaults.Targets[0].RetryBaseDelay
+	defaults.Targets[0].BreakerMinRequests = 1
+	defaults.Targets[0].BreakerHalfOpenProbes = 1
+	require.NoError(t, defaults.Validate())
 
 	// Breaker knobs are free when the breaker is off.
-	c = DefaultConfig("a")
-	c.Targets[0].BreakerFailureRatio = 0
-	c.Targets[0].BreakerMinRequests, c.Targets[0].BreakerWindow, c.Targets[0].BreakerHalfOpenProbes = 0, 0, 0
-	require.NoError(t, c.Validate())
+	defaults = DefaultConfig("a")
+	defaults.Targets[0].BreakerFailureRatio = 0
+	defaults.Targets[0].BreakerMinRequests, defaults.Targets[0].BreakerWindow, defaults.Targets[0].BreakerHalfOpenProbes = 0, 0, 0
+	require.NoError(t, defaults.Validate())
 
 	// Every problem is reported, not just the first.
-	c = DefaultConfig("a")
-	c.MaxRedirects = -1
-	c.Targets[0].RateLimit = -1
-	err := c.Validate()
+	defaults = DefaultConfig("a")
+	defaults.MaxRedirects = -1
+	defaults.Targets[0].RateLimit = -1
+	err := defaults.Validate()
 	require.Error(t, err)
 	assert.Equal(t, 2, strings.Count(err.Error(), "\n")+1)
 }

@@ -25,6 +25,7 @@ func admin(t testing.TB) *kadm.Client {
 	cl, err := kgo.NewClient(kgo.SeedBrokers(containers.Kafka(t)...))
 	require.NoError(t, err)
 	t.Cleanup(cl.Close)
+
 	return kadm.NewClient(cl)
 }
 
@@ -43,8 +44,11 @@ var harness = kafkatest.Harness{
 			if err != nil {
 				return false
 			}
+
 			n, ok := 0, true
+
 			offs.Each(func(o kadm.ListedOffset) { n++; ok = ok && o.Err == nil })
+
 			return ok && n == len(names)*int(partitions)
 		}, 30*time.Second, 50*time.Millisecond, "topics %v get leaders", names)
 	},
@@ -52,27 +56,40 @@ var harness = kafkatest.Harness{
 		t.Helper()
 		resp, err := admin(t).FetchOffsets(t.Context(), group)
 		require.NoError(t, err)
+
 		out := map[int32]int64{}
+
 		resp.Each(func(o kadm.OffsetResponse) {
 			if o.Topic == topic && o.Err == nil {
 				out[o.Partition] = o.At
 			}
 		})
+
 		return out
 	},
 }
 
-func TestConformance(t *testing.T) { kafkatest.Run(t, harness) }
+func TestConformance(t *testing.T) {
+	t.Parallel()
+	kafkatest.Run(t, harness)
+}
 
-func TestSASLSSL(t *testing.T) { kafkatest.SASLSSL(t) }
+func TestSASLSSL(t *testing.T) {
+	t.Parallel()
+	kafkatest.SASLSSL(t)
+}
 
 func TestProvider(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(t, "franz", kafka.Provider())
 }
 
 // franz-go has no string-keyed configuration: librdkafka properties are a
 // config error naming the way out, not silently ignored.
 func TestValidate_RejectsPassthrough(t *testing.T) {
+	t.Parallel()
+
 	cfg := kafka.Config{Brokers: []string{"b:9092"}, ProducerExtraProperties: kafka.Properties{"batch.size": "1"}}
 	err := cfg.Validate()
 	require.Error(t, err)

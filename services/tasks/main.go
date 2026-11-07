@@ -41,10 +41,12 @@ func main() {
 		Load:     func() (config.Config, error) { return config.Load(os.Getenv("TASKS_CONFIG")) },
 		Defaults: config.Defaults,
 	}
+
 	cfg, code, ok := boot.Config(os.Args[1:], os.Stdout, os.Stderr)
 	if !ok {
 		os.Exit(code)
 	}
+
 	if err := run(cfg); err != nil {
 		// run() owns logging on the failure path; main only sets the exit code,
 		// after every deferred cleanup in run() has executed.
@@ -56,7 +58,8 @@ func run(cfg config.Config) error {
 	logger := httpx.NewLogger(cfg.LogConfig())
 
 	// Tracing first, so spans from the dependency setup below are captured.
-	shutdownTracing, err := otelx.Init(context.Background(), cfg.OTel, logger)
+	// Every component gets the provider / propagator explicitly (see otelx.Telemetry).
+	tel, err := otelx.Init(context.Background(), cfg.OTel, logger)
 	if err != nil {
 		logger.Error("tracing init failed", "err", err)
 		return err
@@ -64,7 +67,8 @@ func run(cfg config.Config) error {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = shutdownTracing(ctx)
+
+		_ = tel.Shutdown(ctx)
 	}()
 
 	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 60*time.Second)
@@ -73,18 +77,20 @@ func run(cfg config.Config) error {
 	// Dependencies — each fails fast at boot if unreachable. Deferred closes
 	// run in reverse: producer, cache, then the database, after the server
 	// and the relay below have stopped.
-	db, err := pgx.New(bootCtx, cfg.Postgres, logger)
+	db, err := pgx.New(bootCtx, cfg.Postgres, logger, pgx.WithTracerProvider(tel.TracerProvider))
 	if err != nil {
 		logger.Error("postgres init failed", "err", err)
 		return err
 	}
 	defer db.Close()
+
 	if err := pgx.Migrate(bootCtx, db.Pool(), migrations.FS, logger); err != nil {
 		logger.Error("migration failed", "err", err)
 		return err
 	}
 
-	srv, err := httpx.NewServer(cfg.Config, logger, httpx.WithConfig(cfg))
+	srv, err := httpx.NewServer(cfg.Config, logger, httpx.WithConfig(cfg),
+		httpx.WithTracerProvider(tel.TracerProvider), httpx.WithPropagator(tel.Propagator))
 	if err != nil {
 		logger.Error("invalid server config", "err", err)
 		return err
@@ -98,13 +104,15 @@ func run(cfg config.Config) error {
 	reportIntegrations(cfg, logger, srv.Metrics.Registry)
 
 	var taskCache api.Cache = cache.None{}
+
 	if cfg.ValkeyEnabled() {
-		vk, err := valkey.New(cfg.Valkey, logger)
+		vk, err := valkey.New(cfg.Valkey, logger, valkey.WithTracerProvider(tel.TracerProvider))
 		if err != nil {
 			logger.Error("valkey init failed", "err", err)
 			return err
 		}
 		defer vk.Close()
+
 		srv.Health.Register("valkey", vk.ReadyCheck(), httpx.Optional())
 		srv.Metrics.Registry.MustRegister(vk.Collectors()...)
 		taskCache = cache.New(vk, cfg.Cache.TTL, cfg.Cache.TombstoneTTL, logger)
@@ -114,18 +122,23 @@ func run(cfg config.Config) error {
 	// but still keeps outbox_pending / outbox_oldest_age_seconds current, so
 	// the backlog of a deploy that lost its broker address is visible.
 	var pub outbox.Publisher // nil interface: no Kafka
+
 	committed := func() {}
+
 	if cfg.KafkaEnabled() {
-		producer, err := kafka.NewProducer(bootCtx, cfg.Kafka, logger)
+		producer, err := kafka.NewProducer(bootCtx, cfg.Kafka, logger,
+			kafka.WithTracerProvider(tel.TracerProvider), kafka.WithPropagator(tel.Propagator))
 		if err != nil {
 			logger.Error("kafka init failed", "err", err)
 			return err
 		}
 		defer producer.Close()
+
 		srv.Health.Register("kafka", producer.ReadyCheck(), httpx.Optional())
 		srv.Metrics.Registry.MustRegister(producer.Collectors()...)
 		pub = producer
 	}
+
 	relay := outbox.NewRelay(db.Pool(), pub, outbox.Config{
 		Topic:         cfg.Kafka.Topic,
 		PollInterval:  cfg.Outbox.PollInterval,
@@ -133,13 +146,14 @@ func run(cfg config.Config) error {
 		MaxBackoff:    cfg.Outbox.MaxBackoff,
 		MaxAttempts:   cfg.Outbox.MaxAttempts,
 		RejectBackoff: cfg.Outbox.RejectBackoff,
-	}, logger)
+	}, logger, outbox.WithTracerProvider(tel.TracerProvider), outbox.WithPropagator(tel.Propagator))
 	srv.Metrics.Registry.MustRegister(relay.Collectors()...)
+
 	if pub != nil {
 		committed = relay.Wake
 	}
 
-	st := store.New(db.Pool())
+	st := store.New(db.Pool(), store.WithPropagator(tel.Propagator))
 	api.Register(srv, api.Deps{
 		Store:     st,
 		Cache:     taskCache,
@@ -151,10 +165,12 @@ func run(cfg config.Config) error {
 	defer stop()
 
 	logger.Info("tasks starting", "addr", cfg.Addr, "admin_addr", cfg.AdminAddr, "version", httpx.Version)
+
 	if err := serve(ctx, srv, relay, st, cfg, logger); err != nil {
 		logger.Error("tasks exited with error", "err", err)
 		return err
 	}
+
 	return nil
 }
 
@@ -178,6 +194,7 @@ func serve(ctx context.Context, srv *httpx.Server, relay *outbox.Relay, st *stor
 	g.Go(func() error {
 		return st.RunJanitor(workers, cfg.Idempotency.TTL, cfg.Idempotency.PurgeInterval, log)
 	})
+
 	return g.Wait()
 }
 
@@ -186,18 +203,21 @@ func serve(ctx context.Context, srv *httpx.Server, relay *outbox.Relay, st *stor
 // on /metrics, so a deploy that lost an address shows on a dashboard instead
 // of as quietly uncached reads or a growing outbox.
 func reportIntegrations(cfg config.Config, log *slog.Logger, reg prometheus.Registerer) {
-	on := map[string]bool{"valkey": cfg.ValkeyEnabled(), "kafka": cfg.KafkaEnabled()}
+	enabled := map[string]bool{"valkey": cfg.ValkeyEnabled(), "kafka": cfg.KafkaEnabled()}
 	g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "app_integration_enabled",
 		Help: "Optional integrations this process runs with (1 on, 0 off: its address is not set).",
 	}, []string{"integration"})
-	for name, enabled := range on {
+
+	for name, enabled := range enabled {
 		v := 0.0
 		if enabled {
 			v = 1
 		}
+
 		g.WithLabelValues(name).Set(v)
 	}
+
 	reg.MustRegister(g)
-	log.Info("integrations resolved", "valkey", on["valkey"], "kafka", on["kafka"])
+	log.Info("integrations resolved", "valkey", enabled["valkey"], "kafka", enabled["kafka"])
 }

@@ -16,6 +16,8 @@ import (
 )
 
 func TestMetrics_EndpointRecordsRequestsByRoute(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	srv.Mux().HandleFunc("GET /items/{id}", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 	get(srv.Handler(), "/items/1")
@@ -38,19 +40,24 @@ func TestMetrics_EndpointRecordsRequestsByRoute(t *testing.T) {
 // Arbitrary methods must not grow the series: anything outside the standard
 // set is counted as _OTHER, on matched and unmatched routes alike.
 func TestMetrics_NonStandardMethodsCollapseToOther(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	srv.Mux().HandleFunc("/any", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
 	for _, m := range []string{"FOO", "BAR", "PROPFIND", "get"} {
-		do(srv.Handler(), httptest.NewRequest(m, "/any", nil))
-		do(srv.Handler(), httptest.NewRequest(m, "/nowhere", nil))
+		do(srv.Handler(), httptest.NewRequest(m, "/any", http.NoBody))
+		do(srv.Handler(), httptest.NewRequest(m, "/nowhere", http.NoBody))
 	}
-	do(srv.Handler(), httptest.NewRequest(http.MethodGet, "/any", nil))
+
+	do(srv.Handler(), httptest.NewRequest(http.MethodGet, "/any", http.NoBody))
 
 	reg := srv.Metrics.Registry
 	assert.Equal(t, 4.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"method": "_OTHER", "route": "/any", "status": "200"}))
 	assert.Equal(t, 4.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"method": "_OTHER", "route": "unmatched", "status": "404"}))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"method": "GET", "route": "/any"}))
 	assert.Len(t, series(t, reg, "http_requests_total"), 3, "four odd methods, still three series")
+
 	for _, m := range series(t, reg, "http_request_duration_seconds") {
 		assert.True(t, hasLabels(m, map[string]string{"method": "_OTHER"}) || hasLabels(m, map[string]string{"method": "GET"}))
 	}
@@ -60,16 +67,20 @@ func TestMetrics_NonStandardMethodsCollapseToOther(t *testing.T) {
 // the counter and the log alike, not the 200 net/http would assume; a handler
 // that reports the cancellation through WriteError is a 499 too, not a 5xx.
 func TestMetrics_ClientGoneIs499(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	srv.Mux().HandleFunc("GET /silent", func(http.ResponseWriter, *http.Request) {})
 	srv.Mux().HandleFunc("GET /failed", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, fmt.Errorf("query: %w", r.Context().Err()))
 	})
+
 	for _, path := range []string{"/silent", "/failed"} {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		do(srv.Handler(), httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx))
+		do(srv.Handler(), httptest.NewRequest(http.MethodGet, path, http.NoBody).WithContext(ctx))
 	}
+
 	get(srv.Handler(), "/silent")
 
 	reg := srv.Metrics.Registry
@@ -83,6 +94,8 @@ func TestMetrics_ClientGoneIs499(t *testing.T) {
 // dashboards and alerts are written against, so lint them the way Prometheus
 // would and pin the ones every service must have.
 func TestMetrics_ExpositionIsLintCleanAndComplete(t *testing.T) {
+	t.Parallel()
+
 	log := httpx.NewLogger(httpx.LogConfig{Level: "error", Writer: &testx.LogBuffer{}, SampleInitial: 100, SampleThereafter: 100})
 	srv, err := httpx.NewServer(httpx.Config{Service: "test", Addr: ":0"}, log)
 	require.NoError(t, err)
@@ -128,17 +141,23 @@ func TestMetrics_ExpositionIsLintCleanAndComplete(t *testing.T) {
 	} {
 		assert.Containsf(t, body, want, "exposition must contain %q", want)
 	}
-	for _, gone := range []string{"http_request_size_bytes", "http_response_size_bytes", "http_panics_total",
-		"go_sched_goroutines_goroutines"} { // the scheduler rule adds latencies only, not a second goroutine count
+
+	for _, gone := range []string{
+		"http_request_size_bytes", "http_response_size_bytes", "http_panics_total",
+		"go_sched_goroutines_goroutines",
+	} { // the scheduler rule adds latencies only, not a second goroutine count
 		assert.NotContainsf(t, body, gone, "%s is not part of the metrics contract", gone)
 	}
 }
 
 func TestMetrics_AdminTrafficIsNotCounted(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	for _, path := range []string{"/healthz", "/livez", "/readyz", "/version", "/metrics", "/admin/config"} {
 		get(srv.Admin(), path)
 	}
+
 	body := get(srv.Admin(), "/metrics").Body.String()
 	assert.NotContains(t, body, `http_requests_total{`, "admin traffic is not API traffic")
 }
@@ -146,32 +165,42 @@ func TestMetrics_AdminTrafficIsNotCounted(t *testing.T) {
 // Exemplars link a metric sample to one trace: present when the request's
 // span is sampled, absent otherwise.
 func TestMetrics_ExemplarCarriesTheSampledTraceID(t *testing.T) {
-	testx.Recorder(t) // an always-sampling global provider; not parallel-safe
-	srv, _ := loggedServer(t, httpx.Config{})
+	t.Parallel()
+
+	recorder := testx.Recorder(t) // an always-sampling provider of this test's own
+	srv, _ := loggedServer(t, httpx.Config{},
+		httpx.WithTracerProvider(recorder.Provider), httpx.WithPropagator(recorder.Propagator))
 	srv.Mux().HandleFunc("GET /x", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
-	req := httptest.NewRequest(http.MethodGet, "/x", nil)
-	req.Header.Set("traceparent", "00-"+traceID+"-00f067aa0ba902b7-01")
+
+	req := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
+	req.Header.Set("Traceparent", "00-"+traceID+"-00f067aa0ba902b7-01")
 	do(srv.Handler(), req)
 
 	var found bool
+
 	for _, m := range series(t, srv.Metrics.Registry, "http_requests_total") {
 		ex := m.GetCounter().GetExemplar()
 		require.NotNil(t, ex, "a sampled request leaves an exemplar")
+
 		for _, l := range ex.GetLabel() {
 			if l.GetName() == "trace_id" && l.GetValue() == traceID {
 				found = true
 			}
 		}
 	}
+
 	assert.True(t, found, "the exemplar is the request's trace id")
 }
 
 func TestMetrics_NoExemplarWithoutASampledSpan(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{})
 	srv.Mux().HandleFunc("GET /x", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	get(srv.Handler(), "/x")
+
 	for _, m := range series(t, srv.Metrics.Registry, "http_requests_total") {
 		assert.Nil(t, m.GetCounter().GetExemplar())
 	}
@@ -180,6 +209,8 @@ func TestMetrics_NoExemplarWithoutASampledSpan(t *testing.T) {
 // Metrics.Middleware works outside a Server chain too, labelling the route
 // "unmatched" since nothing routed the request.
 func TestMetrics_MiddlewareStandalone(t *testing.T) {
+	t.Parallel()
+
 	m := httpx.NewMetrics(httpx.Build("t"), nil)
 	h := m.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }))
 	get(h, "/")

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,7 +28,7 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
 )
 
-func init() { kafka.Register(Driver{}) }
+func init() { kafka.Register(Driver{}) } //nolint:gochecknoinits // a provider registers itself on import (database/sql style); services pick one via internal/kafkaprovider
 
 // Driver is the librdkafka [kafka.Driver].
 type Driver struct{}
@@ -47,7 +48,7 @@ const flushOnClose = 5 * time.Second
 
 // sendErrorKinds maps librdkafka codes onto the libs/kafka kinds (the same
 // codes as Node's KAFKA_SEND_ERRORS).
-var sendErrorKinds = map[ckafka.ErrorCode]string{
+var sendErrorKinds = map[ckafka.ErrorCode]string{ //nolint:gochecknoglobals // read-only lookup table (Go has no const maps)
 	ckafka.ErrQueueFull: kafka.KindQueueFull,
 
 	ckafka.ErrMsgTimedOut:                  kafka.KindUnavailable,
@@ -88,17 +89,20 @@ func sendError(err error) error {
 	if err == nil {
 		return nil
 	}
+
 	kind, code := kafka.KindUnknown, 0
-	var kerr ckafka.Error
-	if errors.As(err, &kerr) {
+
+	if kerr, ok := errors.AsType[ckafka.Error](err); ok {
 		code = int(kerr.Code())
 		if k, ok := sendErrorKinds[kerr.Code()]; ok {
 			kind = k
 		}
+
 		if kerr.IsFatal() {
 			kind = kafka.KindFatal
 		}
 	}
+
 	return kafka.NewSendError(kind, code, err)
 }
 
@@ -112,12 +116,16 @@ func newProducer(cfg kafka.Config, log *slog.Logger, role string) (*producer, er
 	if err != nil {
 		return nil, err
 	}
+
 	p := &producer{cfg: cfg, props: props, log: log, role: role, stats: &statsHolder{}}
+
 	cl, err := p.newClient()
 	if err != nil {
 		return nil, err
 	}
+
 	p.cl = cl
+
 	return p, nil
 }
 
@@ -144,26 +152,28 @@ type producer struct {
 
 // testHookNewClient, when set (tests), sees every client the producer
 // creates.
-var testHookNewClient func(*ckafka.Producer)
+var testHookNewClient func(*ckafka.Producer) //nolint:gochecknoglobals // test seam, nil in production; set only by internal tests
 
 // newClient creates a librdkafka producer and starts draining its events
 // (statistics, errors) and logs. It runs before the producer is shared or
 // with mu held for writing and closed false — never after Close began.
 func (p *producer) newClient() (*ckafka.Producer, error) {
 	props := ckafka.ConfigMap{}
-	for k, v := range p.props {
-		props[k] = v
-	}
+	maps.Copy(props, p.props)
+
 	cl, err := ckafka.NewProducer(&props)
 	if err != nil {
 		return nil, err
 	}
+
 	if testHookNewClient != nil {
 		testHookNewClient(cl)
 	}
+
 	p.wg.Add(2)
 	go func() { defer p.wg.Done(); pumpLogs(cl.Logs(), p.log, p.role) }()
 	go func() { defer p.wg.Done(); p.pumpEvents(cl) }()
+
 	return cl, nil
 }
 
@@ -191,9 +201,11 @@ func (p *producer) pumpEvents(cl *ckafka.Producer) {
 func (p *producer) startReplace(failed *ckafka.Producer) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	if p.closed {
 		return
 	}
+
 	p.wg.Add(1)
 	go p.replace(failed)
 }
@@ -204,17 +216,21 @@ func (p *producer) startReplace(failed *ckafka.Producer) {
 // nothing; a replacement that lost the race with Close does nothing either.
 func (p *producer) replace(failed *ckafka.Producer) {
 	defer p.wg.Done()
+
 	p.mu.Lock()
 	if p.closed || p.cl != failed {
 		p.mu.Unlock()
 		return
 	}
+
 	cl, err := p.newClient()
 	if err != nil {
 		p.mu.Unlock()
 		p.log.Error("kafka producer could not be replaced; readiness stays failed", "err", err)
+
 		return
 	}
+
 	p.cl = cl
 	p.mu.Unlock()
 	failed.Close() // no call is inside it: each one took the read lock and found the new client
@@ -228,22 +244,27 @@ var errProducerClosed = ckafka.NewError(ckafka.ErrState, "producer closed", fals
 // record itself at message.timeout.ms (KAFKA_PUBLISH_TIMEOUT).
 func (p *producer) Send(ctx context.Context, msg kafka.Message) error {
 	topic := msg.Topic
+
 	hs := make([]ckafka.Header, len(msg.Headers))
 	for i, h := range msg.Headers {
 		hs[i] = ckafka.Header{Key: h.Key, Value: h.Value}
 	}
+
 	m := &ckafka.Message{
 		TopicPartition: ckafka.TopicPartition{Topic: &topic, Partition: ckafka.PartitionAny},
 		Key:            msg.Key, Value: msg.Value, Headers: hs,
 	}
 	delivery := make(chan ckafka.Event, 1)
+
 	var err error
 	for {
 		err = p.produce(m, delivery)
+
 		var kerr ckafka.Error
 		if !errors.As(err, &kerr) || kerr.Code() != ckafka.ErrQueueFull {
 			break
 		}
+
 		t := time.NewTimer(queueFullRetry) // back-pressure: wait for room within the budget
 		select {
 		case <-t.C:
@@ -251,16 +272,20 @@ func (p *producer) Send(ctx context.Context, msg kafka.Message) error {
 		case <-ctx.Done():
 			t.Stop()
 		}
+
 		break
 	}
+
 	if err != nil {
 		return sendError(err)
 	}
+
 	select {
 	case ev := <-delivery:
 		if r, ok := ev.(*ckafka.Message); ok {
 			return sendError(r.TopicPartition.Error)
 		}
+
 		return nil
 	case <-ctx.Done():
 		return sendError(ctx.Err())
@@ -271,9 +296,11 @@ func (p *producer) Send(ctx context.Context, msg kafka.Message) error {
 func (p *producer) produce(m *ckafka.Message, delivery chan ckafka.Event) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+
 	if p.closed {
 		return errProducerClosed
 	}
+
 	return p.cl.Produce(m, delivery)
 }
 
@@ -281,9 +308,11 @@ func (p *producer) produce(m *ckafka.Message, delivery chan ckafka.Event) error 
 func (p *producer) Ping(ctx context.Context) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+
 	if p.closed {
 		return errProducerClosed
 	}
+
 	return ping(ctx, p.cl)
 }
 
@@ -300,12 +329,15 @@ func (p *producer) Close() {
 		p.mu.Unlock()
 		return
 	}
+
 	p.closed = true
 	cl := p.cl
 	p.mu.Unlock()
+
 	if left := cl.Flush(int(flushOnClose.Milliseconds())); left > 0 {
 		p.log.Warn("kafka producer closed with records still queued; they were not delivered", "kafka_client", p.role, "records", left)
 	}
+
 	cl.Close()
 	p.wg.Wait()
 }
@@ -316,18 +348,25 @@ func (Driver) NewConsumer(cfg kafka.Config, log *slog.Logger, rb kafka.Rebalance
 	if err != nil {
 		return nil, err
 	}
+
 	cl, err := ckafka.NewConsumer(&props)
 	if err != nil {
 		return nil, err
 	}
+
 	c := &consumer{cl: cl, cfg: cfg, log: log, rb: rb, stats: &statsHolder{}}
+
 	c.logsDone = make(chan struct{})
 	go func() { defer close(c.logsDone); pumpLogs(cl.Logs(), log, "consumer") }()
+
 	if err := cl.SubscribeTopics(cfg.Topics, c.rebalance); err != nil {
 		_ = cl.Close()
+
 		<-c.logsDone
+
 		return nil, err
 	}
+
 	return c, nil
 }
 
@@ -362,7 +401,7 @@ type consumer struct {
 // (a commit waiting on an unreachable coordinator) before giving up on the
 // client: destroying it under a running call would crash the process, so
 // past this the handle is left to the exiting process instead.
-var closeWait = 30 * time.Second // a variable for tests
+var closeWait = 30 * time.Second //nolint:gochecknoglobals // a variable so internal tests can shorten it
 
 func toPartitions(tps []ckafka.TopicPartition) []kafka.TopicPartition {
 	out := make([]kafka.TopicPartition, 0, len(tps))
@@ -371,6 +410,7 @@ func toPartitions(tps []ckafka.TopicPartition) []kafka.TopicPartition {
 			out = append(out, kafka.TopicPartition{Topic: *tp.Topic, Partition: tp.Partition})
 		}
 	}
+
 	return out
 }
 
@@ -379,6 +419,7 @@ func toPartitions(tps []ckafka.TopicPartition) []kafka.TopicPartition {
 // cooperative-sticky) assigns or unassigns itself.
 func (c *consumer) rebalance(cl *ckafka.Consumer, ev ckafka.Event) error {
 	ctx := context.Background()
+
 	switch e := ev.(type) {
 	case ckafka.AssignedPartitions:
 		c.rb.Assigned(ctx, toPartitions(e.Partitions))
@@ -389,57 +430,71 @@ func (c *consumer) rebalance(cl *ckafka.Consumer, ev ckafka.Event) error {
 		} else {
 			c.rb.Revoked(ctx, parts)
 		}
+
 		if c.revoked != nil {
 			for _, p := range parts {
 				c.revoked[p] = struct{}{}
 			}
 		}
 	}
+
 	return nil
 }
 
 // Poll implements kafka.ConsumerClient: wait (in short slices, to notice
 // ctx) for a first record, then take whatever is already queued up to max.
-func (c *consumer) Poll(ctx context.Context, max int) ([]kafka.Message, error) {
+func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, error) {
 	c.mu.Lock()
 	closing := c.closing
 	c.mu.Unlock()
+
 	if closing {
 		return nil, kafka.ErrClientClosed
 	}
+
 	c.revoked = map[kafka.TopicPartition]struct{}{}
 	defer func() { c.revoked = nil }()
-	var out []kafka.Message
-	var errs []error
+
+	var (
+		out  []kafka.Message
+		errs []error
+	)
+
 	timeoutMs := 100
-	for len(out) < max && ctx.Err() == nil {
+	for len(out) < maxRecords && ctx.Err() == nil {
 		ev := c.cl.Poll(timeoutMs)
 		if ev == nil {
 			if len(out) > 0 {
 				break
 			}
+
 			continue
 		}
-		switch e := ev.(type) {
+
+		switch event := ev.(type) {
 		case *ckafka.Message:
-			if e.TopicPartition.Error != nil {
-				errs = append(errs, e.TopicPartition.Error)
+			if event.TopicPartition.Error != nil {
+				errs = append(errs, event.TopicPartition.Error)
 				continue
 			}
-			out = append(out, toMessage(e))
+
+			out = append(out, toMessage(event))
 			timeoutMs = 0
 		case *ckafka.Stats:
-			c.stats.update(e.String())
+			c.stats.update(event.String())
 		case ckafka.Error:
-			if e.IsFatal() {
+			if event.IsFatal() {
 				// The client is finished (e.g. FENCED_INSTANCE_ID): what
 				// was polled is left for the group's next owner.
-				err := fmt.Errorf("%w: %w", kafka.ErrClientFailed, e)
+				err := fmt.Errorf("%w: %w", kafka.ErrClientFailed, event)
 				c.failed.Store(&err)
+
 				return nil, err
 			}
-			errs = append(errs, e)
+
+			errs = append(errs, event)
 		}
+
 		if len(c.revoked) > 0 {
 			kept := out[:0]
 			for _, m := range out {
@@ -447,10 +502,13 @@ func (c *consumer) Poll(ctx context.Context, max int) ([]kafka.Message, error) {
 					kept = append(kept, m)
 				}
 			}
+
 			out = kept
+
 			clear(c.revoked)
 		}
 	}
+
 	return out, errors.Join(errs...)
 }
 
@@ -462,11 +520,15 @@ func toMessage(e *ckafka.Message) kafka.Message {
 			hs[i] = kafka.Header{Key: h.Key, Value: h.Value}
 		}
 	}
-	m := kafka.Message{Key: e.Key, Value: e.Value, Partition: e.TopicPartition.Partition,
-		Offset: int64(e.TopicPartition.Offset), Headers: hs, Timestamp: e.Timestamp}
+
+	m := kafka.Message{
+		Key: e.Key, Value: e.Value, Partition: e.TopicPartition.Partition,
+		Offset: int64(e.TopicPartition.Offset), Headers: hs, Timestamp: e.Timestamp,
+	}
 	if e.TopicPartition.Topic != nil {
 		m.Topic = *e.TopicPartition.Topic
 	}
+
 	return m
 }
 
@@ -481,23 +543,30 @@ func (c *consumer) Commit(ctx context.Context, offsets []kafka.Offset) error {
 		topic := o.Topic
 		tps[i] = ckafka.TopicPartition{Topic: &topic, Partition: o.Partition, Offset: ckafka.Offset(o.Next)}
 	}
+
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		return kafka.ErrClientClosed
 	}
+
 	closing := c.closing
 	c.calls.Add(1)
 	c.mu.Unlock()
+
 	if closing {
 		defer c.calls.Done()
 		return commitOffsets(c.cl, tps)
 	}
+
 	done := make(chan error, 1)
+
 	go func() {
 		defer c.calls.Done()
+
 		done <- commitOffsets(c.cl, tps)
 	}()
+
 	select {
 	case err := <-done:
 		return err
@@ -513,6 +582,7 @@ func commitOffsets(cl *ckafka.Consumer, tps []ckafka.TopicPartition) error {
 			err = errors.Join(err, tp.Error)
 		}
 	}
+
 	return err
 }
 
@@ -525,9 +595,11 @@ func (c *consumer) AllowRebalance() {}
 // use with the same settings.
 func (c *consumer) DeadLetter() kafka.ProducerClient {
 	c.dlqOnce.Do(func() { c.dlq, c.dlqErr = newProducer(c.cfg, c.log, "dlq_producer") })
+
 	if c.dlqErr != nil {
 		return failedProducer{c.dlqErr}
 	}
+
 	return c.dlq
 }
 
@@ -538,14 +610,18 @@ func (c *consumer) Ping(ctx context.Context) error {
 	if err := c.failed.Load(); err != nil {
 		return *err
 	}
+
 	c.mu.Lock()
 	if c.closing || c.closed {
 		c.mu.Unlock()
 		return kafka.ErrClientClosed
 	}
+
 	c.calls.Add(1)
+
 	c.mu.Unlock()
 	defer c.calls.Done()
+
 	return ping(ctx, c.cl)
 }
 
@@ -562,23 +638,29 @@ func (c *consumer) Close() {
 		c.mu.Unlock()
 		return
 	}
+
 	c.closing = true
 	c.mu.Unlock()
+
 	if !waitTimeout(&c.calls, closeWait) {
 		c.mu.Lock()
 		c.closed = true
 		c.mu.Unlock()
 		c.log.Error("kafka consumer: a call into librdkafka did not return; leaving the client to the exiting process",
 			"waited", closeWait.String())
+
 		return
 	}
+
 	if err := c.cl.Close(); err != nil {
 		c.log.Warn("kafka consumer close", "err", err)
 	}
+
 	c.mu.Lock()
 	c.closed = true
 	c.mu.Unlock()
 	<-c.logsDone
+
 	if c.dlq != nil {
 		c.dlq.Close()
 	}
@@ -587,9 +669,12 @@ func (c *consumer) Close() {
 // waitTimeout waits for wg up to d and reports whether it got to zero.
 func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 	done := make(chan struct{})
+
 	go func() { wg.Wait(); close(done) }()
+
 	t := time.NewTimer(d)
 	defer t.Stop()
+
 	select {
 	case <-done:
 		return true

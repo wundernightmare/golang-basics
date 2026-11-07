@@ -13,7 +13,6 @@ import (
 	pgxv5 "github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel"
 
 	"github.com/tracehubmmp/golang-basics/libs/pgx"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
@@ -36,29 +35,40 @@ type outboxRow struct {
 
 func outboxRows(t testing.TB, db *pgx.DB) []outboxRow {
 	t.Helper()
+
 	rows, err := db.Pool().Query(context.Background(),
 		`SELECT event_id::text, aggregate_id, event_type, payload, headers FROM outbox ORDER BY id`)
 	require.NoError(t, err)
+
 	defer rows.Close()
+
 	var out []outboxRow
+
 	for rows.Next() {
-		var r outboxRow
-		var headers []byte
+		var (
+			r       outboxRow
+			headers []byte
+		)
 		require.NoError(t, rows.Scan(&r.EventID, &r.AggregateID, &r.Type, &r.Payload, &headers))
 		require.NoError(t, json.Unmarshal(headers, &r.Headers))
 		out = append(out, r)
 	}
+
 	require.NoError(t, rows.Err())
+
 	return out
 }
 
 func newID(n int) string { return fmt.Sprintf("00000000-0000-0000-0000-%012d", n) }
 
 func TestCreate_TaskAndEventCommitTogether(t *testing.T) {
+	t.Parallel()
+
 	db := testsupport.DB(t, containers.Postgres(t))
-	st := store.New(db.Pool())
-	testx.Recorder(t) // a real propagator + provider, so the trace context is captured
-	ctx, span := otel.Tracer("test").Start(context.Background(), "POST /tasks")
+	recorder := testx.Recorder(t) // a real propagator + provider, so the trace context is captured
+	st := store.New(db.Pool(), store.WithPropagator(recorder.Propagator))
+
+	ctx, span := recorder.Tracer().Start(context.Background(), "POST /tasks")
 	defer span.End()
 
 	before := time.Now()
@@ -79,6 +89,7 @@ func TestCreate_TaskAndEventCommitTogether(t *testing.T) {
 	assert.Equal(t, outbox.TypeTaskCreated, e.Type)
 	assert.Equal(t, task.ID, e.AggregateID)
 	contract.LoadJSONSchema(t, "jsonschema/TaskCreatedEvent.json").Validate(t, e.Payload)
+
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(e.Payload, &payload))
 	assert.Equal(t, e.EventID, payload["event_id"], "the payload names its event id")
@@ -87,6 +98,8 @@ func TestCreate_TaskAndEventCommitTogether(t *testing.T) {
 }
 
 func TestCreate_FailedTransactionLeavesNoEvent(t *testing.T) {
+	t.Parallel()
+
 	db := testsupport.DB(t, containers.Postgres(t))
 	st := store.New(db.Pool())
 	ctx := context.Background()
@@ -99,6 +112,8 @@ func TestCreate_FailedTransactionLeavesNoEvent(t *testing.T) {
 }
 
 func TestCreate_IdempotencyKey(t *testing.T) {
+	t.Parallel()
+
 	db := testsupport.DB(t, containers.Postgres(t))
 	st := store.New(db.Pool())
 	ctx := context.Background()
@@ -117,6 +132,7 @@ func TestCreate_IdempotencyKey(t *testing.T) {
 	require.ErrorIs(t, err, domain.ErrIdempotencyKeyReused)
 
 	assert.Len(t, outboxRows(t, db), 1, "replays and rejections write no event")
+
 	_, err = st.Get(ctx, newID(2))
 	require.ErrorIs(t, err, domain.ErrNotFound, "the replayed attempt's row was rolled back")
 
@@ -131,13 +147,18 @@ func TestCreate_IdempotencyKey(t *testing.T) {
 // Concurrent requests with one key: exactly one task and one event; every
 // caller gets that task.
 func TestCreate_IdempotencyKeyUnderConcurrency(t *testing.T) {
+	t.Parallel()
+
 	db := testsupport.DB(t, containers.Postgres(t))
 	st := store.New(db.Pool())
 	key := &domain.IdempotencyKey{Key: "race", Hash: "h"}
 
 	const n = 8
+
 	var wg sync.WaitGroup
+
 	ids := make([]string, n)
+
 	errs := make([]error, n)
 	for i := range n {
 		wg.Go(func() {
@@ -145,11 +166,14 @@ func TestCreate_IdempotencyKeyUnderConcurrency(t *testing.T) {
 			ids[i], errs[i] = task.ID, err
 		})
 	}
+
 	wg.Wait()
+
 	for i := range n {
 		require.NoError(t, errs[i])
 		assert.Equal(t, ids[0], ids[i])
 	}
+
 	page, err := st.List(context.Background(), domain.PageRequest{Limit: 50})
 	require.NoError(t, err)
 	assert.Len(t, page.Tasks, 1)
@@ -157,6 +181,8 @@ func TestCreate_IdempotencyKeyUnderConcurrency(t *testing.T) {
 }
 
 func TestUpdate_VersionsAndEvents(t *testing.T) {
+	t.Parallel()
+
 	db := testsupport.DB(t, containers.Postgres(t))
 	st := store.New(db.Pool())
 	ctx := context.Background()
@@ -187,10 +213,12 @@ func TestUpdate_VersionsAndEvents(t *testing.T) {
 
 	events := outboxRows(t, db)
 	require.Len(t, events, 3, "created + two updates; failed updates write nothing")
+
 	schema := contract.LoadJSONSchema(t, "jsonschema/TaskUpdatedEvent.json")
 	for i, e := range events[1:] {
 		assert.Equal(t, outbox.TypeTaskUpdated, e.Type)
 		schema.Validate(t, e.Payload)
+
 		var p map[string]any
 		require.NoError(t, json.Unmarshal(e.Payload, &p))
 		assert.Equal(t, float64(i+2), p["version"])
@@ -199,6 +227,8 @@ func TestUpdate_VersionsAndEvents(t *testing.T) {
 }
 
 func TestDelete_VersionsAndEvent(t *testing.T) {
+	t.Parallel()
+
 	db := testsupport.DB(t, containers.Postgres(t))
 	st := store.New(db.Pool())
 	ctx := context.Background()
@@ -207,6 +237,7 @@ func TestDelete_VersionsAndEvent(t *testing.T) {
 
 	stale := int64(5)
 	require.ErrorIs(t, st.Delete(ctx, task.ID, &stale), domain.ErrVersionMismatch)
+
 	current := int64(1)
 	require.NoError(t, st.Delete(ctx, task.ID, &current))
 	require.ErrorIs(t, st.Delete(ctx, task.ID, nil), domain.ErrNotFound)
@@ -222,6 +253,8 @@ func TestDelete_VersionsAndEvent(t *testing.T) {
 // Keyset pages walk (created_at DESC, id DESC) exactly once each, including
 // ties on created_at, and the query is served by the matching index.
 func TestList_KeysetPagination(t *testing.T) {
+	t.Parallel()
+
 	db := testsupport.DB(t, containers.Postgres(t))
 	st := store.New(db.Pool())
 	ctx := context.Background()
@@ -236,22 +269,29 @@ func TestList_KeysetPagination(t *testing.T) {
 	require.NoError(t, err)
 
 	var seen []string
+
 	req := domain.PageRequest{Limit: 2}
+
 	for pages := 0; ; pages++ {
 		require.Less(t, pages, 10)
+
 		page, err := st.List(ctx, req)
 		require.NoError(t, err)
+
 		for _, task := range page.Tasks {
 			seen = append(seen, task.ID)
 		}
+
 		if page.Next == nil {
 			break
 		}
 		// Through the wire form, as a client would.
 		c, err := domain.DecodeCursor(page.Next.Encode())
 		require.NoError(t, err)
+
 		req.Cursor = &c
 	}
+
 	assert.Equal(t, []string{"g", "f", "e", "d", "c", "b", "a"}, seen)
 
 	page, err := st.List(ctx, domain.PageRequest{Limit: 7})
@@ -261,7 +301,9 @@ func TestList_KeysetPagination(t *testing.T) {
 
 	conn, err := db.Pool().Acquire(ctx)
 	require.NoError(t, err)
+
 	defer conn.Release()
+
 	_, err = conn.Exec(ctx, `SET enable_seqscan = off`)
 	require.NoError(t, err)
 	rows, err := conn.Query(ctx, `EXPLAIN SELECT id, title, done, version, created_at FROM tasks WHERE (created_at, id) < ($1, $2)
@@ -269,12 +311,15 @@ func TestList_KeysetPagination(t *testing.T) {
 	require.NoError(t, err)
 	lines, err := pgxv5.CollectRows(rows, pgxv5.RowTo[string])
 	require.NoError(t, err)
+
 	plan := strings.Join(lines, "\n")
 	assert.Contains(t, plan, "Index Scan using tasks_created_at_id_idx")
 	assert.Contains(t, plan, "Index Cond: (ROW(created_at, id) < ROW(", "the cursor is the index range, not a filter")
 }
 
 func TestPurgeIdempotencyKeys(t *testing.T) {
+	t.Parallel()
+
 	db := testsupport.DB(t, containers.Postgres(t))
 	st := store.New(db.Pool())
 	ctx := context.Background()
@@ -288,24 +333,32 @@ func TestPurgeIdempotencyKeys(t *testing.T) {
 	n, err := st.PurgeIdempotencyKeys(ctx, 24*time.Hour)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), n)
+
 	var left []string
+
 	rows, err := db.Pool().Query(ctx, `SELECT key FROM idempotency_keys`)
 	require.NoError(t, err)
+
 	for rows.Next() {
 		var k string
 		require.NoError(t, rows.Scan(&k))
 		left = append(left, k)
 	}
+
 	assert.Equal(t, []string{"new"}, left)
 }
 
 // Re-running the migrations (a second replica booting) is a no-op.
 func TestMigrationsAreIdempotent(t *testing.T) {
+	t.Parallel()
+
 	dsn := testsupport.SchemaDSN(t, containers.Postgres(t), "")
 	testsupport.MigratedDB(t, dsn)
 	db := testsupport.MigratedDB(t, dsn)
+
 	var n int
 	require.NoError(t, db.Pool().QueryRow(context.Background(), `SELECT count(*) FROM schema_migrations`).Scan(&n))
+
 	all, err := pgx.LoadMigrations(migrations.FS)
 	require.NoError(t, err)
 	assert.Equal(t, len(all), n, "each embedded migration applied once")

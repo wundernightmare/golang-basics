@@ -62,7 +62,9 @@ func actions(stmt string) []string {
 	if head == "" {
 		return nil
 	}
+
 	var out []string
+
 	depth, start := 0, len(head)
 	for i := start; i < len(stmt); i++ {
 		switch stmt[i] {
@@ -77,6 +79,7 @@ func actions(stmt string) []string {
 			}
 		}
 	}
+
 	return append(out, strings.TrimSpace(stmt[start:]))
 }
 
@@ -88,6 +91,7 @@ func anyAction(stmt string, re *regexp.Regexp, col int) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -110,6 +114,7 @@ var rules = []rule{
 				return true
 			}
 		}
+
 		return false
 	}, "an implicit cast can truncate or fail on existing rows — make it explicit with USING"},
 	{"SET NOT NULL", func(s string, _ map[string]bool) bool {
@@ -128,11 +133,13 @@ var rules = []rule{
 // whitespace collapsed, upper case (no dollar-quoting in our files).
 func statements(sql string) []string {
 	var out []string
-	for _, s := range strings.Split(lineComment.ReplaceAllString(sql, ""), ";") {
+
+	for s := range strings.SplitSeq(lineComment.ReplaceAllString(sql, ""), ";") {
 		if s = strings.TrimSpace(spaces.ReplaceAllString(s, " ")); s != "" {
 			out = append(out, strings.ToUpper(s))
 		}
 	}
+
 	return out
 }
 
@@ -140,12 +147,15 @@ func statements(sql string) []string {
 func findings(sql string) []string {
 	stmts := statements(sql)
 	created := map[string]bool{}
+
 	for _, s := range stmts {
 		if m := createTable.FindStringSubmatch(s); m != nil {
 			created[strings.ToLower(m[2])] = true
 		}
 	}
+
 	var out []string
+
 	for _, r := range rules {
 		for _, s := range stmts {
 			if r.match(s, created) {
@@ -154,19 +164,24 @@ func findings(sql string) []string {
 			}
 		}
 	}
+
 	return out
 }
 
 func TestMigrations_NoRiskyDDLUnlessReviewed(t *testing.T) {
 	t.Parallel()
+
 	all, err := pgx.LoadMigrations(migrations.FS)
 	require.NoError(t, err)
 	require.NotEmpty(t, all)
+
 	var problems []string
+
 	for _, m := range all {
 		if strings.Contains(m.SQL, reviewed) {
 			continue
 		}
+
 		for _, name := range findings(m.SQL) {
 			for _, r := range rules {
 				if r.name == name {
@@ -175,11 +190,13 @@ func TestMigrations_NoRiskyDDLUnlessReviewed(t *testing.T) {
 			}
 		}
 	}
+
 	assert.Empty(t, problems)
 }
 
 func TestMigrationSafety_Patterns(t *testing.T) {
 	t.Parallel()
+
 	for _, tc := range []struct {
 		sql  string
 		hits []string

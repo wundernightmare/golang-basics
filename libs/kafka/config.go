@@ -168,10 +168,12 @@ func (p *Properties) UnmarshalText(b []byte) error {
 		*p = nil
 		return nil
 	}
+
 	var raw map[string]any
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return fmt.Errorf("want a JSON object of librdkafka properties: %w", err)
 	}
+
 	out := make(Properties, len(raw))
 	for k, v := range raw {
 		switch v := v.(type) {
@@ -185,7 +187,9 @@ func (p *Properties) UnmarshalText(b []byte) error {
 			return fmt.Errorf("property %q: want a string, number or boolean, got %T", k, v)
 		}
 	}
+
 	*p = out
+
 	return nil
 }
 
@@ -228,14 +232,21 @@ const (
 // (use "" for no prefix) and validates it. Every field but KAFKA_BROKERS is
 // defaulted; when KAFKA_TOPICS is unset the consumer subscribes to the single
 // Topic.
-func LoadConfig(prefix string) (Config, error) {
+func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, nil) }
+
+// LoadConfigFrom is [LoadConfig] reading environ instead of the process
+// environment (nil means the process environment). Tests pass a map, so they
+// need no t.Setenv and can run in parallel.
+func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	var cfg Config
-	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix}); err != nil {
+	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix, Environment: environ}); err != nil {
 		return Config{}, fmt.Errorf("kafka: parse config (prefix %q): %w", prefix, err)
 	}
+
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("kafka: config (prefix %q): %w", prefix, err)
 	}
+
 	return cfg, nil
 }
 
@@ -245,9 +256,11 @@ func (c *Config) withDefaults() {
 	if c.Topic == "" {
 		c.Topic = defaultTopic
 	}
+
 	if len(c.Topics) == 0 && c.Topic != "" {
 		c.Topics = []string{c.Topic}
 	}
+
 	setString(&c.Group, defaultGroup)
 	setString(&c.ClientID, defaultClientID)
 	setString(&c.CompressionType, defaultCompressionType)
@@ -302,35 +315,44 @@ func setDuration(d *time.Duration, def time.Duration) {
 // linked provider refuses (see [Driver.Validate]: extra properties).
 func (c *Config) Validate() error {
 	c.withDefaults()
+
 	var errs []error
 	if len(c.Brokers) == 0 {
 		errs = append(errs, errors.New("KAFKA_BROKERS must be set"))
 	}
+
 	for _, b := range c.Brokers {
 		if strings.TrimSpace(b) == "" {
 			errs = append(errs, errors.New("KAFKA_BROKERS: empty broker address"))
 			break
 		}
 	}
+
 	errs = append(errs, c.validateSecurity()...)
+
 	errs = append(errs, c.validateBuffers()...)
 	if !slices.Contains([]string{"none", "gzip", "snappy", "lz4", "zstd"}, c.CompressionType) {
 		errs = append(errs, fmt.Errorf("KAFKA_PRODUCER_COMPRESSION_TYPE: unknown codec %q (want none|gzip|snappy|lz4|zstd)", c.CompressionType))
 	}
+
 	if !slices.Contains([]string{"earliest", "latest"}, c.AutoOffsetReset) {
 		errs = append(errs, fmt.Errorf("KAFKA_CONSUMER_AUTO_OFFSET_RESET: want earliest|latest, got %q", c.AutoOffsetReset))
 	}
+
 	if !slices.Contains([]string{"cooperative-sticky", "range", "roundrobin"}, c.AssignmentStrategy) {
 		errs = append(errs, fmt.Errorf("KAFKA_CONSUMER_ASSIGNMENT_STRATEGY: want cooperative-sticky|range|roundrobin, got %q", c.AssignmentStrategy))
 	}
+
 	if c.SessionTimeoutMs < 0 || c.MaxPollIntervalMs < 0 {
 		errs = append(errs, errors.New("KAFKA_CONSUMER_SESSION_TIMEOUT_MS and KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS must be positive"))
 	} else if c.MaxPollIntervalMs < c.SessionTimeoutMs {
 		errs = append(errs, fmt.Errorf("KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS (%d) is below KAFKA_CONSUMER_SESSION_TIMEOUT_MS (%d)", c.MaxPollIntervalMs, c.SessionTimeoutMs))
 	}
+
 	if c.LingerMs < 0 {
 		errs = append(errs, errors.New("KAFKA_PRODUCER_LINGER_MS must not be negative"))
 	}
+
 	for name, d := range map[string]time.Duration{
 		"KAFKA_DIAL_TIMEOUT":               c.DialTimeout,
 		"KAFKA_PUBLISH_TIMEOUT":            c.PublishTimeout,
@@ -343,18 +365,23 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("%s must be positive", name))
 		}
 	}
+
 	if c.RetryBackoffMax < c.RetryBackoff {
 		errs = append(errs, fmt.Errorf("KAFKA_CONSUMER_RETRY_BACKOFF_MAX (%s) is below KAFKA_CONSUMER_RETRY_BACKOFF (%s)", c.RetryBackoffMax, c.RetryBackoff))
 	}
+
 	if c.MaxPollRecords < 0 {
 		errs = append(errs, errors.New("KAFKA_CONSUMER_MAX_POLL_RECORDS must be positive"))
 	}
+
 	if strings.TrimSpace(c.DeadLetterTopic) != c.DeadLetterTopic {
 		errs = append(errs, fmt.Errorf("KAFKA_DEAD_LETTER_TOPIC %q has surrounding spaces", c.DeadLetterTopic))
 	}
+
 	if d := registered(); d != nil {
 		errs = append(errs, d.Validate(*c)...)
 	}
+
 	return errors.Join(errs...)
 }
 
@@ -363,7 +390,9 @@ func (c *Config) Validate() error {
 // that would otherwise connect in the clear without a word.
 func (c *Config) validateSecurity() []error {
 	var errs []error
+
 	sasl, tls := false, false
+
 	switch c.SecurityProtocol {
 	case "", "plaintext":
 	case "ssl":
@@ -376,10 +405,12 @@ func (c *Config) validateSecurity() []error {
 		errs = append(errs, fmt.Errorf("KAFKA_SECURITY_PROTOCOL: unknown protocol %q (want plaintext|ssl|sasl_plaintext|sasl_ssl)", c.SecurityProtocol))
 		return errs
 	}
+
 	hasPassword := c.SASLPassword != "" || c.SASLPasswordFile != ""
 	if c.SASLPassword != "" && c.SASLPasswordFile != "" {
 		errs = append(errs, errors.New("KAFKA_SASL_PASSWORD and KAFKA_SASL_PASSWORD_FILE are both set: pick one"))
 	}
+
 	if sasl {
 		switch c.SASLMechanism {
 		case "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512":
@@ -394,18 +425,22 @@ func (c *Config) validateSecurity() []error {
 	} else if c.SASLMechanism != "" || c.SASLUsername != "" || hasPassword {
 		errs = append(errs, errors.New("KAFKA_SASL_* set but KAFKA_SECURITY_PROTOCOL is not sasl_plaintext or sasl_ssl"))
 	}
+
 	if !tls && (c.SSLCALocation != "" || c.SSLCertificateLocation != "" || c.SSLKeyLocation != "" || c.SSLEndpointIdentificationAlgorithm != "") {
 		errs = append(errs, errors.New("KAFKA_SSL_* set but KAFKA_SECURITY_PROTOCOL is not ssl or sasl_ssl"))
 	}
+
 	if (c.SSLCertificateLocation == "") != (c.SSLKeyLocation == "") {
 		errs = append(errs, errors.New("KAFKA_SSL_CERTIFICATE_LOCATION and KAFKA_SSL_KEY_LOCATION must be set together"))
 	}
+
 	errs = append(errs, c.validateFiles()...)
 	switch c.SSLEndpointIdentificationAlgorithm {
 	case "", "https", "none":
 	default:
 		errs = append(errs, fmt.Errorf("KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: want https|none, got %q", c.SSLEndpointIdentificationAlgorithm))
 	}
+
 	return errs
 }
 
@@ -417,6 +452,7 @@ func (c *Config) validateSecurity() []error {
 // librdkafka's "probe" (find the system's).
 func (c *Config) validateFiles() []error {
 	var errs []error
+
 	if c.SASLPasswordFile != "" {
 		b, err := os.ReadFile(c.SASLPasswordFile)
 		switch {
@@ -426,6 +462,7 @@ func (c *Config) validateFiles() []error {
 			errs = append(errs, fmt.Errorf("KAFKA_SASL_PASSWORD_FILE: %s is empty", c.SASLPasswordFile))
 		}
 	}
+
 	for key, path := range map[string]string{
 		"KAFKA_SSL_CA_LOCATION":          c.SSLCALocation,
 		"KAFKA_SSL_CERTIFICATE_LOCATION": c.SSLCertificateLocation,
@@ -434,11 +471,14 @@ func (c *Config) validateFiles() []error {
 		if path == "" || (key == "KAFKA_SSL_CA_LOCATION" && path == "probe") {
 			continue
 		}
+
 		if err := readable(path, key == "KAFKA_SSL_CA_LOCATION"); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", key, err))
 		}
 	}
+
 	slices.SortFunc(errs, func(a, b error) int { return strings.Compare(a.Error(), b.Error()) })
+
 	return errs
 }
 
@@ -450,13 +490,16 @@ func readable(path string, dirOK bool) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+
 	st, err := f.Stat()
 	if err != nil {
 		return err
 	}
+
 	if st.IsDir() && !dirOK {
 		return fmt.Errorf("%s is a directory", path)
 	}
+
 	return nil
 }
 
@@ -464,6 +507,7 @@ func readable(path string, dirOK bool) error {
 // librdkafka would at client creation — but at boot, with the key names.
 func (c *Config) validateBuffers() []error {
 	var errs []error
+
 	for name, n := range map[string]int{
 		"KAFKA_PRODUCER_QUEUE_MAX_KBYTES":          c.ProducerQueueMaxKBytes,
 		"KAFKA_PRODUCER_QUEUE_MAX_MESSAGES":        c.ProducerQueueMaxMessages,
@@ -476,15 +520,19 @@ func (c *Config) validateBuffers() []error {
 			errs = append(errs, fmt.Errorf("%s must be positive", name))
 		}
 	}
+
 	if c.MessageMaxBytes > c.ProducerQueueMaxKBytes*1024 {
 		errs = append(errs, fmt.Errorf("KAFKA_MESSAGE_MAX_BYTES (%d) does not fit in KAFKA_PRODUCER_QUEUE_MAX_KBYTES (%d KiB)", c.MessageMaxBytes, c.ProducerQueueMaxKBytes))
 	}
+
 	if c.ConsumerFetchMaxBytes < c.MessageMaxBytes {
 		errs = append(errs, fmt.Errorf("KAFKA_CONSUMER_FETCH_MAX_BYTES (%d) is below KAFKA_MESSAGE_MAX_BYTES (%d): the largest record could not be fetched", c.ConsumerFetchMaxBytes, c.MessageMaxBytes))
 	}
+
 	if c.ConsumerPartitionFetchMaxBytes > c.ConsumerFetchMaxBytes {
 		errs = append(errs, fmt.Errorf("KAFKA_CONSUMER_PARTITION_FETCH_MAX_BYTES (%d) is above KAFKA_CONSUMER_FETCH_MAX_BYTES (%d)", c.ConsumerPartitionFetchMaxBytes, c.ConsumerFetchMaxBytes))
 	}
+
 	return errs
 }
 
@@ -497,6 +545,7 @@ func (c Config) deadLetterTopic(source string) string {
 	if c.DeadLetterTopic == DeadLetterDisabled || c.DeadLetterTopic == "-" {
 		return ""
 	}
+
 	return strings.ReplaceAll(c.DeadLetterTopic, "{topic}", source)
 }
 

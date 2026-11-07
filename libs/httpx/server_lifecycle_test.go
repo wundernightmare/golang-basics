@@ -15,6 +15,8 @@ import (
 )
 
 func TestAccessLog_LevelsAndFields(t *testing.T) {
+	t.Parallel()
+
 	srv, buf := loggedServer(t, httpx.Config{SlowRequest: 20 * time.Millisecond})
 	srv.Mux().HandleFunc("GET /ok/{id}", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "hello") })
 	srv.Mux().HandleFunc("GET /bad", func(w http.ResponseWriter, r *http.Request) {
@@ -29,6 +31,7 @@ func TestAccessLog_LevelsAndFields(t *testing.T) {
 	for _, p := range []string{"/ok/7?q=1", "/bad", "/slow", "/err"} {
 		get(srv.Handler(), p)
 	}
+
 	lines := buf.Lines(t)
 	require.Len(t, lines, 4)
 
@@ -52,8 +55,13 @@ func TestAccessLog_LevelsAndFields(t *testing.T) {
 }
 
 func TestWithMiddleware_SeesRequestIDAndRoute(t *testing.T) {
-	var sawID, sawRoute string
-	var hadDeadline bool
+	t.Parallel()
+
+	var (
+		sawID, sawRoute string
+		hadDeadline     bool
+	)
+
 	mw := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			sawID = httpx.RequestIDFromContext(r.Context())
@@ -63,9 +71,12 @@ func TestWithMiddleware_SeesRequestIDAndRoute(t *testing.T) {
 		})
 	}
 	srv, _ := loggedServer(t, httpx.Config{RequestTimeout: time.Minute}, httpx.WithMiddleware(mw))
+
 	var handlerRoute string
+
 	srv.Mux().HandleFunc("GET /tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
 		handlerRoute = httpx.RouteFromContext(r.Context())
+
 		w.WriteHeader(http.StatusOK)
 	})
 	rec := get(srv.Handler(), "/tasks/9")
@@ -76,11 +87,14 @@ func TestWithMiddleware_SeesRequestIDAndRoute(t *testing.T) {
 }
 
 func TestRequestTimeout_IsTheHandlersDeadline(t *testing.T) {
+	t.Parallel()
+
 	srv, _ := loggedServer(t, httpx.Config{RequestTimeout: 20 * time.Millisecond})
 	srv.Mux().HandleFunc("GET /wait", func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 		httpx.WriteError(w, r, r.Context().Err())
 	})
+
 	start := time.Now()
 	rec := get(srv.Handler(), "/wait")
 	assert.Equal(t, http.StatusGatewayTimeout, rec.Code)
@@ -95,20 +109,30 @@ func TestRequestTimeout_IsTheHandlersDeadline(t *testing.T) {
 }
 
 func TestRequestTimeoutHeader_ShortensNeverExtends(t *testing.T) {
+	t.Parallel()
+
 	remaining := func(cfg time.Duration, header string) (time.Duration, bool) {
 		srv, _ := loggedServer(t, httpx.Config{RequestTimeout: cfg})
-		var left time.Duration
-		var ok bool
+
+		var (
+			left time.Duration
+			ok   bool
+		)
+
 		srv.Mux().HandleFunc("GET /dl", func(_ http.ResponseWriter, r *http.Request) {
 			var dl time.Time
+
 			dl, ok = r.Context().Deadline()
 			left = time.Until(dl)
 		})
-		req := httptest.NewRequest(http.MethodGet, "/dl", nil)
+
+		req := httptest.NewRequest(http.MethodGet, "/dl", http.NoBody)
 		if header != "" {
 			req.Header.Set(httpx.RequestTimeoutHeader, header)
 		}
+
 		do(srv.Handler(), req)
+
 		return left, ok
 	}
 
@@ -131,17 +155,24 @@ func TestRequestTimeoutHeader_ShortensNeverExtends(t *testing.T) {
 // A caller cannot ask for less than HTTP_REQUEST_TIMEOUT_MIN: a 1 ms budget
 // would make every request a 504 the server is blamed (and paged) for.
 func TestRequestTimeoutHeader_NotBelowTheFloor(t *testing.T) {
+	t.Parallel()
+
 	remaining := func(cfg, floor time.Duration, header string) time.Duration {
 		srv, _ := loggedServer(t, httpx.Config{RequestTimeout: cfg, RequestTimeoutMin: floor})
+
 		var left time.Duration
+
 		srv.Mux().HandleFunc("GET /dl", func(_ http.ResponseWriter, r *http.Request) {
 			dl, ok := r.Context().Deadline()
 			assert.True(t, ok)
+
 			left = time.Until(dl)
 		})
-		req := httptest.NewRequest(http.MethodGet, "/dl", nil)
+
+		req := httptest.NewRequest(http.MethodGet, "/dl", http.NoBody)
 		req.Header.Set(httpx.RequestTimeoutHeader, header)
 		do(srv.Handler(), req)
+
 		return left
 	}
 	assert.Greater(t, remaining(time.Minute, time.Second, "1"), 900*time.Millisecond, "1 ms is raised to the floor")
@@ -160,8 +191,10 @@ func TestRequestTimeoutHeader_NotBelowTheFloor(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			}
 		})
-		req := httptest.NewRequest(http.MethodGet, "/slow", nil)
+
+		req := httptest.NewRequest(http.MethodGet, "/slow", http.NoBody)
 		req.Header.Set(httpx.RequestTimeoutHeader, "1")
+
 		return do(srv.Handler(), req).Code
 	}
 	assert.Equal(t, http.StatusNoContent, slow(time.Minute, time.Second), "a 1 ms ask cannot turn a 150 ms request into a 504")
@@ -169,6 +202,8 @@ func TestRequestTimeoutHeader_NotBelowTheFloor(t *testing.T) {
 }
 
 func TestValidate_RequestTimeoutMin(t *testing.T) {
+	t.Parallel()
+
 	base := func() httpx.Config {
 		return httpx.Config{Addr: ":0", ShutdownTimeout: time.Second, MaxBodyBytes: 1, MaxHeaderBytes: 1, RequestTimeout: time.Second}
 	}
@@ -184,6 +219,8 @@ func TestValidate_RequestTimeoutMin(t *testing.T) {
 }
 
 func TestNewServer_NilLoggerIsDiscarded(t *testing.T) {
+	t.Parallel()
+
 	srv, err := httpx.NewServer(httpx.Config{Addr: ":0"}, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, srv.Logger())
@@ -195,6 +232,8 @@ func TestNewServer_NilLoggerIsDiscarded(t *testing.T) {
 // The shutdown sequence: readiness flips first, requests are still served
 // during the drain delay, then Run returns nil once the listeners are closed.
 func TestRun_GracefulShutdownSequence(t *testing.T) {
+	t.Parallel()
+
 	srv, buf := loggedServer(t, httpx.Config{
 		Addr: "127.0.0.1:0", AdminAddr: "127.0.0.1:0",
 		ShutdownDelay: 300 * time.Millisecond, ShutdownTimeout: 2 * time.Second,
@@ -202,16 +241,22 @@ func TestRun_GracefulShutdownSequence(t *testing.T) {
 	srv.Mux().HandleFunc("GET /ping", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "pong") })
 
 	ctx, cancel := context.WithCancel(context.Background())
+
 	done := make(chan error, 1)
 	go func() { done <- srv.Run(ctx) }()
+
 	require.Eventually(t, func() bool { return srv.ListenAddr() != "" && srv.AdminListenAddr() != "" }, 2*time.Second, 5*time.Millisecond)
+
 	api, adm := "http://"+srv.ListenAddr(), "http://"+srv.AdminListenAddr()
 
 	require.Eventually(t, func() bool { return status(t, adm+"/readyz") == http.StatusOK }, 2*time.Second, 5*time.Millisecond)
+
 	resp, err := http.Get(api + "/ping")
 	require.NoError(t, err)
+
 	b, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
+
 	assert.Equal(t, "pong", string(b))
 
 	cancel()
@@ -225,15 +270,20 @@ func TestRun_GracefulShutdownSequence(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("server did not shut down")
 	}
+
 	assert.NotNil(t, buf.Find(t, map[string]any{"msg": "shutdown requested, draining"}))
 	assert.NotNil(t, buf.Find(t, map[string]any{"msg": "servers stopped cleanly"}))
+
 	_, err = http.Get(api + "/ping") //nolint:bodyclose // expected to fail
 	assert.Error(t, err, "the listener is closed")
 }
 
 func TestRun_PortInUseIsReturned(t *testing.T) {
+	t.Parallel()
+
 	busy := httptest.NewServer(http.NotFoundHandler())
 	defer busy.Close()
+
 	srv, _ := loggedServer(t, httpx.Config{Addr: busy.Listener.Addr().String(), AdminAddr: "127.0.0.1:0"})
 	err := srv.Run(context.Background())
 	require.ErrorContains(t, err, "bind API listener")
@@ -241,10 +291,13 @@ func TestRun_PortInUseIsReturned(t *testing.T) {
 
 func status(t testing.TB, url string) int {
 	t.Helper()
-	resp, err := http.Get(url) //nolint:gosec,noctx // test URL on a loopback listener
+
+	resp, err := http.Get(url) // test URL on a loopback listener
 	if err != nil {
 		return 0
 	}
+
 	_ = resp.Body.Close()
+
 	return resp.StatusCode
 }

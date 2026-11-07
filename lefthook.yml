@@ -24,10 +24,12 @@ pre-commit:
     go-lint:
       glob: "*.go"
       # golangci-lint must run inside a module dir; lint only the touched ones.
+      # Through `mise exec`: a hook's PATH may hold another (global) version
+      # than the mise.toml pin, with different findings.
       run: |
         set -e
         for m in $(scripts/touched-modules.sh {staged_files}); do
-          echo "── lint $m"; (cd "$m" && golangci-lint run)
+          echo "── lint $m"; (cd "$m" && mise exec -- golangci-lint run)
         done
     secrets:
       # Staged-diff secret scan — the same rules CI runs over the whole tree.
@@ -92,7 +94,7 @@ pre-push:
           # too; harmless elsewhere. Its tests need built binaries, so the
           # untagged `go test` below is a no-op there.
           echo "── vet $m";  (cd "$m" && go vet -tags e2e ./...)
-          echo "── lint $m"; (cd "$m" && golangci-lint run --build-tags e2e)
+          echo "── lint $m"; (cd "$m" && mise exec -- golangci-lint run --build-tags e2e)
           # Unit tests only (-short skips the testcontainers suites; CI runs those).
           echo "── test $m"; (cd "$m" && go test -short ./...)
         done

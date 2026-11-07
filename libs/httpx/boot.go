@@ -59,15 +59,19 @@ func (b Boot[T]) Config(args []string, stdout, stderr io.Writer) (cfg T, code in
 	fs.SetOutput(stderr)
 	check := fs.Bool("check-config", false, "load and validate the configuration, then exit (0 valid, 78 not)")
 	reference := fs.Bool("config-reference", false, "print every configuration key with its YAML path and default, then exit")
+
 	fs.Usage = func() {} // printed below: to stdout for --help, not after a mistake
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			b.usage(stdout, fs)
 			return cfg, 0, false
 		}
+
 		_, _ = fmt.Fprintf(stderr, "%s: see --help\n", b.Name) // the flag package has said what was wrong
+
 		return cfg, ExitUsage, false
 	}
+
 	if fs.NArg() > 0 {
 		_, _ = fmt.Fprintf(stderr, "%s: unexpected argument %q (see --help)\n", b.Name, fs.Arg(0))
 		return cfg, ExitUsage, false
@@ -79,7 +83,9 @@ func (b Boot[T]) Config(args []string, stdout, stderr io.Writer) (cfg T, code in
 			_, _ = fmt.Fprintf(stderr, "%s: %v\n", b.Name, err)
 			return cfg, ExitConfig, false
 		}
+
 		ConfigReference(stdout, b.Prefix, def)
+
 		return cfg, 0, false
 	}
 
@@ -89,22 +95,28 @@ func (b Boot[T]) Config(args []string, stdout, stderr io.Writer) (cfg T, code in
 		if !strings.HasPrefix(msg, b.Name+":") {
 			msg = b.Name + ": " + msg
 		}
+
 		_, _ = fmt.Fprintln(stderr, msg)
+
 		return cfg, ExitConfig, false
 	}
+
 	if *check {
 		_, _ = fmt.Fprintln(stdout, "config ok")
 		return cfg, 0, false
 	}
+
 	return cfg, 0, true
 }
 
 func (b Boot[T]) usage(w io.Writer, fs *flag.FlagSet) {
 	_, _ = fmt.Fprintf(w, "Usage: %s [--check-config | --config-reference | --help]\n\n", b.Name)
+
 	source := "environment variables " + b.Prefix + "*"
 	if b.File != "" {
 		source += ", over the optional YAML file named by " + b.File
 	}
+
 	_, _ = fmt.Fprintf(w, "Configured by %s (--config-reference lists every key).\n\nFlags:\n", source)
 	fs.SetOutput(w)
 	fs.PrintDefaults()
@@ -118,9 +130,11 @@ func (b Boot[T]) usage(w io.Writer, fs *flag.FlagSet) {
 func ConfigReference(w io.Writer, prefix string, cfg any) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ENV\tYAML\tDEFAULT")
+
 	walkConfig(reflect.ValueOf(cfg), prefix, "", func(env, yaml, def string) {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", env, yaml, def)
 	})
+
 	_ = tw.Flush()
 }
 
@@ -131,27 +145,35 @@ func walkConfig(v reflect.Value, envPrefix, yamlPrefix string, emit func(env, ya
 		if !f.IsExported() {
 			continue
 		}
+
 		yamlName, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+
 		inline := strings.Contains(f.Tag.Get("yaml"), "inline")
 		if yamlName == "" {
 			yamlName = strings.ToLower(f.Name)
 		}
+
 		envName, _, _ := strings.Cut(f.Tag.Get("env"), ",")
 		if envName == "" && f.Type.Kind() == reflect.Struct && f.Type != reflect.TypeFor[time.Time]() {
 			yp := yamlPrefix + yamlName + "."
 			if inline {
 				yp = yamlPrefix
 			}
+
 			walkConfig(v.Field(i), envPrefix+f.Tag.Get("envPrefix"), yp, emit)
+
 			continue
 		}
+
 		if envName == "" {
 			continue
 		}
+
 		yamlPath := yamlPrefix + yamlName
 		if yamlName == "-" {
 			yamlPath = "-"
 		}
+
 		emit(envPrefix+envName, yamlPath, formatDefault(v.Field(i), f.Tag.Get("secret") == "true"))
 	}
 }
@@ -165,6 +187,7 @@ func formatDefault(v reflect.Value, secret bool) string {
 	case secret && !v.IsZero():
 		return "(secret)"
 	}
+
 	switch x := v.Interface().(type) {
 	case time.Duration:
 		return x.String()

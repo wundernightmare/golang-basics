@@ -22,9 +22,12 @@ import (
 // number twice).
 func applied(t testing.TB, g prometheus.Gatherer) float64 {
 	t.Helper()
+
 	mfs, err := g.Gather()
 	require.NoError(t, err)
+
 	var n float64
+
 	for _, mf := range mfs {
 		if mf.GetName() == "consumer_events_total" {
 			for _, m := range mf.GetMetric() {
@@ -32,14 +35,17 @@ func applied(t testing.TB, g prometheus.Gatherer) float64 {
 			}
 		}
 	}
+
 	return n
 }
 
 func newWorker(t testing.TB, opts worker.Options) (*worker.Worker, *prometheus.Registry, *testx.LogBuffer) {
 	t.Helper()
+
 	buf := &testx.LogBuffer{}
 	log := httpx.NewLogger(httpx.LogConfig{Service: "consumer", Level: "info", Format: "json", Writer: buf})
 	reg := prometheus.NewRegistry()
+
 	return worker.New(nil, log, reg, opts), reg, buf
 }
 
@@ -47,22 +53,29 @@ func newWorker(t testing.TB, opts worker.Options) (*worker.Worker, *prometheus.R
 // with the event id, headers with the id and the type.
 func msg(t testing.TB, eventType, eventID string, payload map[string]any) kafka.Message {
 	t.Helper()
+
 	if payload == nil {
 		payload = map[string]any{"event_id": eventID, "id": "task-1", "title": "a private title"}
 	}
+
 	b, err := json.Marshal(payload)
 	require.NoError(t, err)
+
 	m := kafka.Message{Topic: "tasks.events", Value: b, Attempt: 1}
 	if eventID != "" {
 		m.Headers = append(m.Headers, kafka.Header{Key: kafka.HeaderEventID, Value: []byte(eventID)})
 	}
+
 	if eventType != "" {
 		m.Headers = append(m.Headers, kafka.Header{Key: kafka.HeaderEventType, Value: []byte(eventType)})
 	}
+
 	return m
 }
 
 func TestHandle_DispatchesOnEventType(t *testing.T) {
+	t.Parallel()
+
 	w, reg, _ := newWorker(t, worker.Options{})
 	ctx := t.Context()
 
@@ -84,7 +97,8 @@ func TestHandle_DispatchesOnEventType(t *testing.T) {
 }
 
 func TestHandle_PermanentFailures(t *testing.T) {
-	w, reg, _ := newWorker(t, worker.Options{})
+	t.Parallel()
+
 	cases := map[string]struct {
 		msg    kafka.Message
 		reason string
@@ -95,48 +109,57 @@ func TestHandle_PermanentFailures(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			before := testx.Metric(t, reg, "consumer_events_rejected_total", map[string]string{"reason": tc.reason})
+			t.Parallel()
+
+			// A worker (and registry) per case: the cases run in parallel and
+			// two of them share a reason label.
+			w, reg, _ := newWorker(t, worker.Options{})
 			err := w.Handle(t.Context(), tc.msg)
 			require.Error(t, err)
 			assert.True(t, kafka.IsPermanent(err), "no retry can fix it: straight to the DLQ")
-			assert.Equal(t, max(before, 0)+1, testx.Metric(t, reg, "consumer_events_rejected_total", map[string]string{"reason": tc.reason}))
+			assert.Equal(t, 1.0, testx.Metric(t, reg, "consumer_events_rejected_total", map[string]string{"reason": tc.reason}))
+			assert.Equal(t, 0.0, applied(t, reg), "nothing was applied")
 		})
 	}
-	assert.Equal(t, 0.0, applied(t, reg), "nothing was applied")
 }
 
 func TestHandle_DedupesByEventID(t *testing.T) {
-	w, reg, _ := newWorker(t, worker.Options{DedupeSize: 2})
+	t.Parallel()
+
+	testWorker, reg, _ := newWorker(t, worker.Options{DedupeSize: 2})
 	ctx := t.Context()
 
-	require.NoError(t, w.Handle(ctx, msg(t, worker.TaskCreated, "e1", nil)))
-	require.NoError(t, w.Handle(ctx, msg(t, worker.TaskCreated, "e1", nil)), "a duplicate is acknowledged")
+	require.NoError(t, testWorker.Handle(ctx, msg(t, worker.TaskCreated, "e1", nil)))
+	require.NoError(t, testWorker.Handle(ctx, msg(t, worker.TaskCreated, "e1", nil)), "a duplicate is acknowledged")
 	// Same id carried only in the payload.
-	require.NoError(t, w.Handle(ctx, msg(t, worker.TaskCreated, "", map[string]any{"event_id": "e1", "id": "t"})))
+	require.NoError(t, testWorker.Handle(ctx, msg(t, worker.TaskCreated, "", map[string]any{"event_id": "e1", "id": "t"})))
 	assert.Equal(t, 1.0, applied(t, reg))
 	assert.Equal(t, 2.0, testx.Metric(t, reg, "consumer_duplicates_total", nil))
 
 	// Bounded: two newer ids push e1 out, so it is applied again.
-	require.NoError(t, w.Handle(ctx, msg(t, worker.TaskUpdated, "e2", nil)))
-	require.NoError(t, w.Handle(ctx, msg(t, worker.TaskUpdated, "e3", nil)))
-	require.NoError(t, w.Handle(ctx, msg(t, worker.TaskCreated, "e1", nil)))
+	require.NoError(t, testWorker.Handle(ctx, msg(t, worker.TaskUpdated, "e2", nil)))
+	require.NoError(t, testWorker.Handle(ctx, msg(t, worker.TaskUpdated, "e3", nil)))
+	require.NoError(t, testWorker.Handle(ctx, msg(t, worker.TaskCreated, "e1", nil)))
 	assert.Equal(t, 4.0, applied(t, reg))
 	assert.Equal(t, 2.0, testx.Metric(t, reg, "consumer_duplicates_total", nil))
 
 	// No event id at all: nothing to dedupe on, applied every time.
 	legacy := msg(t, "", "", map[string]any{"id": "t"})
-	require.NoError(t, w.Handle(ctx, legacy))
-	require.NoError(t, w.Handle(ctx, legacy))
+	require.NoError(t, testWorker.Handle(ctx, legacy))
+	require.NoError(t, testWorker.Handle(ctx, legacy))
 	assert.Equal(t, 6.0, applied(t, reg))
 }
 
 func TestHandle_TransientFailureIsRetriedNotDeduped(t *testing.T) {
+	t.Parallel()
+
 	calls := 0
 	w, reg, _ := newWorker(t, worker.Options{Inject: func(context.Context, string, kafka.Message) error {
 		calls++
 		if calls == 1 {
 			return errors.New("downstream unavailable")
 		}
+
 		return nil
 	}})
 	m := msg(t, worker.TaskCreated, "e1", nil)
@@ -144,6 +167,7 @@ func TestHandle_TransientFailureIsRetriedNotDeduped(t *testing.T) {
 	err := w.Handle(t.Context(), m)
 	require.Error(t, err)
 	assert.False(t, kafka.IsPermanent(err), "a transient failure is retried by the consumer")
+
 	m.Attempt = 2
 	require.NoError(t, w.Handle(t.Context(), m), "the retry applies it: a failed attempt did not mark the id as seen")
 	assert.Equal(t, 1.0, applied(t, reg))
@@ -151,6 +175,8 @@ func TestHandle_TransientFailureIsRetriedNotDeduped(t *testing.T) {
 }
 
 func TestHandle_LogsIDsNeverContent(t *testing.T) {
+	t.Parallel()
+
 	w, _, buf := newWorker(t, worker.Options{})
 	ctx := httpx.WithRequestID(t.Context(), "e1")
 	require.NoError(t, w.Handle(ctx, msg(t, worker.TaskCreated, "e1", nil)))
@@ -174,10 +200,13 @@ func (f *fakeConsumer) Run(ctx context.Context, h kafka.Handler) error {
 			return err
 		}
 	}
+
 	return nil
 }
 
 func TestRun_DrivesTheHandler(t *testing.T) {
+	t.Parallel()
+
 	fc := &fakeConsumer{msgs: []kafka.Message{msg(t, worker.TaskCreated, "e1", nil), msg(t, worker.TaskDeleted, "e2", nil)}}
 	reg := prometheus.NewRegistry()
 	w := worker.New(fc, slog.New(slog.DiscardHandler), reg, worker.Options{})
@@ -192,7 +221,9 @@ func FuzzHandle(f *testing.F) {
 	f.Add([]byte(`{"event_type":"task.deleted","task":{"id":"t"}}`), "", "")
 	f.Add([]byte(`not json`), "task.updated", "")
 	f.Add([]byte(`{"task":null}`), "\x00", "\xff")
+
 	w := worker.New(nil, slog.New(slog.DiscardHandler), prometheus.NewRegistry(), worker.Options{DedupeSize: 16})
+
 	f.Fuzz(func(t *testing.T, value []byte, eventType, eventID string) {
 		m := kafka.Message{Value: value, Headers: []kafka.Header{
 			{Key: kafka.HeaderEventType, Value: []byte(eventType)},
