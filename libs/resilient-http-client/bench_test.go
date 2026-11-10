@@ -5,21 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 )
-
-func BenchmarkBreaker_AllowRecord(b *testing.B) {
-	tc := DefaultTarget("t")
-	br := newBreaker(&tc, time.Now, nil)
-
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			if tk, ok := br.allow(); ok {
-				br.record(tk, outcomeSuccess)
-			}
-		}
-	})
-}
 
 func BenchmarkSend(b *testing.B) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))

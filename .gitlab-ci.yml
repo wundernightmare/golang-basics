@@ -643,7 +643,7 @@ mutation:
       for m in $(scripts/touched-modules.sh --mutation); do
         flat="$(echo "$m" | tr / -)"
         echo "── $m"
-        (cd "$m" && GOFLAGS=-count=1 gremlins unleash --output "$CI_PROJECT_DIR/gremlins-$flat.json") || status=1
+        scripts/mutate.sh "$m" "$CI_PROJECT_DIR/gremlins-$flat.json" || status=1
       done
       test "$status" = 0
   artifacts:

@@ -38,3 +38,7 @@ override:
     threshold: 85
   - path: ^libs/resilient-http-client$
     threshold: 80
+  - path: ^libs/grpcx$
+    threshold: 80
+  - path: ^libs/resilience$
+    threshold: 80

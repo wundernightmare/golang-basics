@@ -147,6 +147,61 @@ func TestSend_RejectsUnknownTargetAndBadURL(t *testing.T) {
 		"a bad request to a known target is counted")
 	assert.InDelta(t, -1, metric(t, c, "http_client_requests_total", map[string]string{"target": "nope"}), 0,
 		"an unknown target name never becomes a label value")
+
+	for _, url := range []string{"ftp://example.com/file", "http:///no-host", "//example.com/no-scheme"} {
+		_, err = c.Send("api", get(t, t.Context(), url)) //nolint:bodyclose // error
+		require.ErrorIs(t, err, resilient.KindInvalid, url)
+	}
+}
+
+func TestSend_HTTPS(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "secure") }))
+	t.Cleanup(srv.Close)
+
+	client := newClient(t, target(nil), resilient.WithHTTPClient(srv.Client()))
+	resp, err := client.Send("api", get(t, t.Context(), srv.URL))
+	require.NoError(t, err)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, "secure", string(body))
+	assert.NotNil(t, resp.TLS)
+}
+
+// "Zero means disabled": a target that sets only its name has no timeout, no
+// limits, no breaker and no retries — and still works.
+func TestSend_ZeroTargetConfigDisablesEverything(t *testing.T) {
+	t.Parallel()
+
+	srv, hits := server(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/down" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	})
+	client := newClient(t, resilient.TargetConfig{Name: "api"})
+
+	resp, err := client.SendWithRetry("api", get(t, t.Context(), srv.URL))
+	require.NoError(t, err, "timeout 0 is no timeout, not an expired one")
+	require.NoError(t, resp.Body.Close())
+
+	for range 5 {
+		_, err = client.SendWithRetry("api", get(t, t.Context(), srv.URL+"/down")) //nolint:bodyclose // error
+		require.ErrorIs(t, err, resilient.KindStatus)
+	}
+
+	assert.Equal(t, int32(6), hits.Load(), "no retries, and no breaker to stop the calls")
+	assert.InDelta(t, -1, metric(t, client, "http_client_bulkhead_in_flight", nil), 0, "no bulkhead, no gauge")
+}
+
+func TestNew_BulkheadGaugeStartsAtZero(t *testing.T) {
+	t.Parallel()
+
+	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.MaxConcurrent = 2 }))
+	assert.InDelta(t, 0, metric(t, client, "http_client_bulkhead_in_flight", map[string]string{"target": "api"}), 0,
+		"the series exists before the first request")
 }
 
 func TestNew_RejectsInvalidConfigAndDuplicateRegistration(t *testing.T) {
@@ -182,6 +237,7 @@ func TestSend_StatusErrorKeepsBodyAndRetryAfter(t *testing.T) {
 	assert.Equal(t, 429, oe.StatusCode)
 	assert.Equal(t, 7*time.Second, oe.RetryAfter)
 	assert.JSONEq(t, `{"error":"slow down"}`, string(oe.Body))
+	assert.Equal(t, "7", oe.Header.Get("Retry-After"), "the response header is kept")
 	assert.True(t, resilient.Retryable(err))
 	assert.InDelta(t, 1, metric(t, c, "http_client_requests_total", map[string]string{"outcome": "4xx"}), 0)
 }
@@ -256,7 +312,8 @@ func TestSendWithRetry_HonoursRetryAfter(t *testing.T) {
 
 		gap.Store(now - first.Load())
 	})
-	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.RetryMaxDelay = 2 * time.Second }))
+	// Retry-After equals retry_max_delay: the limit is inclusive.
+	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.RetryMaxDelay = time.Second }))
 	resp, err := c.SendWithRetry("api", get(t, t.Context(), srv.URL))
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
@@ -408,20 +465,220 @@ func TestSend_TimeoutIsABreakerFailure(t *testing.T) {
 func TestSend_CallerCancellationDoesNotTripBreaker(t *testing.T) {
 	t.Parallel()
 
-	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+	started := make(chan struct{}, 5)
+	srv, _ := server(t, func(_ http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
 
-	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }))
+		<-r.Context().Done()
+	})
+
+	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }))
 	for range 5 {
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+		ctx, cancel := context.WithCancel(t.Context())
+
+		go func() {
+			<-started
+			cancel()
+		}()
+
+		_, err := client.Send("api", get(t, ctx, srv.URL)) //nolint:bodyclose // error
+		require.ErrorIs(t, err, resilient.KindCanceled)
+		require.ErrorIs(t, err, context.Canceled)
+	}
+
+	st, _ := client.BreakerState("api")
+	assert.Equal(t, resilient.StateClosed, st, "the caller walking away says nothing about the dependency")
+	assert.InDelta(t, 5, metric(t, client, "http_client_requests_total", map[string]string{"outcome": "canceled"}), 0)
+}
+
+// A caller whose own deadline is shorter than the target's timeout must not
+// hide a hung dependency from the breaker.
+func TestSend_CallerDeadlineIsABreakerFailure(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := server(t, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+
+	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 2 }))
+	for range 2 {
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 		_, err := c.Send("api", get(t, ctx, srv.URL)) //nolint:bodyclose // error
 
 		cancel()
-		require.ErrorIs(t, err, resilient.KindCanceled, "the caller's deadline is a cancellation, not a timeout")
+		require.ErrorIs(t, err, resilient.KindCanceled, "the caller's deadline is still reported as a cancellation, not a timeout")
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.False(t, resilient.Retryable(err))
 	}
 
 	st, _ := c.BreakerState("api")
+	assert.Equal(t, resilient.StateOpen, st, "the dependency did not answer within the caller's deadline")
+	assert.InDelta(t, 2, metric(t, c, "http_client_requests_total", map[string]string{"outcome": "canceled"}), 0)
+}
+
+// hangAfterHead answers 200, flushes the first bytes of the body and then
+// hangs until the test ends.
+func hangAfterHead(t *testing.T) *httptest.Server {
+	t.Helper()
+
+	release := make(chan struct{})
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "head")
+		_ = http.NewResponseController(w).Flush()
+
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+
+	t.Cleanup(func() { close(release) })
+
+	return srv
+}
+
+func TestSend_BodyTimeoutIsATypedBreakerFailure(t *testing.T) {
+	t.Parallel()
+
+	srv := hangAfterHead(t)
+	client := newClient(t, target(func(tc *resilient.TargetConfig) {
+		tc.Timeout = 30 * time.Millisecond
+		tc.BreakerMinRequests = 2
+	}))
+
+	for range 2 {
+		resp, err := client.SendWithRetry("api", get(t, t.Context(), srv.URL))
+		require.NoError(t, err, "the headers arrived in time")
+
+		_, err = io.ReadAll(resp.Body)
+		require.NoError(t, resp.Body.Close())
+
+		var oe *resilient.OutboundError
+		require.ErrorAs(t, err, &oe, "a body read failure is an OutboundError too")
+		assert.Equal(t, resilient.KindTimeout, oe.Kind)
+		assert.Equal(t, "api", oe.Target)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+
+	st, _ := client.BreakerState("api")
+	assert.Equal(t, resilient.StateOpen, st, "a dependency that hangs mid-body is failing")
+}
+
+func TestSend_BodyCutShortIsAConnectionFailure(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := server(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		_, _ = io.WriteString(w, "head")
+
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	})
+	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }))
+
+	resp, err := c.Send("api", get(t, t.Context(), srv.URL))
+	require.NoError(t, err)
+
+	_, err = io.ReadAll(resp.Body)
+	require.NoError(t, resp.Body.Close())
+	require.ErrorIs(t, err, resilient.KindConnection)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+
+	st, _ := c.BreakerState("api")
+	assert.Equal(t, resilient.StateOpen, st)
+}
+
+// The breaker hears about an attempt when its timeout fires, even from a
+// caller that sits on the response without reading or closing it.
+func TestSend_UnreadBodyReportsToBreakerAtAttemptTimeout(t *testing.T) {
+	t.Parallel()
+
+	srv := hangAfterHead(t)
+	c := newClient(t, target(func(tc *resilient.TargetConfig) {
+		tc.Timeout = 30 * time.Millisecond
+		tc.BreakerMinRequests = 2
+	}))
+
+	for range 2 {
+		resp, err := c.Send("api", get(t, t.Context(), srv.URL))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = resp.Body.Close() })
+	}
+
+	require.Eventually(t, func() bool {
+		st, _ := c.BreakerState("api")
+		return st == resilient.StateOpen
+	}, 5*time.Second, 5*time.Millisecond)
+}
+
+// A body read to the end, or closed early by the caller, is a success.
+func TestSend_BodyReadOrClosedEarlyIsABreakerSuccess(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := server(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, strings.Repeat("x", 1<<16)) })
+	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }))
+
+	for i := range 4 {
+		resp, err := client.Send("api", get(t, t.Context(), srv.URL))
+		require.NoError(t, err)
+
+		if i%2 == 0 {
+			_, err = io.Copy(io.Discard, resp.Body)
+			require.NoError(t, err)
+		}
+
+		require.NoError(t, resp.Body.Close())
+
+		_, err = resp.Body.Read(make([]byte, 1))
+		require.Error(t, err, "reading a closed body fails")
+	}
+
+	st, _ := client.BreakerState("api")
 	assert.Equal(t, resilient.StateClosed, st)
-	assert.InDelta(t, 5, metric(t, c, "http_client_requests_total", map[string]string{"outcome": "canceled"}), 0)
+}
+
+// A 101 response's body is the connection: it must stay writable.
+func TestSend_UpgradedBodyStaysWritable(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := server(t, func(w http.ResponseWriter, _ *http.Request) {
+		conn, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			return
+		}
+
+		defer func() { _ = conn.Close() }()
+
+		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+		_ = rw.Flush()
+
+		line, _ := rw.ReadString('\n')
+		_, _ = rw.WriteString(line)
+		_ = rw.Flush()
+	})
+	c := newClient(t, target(nil))
+
+	req := get(t, t.Context(), srv.URL)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "echo")
+
+	resp, err := c.Send("api", req)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+
+	rw, ok := resp.Body.(io.ReadWriter)
+	require.True(t, ok, "the upgraded body must be an io.Writer")
+
+	_, err = io.WriteString(rw, "ping\n")
+	require.NoError(t, err)
+
+	echo := make([]byte, 5)
+	_, err = io.ReadFull(rw, echo)
+	require.NoError(t, err)
+	assert.Equal(t, "ping\n", string(echo))
 }
 
 func TestSend_4xxDoesNotTripBreaker(t *testing.T) {
@@ -442,11 +699,25 @@ func TestSend_4xxDoesNotTripBreaker(t *testing.T) {
 func TestSend_ConnectionErrorTripsBreaker(t *testing.T) {
 	t.Parallel()
 
+	// A listener that hangs up on every connection. It keeps its port for the
+	// whole test: a port that was merely freed could be taken by a parallel
+	// test's server.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+
+			_ = conn.Close()
+		}
+	}()
 
 	addr := ln.Addr().String()
-	require.NoError(t, ln.Close()) // nothing listens: connection refused
 
 	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }))
 	_, err = c.Send("api", get(t, t.Context(), "http://"+addr)) //nolint:bodyclose // error
@@ -743,15 +1014,63 @@ func TestSend_LogsWithoutQueryString(t *testing.T) {
 	t.Parallel()
 
 	buf := &testx.LogBuffer{}
-	srv, _ := server(t, status(http.StatusBadGateway))
+	srv, _ := server(t, status(http.StatusInternalServerError)) // 500: the lowest status logged at warn
 	c := newClient(t, target(nil), resilient.WithLogger(slog.New(slog.NewJSONHandler(buf, nil))))
 	_, err := c.Send("api", get(t, t.Context(), srv.URL+"/v1/items?token=s3cr3t")) //nolint:bodyclose // error
 	require.Error(t, err)
 
-	line := buf.Find(t, map[string]any{"level": "WARN", "target": "api"})
+	line := buf.Find(t, map[string]any{"level": "WARN", "target": "api", "msg": "resilient: server error"})
 	require.NotNil(t, line, buf.String())
 	assert.Equal(t, srv.URL+"/v1/items", line["url"])
 	assert.NotContains(t, buf.String(), "s3cr3t")
+}
+
+// Every way an attempt can fail leaves a warning: a failed body, a failed
+// request, a local rejection.
+func TestSend_WarnsOnBodyFailureRequestFailureAndRejection(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/body" {
+			_, _ = io.WriteString(w, "head")
+			_ = http.NewResponseController(w).Flush()
+		}
+
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+
+	t.Cleanup(func() { close(release) })
+
+	buf := &testx.LogBuffer{}
+	client := newClient(t, target(func(tc *resilient.TargetConfig) {
+		tc.Timeout = 30 * time.Millisecond
+		tc.BreakerMinRequests = 2
+	}), resilient.WithLogger(slog.New(slog.NewJSONHandler(buf, nil))))
+
+	resp, err := client.Send("api", get(t, t.Context(), srv.URL+"/body"))
+	require.NoError(t, err)
+
+	_, err = io.ReadAll(resp.Body)
+	require.ErrorIs(t, err, resilient.KindTimeout)
+	require.NoError(t, resp.Body.Close())
+
+	_, err = client.Send("api", get(t, t.Context(), srv.URL+"/hang")) //nolint:bodyclose // error
+	require.ErrorIs(t, err, resilient.KindTimeout)
+
+	_, err = client.Send("api", get(t, t.Context(), srv.URL+"/hang")) //nolint:bodyclose // error
+	require.ErrorIs(t, err, resilient.KindCircuitOpen)
+
+	for _, want := range []map[string]any{
+		{"level": "WARN", "msg": "resilient: response body failed", "reason": "timeout", "url": srv.URL + "/body"},
+		{"level": "WARN", "msg": "resilient: request failed", "reason": "timeout", "url": srv.URL + "/hang"},
+		{"level": "WARN", "msg": "resilient: request rejected", "reason": "circuit_open", "url": srv.URL + "/hang"},
+	} {
+		assert.NotNil(t, buf.Find(t, want), "%v\n%s", want, buf.String())
+	}
 }
 
 func TestShutdown_WaitsForInFlightThenRejects(t *testing.T) {
@@ -785,6 +1104,42 @@ func TestShutdown_WaitsForInFlightThenRejects(t *testing.T) {
 
 	require.NoError(t, open.Body.Close())
 	require.NoError(t, <-done)
+}
+
+// Every concurrent Shutdown caller returns once the client is idle, not just
+// the first one.
+func TestShutdown_ConcurrentCallersAllReturn(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := server(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "x") })
+	client := newClient(t, target(nil))
+
+	open, err := client.Send("api", get(t, t.Context(), srv.URL))
+	require.NoError(t, err)
+
+	const callers = 4
+
+	done := make(chan error, callers)
+	for range callers {
+		go func() { done <- client.Shutdown(t.Context()) }()
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("Shutdown returned (err: %v) with a request in flight", err)
+	case <-time.After(20 * time.Millisecond): // let the callers block
+	}
+
+	require.NoError(t, open.Body.Close())
+
+	for range callers {
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("a Shutdown caller is still waiting although nothing is in flight")
+		}
+	}
 }
 
 func TestShutdown_RaceNoRequestEscapes(t *testing.T) {

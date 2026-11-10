@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/tracehubmmp/golang-basics/libs/resilience"
 )
 
 // Config is the declarative configuration of a [Client].
@@ -128,6 +130,17 @@ type TargetConfig struct {
 	RetryBudgetWindow time.Duration `yaml:"retry_budget_window"`
 }
 
+// breaker is the target's circuit-breaker policy.
+func (t *TargetConfig) breaker() resilience.BreakerConfig {
+	return resilience.BreakerConfig{
+		FailureRatio:   t.BreakerFailureRatio,
+		MinRequests:    t.BreakerMinRequests,
+		Window:         t.BreakerWindow,
+		OpenTimeout:    t.BreakerOpenTimeout,
+		HalfOpenProbes: t.BreakerHalfOpenProbes,
+	}
+}
+
 // DefaultConfig returns the defaults documented on [Config], with the given
 // targets (each built with [DefaultTarget]).
 func DefaultConfig(targets ...string) Config {
@@ -148,14 +161,16 @@ func DefaultConfig(targets ...string) Config {
 
 // DefaultTarget returns the defaults documented on [TargetConfig].
 func DefaultTarget(name string) TargetConfig {
+	breaker := resilience.DefaultBreakerConfig()
+
 	return TargetConfig{
 		Name:                  name,
 		Timeout:               5 * time.Second,
-		BreakerFailureRatio:   0.5,
-		BreakerMinRequests:    20,
-		BreakerWindow:         10 * time.Second,
-		BreakerOpenTimeout:    30 * time.Second,
-		BreakerHalfOpenProbes: 1,
+		BreakerFailureRatio:   breaker.FailureRatio,
+		BreakerMinRequests:    breaker.MinRequests,
+		BreakerWindow:         breaker.Window,
+		BreakerOpenTimeout:    breaker.OpenTimeout,
+		BreakerHalfOpenProbes: breaker.HalfOpenProbes,
 		RetryMaxAttempts:      3,
 		RetryBaseDelay:        100 * time.Millisecond,
 		RetryMaxDelay:         5 * time.Second,

@@ -14,7 +14,7 @@ policy applies:
 | Attempt timeout | per target; starts **before** the rate-limiter and bulkhead waits |
 | Rate limit | `golang.org/x/time/rate` token bucket (fractional rates) |
 | Bulkhead | fixed concurrency cap, bounded wait |
-| Circuit breaker | closed / open / half-open, CAS transitions, generation-tagged probes |
+| Circuit breaker | [`libs/resilience`](../resilience) (shared with [`grpcx`](../grpcx)): closed / open / half-open, CAS transitions, generation-tagged probes |
 | Retries | `SendWithRetry`: idempotent requests only, full-jitter backoff, `Retry-After`, retry budget |
 | Redirects | same host only, at most 10 (both configurable) |
 | Metrics | Prometheus, on your registerer or a private registry |
@@ -34,9 +34,10 @@ resp, err := c.SendWithRetry("billing", req)
 switch {
 case err == nil:
     defer resp.Body.Close() // status < 400; Close releases the bulkhead slot and the attempt timeout
+    // reading resp.Body can fail with an *OutboundError too (KindTimeout, KindConnection)
 case errors.Is(err, resilient.KindStatus):
     var oe *resilient.OutboundError
-    errors.As(err, &oe) // oe.StatusCode, oe.RetryAfter, oe.Body (first 4 KiB)
+    errors.As(err, &oe) // oe.StatusCode, oe.Header, oe.RetryAfter, oe.Body (first 4 KiB)
 case errors.Is(err, resilient.KindCircuitOpen), errors.Is(err, resilient.KindRateLimited):
     // shed load: the dependency is down or we are over our own limit
 }
@@ -52,9 +53,22 @@ The request's context is the overall deadline; `Send` sends once,
 ## Semantics
 
 **Breaker** — counts 5xx, attempt timeouts and connection errors as
-failures. It ignores the caller's cancellation (the parent context ending,
-deadline included), 4xx (429 included: the dependency answered) and local
-rejections. When open for `breaker_open_timeout`, it admits exactly
+failures, and so the caller's own **deadline** passing while the request is
+with the dependency (still reported as `KindCanceled`): a caller deadline
+shorter than the target's `timeout` must not hide an outage. It ignores the
+caller cancelling, 4xx (429 included: the dependency answered) and local
+rejections.
+
+**Response body** — an attempt lasts until its body is read to the end or
+closed, and only then does the breaker hear a success. The attempt timeout
+covers the read; a read that fails returns an `*OutboundError`
+(`KindTimeout`, `KindConnection`, `KindCanceled`) and counts for the breaker
+like the same failure before the headers. If the attempt's context ends while
+the caller still holds the body, the breaker hears that too. A failed body is
+not retried (the response was already handed over), and
+`http_client_requests_total` keeps the outcome known at the headers (`2xx`).
+
+**Half-open** — when open for `breaker_open_timeout`, the breaker admits exactly
 `breaker_half_open_probes` probes; all must succeed to close it, any failure
 re-opens it. A probe rejected locally releases its slot; a request admitted
 before the breaker opened cannot decide a probe (results carry the generation
@@ -73,7 +87,9 @@ the load on the dependency.
 
 **Shutdown** — a request counts as in flight from before the shutdown check to
 the end of its whole retry loop, or until its body is closed on success; so
-`Shutdown` never returns while a request can still reach the network.
+`Shutdown` never returns while a request can still reach the network. It may
+be called more than once, concurrently too: every caller returns when the
+client is idle.
 
 ## Configuration
 
@@ -112,6 +128,29 @@ targets:
     retry_budget_min_retries: 10
     retry_budget_window: 10s     # 0 = no budget
 ```
+
+**In a service config.** A service does not call `LoadConfig`: it embeds
+`resilient.Config` under a key of its own config and loads everything with
+the workspace's one loader, `httpx.LoadYAML` (pinned by `embed_test.go`):
+
+```go
+type Config struct {
+    httpx.Config `yaml:",inline"`
+    HTTPClient resilient.Config `yaml:"http_client"`
+}
+
+cfg := Config{HTTPClient: resilient.DefaultConfig()} // preset: see below
+err := httpx.LoadYAML(path, prefix, &cfg)
+```
+
+**Preset `DefaultConfig()` before loading.** The transport defaults
+(`max_idle_conns_per_host: 32`, the HTTP/2 ping, …) are not struct tags, so
+the loader cannot supply them: without the preset an omitted key is zero —
+net/http's 2 idle connections per host, no health check. Targets default
+themselves either way. Two more things are the service's: call
+`cfg.HTTPClient.Validate()` in its own `Validate` (the loader parses, it does
+not validate), and keep per-environment values in that environment's file —
+the client's keys have no environment form.
 
 An undeclared target name is an error at `Send` — there is no lazily created
 fallback policy.
@@ -158,6 +197,6 @@ your client, which is never modified; its idle connections are yours to close.
 just test          # go test ./...
 just test-verbose  # + race detector
 just lint          # golangci-lint run
-just bench         # breaker and Send micro-benchmarks
+just bench         # Send micro-benchmark (the breaker's is in libs/resilience)
 just mutate libs/resilient-http-client   # from the repo root; scope in .gremlins.yaml
 ```

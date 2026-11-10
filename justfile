@@ -194,12 +194,12 @@ cov-all:
     {{PERF}} scripts/cover.sh e2e
     just cov-check
 
-# GOFLAGS=-count=1: the per-mutant timeout comes from the coverage run, a
-# cached run would time every mutant out.
+# scripts/mutate.sh makes the out-of-tree copies gremlins tests buildable
+# (otherwise every mutant counts as killed) and keeps the run off the test cache.
 
 # Mutation testing (gremlins, perf profile); config: <module>/.gremlins.yaml
 mutate MODULE="libs/resilient-http-client":
-    cd {{MODULE}} && GOFLAGS=-count=1 {{PERF}} {{MISE}} gremlins unleash --output "{{justfile_directory()}}/gremlins-$(basename {{MODULE}}).json"
+    {{PERF}} {{MISE}} scripts/mutate.sh {{MODULE}}
 
 # Input: the JUnit XML in .reports/junit (`just test-junit`, `just
 # schemathesis`). allure-commandline is in the root package.json.
