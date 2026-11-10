@@ -43,7 +43,12 @@ func TestFullJitter_Bounds(t *testing.T) {
 		assert.Greater(t, top, tc.ceiling/2, "retry %d: the range reaches up to the ceiling", tc.retry)
 	}
 
-	assert.LessOrEqual(t, fullJitter(1, 1, 1), time.Duration(1), "a 1ns ceiling is still a valid range")
+	seen := map[time.Duration]bool{}
+	for range 200 {
+		seen[fullJitter(1, 1, 1)] = true
+	}
+
+	assert.Equal(t, map[time.Duration]bool{0: true, 1: true}, seen, "a 1ns ceiling is still a range: both ends are drawn")
 }
 
 func TestParseRetryAfter(t *testing.T) {

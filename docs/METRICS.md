@@ -19,7 +19,7 @@ repo). Where the Go implementation lives is in the last column.
   `^regex` subscription match is `other`); an outbound `target` a configured
   name (an unknown one is an error, never a label).
 - **Latency buckets** (seconds): `.001 .0025 .005 .01 .025 .05 .1 .25 .5 1
-  2.5 5 10` for HTTP server and client and the database; Kafka adds `30 60`;
+  2.5 5 10` for HTTP server and client, the gRPC client and the database; Kafka adds `30 60`;
   the cache starts at `.0001` and ends at `.5`.
 - **What the broker or a server measures better is not collected in the
   app**: consumer-group lag (the broker: Redpanda `/public_metrics`, or
@@ -54,6 +54,20 @@ Go only (features the Node client does not have):
 `http_client_circuit_breaker_transitions_total{target,from,to}`,
 `http_client_bulkhead_in_flight{target}`,
 `http_client_bulkhead_rejected_total{target}`.
+
+## gRPC client — `libs/grpcx` (registered by the service that uses it)
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `grpc_client_requests_total` | counter | `target, method, outcome` (the status code in lower case — `ok`, `unavailable`, `deadline_exceeded`, …, `canceled` spelt as in the HTTP client — or `circuit_open`; a code gRPC does not define is `unknown`) |
+| `grpc_client_request_duration_seconds` | histogram | `target, method` |
+| `grpc_client_retries_total` | counter | `target` |
+| `grpc_client_circuit_breaker_state` | gauge | `target` (0 closed, 1 open, 2 half-open) |
+
+One per **call**, not per attempt: gRPC retries below the instrumented layer,
+and a stream is one call, counted when it ends. `method` is the full gRPC
+method (`/pkg.Service/Method`) — from generated code, so bounded. Go only:
+`grpc_client_circuit_breaker_transitions_total{target,from,to}`.
 
 ## Postgres — `libs/pgx` (client side only)
 

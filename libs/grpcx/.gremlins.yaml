@@ -1,0 +1,21 @@
+# gremlins — mutation testing of grpcx: config validation, the service config
+# it renders, what the breaker is told about a call or a stream.
+#
+#   just mutate libs/grpcx
+#
+# Run it through scripts/mutate.sh (`just mutate` and CI do), never bare: see
+# the script for why a bare `gremlins unleash` reports every mutant killed.
+#
+# Thresholds fail the run (exit 11) when the suite lets too many mutants live.
+# Efficacy = killed / (killed + lived); mutant coverage = mutants any test
+# reaches. Ratchet them up when the numbers improve, never down without a
+# reason in the commit message.
+unleash:
+  workers: 4
+  timeout-coefficient: 8
+  output-statuses: lt # print only LIVED and TIMED OUT — the ones that matter
+  exclude-files:
+    - "doc\\.go$"
+  threshold:
+    efficacy: 90
+    mutant-coverage: 90

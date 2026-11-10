@@ -1,19 +1,32 @@
-# gremlins — mutation testing for the pure decision logic of this module.
+# gremlins — mutation testing for the decision logic of this module.
 #
 #   just mutate                      # this module (default)
 #   just mutate libs/resilient-http-client
 #
-# Scope: breaker.go (state machine), backoff.go (jitter, Retry-After parsing,
-# idempotency and retryable-status rules), budget.go + window.go (retry
-# budget, sliding window) and validate.go (config validation) — logic unit
-# tests pin down exactly, with a fake clock. Everything else is excluded on
-# purpose: the client, transport, bulkhead, config loading, errors and
-# metrics are integration-shaped (httptest, timers, a real transport), where
-# a surviving mutant is mostly noise and the run is slow.
+# Run it through scripts/mutate.sh (`just mutate` and CI do), never bare: see
+# the script for why a bare `gremlins unleash` reports every mutant killed.
 #
-# Run it with GOFLAGS=-count=1 (`just mutate` does): the per-mutant timeout is
-# derived from the initial coverage run, so a cached run makes everything
-# TIMED OUT.
+# Scope: backoff.go (jitter, Retry-After parsing, idempotency and
+# retryable-status rules), validate.go (config validation) — logic unit tests
+# pin down exactly — and client.go: the retry loop, the
+# order of an attempt, what the breaker is told, shutdown. Its tests are
+# httptest-backed, so a mutant there costs a second, but the decisions it
+# holds are the module's guarantees. Excluded on purpose: transport, bulkhead,
+# config loading, errors and metrics — wiring and timers, where a surviving
+# mutant is mostly noise.
+#
+# Reading a run:
+#   - TIMED OUT is a mutant that hangs a test (a breaker that never opens, a
+#     Shutdown that never returns): noticed, but not counted as killed.
+#   - NOT COVERED here is a gremlins limitation, not untested code: Go's
+#     cover profile has no block for a `case` expression or a const.
+#   - Known survivors, all equivalent or cosmetic — anything else is a gap:
+#       backoff.go  secs >= maxRetryAfter      (== gives the same value either way)
+#       client.go   RetryMaxAttempts > 1       (1 attempt either way)
+#                   time.Until(dl) <= delay    (equality is not reachable in a test)
+#                   n > 1 && GetBody != nil    (GetBody on attempt 1 yields the same body)
+#                   d <= 0 in sleep            (a zero timer fires at once)
+#                   "attempt", n+1             (a debug log field)
 #
 # Thresholds fail the run (exit 1) when the suite lets too many mutants live.
 # Efficacy = killed / (killed + lived); mutant coverage = mutants any test
@@ -21,10 +34,9 @@
 # reason in the commit message.
 unleash:
   workers: 4
-  timeout-coefficient: 3
+  timeout-coefficient: 8 # slow failures (a 5s wait that never comes true) are kills, not timeouts
   output-statuses: lt # print only LIVED and TIMED OUT — the ones that matter
   exclude-files:
-    - "client\\.go$"
     - "transport\\.go$"
     - "bulkhead\\.go$"
     - "config\\.go$"
@@ -32,5 +44,5 @@ unleash:
     - "metrics\\.go$"
     - "doc\\.go$"
   threshold:
-    efficacy: 80
+    efficacy: 90
     mutant-coverage: 90

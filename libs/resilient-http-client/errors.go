@@ -3,6 +3,7 @@ package resilient
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -14,7 +15,8 @@ type Kind int
 // The error kinds.
 const (
 	// KindTimeout: the per-attempt timeout expired (the caller's context did
-	// not). Counts as a breaker failure; retryable.
+	// not) — before the response headers, or while its body was being read.
+	// Counts as a breaker failure; retryable (before the headers).
 	KindTimeout Kind = iota + 1
 	// KindConnection: dial, TLS, reset or another transport failure. Counts
 	// as a breaker failure; retryable.
@@ -34,6 +36,9 @@ const (
 	// KindShutdown: rejected locally — the client is shutting down.
 	KindShutdown
 	// KindCanceled: the caller's context was cancelled or hit its deadline.
+	// Never retried. A cancellation tells the breaker nothing; the caller's
+	// deadline passing while the request was with the dependency counts as a
+	// breaker failure.
 	KindCanceled
 	// KindRedirect: a redirect was refused (another host, or too many).
 	KindRedirect
@@ -77,6 +82,9 @@ type OutboundError struct {
 	Target string
 	// StatusCode is the response status for KindStatus (else 0).
 	StatusCode int
+	// Header is the response header for KindStatus (else nil): Content-Type
+	// of Body, WWW-Authenticate, rate-limit headers and the like.
+	Header http.Header
 	// RetryAfter is the response's Retry-After, parsed (else 0).
 	RetryAfter time.Duration
 	// Body is the start (at most 4 KiB) of a KindStatus response body, for

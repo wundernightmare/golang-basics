@@ -107,6 +107,10 @@ func TestValidate(t *testing.T) {
 		}
 	}
 
+	// Zero means disabled, never invalid: a target may set nothing but its name.
+	zero := Config{Targets: []TargetConfig{{Name: "a"}}}
+	require.NoError(t, zero.Validate())
+
 	// Bounds are inclusive where the doc says so.
 	defaults := DefaultConfig("a")
 	defaults.Targets[0].BreakerFailureRatio = 1

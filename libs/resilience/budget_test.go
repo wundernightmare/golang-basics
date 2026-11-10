@@ -1,4 +1,4 @@
-package resilient
+package resilience
 
 import (
 	"testing"
@@ -8,23 +8,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func testBudget(t *testing.T, ratio float64, minRetries int) (*retryBudget, *fakeClock) {
+func testBudget(t *testing.T, ratio float64, minRetries int) (*RetryBudget, *fakeClock) {
 	t.Helper()
 
-	tc := DefaultTarget("t")
-	tc.RetryBudgetRatio = ratio
-	tc.RetryBudgetMinRetries = minRetries
-	tc.RetryBudgetWindow = 10 * time.Second
 	clk := newFakeClock()
-	b := newRetryBudget(&tc, clk.now)
+	b := NewRetryBudget(ratio, minRetries, 10*time.Second, clk.now)
 	require.NotNil(t, b)
 
 	return b, clk
 }
 
-func retries(b *retryBudget, n int) (granted int) {
+func retries(b *RetryBudget, n int) (granted int) {
 	for range n {
-		if b.tryRetry() {
+		if b.TryRetry() {
 			granted++
 		}
 	}
@@ -35,11 +31,9 @@ func retries(b *retryBudget, n int) (granted int) {
 func TestRetryBudget_Disabled(t *testing.T) {
 	t.Parallel()
 
-	tc := DefaultTarget("t")
-	tc.RetryBudgetWindow = 0
-	b := newRetryBudget(&tc, time.Now)
+	b := NewRetryBudget(0.2, 10, 0, time.Now)
 	require.Nil(t, b)
-	b.request()
+	b.Request()
 	assert.Equal(t, 1000, retries(b, 1000))
 }
 
@@ -55,15 +49,15 @@ func TestRetryBudget_RatioOfRequests(t *testing.T) {
 
 	b, _ := testBudget(t, 0.2, 0)
 	for range 100 {
-		b.request()
+		b.Request()
 	}
 
 	assert.Equal(t, 20, retries(b, 50), "20% of 100 requests")
 
-	b.request()
-	b.request()
-	b.request()
-	b.request()
+	b.Request()
+	b.Request()
+	b.Request()
+	b.Request()
 	assert.Equal(t, 1, retries(b, 5), "20 retries < 0.2×104 = 20.8: one more, then 21 ≥ 20.8")
 }
 
@@ -71,8 +65,8 @@ func TestRetryBudget_RatioBoundaryIsExclusive(t *testing.T) {
 	t.Parallel()
 
 	b, _ := testBudget(t, 0.5, 1)
-	b.request()
-	b.request()
+	b.Request()
+	b.Request()
 	assert.Equal(t, 2, retries(b, 5), "1 + 0.5×2 = 2 retries")
 }
 

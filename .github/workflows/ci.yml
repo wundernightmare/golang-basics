@@ -420,7 +420,9 @@ jobs:
           elif [ "$EVENT_NAME" = "pull_request" ]; then
             echo "no base breakdown for master yet — absolute thresholds only"
           fi
-          go-test-coverage --config .testcoverage.yml "${diff_args[@]}" | tee coverage-summary.txt
+          # cover.sh gate, never a bare go-test-coverage: only there do the
+          # paths of .testcoverage.yml match anything.
+          scripts/cover.sh gate "${diff_args[@]}" | tee coverage-summary.txt
           { echo '### Coverage — unit + integration + e2e (covdata merge)'; echo '```'; cat coverage-layers.txt coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: keep this breakdown as the base for pull requests
         if: github.ref == 'refs/heads/master' && github.event_name == 'push'
@@ -579,11 +581,14 @@ jobs:
       - env:
           GREMLINS_VERSION: ${{ needs.versions.outputs.GREMLINS_VERSION }}
         run: go install "github.com/go-gremlins/gremlins/cmd/gremlins@v${GREMLINS_VERSION}"
-      - working-directory: ${{ matrix.module }}
-        env:
-          GOFLAGS: -count=1 # timeout is derived from the coverage run; never let it hit the cache
+      # scripts/mutate.sh, never a bare `gremlins unleash`: without it the
+      # out-of-tree copies gremlins tests do not build and every mutant counts
+      # as killed.
+      - env:
           FLAT: ${{ steps.name.outputs.flat }}
-        run: gremlins unleash --output "$GITHUB_WORKSPACE/gremlins-$FLAT.json" | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          set -o pipefail # a missed threshold must fail the step even through tee
+          scripts/mutate.sh "$MODULE" "$GITHUB_WORKSPACE/gremlins-$FLAT.json" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
