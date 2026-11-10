@@ -16,7 +16,7 @@ func newMetrics() *metrics {
 		}, []string{"result"}),
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "cache_command_duration_seconds",
-			Help:    "Cache command latency in seconds by operation (get, set, del).",
+			Help:    "Cache command latency in seconds by operation (get, set, del, publish).",
 			Buckets: []float64{.0001, .00025, .0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5},
 		}, []string{"operation"}),
 		errors: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -30,8 +30,8 @@ func newMetrics() *metrics {
 // register on its metrics registry:
 //
 //	cache_lookups_total{result="hit|miss|error"}
-//	cache_command_duration_seconds{operation="get|set|del"}
-//	cache_command_errors_total{operation="get|set|del"}
+//	cache_command_duration_seconds{operation="get|set|del|publish"}
+//	cache_command_errors_total{operation="get|set|del|publish"}
 //
 // The hit ratio is rate(hit) / rate(hit + miss). Errors rising while the
 // readiness check stays green usually means OpTimeout is too tight for the

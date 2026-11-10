@@ -108,8 +108,22 @@ docker/deps.yml).
 | Metric | Type | Labels |
 | --- | --- | --- |
 | `cache_lookups_total` | counter | `result` = `hit` \| `miss` \| `error` |
-| `cache_command_duration_seconds` | histogram | `operation` = `get` \| `set` \| `del` |
+| `cache_command_duration_seconds` | histogram | `operation` = `get` \| `set` \| `del` \| `publish` |
 | `cache_command_errors_total` | counter | `operation` |
+
+## Two-level cache — `libs/tiercache` (off-heap L1 in front of the cache above)
+
+Every series carries `cache` = the cache's configured name. Its L2 commands
+are the `cache_*` series above.
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `tiercache_reads_total` | counter | `cache`, `result` = `fresh` \| `stale` (both L1) \| `l2` \| `load` \| `stale_error` \| `not_found` \| `error` |
+| `tiercache_refreshes_total` | counter | `cache`, `result` = `ok` \| `error` \| `dropped` |
+| `tiercache_invalidations_total` | counter | `cache`, `scope` = `key` \| `all` (L1 emptied after the subscription reconnected) |
+| `tiercache_l2_bypassed_total` | counter | `cache` — lookups that skipped L2 while its breaker was open |
+| `tiercache_l1_oversize_total` | counter | `cache` — entries too large for L1 (served from L2) |
+| `tiercache_l1_bytes` | gauge | `cache` — off-heap bytes held, bounded by the configured capacity |
 
 ## Health, build, runtime
 

@@ -383,3 +383,143 @@ func TestUnreachableCacheFailsFastAndCounts(t *testing.T) {
 	assert.False(t, hit)
 	assert.Equal(t, 9, w.ID)
 }
+
+func TestReplaceIsCompareAndSet(t *testing.T) {
+	t.Parallel()
+
+	cache := sharedCache(t)
+	ctx := context.Background()
+	k := testx.Unique("cas")
+
+	stored, err := cache.Replace(ctx, k, "old", "new", time.Minute)
+	require.NoError(t, err)
+	assert.False(t, stored, "an absent key is not created")
+
+	require.NoError(t, cache.Set(ctx, k, "old", time.Minute))
+	stored, err = cache.Replace(ctx, k, "other", "new", time.Minute)
+	require.NoError(t, err)
+	assert.False(t, stored, "a different value is left alone")
+
+	stored, err = cache.Replace(ctx, k, "old", "new", 300*time.Millisecond)
+	require.NoError(t, err)
+	assert.True(t, stored)
+
+	v, ok, err := cache.Get(ctx, k)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "new", v)
+
+	require.NoError(t, cache.Tombstone(ctx, k, time.Minute))
+	stored, err = cache.Replace(ctx, k, "new", "stale", time.Minute)
+	require.NoError(t, err)
+	assert.False(t, stored, "a refresh cannot overwrite a tombstone")
+
+	_, err = cache.Replace(ctx, k, "a", "b", 0)
+	require.Error(t, err)
+
+	k2 := testx.Unique("cas-ttl")
+	require.NoError(t, cache.Set(ctx, k2, "old", time.Minute))
+	stored, err = cache.Replace(ctx, k2, "old", "new", 300*time.Millisecond)
+	require.NoError(t, err)
+	require.True(t, stored)
+	assert.Eventually(t, func() bool {
+		_, ok, _ := cache.Get(ctx, k2)
+		return !ok
+	}, 3*time.Second, 50*time.Millisecond, "the replacement carries its own TTL")
+}
+
+func TestPublishSubscribe(t *testing.T) {
+	t.Parallel()
+
+	publisher, subscriber := sharedCache(t), sharedCache(t)
+	channel := testx.Unique("events")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	subscribed := make(chan struct{}, 1)
+	messages := make(chan string, 8)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- subscriber.Subscribe(ctx, channel,
+			func(message string) { messages <- message },
+			func() { subscribed <- struct{}{} })
+	}()
+
+	select {
+	case <-subscribed:
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "onSubscribed was not called")
+	}
+
+	require.NoError(t, publisher.Publish(ctx, channel, "binary \x00\xff payload"))
+	require.NoError(t, publisher.Publish(ctx, testx.Unique("elsewhere"), "not for us"))
+	require.NoError(t, publisher.Publish(ctx, channel, "second"))
+
+	for _, want := range []string{"binary \x00\xff payload", "second"} {
+		select {
+		case got := <-messages:
+			assert.Equal(t, want, got)
+		case <-time.After(5 * time.Second):
+			require.Fail(t, "message not delivered", want)
+		}
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "Subscribe did not return when its context was cancelled")
+	}
+}
+
+// A subscription that lost its connection resubscribes by itself and says
+// so: onSubscribed is the only sign that messages may have been missed.
+//
+//nolint:paralleltest // serial: chaos via the shared Toxiproxy proxy
+func TestSubscribeSignalsAReconnect(t *testing.T) {
+	proxy := containers.Proxied(t, "valkey")
+	subscriber, err := valkey.New(valkey.Config{URL: "valkey://" + proxy.Addr, DialTimeout: 5 * time.Second, OpTimeout: 200 * time.Millisecond}, nil)
+	require.NoError(t, err)
+	t.Cleanup(subscriber.Close)
+
+	publisher := sharedCache(t)
+	channel := testx.Unique("events")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	subscribed := make(chan struct{}, 8)
+	messages := make(chan string, 8)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- subscriber.Subscribe(ctx, channel,
+			func(message string) { messages <- message },
+			func() { subscribed <- struct{}{} })
+	}()
+
+	waitSubscribed := func(what string) {
+		select {
+		case <-subscribed:
+		case <-time.After(15 * time.Second):
+			require.Fail(t, what)
+		}
+	}
+	waitSubscribed("the first subscription")
+
+	proxy.Down()
+	proxy.Up()
+	waitSubscribed("the subscription after the reconnect")
+
+	require.NoError(t, publisher.Publish(ctx, channel, "delivered"))
+
+	select {
+	case got := <-messages:
+		assert.Equal(t, "delivered", got, "messages flow again without a new Subscribe call")
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "no message after the reconnect")
+	}
+
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+}
