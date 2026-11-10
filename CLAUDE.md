@@ -212,6 +212,9 @@ README; this file is only the high-signal, easy-to-miss bits.
   (`scripts/cover.sh`, `just cov-check`, `.testcoverage.yml`). Tests write
   `-test.gocoverdir`, e2e binaries are built with `COVER=1` and write
   `GOCOVERDIR`. Raise the threshold when it improves; lower only with a reason.
+  The gate is `scripts/cover.sh gate`, never a bare `go-test-coverage`: with
+  no go.mod at the workspace root the tool names files per module, and every
+  `^libs/…` exclude and override in `.testcoverage.yml` matches nothing.
 - **Mutation testing is scoped**: `just mutate <module>` runs gremlins on the
   modules with a `.gremlins.yaml` (`libs/resilient-http-client`, `libs/grpcx`,
   `libs/resilience`; each file says what it excludes) with thresholds that

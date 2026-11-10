@@ -5,6 +5,7 @@
 #   scripts/cover.sh integration   # go test (Docker) → .cover/integration
 #   scripts/cover.sh e2e           # cover-built binaries + the Go e2e suite → .cover/e2e
 #   scripts/cover.sh merge         # .cover/* → .cover/merged, coverage-merged.out, per-layer %
+#   scripts/cover.sh gate [flags…] # go-test-coverage on coverage-merged.out (.testcoverage.yml)
 #
 # merge is strict under CI (CI set): every layer must have data, or the gate
 # would pass on a partial profile. Locally a missing layer is a loud warning
@@ -32,7 +33,7 @@ layer_dir() { mkdir -p "$cover/$1"; echo "$cover/$1"; }
 # go-test-coverage from PATH (CI installs it into bin/) or through mise (local).
 gotestcov() { if command -v go-test-coverage >/dev/null; then go-test-coverage "$@"; else mise exec -- go-test-coverage "$@"; fi; }
 
-case "${1:?usage: cover.sh unit|integration|e2e|merge}" in
+case "${1:?usage: cover.sh unit|integration|e2e|merge|gate}" in
   unit)
     dir="$(layer_dir unit)"
     for m in $modules; do
@@ -95,6 +96,28 @@ case "${1:?usage: cover.sh unit|integration|e2e|merge}" in
       exit 1
     fi
     echo "merged → coverage-merged.out ($(go tool covdata percent -i="$cover/merged" | wc -l | tr -d ' ') packages)"
+    ;;
+  gate)
+    # go-test-coverage names a file by stripping the module path of the go.mod
+    # it finds at the root. A go.work workspace has none there, so it falls
+    # back to names relative to each module ("leak.go", a "config.go" per
+    # module) — and every ^libs/… pattern of .testcoverage.yml, exclude and
+    # override alike, silently matches nothing. A root go.mod that exists for
+    # the length of the run gives it the workspace's path to strip.
+    shift
+    [ ! -e "$root/go.mod" ] || { echo "cover.sh gate: $root/go.mod exists — a workspace root is not a module" >&2; exit 1; }
+    trap 'rm -f "$root/go.mod"' EXIT
+    printf 'module %s\n' "${pkgs%/...}" >"$root/go.mod"
+    status=0
+    (cd "$root" && gotestcov --config .testcoverage.yml "$@") || status=$?
+    rm -f "$root/go.mod"
+    # The proof that the names are workspace-relative: without it the gate
+    # would pass or fail on patterns that match nothing.
+    if ! grep -q '^libs/' "$root/coverage-breakdown.json"; then
+      echo "cover.sh gate: file names are not workspace-relative — the patterns of .testcoverage.yml match nothing" >&2
+      exit 1
+    fi
+    exit "$status"
     ;;
   *) echo "cover.sh: unknown layer '$1'" >&2; exit 2 ;;
 esac

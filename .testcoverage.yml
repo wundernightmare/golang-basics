@@ -6,8 +6,12 @@
 # scripts/cover.sh. One number for the whole pyramid, no layer counted twice.
 # The thresholds are a ratchet: raise them when coverage improves, lower only
 # with a reason in the commit.
+#
+# Run it through `scripts/cover.sh gate` (`just cov-check` and CI do), never
+# bare: the paths below are relative to the workspace root, and the tool only
+# sees them that way when it finds a go.mod there — which a go.work workspace
+# does not have. Bare, every ^libs/… pattern matches nothing.
 profile: coverage-merged.out
-local-prefix: github.com/tracehubmmp/golang-basics
 
 # Per-package breakdown of this run. CI keeps master's copy and hands it to a
 # PR run as --diff-base-breakdown-file-name with --diff-threshold 0: a change

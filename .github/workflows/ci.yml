@@ -420,7 +420,9 @@ jobs:
           elif [ "$EVENT_NAME" = "pull_request" ]; then
             echo "no base breakdown for master yet — absolute thresholds only"
           fi
-          go-test-coverage --config .testcoverage.yml "${diff_args[@]}" | tee coverage-summary.txt
+          # cover.sh gate, never a bare go-test-coverage: only there do the
+          # paths of .testcoverage.yml match anything.
+          scripts/cover.sh gate "${diff_args[@]}" | tee coverage-summary.txt
           { echo '### Coverage — unit + integration + e2e (covdata merge)'; echo '```'; cat coverage-layers.txt coverage-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: keep this breakdown as the base for pull requests
         if: github.ref == 'refs/heads/master' && github.event_name == 'push'

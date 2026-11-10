@@ -537,10 +537,9 @@ coverage:
     - scripts/cover.sh merge
     - |
       if [ -s coverage-breakdown-base.json ] && [ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" ]; then
-        go-test-coverage --config .testcoverage.yml \
-          --diff-base-breakdown-file-name coverage-breakdown-base.json --diff-threshold 0
+        scripts/cover.sh gate --diff-base-breakdown-file-name coverage-breakdown-base.json --diff-threshold 0
       else
-        go-test-coverage --config .testcoverage.yml
+        scripts/cover.sh gate
       fi
   artifacts:
     expire_in: 4 weeks # long enough to always have a base for MRs

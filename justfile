@@ -182,7 +182,7 @@ cov-layer LAYER:
 cov-check:
     for l in unit integration e2e; do if [ -n "$(ls -A ".cover/$l" 2>/dev/null)" ]; then echo "cov-check: layer $l found"; else echo "cov-check: layer $l MISSING — partial merge; use just cov-all"; fi; done
     {{PERF}} scripts/cover.sh merge
-    {{PERF}} {{MISE}} go-test-coverage --config .testcoverage.yml
+    {{PERF}} scripts/cover.sh gate
 
 # Integration needs Docker; e2e builds cover-instrumented binaries.
 
