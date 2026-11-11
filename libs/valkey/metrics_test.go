@@ -21,7 +21,7 @@ func TestMetricsAreLintClean(t *testing.T) {
 		m.lookups.WithLabelValues(r).Inc()
 	}
 
-	for _, op := range []string{"get", "set", "del"} {
+	for _, op := range []string{"get", "set", "del", "publish"} {
 		m.duration.WithLabelValues(op).Observe(0.001)
 		m.errors.WithLabelValues(op).Inc()
 	}

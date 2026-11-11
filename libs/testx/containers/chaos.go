@@ -133,6 +133,20 @@ func (p *Proxy) Latency(d time.Duration) {
 	require.NoError(p.tb, err)
 }
 
+// Toxic adds any other Toxiproxy toxic to the given stream ("upstream": what
+// the service sends, "downstream": what it receives) until Reset or the test
+// ends — the failure modes Down and Latency do not cover:
+//
+//	p.Toxic("timeout", "downstream", map[string]any{"timeout": 0})     // black hole: accepted, never answered
+//	p.Toxic("reset_peer", "downstream", map[string]any{"timeout": 0})  // TCP RST on every connection
+//	p.Toxic("limit_data", "downstream", map[string]any{"bytes": 512})  // connection cut mid-reply
+//	p.Toxic("slicer", "downstream", map[string]any{"average_size": 7, "delay": 100}) // replies in tiny delayed pieces
+func (p *Proxy) Toxic(kind, stream string, attributes map[string]any) {
+	p.tb.Helper()
+	_, err := p.proxy.AddToxic(kind+"_"+stream, kind, stream, 1.0, toxiclient.Attributes(attributes))
+	require.NoError(p.tb, err)
+}
+
 // Reset removes every toxic and re-enables the proxy.
 func (p *Proxy) Reset() {
 	toxics, err := p.proxy.Toxics()

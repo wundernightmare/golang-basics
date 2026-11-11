@@ -32,6 +32,7 @@ easy-to-miss conventions, [`CONTRIBUTING.md`](CONTRIBUTING.md) the workflow.
 | [`libs/resilience`](libs/resilience) | Library | — | Circuit breaker and retry budget shared by the two outbound clients. Pure logic, injected clock. |
 | [`libs/pgx`](libs/pgx) | Library | — | PostgreSQL pool (`jackc/pgx`): config, readiness, migrations, pool metrics. |
 | [`libs/valkey`](libs/valkey) | Library | — | Valkey cache (`valkey-go`): get/set/del, readiness, cache-aside helper. |
+| [`libs/tiercache`](libs/tiercache) | Library | — | Two-level read cache: off-heap fixed-size L1 (`fastcache`) + Valkey L2, stale-while-revalidate, Pub/Sub invalidation; keeps serving without Valkey. |
 | [`libs/kafka`](libs/kafka) | Library | — | Kafka, provider-neutral (no cgo): synchronous producer with an error taxonomy, at-least-once consumer group (commit-after-handle, retries, DLQ, drain), TLS / SASL / mTLS, every buffer a named key, one set of metric names; a conformance suite (`kafkatest`). **[Read its README](libs/kafka/README.md)** — provider comparison and every safe default. |
 | [`libs/kafka-rdkafka`](libs/kafka-rdkafka) | Library | — | Kafka provider: **librdkafka** via confluent-kafka-go — the default; cgo, a static musl binary in the image; any librdkafka property through `KAFKA_*_EXTRA_PROPERTIES`. |
 | [`libs/kafka-franz`](libs/kafka-franz) | Library | — | Kafka provider: **franz-go**, pure Go (`KAFKA_PROVIDER=franz`, `CGO_ENABLED=0`). |

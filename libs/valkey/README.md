@@ -48,6 +48,17 @@ Pick a tombstone TTL a few times the slowest load (seconds). If the tombstone
 write itself fails (cache down), the entry's TTL bounds the staleness — log
 it.
 
+## Compare-and-set and Pub/Sub
+
+- `Replace(key, old, value, ttl)` is `SET … IFEQ` (Valkey ≥ 8.1): it writes
+  only over exactly `old`, so a refresh cannot overwrite a tombstone or a
+  newer value.
+- `Publish` / `Subscribe` are at most once. `Subscribe` reconnects and
+  resubscribes by itself; its `onSubscribed` callback runs each time, and is
+  the only sign that messages may have been missed in between.
+
+Both are what [`libs/tiercache`](../tiercache) is built on.
+
 ## Configuration
 
 `valkey.Config` carries `env` and `yaml` tags; a service embeds it (no
@@ -65,7 +76,7 @@ it.
 | Metric | Meaning |
 | --- | --- |
 | `cache_lookups_total{result="hit\|miss\|error"}` | GET outcomes (a tombstone is a miss) |
-| `cache_command_duration_seconds{operation="get\|set\|del"}` | command latency |
+| `cache_command_duration_seconds{operation="get\|set\|del\|publish"}` | command latency |
 | `cache_command_errors_total{operation}` | failed commands, timeouts included (a missing key is not a failure) |
 
 Every command is also a client span (valkeyotel) in the caller's trace.
