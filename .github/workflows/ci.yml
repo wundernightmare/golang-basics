@@ -338,7 +338,7 @@ jobs:
       - if: always()
         run: docker compose -f docker/deps.yml down -v
 
-  # Generative API testing: Schemathesis drives the real ping and tasks
+  # Generative API testing: Schemathesis drives the real ping, tasks and ingest
   # binaries with requests generated from their OpenAPI documents and checks
   # every response against the contract. JUnit → the Allure report.
   schemathesis:
@@ -353,10 +353,11 @@ jobs:
         with:
           go-version: ${{ needs.versions.outputs.GO_VERSION }}
           cache-dependency-path: "**/go.sum"
-      - name: deps (Postgres, Valkey, Redpanda)
+      - name: deps (Postgres, Valkey, Redpanda, RustFS)
         run: docker compose -f docker/deps.yml up -d --wait --wait-timeout 180
       - run: scripts/schemathesis.sh ping
       - run: scripts/schemathesis.sh tasks
+      - run: scripts/schemathesis.sh ingest
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

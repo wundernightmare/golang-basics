@@ -206,10 +206,15 @@ variables:
         - --memory=1G
         - --reserve-memory=0M
         - --overprovisioned
+    - name: ${DOCKER_HUB}/rustfs/rustfs:1.0.5
+      alias: rustfs
   variables:
     POSTGRES_DB: app
     POSTGRES_USER: app
     POSTGRES_PASSWORD: app
+    # The S3 store of services/ingest (the same throwaway keys as docker/deps.yml).
+    RUSTFS_ACCESS_KEY: localaccess
+    RUSTFS_SECRET_KEY: localsecret-0123456789
 
 # ── prepare ───────────────────────────────────────────────────────────────────
 
@@ -476,8 +481,8 @@ build-services:
     paths: [.build/]
     expire_in: 1 day
 
-# Generative API testing: Schemathesis (its own pinned image) drives ping and
-# tasks with requests generated from their OpenAPI documents; JUnit → Allure.
+# Generative API testing: Schemathesis (its own pinned image) drives ping,
+# tasks and ingest with requests generated from their OpenAPI documents; JUnit → Allure.
 schemathesis:
   extends: [.deps-services, .rules-go]
   stage: test
@@ -493,10 +498,13 @@ schemathesis:
     TASKS_DATABASE_URL: postgres://app:app@postgres:5432/app?sslmode=disable
     TASKS_VALKEY_URL: valkey://valkey:6379
     TASKS_KAFKA_BROKERS: redpanda:9092
+    INGEST_KAFKA_BROKERS: redpanda:9092
+    INGEST_S3_ENDPOINT: http://rustfs:9000
     JUNIT_DIR: $CI_PROJECT_DIR/.reports/junit
   script:
     - SERVICE_BIN="$CI_PROJECT_DIR/.build/ping" sh scripts/schemathesis.sh ping
     - SERVICE_BIN="$CI_PROJECT_DIR/.build/tasks" sh scripts/schemathesis.sh tasks
+    - SERVICE_BIN="$CI_PROJECT_DIR/.build/ingest" sh scripts/schemathesis.sh ingest
   artifacts:
     when: always
     expire_in: 1 week
