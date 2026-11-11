@@ -2,7 +2,6 @@ package tiercache
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tracehubmmp/golang-basics/libs/resilience"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 )
 
@@ -70,37 +70,6 @@ func FuzzParseEnvelope(f *testing.F) {
 	})
 }
 
-func TestBreaker(t *testing.T) {
-	t.Parallel()
-
-	now := time.Unix(1_700_000_000, 0)
-	failure := errors.New("refused")
-	brk := &breaker{threshold: 3, cooldown: 10 * time.Second}
-
-	assert.True(t, brk.allow(now))
-	assert.False(t, brk.record(now, failure))
-	assert.False(t, brk.record(now, failure))
-	assert.False(t, brk.record(now, nil), "a success resets the count")
-	assert.False(t, brk.record(now, failure))
-	assert.False(t, brk.record(now, context.Canceled), "a caller that left says nothing about L2")
-	assert.False(t, brk.record(now, failure))
-	assert.True(t, brk.allow(now), "two consecutive failures: still closed")
-
-	assert.True(t, brk.record(now, failure), "the third consecutive failure opens it")
-	assert.False(t, brk.allow(now))
-	assert.False(t, brk.allow(now.Add(10*time.Second-time.Nanosecond)))
-
-	afterCooldown := now.Add(10 * time.Second)
-	assert.True(t, brk.allow(afterCooldown), "calls are let through after the cooldown")
-	assert.True(t, brk.record(afterCooldown, failure), "one failed probe re-opens it")
-	assert.False(t, brk.allow(afterCooldown))
-
-	later := afterCooldown.Add(10 * time.Second)
-	assert.False(t, brk.record(later, nil))
-	assert.False(t, brk.record(later, failure), "after a successful probe it takes the full threshold again")
-	assert.True(t, brk.allow(later))
-}
-
 func TestConfig(t *testing.T) {
 	t.Parallel()
 
@@ -115,6 +84,11 @@ func TestConfig(t *testing.T) {
 	require.ErrorContains(t, Config{Name: "c"}.Validate(), "HardTTL")
 	require.ErrorContains(t, Config{Name: "c", HardTTL: time.Second, SoftTTL: time.Minute}.Validate(), "SoftTTL")
 	require.ErrorContains(t, Config{Name: "c", HardTTL: time.Second, StaleIfError: -1}.Validate(), "StaleIfError")
+
+	assert.Equal(t, resilience.BreakerConfig{FailureRatio: 0.5, MinRequests: 10, Window: 10 * time.Second, OpenTimeout: 5 * time.Second, HalfOpenProbes: 1}, cfg.breaker())
+
+	cfg.BreakerFailureRatio = 1.5
+	require.ErrorContains(t, cfg.Validate(), "breaker_failure_ratio")
 }
 
 func TestMetricsAreLintClean(t *testing.T) {

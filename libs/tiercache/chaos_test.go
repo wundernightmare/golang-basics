@@ -92,8 +92,10 @@ func TestChaosValkeyDown(t *testing.T) {
 	answers(t, rig, warm, 0)
 	assert.Equal(t, loads, src.loads.Load(), "warm keys are served from L1")
 
-	answers(t, rig, seeded(src, "cold", 20), 0)
-	assert.Positive(t, rig.metric(t, "tiercache_l2_bypassed_total", nil), "the breaker spared most reads the timeout")
+	// Enough failures to outweigh the successful calls still in the
+	// breaker's window from the warm-up.
+	answers(t, rig, seeded(src, "cold", 60), 0)
+	assert.Positive(t, rig.metric(t, "tiercache_l2_bypassed_total", nil), "the breaker spared the remaining reads the wait")
 	require.Error(t, rig.cache.Invalidate(context.Background(), warm[0]))
 
 	proxy.Up()
@@ -153,13 +155,15 @@ func TestChaosValkeyMisbehaves(t *testing.T) {
 //
 //nolint:paralleltest // serial: stalls the shared Valkey for every client
 func TestChaosValkeyFrozen(t *testing.T) {
-	const frozenFor = 3 * time.Second
+	const frozenFor = 5 * time.Second
 
 	src := newSource()
 	rig := newHarness(t, valkeyAt(t, containers.Valkey(t)), src, realTime("", time.Minute, time.Minute))
 	rig.subscribed(t)
 
-	warm := seeded(src, "warm", 10)
+	// Few warm keys: their successful L2 calls are in the breaker's window,
+	// and it opens only once the failures outweigh them.
+	warm := seeded(src, "warm", 2)
 	answers(t, rig, warm, 0)
 
 	admin := valkeyAt(t, containers.Valkey(t)).Client()
