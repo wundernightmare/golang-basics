@@ -46,7 +46,11 @@ func sharedClient(t testing.TB, mutate ...func(*s3.Config)) *s3.Client {
 	client, err := s3.New(context.Background(), cfg, nil)
 	require.NoError(t, err)
 	t.Cleanup(client.Close)
-	require.NoError(t, client.Ensure(context.Background()))
+	// RustFS reports /health before its S3 API is ready: for the first
+	// seconds a signed call can still answer 503 (seen on CI runners).
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.NoError(c, client.Ensure(context.Background()))
+	}, time.Minute, 250*time.Millisecond, "the bucket becomes reachable")
 
 	return client
 }

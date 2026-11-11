@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
@@ -60,8 +61,30 @@ func direct(t testing.TB) backends {
 	t.Helper()
 
 	store := containers.S3(t)
+	ensureBucket(t, store)
 
 	return backends{brokers: containers.Kafka(t), s3Endpoint: store.Endpoint, store: store}
+}
+
+// ensureBucket creates the suite's bucket and waits until the store really
+// serves it. The service creates it too, but with one attempt at boot — and
+// RustFS reports /health before its S3 API is ready: for the first seconds a
+// signed call can still answer 503 (seen on CI runners).
+func ensureBucket(t testing.TB, backend containers.S3Store) {
+	t.Helper()
+
+	store, err := s3.New(context.Background(), s3.Config{
+		Bucket: bucket, Endpoint: backend.Endpoint, Region: backend.Region,
+		AccessKeyID: backend.AccessKey, SecretAccessKey: backend.SecretKey,
+		UsePathStyle: true, Insecure: true, AutoCreateBucket: true,
+	}, nil)
+	require.NoError(t, err)
+
+	defer store.Close()
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.NoError(c, store.Ensure(context.Background()))
+	}, time.Minute, 250*time.Millisecond, "the bucket becomes reachable")
 }
 
 // service is one running instance.

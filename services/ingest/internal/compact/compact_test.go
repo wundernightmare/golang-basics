@@ -48,7 +48,11 @@ func newFixture(t *testing.T) *fixture {
 	}, nil)
 	require.NoError(t, err)
 	t.Cleanup(store.Close)
-	require.NoError(t, store.Ensure(context.Background()))
+	// RustFS reports /health before its S3 API is ready: for the first
+	// seconds a signed call can still answer 503 (seen on CI runners).
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.NoError(c, store.Ensure(context.Background()))
+	}, time.Minute, 250*time.Millisecond, "the bucket becomes reachable")
 
 	return &fixture{
 		t: t, store: store, layout: archive.NewLayout(testx.Unique("compact")),
