@@ -1,0 +1,1 @@
+{"op":"select-stream","fault":"nft-drop","api":"native","ctx":"none","elapsed_s":153.038724262,"hung":false,"cap_s":1500,"err":"readData stream: block decode for exception: clickhouse [Decode]: randomString(1024) row 16826: read full: read: read tcp 127.0.0.1:47194-\u003e127.0.0.1:28370: read: connection timed out"}
