@@ -34,6 +34,7 @@ easy-to-miss conventions, [`CONTRIBUTING.md`](CONTRIBUTING.md) the workflow.
 | [`libs/pgx`](libs/pgx) | Library | — | PostgreSQL pool (`jackc/pgx`): config, readiness, migrations, pool metrics. |
 | [`libs/valkey`](libs/valkey) | Library | — | Valkey cache (`valkey-go`): get/set/del, readiness, cache-aside helper. |
 | [`libs/tiercache`](libs/tiercache) | Library | — | Two-level read cache: off-heap fixed-size L1 (`fastcache`) + Valkey L2, stale-while-revalidate, Pub/Sub invalidation; keeps serving without Valkey. |
+| [`libs/secret`](libs/secret) | Library | — | `secret.String`: a config value that fmt, `slog`, JSON, YAML and `/admin/config` render as `[redacted:1a2b3c4d]` (a short SHA-256 fingerprint that changes when the secret does); `Expose()` is the one way to it. Reads from YAML, env and viper/mapstructure. Standard library only. |
 | [`libs/s3`](libs/s3) | Library | — | S3 client (`aws-sdk-go-v2`) for AWS and S3-compatible stores: every call under its own deadline, streaming multipart uploads, readiness, metrics, tracing. |
 | [`libs/kafka`](libs/kafka) | Library | — | Kafka, provider-neutral (no cgo): synchronous producer with an error taxonomy, at-least-once consumer group (commit-after-handle, retries, DLQ, drain), TLS / SASL / mTLS, every buffer a named key, one set of metric names; a conformance suite (`kafkatest`). **[Read its README](libs/kafka/README.md)** — provider comparison and every safe default. |
 | [`libs/kafka-rdkafka`](libs/kafka-rdkafka) | Library | — | Kafka provider: **librdkafka** via confluent-kafka-go — the default; cgo, a static musl binary in the image; any librdkafka property through `KAFKA_*_EXTRA_PROPERTIES`. |
@@ -63,7 +64,7 @@ golang-basics/                 ← bare-repo CONTAINER (.bare + .git pointer + w
     ├── justfile               ← workspace task runner (+ a justfile per module)
     ├── mise.toml              ← core toolchain pins; mise.{appsec,ide,perf,report}.toml = opt-in profiles
     ├── api/                   ← TypeSpec contracts (→ api/openapi3, api/jsonschema)
-    ├── libs/                  ← contracts, httpx, resilient-http-client, grpcx, resilience, pgx, valkey, kafka, otelx, testx{,/containers,/contract}
+    ├── libs/                  ← contracts, httpx, resilient-http-client, grpcx, resilience, secret, pgx, valkey, kafka, otelx, testx{,/containers,/contract}
     ├── services/              ← ping, heartbeat, tasks, consumer (main.go + internal/…)
     ├── e2e/                   ← Go e2e suite (build tag e2e)
     ├── docker/                ← service.Dockerfile, deps.yml, stack*.yml, observability*.{yml,/}
