@@ -22,20 +22,20 @@ require (
 	github.com/tracehubmmp/golang-basics/libs/otelx v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/containers v0.0.0
-	golang.org/x/sync v0.24.0
+	golang.org/x/sync v0.25.0
 )
 
 require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20261006220739-8c912ac31dd4 // indirect
 	github.com/Microsoft/go-winio v0.6.3 // indirect
-	github.com/Shopify/toxiproxy/v2 v2.12.0 // indirect
+	github.com/Shopify/toxiproxy/v2 v2.13.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/caarlos0/env/v11 v11.4.1 // indirect
+	github.com/caarlos0/env/v11 v11.4.2 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/confluentinc/confluent-kafka-go/v2 v2.16.0 // indirect
+	github.com/confluentinc/confluent-kafka-go/v2 v2.16.1 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/log v0.2.0 // indirect
