@@ -1,0 +1,1 @@
+{"mode":"blackhole","op":"select1","api":"native","elapsed_s":153.309746808,"hung":false,"cap_s":1500,"err":"readData: block decode for exception: read: read: read tcp 127.0.0.1:40404-\u003e127.0.0.1:28690: read: connection timed out","second_query":"returned after 2.0s: clickhouse: acquire conn timeout. you can increase the number of max open conn or the dial timeout"}

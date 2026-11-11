@@ -1,0 +1,1 @@
+{"mode":"stall","op":"select1","api":"native","elapsed_s":1500.0001701,"hung":true,"cap_s":1500,"err":"","blocked_in":"reading HTTP response body","second_query":"returned after 2.0s: clickhouse: acquire conn timeout. you can increase the number of max open conn or the dial timeout"}

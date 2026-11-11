@@ -1,0 +1,1 @@
+{"mode":"blackhole","op":"select1","api":"native","elapsed_s":720.017335396,"hung":true,"cap_s":720,"err":"","blocked_in":"reading HTTP response body","second_query":"returned after 2.0s: clickhouse: acquire conn timeout. you can increase the number of max open conn or the dial timeout"}
