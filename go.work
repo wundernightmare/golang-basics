@@ -18,6 +18,7 @@
 //   libs/kafka-rdkafka          — Kafka provider: librdkafka via confluent-kafka-go (cgo; the default)
 //   libs/kafka-franz            — Kafka provider: franz-go (pure Go)
 //   libs/otelx                  — shared OpenTelemetry tracing setup
+//   libs/tiercache              — two-level cache: off-heap fastcache L1 + Valkey L2 (SWR, Pub/Sub invalidation)
 //   libs/testx                  — shared test harness (signal helpers, unique names; _test only, no Docker)
 //   libs/testx/containers       — shared containers + chaos helpers (testcontainers, Toxiproxy; _test only)
 //   libs/testx/contract         — OpenAPI / JSON Schema validation of exchanges (_test only)
@@ -42,6 +43,7 @@ use (
 	./libs/testx
 	./libs/testx/containers
 	./libs/testx/contract
+	./libs/tiercache
 	./libs/valkey
 	./services/consumer
 	./services/heartbeat
