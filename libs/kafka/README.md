@@ -100,6 +100,15 @@ type Config struct {
 import _ "github.com/tracehubmmp/golang-basics/services/tasks/internal/kafkaprovider"
 ```
 
+`NewProducer` checks the brokers once and fails the boot when none answers:
+a wrong address or credential should not reach production as a running pod.
+A service that has another place to put its data, and must start — and
+restart, mid-outage — while the brokers are away, passes
+`kafka.WithLazyConnect()`: the producer is built without the check, connects
+on the first send, and its sends fail as `unavailable` until the brokers are
+back (`services/ingest` does this; the conformance suite proves it for both
+providers).
+
 ## Configuration — every key, both clients
 
 Env keys carry the service prefix (`TASKS_KAFKA_BROKERS`); the YAML key is

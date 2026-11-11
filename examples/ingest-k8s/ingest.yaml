@@ -1,0 +1,206 @@
+# services/ingest on Kubernetes: the ingest Deployment (stateless, any number
+# of replicas), its Service and PodDisruptionBudget, and the compactor (one
+# replica). No volumes but the ConfigMap: the service writes nothing to disk.
+#
+# Every key, its env name and default: `ingest --config-reference`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ingest-config
+data:
+  config.yaml: |
+    shutdown_delay: 5s        # endpoints / ingress catch up after readiness flips
+    shutdown_timeout: 10s     # requests in flight are answered
+    request_timeout: 15s      # > kafka_ack_grace + urgent_linger + s3.op_timeout
+    max_body_bytes: 1048576
+    # Post-mortem diagnostics (docs/DIAGNOSTICS.md): crash reports and
+    # memory-pressure profiles go to the bucket below, under diagnostics/.
+    diag_dump_dir: /dumps     # the emptyDir a crash report survives a restart in
+    diag_memory_threshold: 0.9
+    s3:
+      bucket: events-archive
+      endpoint: https://s3.corp.example.com
+      region: us-east-1
+      use_path_style: true
+      op_timeout: 5s          # one put — what an answer waits on while Kafka is away
+      max_attempts: 3
+      # ca_file: /etc/s3-ca/ca.crt
+    kafka:
+      brokers: [kafka-0.kafka:9092, kafka-1.kafka:9092, kafka-2.kafka:9092]
+      topic: ingest.events    # provisioned: auto-creation is off by default
+      publish_timeout: 5s
+      producer_queue_max_kbytes: 65536
+    ingest:
+      max_event_bytes: 65536
+      max_batch_events: 1000
+      max_in_flight_bytes: 134217728
+      kafka_ack_grace: 1s
+      drain_timeout: 15s
+    archive:
+      prefix: events/
+      linger: 10s             # normal: one object per pod per 10 s
+      urgent_linger: 1s       # Kafka away: the latency clients pay, one object per pod per second
+      batch_bytes: 8388608
+    compact:
+      interval: 5m
+      close_delay: 15m
+      part_bytes: 134217728
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest
+spec:
+  replicas: 4
+  strategy:
+    rollingUpdate: { maxUnavailable: 1, maxSurge: 1 }
+  selector:
+    matchLabels: { app: ingest }
+  template:
+    metadata:
+      labels: { app: ingest }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9084"
+    spec:
+      # > shutdown_delay + shutdown_timeout + ingest.drain_timeout (30s)
+      terminationGracePeriodSeconds: 45
+      # A node going down must not take every replica with it.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: { app: ingest }
+      containers:
+        - name: ingest
+          image: registry.example.com/golang-basics-ingest:1.0.0
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true # no event touches a disk; /dumps holds crash reports only
+            capabilities: { drop: [ALL] }
+          ports:
+            - { name: http, containerPort: 8084 }
+            - { name: admin, containerPort: 9084 }
+          env:
+            - { name: INGEST_CONFIG, value: /etc/app/config.yaml }
+            - { name: INGEST_MODE, value: ingest }
+            - name: INGEST_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: ingest-admin, key: token } }
+            - name: INGEST_S3_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: ingest-s3, key: access-key-id } }
+            - name: INGEST_S3_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: ingest-s3, key: secret-access-key } }
+          # No GOMEMLIMIT / GOMAXPROCS here: the binary takes both from the
+          # container's cgroup, so they stay right when the VPA (vpa.yaml)
+          # rewrites these numbers. docs/RUNTIME.md has the details.
+          # requests == limits: Guaranteed QoS.
+          resources:
+            # memory ≈ 3 × max_in_flight_bytes + the Kafka send queue + the runtime.
+            requests: { cpu: "1", memory: 768Mi }
+            limits: { cpu: "1", memory: 768Mi }
+          # Probes on the admin port. Liveness is the process alone: a sink
+          # outage must not restart pods. Readiness is 503 only when no sink
+          # at all can take an event.
+          startupProbe:
+            httpGet: { path: /readyz, port: admin }
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /readyz, port: admin }
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /livez, port: admin }
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /etc/app, readOnly: true }
+            - { name: dumps, mountPath: /dumps }
+      volumes:
+        # Outlives a container restart, which is all a crash report needs:
+        # the next start ships it and deletes the file. Not event data.
+        - name: dumps
+          emptyDir: { sizeLimit: 64Mi }
+        - name: config
+          configMap: { name: ingest-config }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingest
+spec:
+  selector: { app: ingest }
+  ports:
+    - { name: http, port: 80, targetPort: http } # the admin port is not exposed
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ingest
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app: ingest }
+---
+# The compactor: the same image in the other mode. Exactly one, never two
+# overlapping — hence Recreate.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest-compactor
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: ingest-compactor }
+  template:
+    metadata:
+      labels: { app: ingest-compactor }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9084"
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: compactor
+          image: registry.example.com/golang-basics-ingest:1.0.0
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          ports:
+            - { name: admin, containerPort: 9084 }
+          env:
+            - { name: INGEST_CONFIG, value: /etc/app/config.yaml }
+            - { name: INGEST_MODE, value: compact }
+            # The shared ConfigMap names brokers; the compactor has no use for them.
+            - { name: INGEST_KAFKA_BROKERS, value: "" }
+            - name: INGEST_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: ingest-admin, key: token } }
+            - name: INGEST_S3_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: ingest-s3, key: access-key-id } }
+            - name: INGEST_S3_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: ingest-s3, key: secret-access-key } }
+          resources:
+            # memory: fetch_concurrency raw objects + one upload part + the hour's ids.
+            requests: { cpu: 500m, memory: 512Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          readinessProbe:
+            httpGet: { path: /readyz, port: admin }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /livez, port: admin }
+            periodSeconds: 10
+          volumeMounts:
+            - { name: config, mountPath: /etc/app, readOnly: true }
+            - { name: dumps, mountPath: /dumps }
+      volumes:
+        # Outlives a container restart, which is all a crash report needs:
+        # the next start ships it and deletes the file. Not event data.
+        - name: dumps
+          emptyDir: { sizeLimit: 64Mi }
+        - name: config
+          configMap: { name: ingest-config }

@@ -5,7 +5,7 @@
 #   docker build -f docker/service.Dockerfile \
 #     --build-arg SERVICE=ping \
 #     --build-arg GO_VERSION="$(scripts/mise-pins.sh | sed -n 's/^GO_VERSION=//p')" \
-#     --build-arg KAFKA_PROVIDER=rdkafka \          ← or franz (tasks, consumer)
+#     --build-arg KAFKA_PROVIDER=rdkafka \          ← or franz (tasks, consumer, ingest)
 #     --build-arg VERSION="$(git describe --tags --always --dirty)" \
 #     --build-arg GIT_SHA="$(git rev-parse HEAD)" \
 #     --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -86,7 +86,7 @@ SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
 ARG GO_VERSION
 ARG SERVICE
-# rdkafka (default) | franz — which Kafka client tasks / consumer link.
+# rdkafka (default) | franz — which Kafka client tasks / consumer / ingest link.
 ARG KAFKA_PROVIDER=rdkafka
 # The Alpine package mirror (a closed network's proxy), for the C toolchain
 # the rdkafka build needs.
@@ -104,7 +104,7 @@ ARG BUILD_TIME=
 
 # Fail fast on a missing SERVICE (COPY services/ would otherwise copy them
 # all) and on a builder image that is not the pinned Go (stale GOLANG_DIGEST).
-RUN test -n "${SERVICE}" || { echo "build-arg SERVICE is required (ping, heartbeat, tasks, consumer)" >&2; exit 1; } \
+RUN test -n "${SERVICE}" || { echo "build-arg SERVICE is required (ping, heartbeat, tasks, consumer, ingest)" >&2; exit 1; } \
  && { test "$(go env GOVERSION)" = "go${GO_VERSION}" \
     || { echo "builder is $(go env GOVERSION), GO_VERSION is ${GO_VERSION}: update GOLANG_DIGEST" >&2; exit 1; }; } \
  && case "${KAFKA_PROVIDER}" in rdkafka|franz) ;; *) echo "KAFKA_PROVIDER: rdkafka or franz, not '${KAFKA_PROVIDER}'" >&2; exit 1 ;; esac

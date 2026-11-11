@@ -1,13 +1,14 @@
-# Local development dependencies for the Postgres/Valkey/Kafka services.
+# Local development dependencies for the Postgres/Valkey/Kafka/S3 services.
 #
 # Services:
 #   postgres   — PostgreSQL 18                 localhost:5432
 #   valkey     — Valkey 9 (Redis-compatible)   localhost:6379
 #   redpanda   — Redpanda (Kafka API broker)   localhost:9092
+#   rustfs     — RustFS (S3 API object store)  localhost:9000
 #
 # Host ports are overridable when the defaults are taken by something else
 # (another stack on the machine): DEPS_POSTGRES_PORT, DEPS_VALKEY_PORT,
-# DEPS_KAFKA_PORT — in the environment or .env (just loads it). The broker
+# DEPS_KAFKA_PORT, DEPS_S3_PORT — in the environment or .env (just loads it). The broker
 # advertises the same port, and `just e2e` reads the published ports back, so
 # nothing else needs to change; point host processes' URLs at them.
 #
@@ -27,6 +28,11 @@
 #   *_KAFKA_ALLOW_AUTO_TOPIC_CREATION=true  (the kafka lib defaults to false;
 #                       the broker below allows it, so tasks.events and the
 #                       consumer's tasks.events.dlq appear on first use)
+#   INGEST_S3_ENDPOINT  http://localhost:9000   (with INGEST_S3_INSECURE=true,
+#                       INGEST_S3_ACCESS_KEY_ID=localaccess,
+#                       INGEST_S3_SECRET_ACCESS_KEY=localsecret-0123456789 and
+#                       INGEST_S3_AUTO_CREATE_BUCKET=true — `just mod
+#                       services/ingest run` sets all of them)
 #
 # Containers on this network reach the broker at redpanda:29092 (the INTERNAL
 # listener); host processes use the localhost:9092 HOST listener. The two
@@ -122,7 +128,28 @@ services:
       timeout: 10s
       retries: 15
 
+  rustfs:
+    # S3-compatible object store (Apache-2.0) for services/ingest's archive.
+    # Dev credentials, loopback only; a production bucket is provisioned,
+    # with TLS, its own keys and lifecycle rules.
+    image: ${DOCKER_HUB:-docker.io}/rustfs/rustfs:1.0.5
+    container_name: golang-basics-rustfs
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: localaccess
+      RUSTFS_SECRET_KEY: localsecret-0123456789
+    ports:
+      - "127.0.0.1:${DEPS_S3_PORT:-9000}:9000"
+    volumes:
+      - rustfs_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
 volumes:
   postgres_data:
   valkey_data:
   redpanda_data:
+  rustfs_data:

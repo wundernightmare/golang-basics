@@ -17,6 +17,7 @@
 //   libs/kafka                  — shared Kafka producer/consumer, provider-neutral (no cgo)
 //   libs/kafka-rdkafka          — Kafka provider: librdkafka via confluent-kafka-go (cgo; the default)
 //   libs/kafka-franz            — Kafka provider: franz-go (pure Go)
+//   libs/s3                     — shared S3 client (aws-sdk-go-v2): bounded calls, streaming uploads
 //   libs/otelx                  — shared OpenTelemetry tracing setup
 //   libs/tiercache              — two-level cache: off-heap fastcache L1 + Valkey L2 (SWR, Pub/Sub invalidation)
 //   libs/testx                  — shared test harness (signal helpers, unique names; _test only, no Docker)
@@ -25,6 +26,7 @@
 //   services/ping               — ping/pong HTTP service
 //   services/heartbeat          — background heartbeat worker (+ health/metrics HTTP)
 //   services/tasks              — Tasks CRUD over Postgres + Valkey + Kafka + OTel
+//   services/ingest             — event ingest: POST /events → Kafka + S3 archive (either sink acks), archive compaction
 //   services/consumer           — Kafka consumer worker draining tasks.events
 go 1.27.0
 
@@ -40,6 +42,7 @@ use (
 	./libs/pgx
 	./libs/resilience
 	./libs/resilient-http-client
+	./libs/s3
 	./libs/testx
 	./libs/testx/containers
 	./libs/testx/contract
@@ -47,6 +50,7 @@ use (
 	./libs/valkey
 	./services/consumer
 	./services/heartbeat
+	./services/ingest
 	./services/ping
 	./services/tasks
 )
