@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -505,10 +506,25 @@ func (c *Client) Delete(ctx context.Context, keys []string) error {
 	return nil
 }
 
+// ensureLocks holds one mutex per endpoint + bucket, see [Client.Ensure].
+var ensureLocks sync.Map //nolint:gochecknoglobals // process-wide by purpose: it serializes clients that do not know of each other
+
 // Ensure verifies the bucket is reachable with these credentials and, when
 // S3_AUTO_CREATE_BUCKET is set, creates it if it is missing (local stacks and
 // tests; a production bucket is provisioned, with its lifecycle rules).
+//
+// Calls for the same bucket are serialized within the process: two clients
+// creating one bucket at the same moment is the one way to make a store
+// answer NoSuchBucket for a bucket that both were just told exists (seen
+// with RustFS). Across processes the race stays — one more reason the option
+// is not for production.
 func (c *Client) Ensure(ctx context.Context) error {
+	lock, _ := ensureLocks.LoadOrStore(c.cfg.Endpoint+"\x00"+c.cfg.Bucket, &sync.Mutex{})
+
+	mu, _ := lock.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
 	err := c.headBucket(ctx)
 	if err == nil {
 		return nil
