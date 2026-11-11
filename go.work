@@ -8,7 +8,9 @@
 // Members:
 //   e2e                         — end-to-end suite: spawns the service binaries (go test -tags e2e)
 //   libs/contracts              — generated Go types of the TypeSpec contracts (api/): tasks HTTP API + Kafka events
+//   libs/grpcx                  — policy-per-target outbound gRPC connections (service config, CB, metrics, tracing)
 //   libs/httpx                  — shared HTTP server scaffolding (the example common lib)
+//   libs/resilience             — circuit breaker + retry budget shared by the outbound clients (HTTP, gRPC)
 //   libs/resilient-http-client  — policy-per-target outbound HTTP client (rate limit, CB, retry…)
 //   libs/pgx                    — shared PostgreSQL pool (pgx)
 //   libs/valkey                 — shared Valkey cache (valkey-go)
@@ -29,12 +31,14 @@ go 1.27.0
 use (
 	./e2e
 	./libs/contracts
+	./libs/grpcx
 	./libs/httpx
 	./libs/kafka
 	./libs/kafka-franz
 	./libs/kafka-rdkafka
 	./libs/otelx
 	./libs/pgx
+	./libs/resilience
 	./libs/resilient-http-client
 	./libs/testx
 	./libs/testx/containers

@@ -18,6 +18,23 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
+
+	"github.com/tracehubmmp/golang-basics/libs/resilience"
+)
+
+// BreakerState is a circuit breaker's state; its value is the
+// http_client_circuit_breaker_state gauge.
+type BreakerState = resilience.State
+
+// The breaker states.
+const (
+	// StateClosed lets every request through and counts failures.
+	StateClosed = resilience.StateClosed
+	// StateOpen rejects every request until the open timeout elapses.
+	StateOpen = resilience.StateOpen
+	// StateHalfOpen admits a fixed number of probes; they decide whether the
+	// breaker closes (all succeed) or re-opens (any fails).
+	StateHalfOpen = resilience.StateHalfOpen
 )
 
 const (
@@ -67,11 +84,12 @@ func WithPropagator(p propagation.TextMapPropagator) Option {
 type policy struct {
 	name     string
 	cfg      TargetConfig
-	limiter  *rate.Limiter // nil: no rate limit
-	breaker  *breaker      // nil: no breaker
-	bulkhead *bulkhead     // nil: no concurrency cap
-	budget   *retryBudget  // nil: no retry budget
-	logLimit *rate.Limiter // bounds warn logs per target
+	limiter  *rate.Limiter           // nil: no rate limit
+	breaker  *resilience.Breaker     // nil: no breaker
+	bulkhead *bulkhead               // nil: no concurrency cap
+	budget   *resilience.RetryBudget // nil: no retry budget
+	logLimit *rate.Limiter           // bounds warn logs per target
+	stateMu  sync.Mutex              // serialises breaker-state gauge updates
 }
 
 // Client sends HTTP requests under a per-target policy. It is safe for
@@ -87,7 +105,8 @@ type Client struct {
 
 	inFlight atomic.Int64
 	closing  atomic.Bool
-	idle     chan struct{}
+	idle     chan struct{} // closed once shutdown began and nothing is in flight
+	idleOnce sync.Once
 }
 
 // New builds a Client; cfg must pass [Config.Validate].
@@ -101,7 +120,7 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		opt(&applied)
 	}
 
-	client := &Client{userAgent: cfg.UserAgent, log: applied.log, targets: make(map[string]*policy, len(cfg.Targets)), idle: make(chan struct{}, 1)}
+	client := &Client{userAgent: cfg.UserAgent, log: applied.log, targets: make(map[string]*policy, len(cfg.Targets)), idle: make(chan struct{})}
 	if client.log == nil {
 		client.log = slog.New(slog.DiscardHandler)
 	}
@@ -149,15 +168,18 @@ func (c *Client) newPolicy(tc TargetConfig) *policy {
 		p.limiter = rate.NewLimiter(rate.Limit(tc.RateLimit), burst)
 	}
 
-	p.breaker = newBreaker(&tc, time.Now, func(from, to BreakerState) {
+	p.breaker = resilience.NewBreaker(tc.breaker(), time.Now, func(from, to BreakerState) {
 		c.m.transitions.WithLabelValues(tc.Name, from.String(), to.String()).Inc()
-		// The current state, not `to`: concurrent notifications may run out
-		// of order, but each reads the state after its own transition.
-		c.m.breakerState.WithLabelValues(tc.Name).Set(float64(p.breaker.state()))
+		// The current state, not `to`, and read under the lock: concurrent
+		// notifications may run out of order, but whichever sets the gauge
+		// last has read a state at least as new as every earlier writer's.
+		p.stateMu.Lock()
+		c.m.breakerState.WithLabelValues(tc.Name).Set(float64(p.breaker.State()))
+		p.stateMu.Unlock()
 		c.log.Info("resilient: circuit breaker "+to.String(), "target", tc.Name, "from", from.String())
 	})
 	p.bulkhead = newBulkhead(&tc)
-	p.budget = newRetryBudget(&tc, time.Now)
+	p.budget = resilience.NewRetryBudget(tc.RetryBudgetRatio, tc.RetryBudgetMinRetries, tc.RetryBudgetWindow, time.Now)
 
 	c.m.breakerState.WithLabelValues(tc.Name).Set(0)
 
@@ -178,7 +200,7 @@ func (c *Client) BreakerState(target string) (BreakerState, error) {
 		return 0, &OutboundError{Kind: KindInvalid, Target: target, Err: errUnknownTarget}
 	}
 
-	return p.breaker.state(), nil
+	return p.breaker.State(), nil
 }
 
 // Send sends req once under target's policy. req's context is the overall
@@ -188,6 +210,13 @@ func (c *Client) BreakerState(target string) (BreakerState, error) {
 // A response with status < 400 is returned with a nil error; the caller must
 // close its body (that releases the bulkhead slot and the attempt's timeout).
 // Everything else is an [*OutboundError] and a nil response.
+//
+// The attempt is not over until the body is: the timeout covers reading it,
+// a failed Read returns an [*OutboundError] too ([KindTimeout],
+// [KindConnection] or [KindCanceled]), and only then does the circuit breaker
+// hear how the attempt ended — a success once the body is read to the end or
+// closed. A body that fails is never retried: the response was already
+// handed over.
 func (c *Client) Send(target string, req *http.Request) (*http.Response, error) {
 	return c.send(target, req, false)
 }
@@ -234,7 +263,7 @@ func (c *Client) send(target string, req *http.Request, retry bool) (*http.Respo
 		}
 	}()
 
-	p.budget.request()
+	p.budget.Request()
 
 	attempts := 1
 	if retry && p.cfg.RetryMaxAttempts > 1 && idempotent(req) &&
@@ -248,11 +277,12 @@ func (c *Client) send(target string, req *http.Request, retry bool) (*http.Respo
 			return nil, &OutboundError{Kind: KindCanceled, Target: target, Err: err}
 		}
 
-		resp, release, outErr := c.attempt(ctx, p, req, n, method)
+		resp, body, outErr := c.attempt(ctx, p, req, n, method)
 		if outErr == nil {
 			l := leave
 			leave = nil
-			resp.Body = &releaseBody{ReadCloser: resp.Body, release: func() { release(); l() }}
+			release := body.release
+			body.release = func() { release(); l() }
 
 			return resp, nil
 		}
@@ -270,7 +300,7 @@ func (c *Client) send(target string, req *http.Request, retry bool) (*http.Respo
 			return nil, outErr
 		}
 
-		if !p.budget.tryRetry() {
+		if !p.budget.TryRetry() {
 			c.m.budgetExhausted.WithLabelValues(target).Inc()
 			c.warn(ctx, p, "resilient: retry budget exhausted", "url", logURL(req.URL))
 
@@ -287,17 +317,17 @@ func (c *Client) send(target string, req *http.Request, retry bool) (*http.Respo
 	}
 }
 
-// attempt sends req once. On success it returns the response and the release
-// func the caller must run when done with it; on failure an error, with
-// everything already released.
-func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n int, method string) (*http.Response, func(), *OutboundError) {
+// attempt sends req once. On success it returns the response and its body
+// (already installed as resp.Body), whose Close releases the attempt; on
+// failure an error, with everything already released.
+func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n int, method string) (*http.Response, *responseBody, *OutboundError) {
 	// The attempt timeout starts before the waits, so they count against it.
 	actx, cancel := ctx, context.CancelFunc(func() {})
 	if p.cfg.Timeout > 0 {
 		actx, cancel = context.WithTimeout(ctx, p.cfg.Timeout)
 	}
 
-	fail := func(kind Kind, err error) (*http.Response, func(), *OutboundError) {
+	fail := func(kind Kind, err error) (*http.Response, *responseBody, *OutboundError) {
 		cancel()
 		c.count(p, method, kind.String())
 
@@ -309,7 +339,7 @@ func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n in
 		return nil, nil, oe
 	}
 
-	grant, ok := p.breaker.allow()
+	grant, ok := p.breaker.Allow()
 	if !ok {
 		return fail(KindCircuitOpen, nil)
 	}
@@ -317,7 +347,7 @@ func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n in
 	// rejection is "ignored": it releases a half-open probe slot.
 	if p.limiter != nil {
 		if err := p.limiter.Wait(actx); err != nil {
-			p.breaker.record(grant, outcomeIgnored)
+			p.breaker.Record(grant, resilience.OutcomeIgnored)
 
 			if ctx.Err() != nil {
 				return fail(KindCanceled, ctx.Err())
@@ -328,7 +358,7 @@ func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n in
 	}
 
 	if !p.bulkhead.acquire(actx) {
-		p.breaker.record(grant, outcomeIgnored)
+		p.breaker.Record(grant, resilience.OutcomeIgnored)
 
 		if ctx.Err() != nil {
 			return fail(KindCanceled, ctx.Err())
@@ -357,7 +387,7 @@ func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n in
 		body, err := req.GetBody()
 		if err != nil {
 			release()
-			p.breaker.record(grant, outcomeIgnored)
+			p.breaker.Record(grant, resilience.OutcomeIgnored)
 			c.count(p, method, KindInvalid.String())
 
 			return nil, nil, &OutboundError{Kind: KindInvalid, Target: p.name, Err: fmt.Errorf("replay body: %w", err)}
@@ -378,7 +408,7 @@ func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n in
 		kind, o := classify(ctx, actx, err) // before release cancels actx
 
 		release()
-		p.breaker.record(grant, o)
+		p.breaker.Record(grant, o)
 		c.count(p, method, kind.String())
 
 		if kind != KindCanceled {
@@ -389,16 +419,21 @@ func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n in
 	}
 
 	code := resp.StatusCode
-	if code >= 500 {
-		p.breaker.record(grant, outcomeFailure)
-	} else {
-		p.breaker.record(grant, outcomeSuccess)
-	}
-
 	c.count(p, method, statusOutcome(code))
 
 	if code < 400 {
-		return resp, release, nil
+		// The dependency has only answered with headers so far: the breaker
+		// hears the outcome when the body is done (see responseBody).
+		body := c.newResponseBody(ctx, actx, p, req, resp.Body, grant, release)
+		resp.Body = body.readCloser()
+
+		return resp, body, nil
+	}
+
+	if code >= 500 {
+		p.breaker.Record(grant, resilience.OutcomeFailure)
+	} else {
+		p.breaker.Record(grant, resilience.OutcomeSuccess)
 	}
 
 	return nil, nil, c.statusError(ctx, p, req, resp, release)
@@ -410,7 +445,7 @@ func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n in
 func (c *Client) statusError(ctx context.Context, p *policy, req *http.Request, resp *http.Response, release func()) *OutboundError {
 	code := resp.StatusCode
 
-	outErr := &OutboundError{Kind: KindStatus, Target: p.name, StatusCode: code}
+	outErr := &OutboundError{Kind: KindStatus, Target: p.name, StatusCode: code, Header: resp.Header}
 	if d, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
 		outErr.RetryAfter = d
 	}
@@ -431,18 +466,25 @@ func (c *Client) statusError(ctx context.Context, p *policy, req *http.Request, 
 }
 
 // classify maps a transport error to its kind and what it tells the breaker.
-func classify(parent, attempt context.Context, err error) (Kind, outcome) {
+func classify(parent, attempt context.Context, err error) (Kind, resilience.Outcome) {
 	var ne net.Error
 	switch {
 	case isRedirectError(err):
-		return KindRedirect, outcomeSuccess
+		return KindRedirect, resilience.OutcomeSuccess
+	case errors.Is(parent.Err(), context.DeadlineExceeded):
+		// The caller's own deadline: reported as a cancellation (the caller's
+		// budget, not the target's timeout, ended the attempt), but the
+		// dependency did fail to answer in the time it was given — the breaker
+		// must hear that, or a caller deadline shorter than the target's
+		// timeout would hide an outage from it forever.
+		return KindCanceled, resilience.OutcomeFailure
 	case parent.Err() != nil:
-		return KindCanceled, outcomeIgnored
+		return KindCanceled, resilience.OutcomeIgnored
 	case errors.Is(attempt.Err(), context.DeadlineExceeded), errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
-		return KindTimeout, outcomeFailure
+		return KindTimeout, resilience.OutcomeFailure
 	}
 
-	return KindConnection, outcomeFailure
+	return KindConnection, resilience.OutcomeFailure
 }
 
 func (c *Client) count(p *policy, method, outcome string) {
@@ -478,18 +520,102 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// releaseBody runs release once, on the first Close.
-type releaseBody struct {
-	io.ReadCloser
-	once    sync.Once
-	release func()
+// responseBody is the body of a successful response. The attempt lasts as
+// long as the body does, so it reports to the circuit breaker when the body
+// is done — read to the end or closed: success; a failed Read: by its kind;
+// the attempt's context ending first (its timeout, or the caller's context):
+// by its kind as well, so the breaker hears even from a caller that never
+// reads or closes. Close releases the attempt (bulkhead slot, timeout,
+// in-flight count) once.
+type responseBody struct {
+	rc      io.ReadCloser
+	c       *Client
+	p       *policy
+	url     string
+	parent  context.Context //nolint:containedctx // the body outlives the call that made it; it is the attempt
+	attempt context.Context //nolint:containedctx // as above
+	grant   resilience.Ticket
+
+	settled   sync.Once // the breaker hears once
+	closed    atomic.Bool
+	closeOnce sync.Once
+	stopWatch func() bool
+	release   func()
 }
 
-func (b *releaseBody) Close() error {
-	err := b.ReadCloser.Close()
-	b.once.Do(b.release)
+func (c *Client) newResponseBody(parent, attempt context.Context, p *policy, req *http.Request, rc io.ReadCloser, grant resilience.Ticket, release func()) *responseBody {
+	b := &responseBody{rc: rc, c: c, p: p, url: logURL(req.URL), parent: parent, attempt: attempt, grant: grant, release: release}
+	b.stopWatch = context.AfterFunc(attempt, func() {
+		_, o := classify(parent, attempt, attempt.Err())
+		b.settle(o)
+	})
 
-	return err
+	return b
+}
+
+// readCloser is b as the response's Body. A 101 Switching Protocols (or
+// CONNECT) body is the connection itself and stays writable.
+func (b *responseBody) readCloser() io.ReadCloser {
+	if w, ok := b.rc.(io.Writer); ok {
+		return &writableBody{responseBody: b, w: w}
+	}
+
+	return b
+}
+
+func (b *responseBody) settle(o resilience.Outcome) {
+	b.settled.Do(func() { b.p.breaker.Record(b.grant, o) })
+}
+
+// Read reads the body. Its failure is an [*OutboundError].
+func (b *responseBody) Read(buf []byte) (int, error) {
+	n, err := b.rc.Read(buf)
+
+	switch {
+	case err == nil:
+	case errors.Is(err, io.EOF):
+		b.settle(resilience.OutcomeSuccess)
+	case b.closed.Load(): // a read after Close: the caller's bug, not the dependency's
+	default:
+		kind, o := classify(b.parent, b.attempt, err)
+		b.settle(o)
+
+		if kind != KindCanceled {
+			b.c.warn(b.parent, b.p, "resilient: response body failed", "url", b.url, "reason", kind.String(), "err", err)
+		}
+
+		err = &OutboundError{Kind: kind, Target: b.p.name, Err: err}
+	}
+
+	return n, err //nolint:wrapcheck // io.EOF must stay io.EOF; a failure is already an OutboundError
+}
+
+// Close closes the body and releases the attempt, once.
+func (b *responseBody) Close() error {
+	b.closed.Store(true)
+
+	err := b.rc.Close()
+
+	b.closeOnce.Do(func() {
+		// Stop the watch and settle before release cancels the attempt's
+		// context: closing early is the caller's choice, not a failure.
+		b.stopWatch()
+		b.settle(resilience.OutcomeSuccess)
+		b.release()
+	})
+
+	return err //nolint:wrapcheck // the transport's error, as is
+}
+
+// writableBody is a responseBody over a writable (upgraded) connection.
+type writableBody struct {
+	*responseBody
+
+	w io.Writer
+}
+
+func (b *writableBody) Write(p []byte) (int, error) {
+	return b.w.Write(p) //nolint:wrapcheck // the connection's error, as is
 }
 
 // enter counts a request in flight, or refuses it once shutdown began. The
@@ -507,18 +633,18 @@ func (c *Client) enter() bool {
 }
 
 func (c *Client) leave() {
+	// Once shutdown began no request is admitted, so a count of zero stays
+	// zero (refused requests only blip it): idle is final, and closing the
+	// channel wakes every Shutdown caller, however many wait.
 	if c.inFlight.Add(-1) == 0 && c.closing.Load() {
-		select {
-		case c.idle <- struct{}{}:
-		default:
-		}
+		c.idleOnce.Do(func() { close(c.idle) })
 	}
 }
 
 // Shutdown refuses new requests ([KindShutdown]) and waits until every
 // request in flight is done — a successful one when its body is closed — or
 // ctx ends. Then it closes idle connections (of a transport the client
-// built). Safe to call more than once.
+// built). Safe to call more than once, concurrently too.
 func (c *Client) Shutdown(ctx context.Context) error {
 	c.closing.Store(true)
 
@@ -526,16 +652,16 @@ func (c *Client) Shutdown(ctx context.Context) error {
 		defer c.closeIdle()
 	}
 
-	for {
-		n := c.inFlight.Load()
-		if n == 0 {
-			return nil
-		}
+	// A request that left before closing was set did not close idle; the
+	// count read after setting it sees that request gone.
+	if c.inFlight.Load() == 0 {
+		return nil
+	}
 
-		select {
-		case <-c.idle:
-		case <-ctx.Done():
-			return fmt.Errorf("resilient: shutdown with %d requests in flight: %w", n, ctx.Err())
-		}
+	select {
+	case <-c.idle:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("resilient: shutdown with %d requests in flight: %w", c.inFlight.Load(), ctx.Err())
 	}
 }

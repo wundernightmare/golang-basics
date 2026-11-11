@@ -62,22 +62,7 @@ func (t *TargetConfig) validate() []error {
 		bad("max_concurrent must not be negative")
 	}
 
-	switch {
-	case t.BreakerFailureRatio < 0 || t.BreakerFailureRatio > 1:
-		bad("breaker_failure_ratio must be in [0, 1]")
-	case t.BreakerFailureRatio > 0:
-		if t.BreakerMinRequests < 1 {
-			bad("breaker_min_requests must be ≥ 1")
-		}
-
-		if t.BreakerWindow <= 0 || t.BreakerOpenTimeout <= 0 {
-			bad("breaker_window and breaker_open_timeout must be > 0")
-		}
-
-		if t.BreakerHalfOpenProbes < 1 {
-			bad("breaker_half_open_probes must be ≥ 1")
-		}
-	}
+	errs = append(errs, t.breaker().Validate()...)
 
 	if t.RetryMaxAttempts < 0 {
 		bad("retry_max_attempts must not be negative")

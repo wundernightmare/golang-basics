@@ -28,6 +28,8 @@ easy-to-miss conventions, [`CONTRIBUTING.md`](CONTRIBUTING.md) the workflow.
 | [`libs/contracts`](libs/contracts) | Library | — | Generated Go types of those contracts (`pingapi`, `tasksapi`, `events`). Never edited by hand. |
 | [`libs/httpx`](libs/httpx) | Library | — | **net/http** (Go 1.22 ServeMux, no framework) server scaffolding: request ids, tracing, sampled trace-correlated logs, RED metrics (`route` label), admin listener (health / metrics / version / config / runtime log level / pprof, token-guarded), graceful shutdown, env + YAML config, RFC 9457 `Problem`. |
 | [`libs/resilient-http-client`](libs/resilient-http-client) | Library | — | Policy-per-target **outbound** client: per-attempt timeout, rate limit, bulkhead, circuit breaker, budgeted jittered retry (Retry-After aware), traceparent injection, metrics. Not used by a service yet — copy it in when one calls out. |
+| [`libs/grpcx`](libs/grpcx) | Library | — | Policy-per-target **outbound gRPC** connections: default deadline, retries and retry throttling through the gRPC service config, plus a circuit breaker, metrics and tracing. A template library — nothing here imports it yet. |
+| [`libs/resilience`](libs/resilience) | Library | — | Circuit breaker and retry budget shared by the two outbound clients. Pure logic, injected clock. |
 | [`libs/pgx`](libs/pgx) | Library | — | PostgreSQL pool (`jackc/pgx`): config, readiness, migrations, pool metrics. |
 | [`libs/valkey`](libs/valkey) | Library | — | Valkey cache (`valkey-go`): get/set/del, readiness, cache-aside helper. |
 | [`libs/tiercache`](libs/tiercache) | Library | — | Two-level read cache: off-heap fixed-size L1 (`fastcache`) + Valkey L2, stale-while-revalidate, Pub/Sub invalidation; keeps serving without Valkey. |
@@ -59,7 +61,7 @@ golang-basics/                 ← bare-repo CONTAINER (.bare + .git pointer + w
     ├── justfile               ← workspace task runner (+ a justfile per module)
     ├── mise.toml              ← core toolchain pins; mise.{appsec,ide,perf,report}.toml = opt-in profiles
     ├── api/                   ← TypeSpec contracts (→ api/openapi3, api/jsonschema)
-    ├── libs/                  ← contracts, httpx, resilient-http-client, pgx, valkey, kafka, otelx, testx{,/containers,/contract}
+    ├── libs/                  ← contracts, httpx, resilient-http-client, grpcx, resilience, pgx, valkey, kafka, otelx, testx{,/containers,/contract}
     ├── services/              ← ping, heartbeat, tasks, consumer (main.go + internal/…)
     ├── e2e/                   ← Go e2e suite (build tag e2e)
     ├── docker/                ← service.Dockerfile, deps.yml, stack*.yml, observability*.{yml,/}
@@ -306,7 +308,7 @@ number, and every behaviour is checked at exactly one layer.
 | **Chaos** | `services/tasks/internal/integration/chaos_test.go` (`containers.Proxied`, `containers.Pause`) | what the design promises when a dependency fails, slows down or hangs: cache bypassed, outbox catches up, readiness degrades only for the critical dependency, probes stay fast, everything recovers | happy-path behaviour (integration) |
 | **E2E** | `e2e/` (Go, real binaries, `-tags e2e`) | what only a real process shows: it boots from env, is ready on its admin listener, `/version` carries the build stamp, the admin surface is token-guarded, SIGTERM exits 0 with "servers stopped cleanly", and tasks → outbox → Kafka → consumer across processes | per-route behaviour, error bodies (unit), the CRUD flow (integration) |
 | **Generative** | `just schemathesis <svc>` | "bad input → 4xx problem", no 5xx, every response in the contract's shape | business semantics (unit), effects on dependencies (integration) |
-| **Mutation** | `libs/resilient-http-client` (`just mutate`) | whether the unit tests of the pure decision logic notice a wrong comparison or operator | — |
+| **Mutation** | `libs/resilient-http-client`, `libs/grpcx`, `libs/resilience` (`just mutate <module>`) | whether the tests of the decision logic notice a wrong comparison or operator | — |
 | **Load** | `benchmarks/` (k6) | latency / error thresholds under load; reports on the load stand, outside Allure | — |
 
 Put a behaviour's test at the lowest layer that can observe it, and only
@@ -325,7 +327,7 @@ harness waits for `/readyz`; asynchronous effects are polled with
 Tests isolate through `testx.Unique` — a schema, a key prefix, a topic, a
 consumer group — never through a fresh container. A module needs Docker
 exactly when its `go.mod` requires `libs/testx/containers`, which keeps
-`ping`, `heartbeat`, `httpx` and `resilient-http-client` Docker-free. A
+`ping`, `heartbeat`, `httpx`, `resilient-http-client`, `grpcx` and `resilience` Docker-free. A
 `depguard` rule in `.golangci.yml` forbids all three modules, testify and
 testcontainers in non-test files.
 
@@ -360,7 +362,7 @@ counters summed per block, nothing counted twice. `just cov-check` gates the
 merged profile with [`.testcoverage.yml`](.testcoverage.yml): a total floor
 (70 %), a per-package floor (50 %), a per-file floor (30 %) and higher
 overrides for pure-logic packages (`libs/httpx` 85 %,
-`libs/resilient-http-client` 80 %); the test harness modules, `e2e/` and the
+`libs/resilient-http-client`, `libs/grpcx` and `libs/resilience` 80 %); the test harness modules, `e2e/` and the
 generated `libs/contracts` are excluded.
 
 The merge is **strict in CI**: with `CI` set, a layer whose `.cover/<layer>`
@@ -477,15 +479,26 @@ code, re-runs the tests and reports every mutant that *lived*. It is scoped to
 small, pure, decision-heavy code:
 
 ```sh
-just mutate                             # libs/resilient-http-client (default)
-just mutate libs/resilient-http-client  # breaker.go, backoff.go, budget.go, window.go, validate.go
+just mutate                             # libs/resilient-http-client (default): client.go, backoff.go, validate.go
+just mutate libs/resilience             # breaker.go, window.go, budget.go
+just mutate libs/grpcx                  # config, service config, what the breaker is told
 ```
 
-Scope and thresholds live in the module's [`.gremlins.yaml`](libs/resilient-http-client/.gremlins.yaml);
+Scope and thresholds live in each module's `.gremlins.yaml`
+([the HTTP client's](libs/resilient-http-client/.gremlins.yaml));
 the run fails below them; the file says why the rest of the module is left
-out (integration-shaped code, where a surviving mutant is mostly noise).
-CI runs it nightly and on demand (`mutation` job), never per PR. The run must
-not hit the `go test` cache (`GOFLAGS=-count=1`, the recipe sets it).
+out and which survivors are known equivalents.
+CI runs it nightly and on demand (`mutation` job), never per PR.
+
+Always through [`scripts/mutate.sh`](scripts/mutate.sh) (the recipe and both
+pipelines do), never a bare `gremlins unleash`: gremlins tests each mutant in
+a copy of the module directory under `$TMPDIR`, where `go.work` and the
+`replace … => ../x` lines of `go.mod` do not resolve. The copy then fails to
+build, and gremlins counts a failed build as a **killed** mutant — 100 %
+efficacy in two seconds, a gate that cannot fail. The script runs with a
+`go.mod` whose replaces are absolute, refuses to start unless the suite
+passes in such a copy, and keeps the run off the `go test` cache (the
+per-mutant timeout comes from the first, uncached run).
 
 ## Closed networks (proxies, mirrors, no direct internet)
 

@@ -1,4 +1,4 @@
-package resilient
+package resilience
 
 import "time"
 
