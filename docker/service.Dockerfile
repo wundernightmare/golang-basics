@@ -75,7 +75,7 @@ ARG ALPINE_VERSION=3.24
 ARG DOCKER_HUB=docker.io
 ARG GCR=gcr.io
 # renovate: datasource=docker depName=golang versioning=docker
-ARG GOLANG_DIGEST=sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
+ARG GOLANG_DIGEST=sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf
 # renovate: datasource=docker depName=gcr.io/distroless/static-debian13 currentValue=nonroot
 ARG DISTROLESS_DIGEST=sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
 
