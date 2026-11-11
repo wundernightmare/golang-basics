@@ -17,4 +17,5 @@ paths = [
 ]
 regexes = [
   '''minioadmin''',             # well-known local dev placeholder, if ever added
+  '''testsecret-0123456789''',  # key of the throwaway RustFS container in libs/testx/containers
 ]

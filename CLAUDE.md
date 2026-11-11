@@ -110,6 +110,14 @@ README; this file is only the high-signal, easy-to-miss bits.
   or renamed metric changes that file (and the sibling repo) first. What the
   broker or a server-side exporter measures better (consumer-group lag,
   Postgres/Valkey server state) is not collected in the services.
+- Go runtime settings come from the container, not the manifest
+  (`docs/RUNTIME.md`): `httpx.Server.Run` sets the memory limit from the cgroup
+  (`*_RUNTIME_MEMORY_LIMIT_RATIO`) and the traceback level; `GOMAXPROCS` is the
+  runtime's own. Never put `GOMEMLIMIT` / `GOMAXPROCS` in a pod spec or chart.
+- Post-mortem diagnostics (`docs/DIAGNOSTICS.md`, `libs/httpx/diagnostics.go`):
+  a service with object storage calls `srv.SetDumpSink(store)`; crash reports
+  (`*_DIAG_DUMP_DIR`, an emptyDir) and memory-pressure heap/goroutine profiles
+  then land under `diagnostics/<service>/dt=…/<pod>/`. No full heap dumps.
 - **Secure by default.** `*_ADMIN_TOKEN` guards `/admin/*` and `/debug/*`;
   `httpx.Config.Validate()` refuses an empty token on a non-loopback admin
   address unless `*_ADMIN_INSECURE=true` (local compose / e2e set it). Kafka
@@ -179,6 +187,18 @@ README; this file is only the high-signal, easy-to-miss bits.
   consumer retries with backoff and dead-letters to `<topic>.dlq` (or stops
   when DLQ is disabled), processing is idempotent by `event_id`. Copy those,
   not a dual write.
+- **The ingest vertical is the one sanctioned dual write**, and only because
+  of its acknowledgement rule: `services/ingest` answers a batch after Kafka
+  *or* the S3 archive made it durable, never before, so it holds no state
+  (no volume, no `emptyDir`) and a killed pod loses nothing it promised.
+  Keep that rule when changing `internal/pipeline`: nothing may acknowledge
+  from memory. The sinks are driven through `resilience.Breaker` (libs/resilience, one each),
+  what is unconfirmed is bounded (`MAX_IN_FLIGHT_BYTES` → 429), every wait
+  is a config key, and the archive format and layout (`internal/shard`,
+  `internal/archive`) are a contract with the compactor and any replay tool
+  — version the header, do not change records in place. Its chaos and
+  SIGKILL tests (`internal/integration`) are the proof; a change to the
+  write path that does not keep them green is not done.
 - **Log with the context**: `log.InfoContext(ctx, …)`, never bare `log.Info` in
   request or message handling — that is what stamps `trace_id`/`span_id`.
   Debug/info are sampled (`*_LOG_SAMPLE_*`); anything that must always be seen
@@ -198,7 +218,7 @@ README; this file is only the high-signal, easy-to-miss bits.
   (`testx.Recorder` does). No test framework, no per-test Allure plugin: the
   report is `gotestsum --junitfile` → `allure generate`. Helpers come from
   three `_test`-only modules — `libs/testx` (Recorder, LogBuffer, Metric,
-  LintMetrics, Unique), `libs/testx/containers` (`Postgres/Valkey/Kafka`, one
+  LintMetrics, Unique), `libs/testx/containers` (`Postgres/Valkey/Kafka/S3`, one
   per test binary via `TestMain` → `containers.Main`; `Proxied`/`Pause` for
   chaos) and `libs/testx/contract` (OpenAPI / JSON Schema validation). Tests
   isolate with `testx.Unique` (a schema, a key prefix, a topic), never a

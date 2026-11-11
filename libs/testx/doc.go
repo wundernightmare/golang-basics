@@ -13,7 +13,7 @@
 // live in separate modules so that only the packages that need them carry
 // their dependency trees:
 //
-//   - libs/testx/containers — one Postgres / Valkey / Kafka container per
+//   - libs/testx/containers — one Postgres / Valkey / Kafka / S3 (RustFS) container per
 //     test binary (testcontainers), plus chaos helpers (Toxiproxy, SIGSTOP);
 //   - libs/testx/contract — validation of HTTP exchanges against the OpenAPI
 //     documents and of events against the JSON Schemas under api/.

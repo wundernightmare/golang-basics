@@ -1,0 +1,41 @@
+# VerticalPodAutoscaler for the ingest pods. With requests == limits in the
+# Deployment, RequestsAndLimits keeps them equal: the VPA scales the limit by
+# the request's ratio, which is 1.
+#
+# Nothing in the Deployment has to follow these numbers: the binary sizes
+# GOMAXPROCS and the Go memory limit from the cgroup it finds itself in
+# (docs/RUNTIME.md).
+#
+# Do not put a CPU- or memory-based HorizontalPodAutoscaler on the same
+# Deployment: the two fight. Scale replicas on a request-rate metric instead.
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: ingest
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ingest
+  updatePolicy:
+    # Recreate evicts pods to resize them; the PodDisruptionBudget paces it
+    # and a SIGTERM costs nothing here. InPlaceOrRecreate works as well: the
+    # binary re-reads the memory limit every runtime_memory_limit_refresh.
+    updateMode: Recreate
+  resourcePolicy:
+    containerPolicies:
+      - containerName: ingest
+        controlledResources: [cpu, memory]
+        controlledValues: RequestsAndLimits
+        minAllowed:
+          # Whole cores: the Go runtime never runs fewer than 2 threads of Go
+          # code, so a limit below 1 CPU mostly buys throttling.
+          cpu: "1"
+          # The floor is the service's own arithmetic, not a guess: the
+          # in-flight and Kafka buffers are byte counts in the ConfigMap and
+          # do not shrink with the pod (README: "The numbers that have to
+          # agree").
+          memory: 768Mi
+        maxAllowed:
+          cpu: "4"
+          memory: 2Gi

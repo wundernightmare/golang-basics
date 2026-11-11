@@ -3,6 +3,7 @@
 #
 #   scripts/schemathesis.sh ping            # dependency-free
 #   scripts/schemathesis.sh tasks           # needs the deps up: `just infra-up`
+#   scripts/schemathesis.sh ingest          # needs the deps up: `just infra-up`
 #
 # Builds the service, starts it on a scratch port, waits for /readyz on its
 # admin port, then runs Schemathesis against the service's OpenAPI document
@@ -20,7 +21,7 @@
 # image itself).
 set -euo pipefail
 
-svc="${1:?usage: schemathesis.sh <ping|tasks>}"
+svc="${1:?usage: schemathesis.sh <ping|tasks|ingest>}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${DOCKER_HUB:-docker.io}/schemathesis/schemathesis:${SCHEMATHESIS_VERSION:-4.27.5}"
 results="${JUNIT_DIR:-$root/.reports/junit}"
@@ -31,6 +32,7 @@ mkdir -p "$results" "$root/.run"
 case "$svc" in
   ping)  port=18280; admin=19280; upper=PING ;;
   tasks) port=18282; admin=19282; upper=TASKS ;;
+  ingest) port=18284; admin=19284; upper=INGEST ;;
   *) echo "schemathesis.sh: unknown service '$svc'" >&2; exit 2 ;;
 esac
 
@@ -55,6 +57,23 @@ if [ "$svc" = tasks ]; then
   deps=("TASKS_VALKEY_URL=${TASKS_VALKEY_URL:-valkey://localhost:6379}"
         "TASKS_KAFKA_BROKERS=${TASKS_KAFKA_BROKERS:-localhost:9092}"
         "TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION=${KAFKA_ALLOW_AUTO_TOPIC_CREATION:-true}")
+fi
+# ingest runs against the local S3 store and broker (docker/deps.yml). An
+# explicitly empty INGEST_KAFKA_BROKERS runs it on the archive alone. The
+# urgent linger is shortened: without Kafka every generated request waits for
+# an archive flush, and a thousand of them should not take a thousand seconds.
+if [ "$svc" = ingest ]; then
+  deps=("INGEST_S3_ENDPOINT=${INGEST_S3_ENDPOINT:-http://localhost:9000}"
+        "INGEST_S3_INSECURE=${INGEST_S3_INSECURE:-true}"
+        "INGEST_S3_BUCKET=${INGEST_S3_BUCKET:-ingest-schemathesis}"
+        "INGEST_S3_ACCESS_KEY_ID=${INGEST_S3_ACCESS_KEY_ID:-localaccess}"
+        "INGEST_S3_SECRET_ACCESS_KEY=${INGEST_S3_SECRET_ACCESS_KEY:-localsecret-0123456789}"
+        "INGEST_S3_AUTO_CREATE_BUCKET=true"
+        "INGEST_ARCHIVE_URGENT_LINGER=${INGEST_ARCHIVE_URGENT_LINGER:-50ms}"
+        "INGEST_KAFKA_BROKERS=${INGEST_KAFKA_BROKERS-localhost:9092}")
+  if [ -n "${INGEST_KAFKA_BROKERS-localhost:9092}" ]; then
+    deps+=("INGEST_KAFKA_ALLOW_AUTO_TOPIC_CREATION=${KAFKA_ALLOW_AUTO_TOPIC_CREATION:-true}")
+  fi
 fi
 env "${upper}_HTTP_ADDR=:$port" "${upper}_ADMIN_ADDR=127.0.0.1:$admin" "${upper}_LOG_LEVEL=warn" \
   "${deps[@]}" \

@@ -23,6 +23,27 @@ const (
 	PostgresImage = "postgres:18-alpine"
 	ValkeyImage   = "valkey/valkey:9.0"
 	KafkaImage    = "confluentinc/confluent-local:7.5.0"
+	// RustFSImage is the S3-compatible object store (Apache-2.0, a single
+	// static binary): what the S3 fixtures run instead of AWS.
+	RustFSImage = "rustfs/rustfs:1.0.5"
+)
+
+// S3Store is how a test reaches the shared object store: a plaintext
+// endpoint and the root credentials the container was started with. The
+// store starts empty; a test creates its bucket (libs/s3 does, with
+// AutoCreateBucket) and owns a key prefix in it.
+type S3Store struct {
+	Endpoint  string // http://host:port
+	AccessKey string
+	SecretKey string
+	Region    string
+}
+
+// Credentials and port of the S3 fixture.
+const (
+	s3AccessKey = "testaccess"
+	s3SecretKey = "testsecret-0123456789"
+	s3Port      = "9000/tcp"
 )
 
 // shared is one dependency per test binary: started on first use, reused by
@@ -41,6 +62,7 @@ var (
 	postgres shared[string]
 	valkey   shared[string]
 	kafka    shared[[]string]
+	s3store  shared[S3Store]
 )
 
 // Main terminates the shared containers after the package's tests have run.
@@ -57,7 +79,7 @@ func Main(m *testing.M) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	for _, term := range []func(context.Context) error{postgres.terminate, valkey.terminate, kafka.terminate, toxi.terminate} {
+	for _, term := range []func(context.Context) error{postgres.terminate, valkey.terminate, kafka.terminate, s3store.terminate, toxi.terminate} {
 		if term != nil {
 			_ = term(ctx)
 		}
@@ -138,6 +160,31 @@ func Kafka(tb testing.TB) []string {
 		brokers, err := c.Brokers(ctx)
 
 		return brokers, c, err
+	})
+}
+
+// S3 returns the package's shared S3-compatible object store (RustFS).
+func S3(tb testing.TB) S3Store {
+	tb.Helper()
+
+	return use(tb, &s3store, "s3", func(ctx context.Context) (S3Store, testcontainers.Container, error) {
+		ctr, err := testcontainers.Run(ctx, RustFSImage,
+			testcontainers.WithExposedPorts(s3Port),
+			testcontainers.WithEnv(map[string]string{
+				"RUSTFS_ACCESS_KEY": s3AccessKey,
+				"RUSTFS_SECRET_KEY": s3SecretKey,
+			}),
+			// /health answers once the store serves the S3 API; the port
+			// alone opens a moment earlier.
+			testcontainers.WithWaitStrategy(wait.ForHTTP("/health").WithPort(s3Port).
+				WithStartupTimeout(60*time.Second)))
+		if err != nil {
+			return S3Store{}, ctr, err
+		}
+
+		endpoint, err := ctr.PortEndpoint(ctx, s3Port, "http")
+
+		return S3Store{Endpoint: endpoint, AccessKey: s3AccessKey, SecretKey: s3SecretKey, Region: "us-east-1"}, ctr, err
 	})
 }
 

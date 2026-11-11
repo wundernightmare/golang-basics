@@ -56,6 +56,7 @@ func Run(t *testing.T, h Harness) {
 	t.Run("Consumer_RebalanceNoLossBoundedDuplicates", func(t *testing.T) { rebalance(t, h) })
 	t.Run("Consumer_StopsOnContextCancel", func(t *testing.T) { stopsOnCancel(t, h) })
 	t.Run("Producer_ErrorTaxonomy", func(t *testing.T) { errorTaxonomy(t, h) })
+	t.Run("Producer_LazyConnectStartsWithoutBrokers", func(t *testing.T) { lazyConnect(t, h) })
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -684,6 +685,44 @@ func errorTaxonomy(t *testing.T, h Harness) {
 	err = auto.Send(t.Context(), kafka.Message{Topic: missing, Value: make([]byte, 2<<20)})
 	require.Error(t, err)
 	assert.True(t, kafka.Rejected(err), "a record over KAFKA_MESSAGE_MAX_BYTES is rejected for good: %v", err)
+}
+
+// With no broker answering, a producer is refused at boot by default and
+// built with WithLazyConnect; its sends then fail as an outage, inside the
+// publish budget, and it works once it is pointed at a live broker.
+func lazyConnect(t *testing.T, harness Harness) {
+	t.Helper()
+
+	dead := kafka.Config{
+		Brokers: []string{"127.0.0.1:1"}, Topic: testx.Unique("lazy"), ClientID: testx.Unique("prod"),
+		DialTimeout: time.Second, PublishTimeout: 2 * time.Second,
+	}
+
+	_, err := kafka.NewProducer(t.Context(), dead, nil)
+	require.Error(t, err, "the default is to fail the boot")
+
+	p, err := kafka.NewProducer(t.Context(), dead, nil, kafka.WithLazyConnect())
+	require.NoError(t, err, "lazy: the producer exists without a broker")
+
+	defer p.Close()
+
+	start := time.Now()
+	err = p.Send(t.Context(), kafka.Message{Value: []byte("x")})
+	require.Error(t, err)
+
+	var se *kafka.SendError
+	require.ErrorAs(t, err, &se)
+	assert.True(t, se.Retryable, "no broker is an outage, not a rejected record: %v", err)
+	assert.Less(t, time.Since(start), 10*time.Second, "bounded by KAFKA_PUBLISH_TIMEOUT")
+
+	live, err := kafka.NewProducer(t.Context(), kafka.Config{
+		Brokers: harness.Brokers(t), Topic: dead.Topic, ClientID: testx.Unique("prod"), AllowAutoTopicCreation: true,
+	}, nil, kafka.WithLazyConnect())
+	require.NoError(t, err)
+
+	defer live.Close()
+
+	require.NoError(t, live.Send(t.Context(), kafka.Message{Value: []byte("x")}), "a lazy producer connects on the first send")
 }
 
 // SASLSSL produces and consumes one record through a SASL_SSL listener

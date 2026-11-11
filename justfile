@@ -500,7 +500,7 @@ bench-tasks PROFILE="smoke":
 
 # ── Contracts (TypeSpec → OpenAPI + JSON Schema → Go types) ───────────────────
 
-# OpenAPI for ping + tasks, the event JSON Schemas, and the Go types in
+# OpenAPI for ping + tasks + ingest, the event JSON Schemas, and the Go types in
 # libs/contracts. Commit the result.
 
 # Regenerate every contract artefact from api/tsp
@@ -509,6 +509,7 @@ contracts:
     {{MISE}} pnpm --filter @golang-basics/api compile
     {{MISE}} oapi-codegen -config api/oapi-codegen.yaml api/openapi3/tasks.openapi.yaml
     {{MISE}} oapi-codegen -config api/oapi-codegen-ping.yaml api/openapi3/ping.openapi.yaml
+    {{MISE}} oapi-codegen -config api/oapi-codegen-ingest.yaml api/openapi3/ingest.openapi.yaml
     {{MISE}} go-jsonschema -p events --only-models --schema-root-type TaskCreatedEvent=TaskCreatedEvent -o libs/contracts/events/task_created.gen.go api/jsonschema/TaskCreatedEvent.json
     {{MISE}} go-jsonschema -p events --only-models --schema-root-type TaskUpdatedEvent=TaskUpdatedEvent -o libs/contracts/events/task_updated.gen.go api/jsonschema/TaskUpdatedEvent.json
     {{MISE}} go-jsonschema -p events --only-models --schema-root-type TaskDeletedEvent=TaskDeletedEvent -o libs/contracts/events/task_deleted.gen.go api/jsonschema/TaskDeletedEvent.json
@@ -541,7 +542,7 @@ contracts-check BASE="origin/master":
     done
     echo "contracts OK"
 
-# Property-based API testing (Schemathesis; JUnit → .reports/junit); tasks needs infra-up
+# Property-based API testing (Schemathesis; JUnit → .reports/junit); tasks and ingest need infra-up
 schemathesis SVC="ping":
     scripts/schemathesis.sh {{SVC}}
 

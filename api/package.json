@@ -4,9 +4,10 @@
   "private": true,
   "description": "API and event contracts in TypeSpec — the source the OpenAPI document, the JSON Schemas and the Go types are generated from",
   "scripts": {
-    "compile": "pnpm compile:tasks && pnpm compile:ping",
+    "compile": "pnpm compile:tasks && pnpm compile:ping && pnpm compile:ingest",
     "compile:tasks": "tsp compile tsp/main.tsp --option @typespec/openapi3.output-file=tasks.openapi.yaml",
     "compile:ping": "tsp compile tsp/ping.tsp --option @typespec/openapi3.output-file=ping.openapi.yaml",
+    "compile:ingest": "tsp compile tsp/ingest.tsp --option @typespec/openapi3.output-file=ingest.openapi.yaml",
     "clean": "rm -rf openapi3 jsonschema"
   },
   "devDependencies": {

@@ -50,6 +50,25 @@ import (
 //	PING_LOG_FORMAT              json|text                                 (default "json")
 //	PING_LOG_SAMPLE_INITIAL      per second, per message: pass the first N (default 100, 0 = no sampling)
 //	PING_LOG_SAMPLE_THEREAFTER   … then every M-th                         (default 100)
+//	PING_RUNTIME_MEMORY_LIMIT_RATIO   Go memory limit as a share of the container's memory limit; negative = leave it alone (default 0.85)
+//	PING_RUNTIME_MEMORY_LIMIT_REFRESH how often the container limit is re-read; negative = only at start (default "30s")
+//	PING_RUNTIME_TRACEBACK       none|single|all|system|crash: goroutines printed when the process dies (default "all")
+//	PING_DIAG_DUMP_DIR           directory (an emptyDir) for crash reports and artifacts not uploaded yet; "" = no crash capture (default "")
+//	PING_DIAG_KEY_PREFIX         first segment of the object keys in the dump sink (default "diagnostics")
+//	PING_DIAG_MEMORY_THRESHOLD   share of the container's memory limit at which profiles are captured; negative = never (default 0.9)
+//	PING_DIAG_MEMORY_COOLDOWN    shortest time between two memory captures (default "10m")
+//	PING_DIAG_CHECK_INTERVAL     how often container memory is looked at     (default "5s")
+//	PING_DIAG_UPLOAD_TIMEOUT     one upload to the dump sink                 (default "15s")
+//	PING_DIAG_SPOOL_RETRY        how often the dump directory is re-sent     (default "1m")
+//	PING_DIAG_SPOOL_MAX_FILES    files kept in the dump directory            (default 20)
+//	PING_DIAG_CRASH_MAX_BYTES    longest crash report shipped                (default 8388608)
+//
+// The DIAG_ keys do nothing until the service installs a sink
+// ([Server.SetDumpSink]) or sets DIAG_DUMP_DIR (diagnostics.go).
+//
+// The RUNTIME_ keys are applied by [Server.Run]; a GOMEMLIMIT in the
+// environment overrides the ratio. GOMAXPROCS has no key: the runtime follows
+// the container's CPU limit by itself (docs/RUNTIME.md).
 //
 // The two tokens are tagged secret so GET /admin/config never shows them (see
 // [Redact]); a service that embeds them in its own config struct should do
@@ -91,6 +110,27 @@ type Config struct {
 	LogFormat           string        `env:"LOG_FORMAT" envDefault:"json" yaml:"log_format"`
 	LogSampleInitial    int           `env:"LOG_SAMPLE_INITIAL" envDefault:"100" yaml:"log_sample_initial"`
 	LogSampleThereafter int           `env:"LOG_SAMPLE_THEREAFTER" envDefault:"100" yaml:"log_sample_thereafter"`
+
+	// RuntimeMemoryLimitRatio is the share of the container's memory limit
+	// handed to the garbage collector as its soft limit (GOMEMLIMIT). The
+	// rest is headroom for what the collector does not count: goroutine
+	// stacks in flight, memory held by C libraries, the kernel's accounting
+	// of page cache and sockets. Negative leaves the runtime alone.
+	RuntimeMemoryLimitRatio   float64       `env:"RUNTIME_MEMORY_LIMIT_RATIO" envDefault:"0.85" yaml:"runtime_memory_limit_ratio"`
+	RuntimeMemoryLimitRefresh time.Duration `env:"RUNTIME_MEMORY_LIMIT_REFRESH" envDefault:"30s" yaml:"runtime_memory_limit_refresh"`
+	RuntimeTraceback          string        `env:"RUNTIME_TRACEBACK" envDefault:"all" yaml:"runtime_traceback"`
+
+	// Post-mortem diagnostics (diagnostics.go): crash reports and
+	// memory-pressure profiles, shipped to the sink of [Server.SetDumpSink].
+	DiagDumpDir         string        `env:"DIAG_DUMP_DIR" yaml:"diag_dump_dir"`
+	DiagKeyPrefix       string        `env:"DIAG_KEY_PREFIX" envDefault:"diagnostics" yaml:"diag_key_prefix"`
+	DiagMemoryThreshold float64       `env:"DIAG_MEMORY_THRESHOLD" envDefault:"0.9" yaml:"diag_memory_threshold"`
+	DiagMemoryCooldown  time.Duration `env:"DIAG_MEMORY_COOLDOWN" envDefault:"10m" yaml:"diag_memory_cooldown"`
+	DiagCheckInterval   time.Duration `env:"DIAG_CHECK_INTERVAL" envDefault:"5s" yaml:"diag_check_interval"`
+	DiagUploadTimeout   time.Duration `env:"DIAG_UPLOAD_TIMEOUT" envDefault:"15s" yaml:"diag_upload_timeout"`
+	DiagSpoolRetry      time.Duration `env:"DIAG_SPOOL_RETRY" envDefault:"1m" yaml:"diag_spool_retry"`
+	DiagSpoolMaxFiles   int           `env:"DIAG_SPOOL_MAX_FILES" envDefault:"20" yaml:"diag_spool_max_files"`
+	DiagCrashMaxBytes   int64         `env:"DIAG_CRASH_MAX_BYTES" envDefault:"8388608" yaml:"diag_crash_max_bytes"`
 }
 
 // Defaults applied by [Config.withDefaults] when a service builds a Config by
@@ -183,6 +223,54 @@ func (c *Config) withDefaults() {
 	if c.LogFormat == "" {
 		c.LogFormat = "json"
 	}
+
+	if c.RuntimeMemoryLimitRatio == 0 {
+		c.RuntimeMemoryLimitRatio = defaultMemoryLimitRatio
+	}
+
+	if c.RuntimeMemoryLimitRefresh == 0 {
+		c.RuntimeMemoryLimitRefresh = defaultMemoryLimitRefresh
+	}
+
+	if c.RuntimeTraceback == "" {
+		c.RuntimeTraceback = defaultTraceback
+	}
+
+	c.withDiagDefaults()
+}
+
+func (c *Config) withDiagDefaults() {
+	if c.DiagKeyPrefix == "" {
+		c.DiagKeyPrefix = defaultDiagKeyPrefix
+	}
+
+	if c.DiagMemoryThreshold == 0 {
+		c.DiagMemoryThreshold = defaultDiagMemoryThreshold
+	}
+
+	if c.DiagMemoryCooldown == 0 {
+		c.DiagMemoryCooldown = defaultDiagMemoryCooldown
+	}
+
+	if c.DiagCheckInterval == 0 {
+		c.DiagCheckInterval = defaultDiagCheckInterval
+	}
+
+	if c.DiagUploadTimeout == 0 {
+		c.DiagUploadTimeout = defaultDiagUploadTimeout
+	}
+
+	if c.DiagSpoolRetry == 0 {
+		c.DiagSpoolRetry = defaultDiagSpoolRetry
+	}
+
+	if c.DiagSpoolMaxFiles == 0 {
+		c.DiagSpoolMaxFiles = defaultDiagSpoolMaxFiles
+	}
+
+	if c.DiagCrashMaxBytes == 0 {
+		c.DiagCrashMaxBytes = defaultDiagCrashMaxBytes
+	}
 }
 
 // Validate applies the defaults and rejects a config the server could not
@@ -248,6 +336,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("LOG_SAMPLE_INITIAL / LOG_SAMPLE_THEREAFTER must not be negative"))
 	}
 
+	errs = append(errs, c.validateRuntime()...)
+
 	if _, err := parsePrefixes(c.TrustedProxies); err != nil {
 		errs = append(errs, fmt.Errorf("HTTP_TRUSTED_PROXIES: %w", err))
 	}
@@ -257,6 +347,37 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// validateRuntime checks the RUNTIME_ and DIAG_ keys.
+func (c *Config) validateRuntime() []error {
+	var errs []error
+
+	if c.RuntimeMemoryLimitRatio > 1 {
+		errs = append(errs, fmt.Errorf("RUNTIME_MEMORY_LIMIT_RATIO must be at most 1 (negative = off), got %v", c.RuntimeMemoryLimitRatio))
+	}
+
+	if c.DiagMemoryThreshold > 1 {
+		errs = append(errs, fmt.Errorf("DIAG_MEMORY_THRESHOLD must be at most 1 (negative = off), got %v", c.DiagMemoryThreshold))
+	}
+
+	if c.DiagMemoryCooldown < 0 || c.DiagCheckInterval <= 0 || c.DiagUploadTimeout <= 0 || c.DiagSpoolRetry <= 0 {
+		errs = append(errs, errors.New("DIAG_CHECK_INTERVAL, DIAG_UPLOAD_TIMEOUT and DIAG_SPOOL_RETRY must be positive, DIAG_MEMORY_COOLDOWN not negative"))
+	}
+
+	if c.DiagSpoolMaxFiles < 1 || c.DiagCrashMaxBytes < 1 {
+		errs = append(errs, errors.New("DIAG_SPOOL_MAX_FILES and DIAG_CRASH_MAX_BYTES must be positive"))
+	}
+
+	if strings.Trim(c.DiagKeyPrefix, "/") == "" {
+		errs = append(errs, errors.New("DIAG_KEY_PREFIX must not be empty"))
+	}
+
+	if !validTraceback(c.RuntimeTraceback) {
+		errs = append(errs, fmt.Errorf("RUNTIME_TRACEBACK: unknown level %q (want none|single|all|system|crash)", c.RuntimeTraceback))
+	}
+
+	return errs
 }
 
 // LogConfig projects the logging fields for [NewLogger].

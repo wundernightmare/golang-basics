@@ -109,6 +109,17 @@ are producer sends with `client="consumer"` and the DLQ topic as `topic`
 (`enable_consumer_group_metrics: [group, partition, consumer_lag]`,
 docker/deps.yml).
 
+## S3 — `libs/s3` (client side only)
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `s3_request_duration_seconds` | histogram | `operation` (`put`, `get`, `head`, `list`, `delete`, `head_bucket`, `create_bucket`, `create_upload`, `upload_part`, `complete_upload`, `abort_upload`) |
+| `s3_request_errors_total` | counter | `operation` |
+
+The duration is the whole call, the client's retries included — the number
+`S3_OP_TIMEOUT` is set against; buckets as Kafka's (up to 60 s: a multipart
+part). A missing key on `get` / `head` is an answer, not an error.
+
 ## Outbox — `services/tasks/internal/outbox` (computed once per relay pass, never per scrape)
 
 | Metric | Type |
@@ -144,6 +155,7 @@ are the `cache_*` series above.
 | Metric | Type | Labels |
 | --- | --- | --- |
 | `health_check_up` | gauge (1/0) | `check, critical` |
+| `diag_dumps_total` | counter | `kind` (crash, memory), `result` (uploaded, spooled, failed) — post-mortem artifacts, [DIAGNOSTICS.md](DIAGNOSTICS.md); Go only |
 | `health_check_duration_seconds` | histogram (Go) | `check` |
 | `build_info` | gauge (1) | `version, revision` — no `service` (the scrape adds it), no runtime version (`go_info` has it) |
 | `app_integration_enabled` | gauge (1/0) | `integration` |
@@ -160,6 +172,20 @@ for a thread — Go's counterpart of Node's event-loop delay).
 | --- | --- |
 | `consumer_events_total{event_type}`, `consumer_duplicates_total`, `consumer_events_rejected_total{reason}` | consumer |
 | `heartbeat_beats_total` | heartbeat |
+| `ingest_batches_total{outcome}` (`kafka`, `archive` — the sink that confirmed first; `no_sink`, `overloaded`, `canceled`), `ingest_in_flight_bytes`, `ingest_in_flight_max_bytes`, `ingest_kafka_skipped_events_total{reason}` (`circuit_open`, `busy`) | ingest |
+| `ingest_archive_batches_total{result}` (`ok`, `failed`), `ingest_archive_events_total{result}` (`ok`, `failed`, `refused`), `ingest_archive_stored_bytes_total` | ingest |
+| `ingest_sink_circuit_breaker_state{target}` (`kafka`, `archive`; 0 closed, 1 open, 2 half-open), `ingest_sink_circuit_breaker_transitions_total{target,state}` | ingest |
+| `ingest_compaction_passes_total{result}`, `ingest_compaction_partitions_total{result}`, `ingest_compaction_events_total{result}` (`written`, `duplicate`), `ingest_compaction_objects_total{result}` (`merged`, `quarantined`), `ingest_compaction_last_success_timestamp_seconds`, `ingest_compaction_oldest_failed_hour_age_seconds` | ingest (`MODE=compact`) |
+
+What to alert on for ingest (not yet in `rules.yml`): `ingest_batches_total{outcome="no_sink"}`
+rising (clients are being told to retry); a sink's breaker state ≥ 1 for more
+than a few minutes; `ingest_archive_events_total{result=~"failed|refused"}`
+rising (events with no archive copy from that pod — they are in Kafka);
+`ingest_in_flight_bytes` near its max (429s next);
+`time() - ingest_compaction_last_success_timestamp_seconds` past a few
+intervals; any `ingest_compaction_objects_total{result="quarantined"}`.
+The share of `outcome="archive"` is the share of traffic answered at archive
+latency: near zero while Kafka is healthy.
 
 ## Alerts
 
