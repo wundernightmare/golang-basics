@@ -181,6 +181,10 @@ with — after YAML, env and defaults — through `httpx.Redact`:
   `cert`) or tagged `secret:"true"` become `[redacted]` (an empty value stays
   empty); a struct, slice or map under such a name is redacted as a whole;
   `secret:"false"` opts a false positive out;
+- a field of a secret *type* ([`secret.String`](../secret)) is redacted whatever its
+  name or tags say, and shown as `[redacted:1a2b3c4d]` — a short SHA-256
+  fingerprint that changes when the secret does; the type also keeps the value
+  out of logs and `fmt`;
 - the password of a URL with userinfo becomes `xxxxx`
   (`postgres://app:xxxxx@db/app`, also when `net/url` cannot parse it), secret-looking query parameters
   (`?sslpassword=`, `?token=`, `?api_key=`) become `[redacted]`, and so does

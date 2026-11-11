@@ -149,7 +149,7 @@ README; this file is only the high-signal, easy-to-miss bits.
   exactly when its `go.mod` requires `libs/testx/containers`; CI derives the
   integration matrix from that (and runs a service with internal/kafkaprovider
   once more with `-tags kafka_franz`). `ping`, `heartbeat`, `httpx` and
-  `resilient-http-client`, `grpcx` and `resilience` stay dependency-free — and so do their module
+  `resilient-http-client`, `grpcx`, `resilience` and `secret` stay dependency-free — and so do their module
   graphs: `libs/testx` (the light harness) pulls no Docker client.
 
 ## Conventions

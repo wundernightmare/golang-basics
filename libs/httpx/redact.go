@@ -32,6 +32,49 @@ var rawUserinfo = regexp.MustCompile(`^([^:/?#]+://[^:@/?#]*):(.*)@`)
 // dsnPair matches one "key=value" of a libpq keyword/value DSN.
 var dsnPair = regexp.MustCompile(`(?i)\b(password|passwd|pwd|sslpassword)=('(?:[^'\\]|\\.)*'|\S+)`)
 
+// typedSecret is a value that is a secret by its type rather than by a tag or
+// a name: libs/secret's String. It is matched by shape, so this package (and
+// every module that imports it) does not depend on that one. Expose is never
+// called here — it only identifies the type.
+type typedSecret interface {
+	Expose() string
+	IsZero() bool
+}
+
+// secretPlaceholder is "" for an unset typed secret and "[redacted]" for a
+// set one — "[redacted:1a2b3c4d]" when the type offers a fingerprint, so an
+// operator sees on /admin/config whether a rotation reached this instance.
+func secretPlaceholder(s typedSecret) string {
+	if s.IsZero() {
+		return ""
+	}
+
+	if f, ok := s.(interface{ Fingerprint() string }); ok {
+		if fp := f.Fingerprint(); isHex(fp) {
+			return "[redacted:" + fp + "]"
+		}
+	}
+
+	return redactedValue
+}
+
+// isHex guards the one thing taken from a typed secret: a short hex digest
+// prefix is shown, anything else is not.
+func isHex(s string) bool {
+	const maxLen = 16
+	if s == "" || len(s) > maxLen {
+		return false
+	}
+
+	for _, c := range s {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return false
+		}
+	}
+
+	return true
+}
+
 // Redact returns a copy of v suitable for showing to an operator — what
 // GET /admin/config serves. It walks structs, pointers, slices and maps and:
 //
@@ -39,6 +82,8 @@ var dsnPair = regexp.MustCompile(`(?i)\b(password|passwd|pwd|sslpassword)=('(?:[
 //     password / secret / token / api key / private key / credential, or whose
 //     field carries `secret:"true"`, with "[redacted]" (an empty value stays
 //     empty, so "unset" remains visible); `secret:"false"` opts a field out;
+//   - does the same for a value that is a secret by type (libs/secret's
+//     String), wherever it sits and whatever its tags say;
 //   - rewrites the password in any string that parses as a URL with
 //     userinfo (postgres://app:s3cret@host → postgres://app:xxxxx@host), any
 //     secret-looking query parameter of such a URL (?sslpassword=, ?token=),
@@ -72,6 +117,10 @@ func redactValue(rv reflect.Value, secret bool) any {
 	case reflect.Struct:
 		if t, ok := reflect.TypeAssert[time.Time](rv); ok {
 			return t
+		}
+
+		if s, ok := reflect.TypeAssert[typedSecret](rv); ok {
+			return secretPlaceholder(s)
 		}
 
 		return redactStruct(rv, secret)

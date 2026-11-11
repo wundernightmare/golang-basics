@@ -46,3 +46,5 @@ override:
     threshold: 80
   - path: ^libs/resilience$
     threshold: 80
+  - path: ^libs/secret$
+    threshold: 95
