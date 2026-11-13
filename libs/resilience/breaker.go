@@ -304,13 +304,14 @@ func (b *Breaker) recordProbe(t Ticket, o Outcome) {
 // swap is a state transition: a CAS from s to next that notifies onChange
 // when it wins.
 func (b *Breaker) swap(s, next *snapshot) bool {
-	if !b.cur.CompareAndSwap(s, next) {
-		return false
-	}
-
-	if b.onChange != nil {
+	// One statement for both outcomes: a "lost the CAS" branch of its own is
+	// only ever executed when two goroutines happen to collide, and a line
+	// whose coverage depends on the scheduler makes the no-regression
+	// coverage gate fail at random.
+	won := b.cur.CompareAndSwap(s, next)
+	if won && b.onChange != nil {
 		b.onChange(s.state, next.state)
 	}
 
-	return true
+	return won
 }

@@ -44,8 +44,12 @@ func TestChaos_LostAcknowledgement(t *testing.T) {
 		tc.RetryMaxAttempts = 3
 	}), nil)
 
-	// Warm up through the proxy: the topics exist and the path works.
-	resp, err := client.Send(api, poll(t, t.Context(), base, once, 0, 0))
+	// Warm up through the proxy, with a client that can wait: the topics
+	// exist and the path works. The broker's first fetch of a new topic can
+	// take longer than the short timeout the test itself runs with.
+	patient := newClient(t, policy(func(tc *resilient.TargetConfig) { tc.Timeout = 30 * time.Second }), nil)
+
+	resp, err := patient.Send(api, poll(t, t.Context(), base, once, 0, 0))
 	require.NoError(t, err)
 	assert.Equal(t, "[]", read(t, resp))
 
