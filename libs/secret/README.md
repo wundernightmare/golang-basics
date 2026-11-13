@@ -107,6 +107,11 @@ there `fmt` prints an address. One small allocation per secret, at config load.
 ## Tests
 
 `just mod libs/secret test` — every fmt verb on a value, a pointer and a struct
-with the secret in unexported fields; both slog handlers; JSON, YAML, env,
-`flag`, mapstructure; `FuzzString` checks that for any value `Expose` returns
-it and no rendering does (`go test -fuzz FuzzString`).
+with the secret in unexported fields; both slog handlers; JSON, `flag`, the
+decode hook; `FuzzString` checks that for any value `Expose` returns it and no
+rendering does (`go test -fuzz FuzzString`).
+
+[`compat/`](compat) is a module of its own with the tests against YAML,
+`caarlos0/env` and mapstructure: those libraries are that suite's
+dependencies, and this module's `go.mod` stays at the standard library (plus
+testify).

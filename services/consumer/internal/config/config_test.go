@@ -75,7 +75,7 @@ otel:
 	assert.Equal(t, "none", cfg.Kafka.DeadLetterTopic)
 	assert.Equal(t, 2, cfg.Kafka.MaxRetries)
 	assert.Equal(t, time.Second, cfg.Kafka.RetryBackoff, "env overlays the file")
-	assert.Equal(t, "s3cret", cfg.Kafka.SASLPassword)
+	assert.Equal(t, "s3cret", cfg.Kafka.SASLPassword.Expose())
 	assert.True(t, cfg.OTel.Enabled)
 	assert.True(t, cfg.OTel.Insecure, "insecure export comes from config, never from code")
 }

@@ -152,7 +152,7 @@ README; this file is only the high-signal, easy-to-miss bits.
   `resilient-http-client`, `grpcx`, `resilience` and `secret` stay dependency-free — and so do their module
   graphs: `libs/testx` (the light harness) pulls no Docker client. A dependency-free library that
   needs a container-backed suite gets a nested module next to its code
-  (`libs/resilient-http-client/integration`, `libs/grpcx/integration`: own `go.mod`, in `go.work`), never a
+  (`libs/resilient-http-client/integration`, `libs/grpcx/integration`, `libs/secret/compat`: own `go.mod`, in `go.work`), never a
   `libs/testx/containers` require in its own `go.mod` and never one shared "all integration tests"
   module.
 
@@ -177,6 +177,10 @@ README; this file is only the high-signal, easy-to-miss bits.
   the provider and propagators, httpx starts the server span. The otelx
   contract test (`telemetry_test.go`) guards that logs, span and metrics
   describe the same request.
+- **A credential in a config is a `secret.String`** (libs/secret), not a string with a tag: it
+  cannot be printed by `fmt`, `slog`, JSON or YAML, shows as `[redacted:<fingerprint>]` on
+  `/admin/config`, and its value is one explicit `Expose()` away, at the point of use. The
+  `secret:"true"` tag remains for what cannot be that type (a map of headers).
 - **Service configs embed the lib configs** (`httpx.Config` inline,
   `pgx.Config`/`valkey.Config`/`kafka.Config`/`otelx.Config` nested with an
   `envPrefix`) and load through `httpx.LoadYAML`: env > YAML > `envDefault` tag.

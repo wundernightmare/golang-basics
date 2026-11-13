@@ -159,7 +159,7 @@ func sdkConfig(ctx context.Context, cfg Config, httpClient *http.Client) (aws.Co
 	if cfg.AccessKeyID != "" {
 		return aws.Config{
 			Region:                     cfg.Region,
-			Credentials:                credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
+			Credentials:                credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey.Expose(), ""),
 			HTTPClient:                 httpClient,
 			Retryer:                    retryer,
 			RequestChecksumCalculation: checksum,

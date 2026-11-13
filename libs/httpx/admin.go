@@ -43,7 +43,7 @@ func newAdminMux(s *Server) *http.ServeMux {
 	mux.Handle("GET /metrics", s.Metrics.Handler())
 	mux.HandleFunc("GET /version", s.versionHandler)
 
-	guard := requireBearer(s.cfg.AdminToken, s.log)
+	guard := requireBearer(s.cfg.AdminToken.Expose(), s.log)
 	mux.Handle("GET /admin/config", guard(http.HandlerFunc(s.configHandler)))
 	mux.Handle("GET /admin/log-level", guard(http.HandlerFunc(s.getLogLevel)))
 	mux.Handle("PUT /admin/log-level", guard(http.HandlerFunc(s.putLogLevel)))

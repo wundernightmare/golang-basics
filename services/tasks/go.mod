@@ -103,6 +103,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/valkey v0.44.0 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
+	github.com/wundernightmare/golang-basics/libs/secret v0.0.0-00010101000000-000000000000 // indirect
 	github.com/twmb/franz-go v1.22.2 // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.15.0 // indirect
 	github.com/valkey-io/valkey-go v1.0.78 // indirect
@@ -136,3 +137,5 @@ replace github.com/wundernightmare/golang-basics/libs/contracts => ../../libs/co
 replace github.com/wundernightmare/golang-basics/libs/testx/containers => ../../libs/testx/containers
 
 replace github.com/wundernightmare/golang-basics/libs/testx/contract => ../../libs/testx/contract
+
+replace github.com/wundernightmare/golang-basics/libs/secret => ../../libs/secret

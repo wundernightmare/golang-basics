@@ -110,7 +110,7 @@ func commonProperties(cfg kafka.Config) (ckafka.ConfigMap, error) {
 	}
 
 	if cfg.SASLMechanism != "" { //nolint:nestif // mirrors kafka-franz saslMechanism; moving the password-file read into libs/kafka is a separate design change
-		password := cfg.SASLPassword
+		password := cfg.SASLPassword.Expose()
 		if cfg.SASLPasswordFile != "" {
 			b, err := os.ReadFile(cfg.SASLPasswordFile)
 			if err != nil {

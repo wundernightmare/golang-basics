@@ -142,8 +142,8 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
 	metrics.Registry.MustRegister(s.diag.dumps)
 
 	mws := []Middleware{s.entry}
-	if cfg.DebugToken != "" {
-		mws = append(mws, debugToken(cfg.DebugToken))
+	if !cfg.DebugToken.IsZero() {
+		mws = append(mws, debugToken(cfg.DebugToken.Expose()))
 	}
 
 	mws = append(mws,
@@ -298,12 +298,12 @@ func (s *Server) Run(ctx context.Context) error {
 	// laptop and a finding in a cluster (Validate only lets it through on
 	// loopback or with ADMIN_INSECURE).
 	adminAuth := "bearer"
-	if s.cfg.AdminToken == "" {
+	if s.cfg.AdminToken.IsZero() {
 		adminAuth = "off"
 	}
 
 	serve("admin server", admin, adminLn, "auth", adminAuth)
-	serve("http server", api, apiLn, "debug_token", s.cfg.DebugToken != "")
+	serve("http server", api, apiLn, "debug_token", !s.cfg.DebugToken.IsZero())
 
 	// Readiness: one synchronous pass so the first probe answers from real
 	// results, then the background loop for the lifetime of the server.
