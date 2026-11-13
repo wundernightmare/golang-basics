@@ -7,6 +7,8 @@ import (
 
 	"github.com/caarlos0/env/v11"
 	valkeygo "github.com/valkey-io/valkey-go"
+
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // Config is the Valkey client configuration, populated from the environment
@@ -33,7 +35,7 @@ import (
 type Config struct {
 	URL         string        `env:"VALKEY_URL" yaml:"url"`
 	Addr        string        `env:"VALKEY_ADDR" yaml:"addr"`
-	Password    string        `env:"VALKEY_PASSWORD" yaml:"password" secret:"true"`
+	Password    secret.String `env:"VALKEY_PASSWORD" yaml:"password"`
 	DB          int           `env:"VALKEY_DB" envDefault:"0" yaml:"db"`
 	DialTimeout time.Duration `env:"VALKEY_DIAL_TIMEOUT" envDefault:"5s" yaml:"dial_timeout"`
 	// OpTimeout bounds every command (get/set/del). Without it a cache that
@@ -85,7 +87,7 @@ func (c Config) clientOption() (valkeygo.ClientOption, error) {
 
 	opt := valkeygo.ClientOption{
 		InitAddress: []string{c.Addr},
-		Password:    c.Password,
+		Password:    c.Password.Expose(),
 		SelectDB:    c.DB,
 	}
 	opt.Dialer.Timeout = c.DialTimeout

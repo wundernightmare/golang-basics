@@ -35,6 +35,8 @@ x-build: &build
   args: &build-args
     GO_VERSION: ${GO_VERSION:-}
     KAFKA_PROVIDER: ${KAFKA_PROVIDER:-rdkafka}
+    FIPS: ${FIPS:-0}
+    GOFIPS140_VERSION: # from the environment; unset = the Dockerfile's pin
     ALPINE_MIRROR: ${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
     VERSION: ${VERSION:-dev}
     GIT_SHA: ${GIT_SHA:-}

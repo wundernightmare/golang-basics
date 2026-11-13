@@ -99,6 +99,6 @@ func TestHTTP_IsTheEmbeddedConfig(t *testing.T) {
 
 	h := cfg.HTTP()
 	assert.Equal(t, cfg.Config, h, "a projection, not a hand copy")
-	assert.Equal(t, "s3cret", h.AdminToken)
-	assert.Equal(t, "dbg", h.DebugToken)
+	assert.Equal(t, "s3cret", h.AdminToken.Expose())
+	assert.Equal(t, "dbg", h.DebugToken.Expose())
 }

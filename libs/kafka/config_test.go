@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // The process-environment path of LoadConfig (LoadConfigFrom with nil);
@@ -120,7 +121,7 @@ func TestConfig_LoadYAMLNested(t *testing.T) {
 	require.NoError(t, cfg.Kafka.Validate())
 	assert.Equal(t, "from-yaml", cfg.Kafka.Topic)
 	assert.Equal(t, []string{"from-yaml"}, cfg.Kafka.Topics)
-	assert.Equal(t, "from-env", cfg.Kafka.SASLPassword)
+	assert.Equal(t, "from-env", cfg.Kafka.SASLPassword.Expose())
 	assert.Equal(t, 2, cfg.Kafka.MaxRetries)
 	assert.Equal(t, 32768, cfg.Kafka.ProducerQueueMaxKBytes)
 	assert.Equal(t, "30000", cfg.Kafka.ExtraProperties["socket.timeout.ms"], "a YAML number is a property string")
@@ -130,7 +131,7 @@ func TestConfig_LoadYAMLNested(t *testing.T) {
 	require.True(t, ok)
 
 	k := redacted["kafka"].(map[string]any)
-	assert.Equal(t, "[redacted]", k["sasl_password"], "the password never reaches /admin/config")
+	assert.Equal(t, "[redacted:43d6d63b]", k["sasl_password"], "the password never reaches /admin/config — its fingerprint does")
 	assert.Equal(t, "[redacted]", k["extra_properties"].(map[string]any)["sasl.oauthbearer.client.secret"], "nor a secret property")
 	assert.Equal(t, "30000", k["extra_properties"].(map[string]any)["socket.timeout.ms"])
 	assert.Equal(t, caPath, k["ssl_ca_location"])
@@ -150,7 +151,7 @@ func TestConfig_Validate(t *testing.T) {
 		"defaults are valid":           {cfg: Config{}},
 		"no brokers":                   {cfg: Config{Brokers: []string{}}, want: "KAFKA_BROKERS must be set"},
 		"unknown protocol":             {cfg: Config{SecurityProtocol: "tls"}, want: "unknown protocol"},
-		"sasl password and its file":   {cfg: Config{SecurityProtocol: "sasl_ssl", SASLMechanism: "PLAIN", SASLUsername: "u", SASLPassword: "p", SASLPasswordFile: pw}, want: "pick one"},
+		"sasl password and its file":   {cfg: Config{SecurityProtocol: "sasl_ssl", SASLMechanism: "PLAIN", SASLUsername: "u", SASLPassword: secret.New("p"), SASLPasswordFile: pw}, want: "pick one"},
 		"sasl password from a file":    {cfg: Config{SecurityProtocol: "sasl_ssl", SASLMechanism: "PLAIN", SASLUsername: "u", SASLPasswordFile: pw}},
 		"unknown sasl":                 {cfg: Config{SecurityProtocol: "sasl_ssl", SASLMechanism: "gssapi"}, want: "unknown mechanism"},
 		"sasl without a mechanism":     {cfg: Config{SecurityProtocol: "sasl_plaintext"}, want: "needs KAFKA_SASL_MECHANISM"},
@@ -159,7 +160,7 @@ func TestConfig_Validate(t *testing.T) {
 		"ssl keys without ssl":         {cfg: Config{SSLCALocation: "ca.pem"}, want: "is not ssl or sasl_ssl"},
 		"half a key pair":              {cfg: Config{SecurityProtocol: "ssl", SSLCertificateLocation: "c.pem"}, want: "must be set together"},
 		"bad endpoint algorithm":       {cfg: Config{SecurityProtocol: "ssl", SSLEndpointIdentificationAlgorithm: "dns"}, want: "want https|none"},
-		"protocol is normalised":       {cfg: Config{SecurityProtocol: " SASL_SSL ", SASLMechanism: "scram-sha-256", SASLUsername: "u", SASLPassword: "p"}},
+		"protocol is normalised":       {cfg: Config{SecurityProtocol: " SASL_SSL ", SASLMechanism: "scram-sha-256", SASLUsername: "u", SASLPassword: secret.New("p")}},
 		"unknown codec":                {cfg: Config{CompressionType: "brotli"}, want: "unknown codec"},
 		"unknown strategy":             {cfg: Config{AssignmentStrategy: "sticky"}, want: "cooperative-sticky|range|roundrobin"},
 		"poll interval below session":  {cfg: Config{SessionTimeoutMs: 60_000, MaxPollIntervalMs: 30_000}, want: "is below KAFKA_CONSUMER_SESSION_TIMEOUT_MS"},

@@ -42,6 +42,8 @@ type Server struct {
 	// LogLevel is the runtime level control of the logger passed to
 	// [NewServer], nil when that logger did not come from [NewLogger].
 	LogLevel *LogLevel
+
+	subjects debugSubjects // tenants / users under investigation (subjects.go)
 }
 
 // Option customises [NewServer].
@@ -141,9 +143,14 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
 	s.diag = newDiagnostics(cfg, build, log)
 	metrics.Registry.MustRegister(s.diag.dumps)
 
-	mws := []Middleware{s.entry}
-	if cfg.DebugToken != "" {
-		mws = append(mws, debugToken(cfg.DebugToken))
+	mws := []Middleware{}
+	if cfg.DiagFlightRecorder && cfg.DiagFlightSlowRequest > 0 {
+		mws = append(mws, s.flightTrigger)
+	}
+
+	mws = append(mws, s.entry)
+	if !cfg.DebugToken.IsZero() {
+		mws = append(mws, debugToken(cfg.DebugToken.Expose()))
 	}
 
 	mws = append(mws,
@@ -151,6 +158,14 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
 		accessLog(log, cfg.SlowRequest),
 		metrics.Middleware(),
 	)
+
+	// Inside tracing, the access log and the metrics — a 429 is a request
+	// like any other to them — and outside everything the service installs:
+	// what is shed costs no authentication, no handler.
+	if limiter := newRateLimiter(cfg, metrics.Registry); limiter != nil {
+		mws = append(mws, limiter.middleware)
+	}
+
 	mws = append(mws, applied.outer...)
 	mws = append(mws,
 		s.recovery,
@@ -298,12 +313,12 @@ func (s *Server) Run(ctx context.Context) error {
 	// laptop and a finding in a cluster (Validate only lets it through on
 	// loopback or with ADMIN_INSECURE).
 	adminAuth := "bearer"
-	if s.cfg.AdminToken == "" {
+	if s.cfg.AdminToken.IsZero() {
 		adminAuth = "off"
 	}
 
-	serve("admin server", admin, adminLn, "auth", adminAuth)
-	serve("http server", api, apiLn, "debug_token", s.cfg.DebugToken != "")
+	serve("admin server", admin, adminLn, "guard", adminAuth) // not "auth": the logger masks keys that name credentials
+	serve("http server", api, apiLn, "debug_token", !s.cfg.DebugToken.IsZero())
 
 	// Readiness: one synchronous pass so the first probe answers from real
 	// results, then the background loop for the lifetime of the server.

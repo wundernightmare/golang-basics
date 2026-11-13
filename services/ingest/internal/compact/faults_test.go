@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/s3"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 	"github.com/tracehubmmp/golang-basics/services/ingest/internal/archive"
 	"github.com/tracehubmmp/golang-basics/services/ingest/internal/compact"
 	"github.com/tracehubmmp/golang-basics/services/ingest/internal/shard"
@@ -32,7 +33,7 @@ func TestPass_StoreDown(t *testing.T) {
 
 	store, err := s3.New(context.Background(), s3.Config{
 		Bucket: "b", Endpoint: srv.URL, Insecure: true, UsePathStyle: true,
-		AccessKeyID: "k", SecretAccessKey: "s", MaxAttempts: 1, UploadPartBytes: s3.MinUploadPartBytes,
+		AccessKeyID: "k", SecretAccessKey: secret.New("s"), MaxAttempts: 1, UploadPartBytes: s3.MinUploadPartBytes,
 	}, nil)
 	require.NoError(t, err)
 	t.Cleanup(store.Close)

@@ -63,14 +63,70 @@ the trace ids in them (see `httpx.NewLogger`).
   logged at warn at most once every 30s, with a count of what was suppressed
   in between. They never affect the service.
 
-## Sampling
+## Sampling: head in the service, tail in the collector
 
-Parent-based ratio head sampling: a root span is sampled with probability
-`OTEL_TRACES_SAMPLER_RATIO` (a negative ratio never samples), a child follows
-its parent. `OTEL_TRACES_TRUST_REMOTE_PARENT=true` (the OpenTelemetry
-default) keeps a sampled caller's trace intact through the service; turn it
-off on an internet-facing edge, where an untrusted client could otherwise
-force sampling — the local ratio then decides for remote parents too.
+There are two places to decide which traces are kept, and they are not
+interchangeable.
+
+**Head sampling** is decided here, in the service, when a trace *starts*:
+parent-based ratio sampling. A root span is sampled with probability
+`OTEL_TRACES_SAMPLER_RATIO` (a negative ratio never samples; `0` is read as
+"not set" and means 1.0), a child follows its parent.
+`OTEL_TRACES_TRUST_REMOTE_PARENT=true` (the OpenTelemetry default) keeps a
+sampled caller's trace intact through the service; turn it off on an
+internet-facing edge, where an untrusted client could otherwise force
+sampling — the local ratio then decides for remote parents too. Head
+sampling is cheap — an unsampled trace costs no export — and blind: at the
+start nobody knows whether the request will fail or be slow.
+
+**Tail sampling** is decided in the OpenTelemetry Collector, when a trace is
+*over*: the collector holds the spans of a trace for a while, then keeps the
+whole trace or drops it. The repository ships that configuration,
+[`docker/observability/otel-collector.yml`](../../docker/observability/otel-collector.yml):
+
+| Kept | Policy | Knob (collector environment) |
+| --- | --- | --- |
+| always | a span in status ERROR anywhere in the trace | — |
+| always | the trace took longer than the threshold | `OTEL_TAIL_SLOW_THRESHOLD_MS` (`500`) |
+| always | a span has the attribute `debug.subject`, any value | — |
+| a share | everything else | `OTEL_TAIL_SAMPLING_PERCENTAGE` (`1`) |
+
+`OTEL_TAIL_DECISION_WAIT` (`10s`) is how long a trace is held before the
+decision, `OTEL_TAIL_NUM_TRACES` (`50000`) how many are held at once.
+
+`debug.subject` is the handle for an investigation: a service sets it on a
+span for the tenant or the user being looked at —
+`span.SetAttributes(attribute.String("debug.subject", tenantID))` — and every
+trace of theirs is kept while everybody else's stay at the baseline share.
+
+Two rules follow, and both fail silently when broken:
+
+1. **With tail sampling, head-sample at 1.0.** The collector decides on what
+   it receives. `OTEL_TRACES_SAMPLER_RATIO=0.1` in a service means the
+   collector sees a tenth of the traces — and keeps "100% of errors" out of
+   that tenth: nine error traces in ten were never sent, and no policy brings
+   them back. Leave the ratio at its default (1.0) and move the volume
+   decision to `OTEL_TAIL_SAMPLING_PERCENTAGE`. Lower the head ratio only
+   when the cost of *exporting* everything is the problem, knowing that it
+   multiplies every tail policy.
+2. **One collector must see every span of a trace.** The decision is made
+   from the spans one collector process holds. Several replicas behind a
+   plain load balancer each get a fragment: the replica with the failed span
+   keeps its part, the others drop theirs at the baseline share, and the
+   trace arrives with holes. Run one sampling collector, or two tiers: a
+   stateless first tier with the `loadbalancing` exporter
+   (`routing_key: traceID`) in front of the sampling replicas. The same
+   reason sets a floor for `OTEL_TAIL_DECISION_WAIT`: it has to outlast the
+   slowest trace worth keeping whole plus the services' batch delay
+   (`OTEL_BSP_SCHEDULE_DELAY`).
+
+Tail sampling also costs memory in the collector (every trace is held for
+the wait) and adds the wait to the time a trace takes to appear in the
+backend.
+
+[`integration/`](integration) runs that configuration file in a real
+collector, fed through `otelx.Init`, and asserts each line of the table —
+and rule 1.
 
 ## Resource
 
@@ -98,7 +154,7 @@ With prefix `TASKS_` (YAML keys for `httpx.LoadYAML` in brackets):
 | `TASKS_OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` (`client_certificate`) | *(none)* | client certificate (PEM), mTLS |
 | `TASKS_OTEL_EXPORTER_OTLP_CLIENT_KEY` (`client_key`) | *(none)*     | client key (PEM), mTLS                          |
 | `TASKS_OTEL_EXPORTER_OTLP_TIMEOUT` (`export_timeout`) | `10s`       | per-export request timeout                      |
-| `TASKS_OTEL_TRACES_SAMPLER_RATIO` (`sampler_ratio`) | `1.0`         | head sampling ratio; negative = never           |
+| `TASKS_OTEL_TRACES_SAMPLER_RATIO` (`sampler_ratio`) | `1.0`         | head sampling ratio; negative = never; keep 1.0 under tail sampling |
 | `TASKS_OTEL_TRACES_TRUST_REMOTE_PARENT` (`trust_remote_parent`) | `true` | honour a caller's sampled flag       |
 | `TASKS_OTEL_BSP_SCHEDULE_DELAY` (`batch_timeout`) | `5s`            | batch flush interval                            |
 | `TASKS_OTEL_BSP_MAX_QUEUE_SIZE` (`max_queue_size`) | `2048`         | spans buffered before dropping                  |
@@ -116,7 +172,9 @@ the real Prometheus registry, asserting that the span (name, kind, parent,
 (`trace_id`/`span_id`/`request_id`, access-log fields) and the metrics
 (`route` label, `trace_id` exemplar, promlint-clean) describe the same
 request. `otelx_test.go` covers config loading, TLS setup, the sampler, the
-resource and the throttled error handler.
+resource and the throttled error handler. [`integration/`](integration) (a
+module of its own, container-backed) covers the path from `Init` through the
+shipped collector configuration: what tail sampling keeps.
 
 ```sh
 just test

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/s3"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // Serial on purpose: exercises the process-environment path (t.Setenv cannot run in parallel).
@@ -48,7 +49,7 @@ func TestConfigValidate(t *testing.T) {
 	t.Parallel()
 
 	valid := func() s3.Config {
-		return s3.Config{Bucket: "b", Endpoint: "https://s3.internal:9000", AccessKeyID: "k", SecretAccessKey: "s"}
+		return s3.Config{Bucket: "b", Endpoint: "https://s3.internal:9000", AccessKeyID: "k", SecretAccessKey: secret.New("s")}
 	}
 
 	cfg := valid()
@@ -65,7 +66,7 @@ func TestConfigValidate(t *testing.T) {
 		mutate func(*s3.Config)
 		want   string
 	}{
-		"half a credential pair": {func(c *s3.Config) { c.SecretAccessKey = "" }, "go together"},
+		"half a credential pair": {func(c *s3.Config) { c.SecretAccessKey = secret.New("") }, "go together"},
 		"plaintext endpoint":     {func(c *s3.Config) { c.Endpoint = "http://s3.internal:9000" }, "S3_INSECURE=true"},
 		"endpoint without host":  {func(c *s3.Config) { c.Endpoint = "s3.internal" }, "must be a URL"},
 		"endpoint scheme":        {func(c *s3.Config) { c.Endpoint = "ftp://s3.internal" }, "scheme must be https"},
@@ -98,7 +99,7 @@ func TestNewRejectsABadCAFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(notPEM, []byte("not a certificate"), 0o600))
 
 	_, err := s3.New(context.Background(), s3.Config{
-		Bucket: "b", Endpoint: "https://s3.internal", AccessKeyID: "k", SecretAccessKey: "s", CAFile: notPEM,
+		Bucket: "b", Endpoint: "https://s3.internal", AccessKeyID: "k", SecretAccessKey: secret.New("s"), CAFile: notPEM,
 	}, nil)
 	require.ErrorContains(t, err, "holds no PEM certificate")
 }

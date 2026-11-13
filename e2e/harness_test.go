@@ -61,6 +61,7 @@ type spec struct {
 	prefix string            // env prefix, e.g. "PING_"
 	api    bool              // has an API listener (HTTP_ADDR)
 	env    map[string]string // extra env, keys without the prefix
+	bin    string            // the binary to run; "" = <binDir>/<name>
 }
 
 // start spawns the service described by sp and returns it once /readyz on
@@ -70,7 +71,11 @@ type spec struct {
 func start(t *testing.T, svcSpec spec) *service {
 	t.Helper()
 
-	bin := filepath.Join(binDir(t), svcSpec.name)
+	bin := svcSpec.bin
+	if bin == "" {
+		bin = filepath.Join(binDir(t), svcSpec.name)
+	}
+
 	if _, err := os.Stat(bin); err != nil {
 		t.Fatalf("service binary %s: %v — build it first: scripts/build-service.sh %s %s (set E2E_BIN_DIR for another dir)",
 			bin, err, svcSpec.name, bin)
@@ -158,6 +163,7 @@ type buildInfo struct {
 	Revision      string `json:"revision"`
 	BuildTime     string `json:"build_time"`
 	GoVersion     string `json:"go_version"`
+	FIPS140       *bool  `json:"fips140"`
 	StartedAt     string `json:"started_at"`
 	UptimeSeconds *int64 `json:"uptime_seconds"`
 }

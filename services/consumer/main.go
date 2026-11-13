@@ -80,11 +80,11 @@ func run(cfg config.Config) error {
 	ctx, stop := httpx.SignalContext()
 	defer stop()
 
-	logger.Info("consumer starting", "admin_addr", cfg.AdminAddr, "topics", cfg.Kafka.Topics, "group", cfg.Kafka.Group, "version", httpx.Version)
+	logger.Info("consumer starting", "admin_addr", cfg.AdminAddr, "topics", cfg.Kafka.Topics, "group", cfg.Kafka.Group, "version", httpx.Version, "fips140", httpx.FIPS140())
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return srv.Run(gctx) })
-	g.Go(func() error { return w.Run(gctx) })
+	g.Go(srv.Guard("consumer", gctx, w.Run)) // a panic in the worker stops the service in order
 
 	if err := g.Wait(); err != nil {
 		logger.Error("consumer exited with error", "err", err)

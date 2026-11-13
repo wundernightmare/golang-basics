@@ -226,7 +226,7 @@ func saslMechanism(cfg kafka.Config) (sasl.Mechanism, error) {
 		return nil, nil //nolint:nilnil // nil mechanism means "no SASL", not an error
 	}
 
-	password := cfg.SASLPassword
+	password := cfg.SASLPassword.Expose()
 	if cfg.SASLPasswordFile != "" {
 		b, err := os.ReadFile(cfg.SASLPasswordFile)
 		if err != nil {

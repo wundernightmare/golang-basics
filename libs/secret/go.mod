@@ -2,9 +2,6 @@ module github.com/tracehubmmp/golang-basics/libs/secret
 
 go 1.27.0
 
-require (
-	github.com/caarlos0/env/v11 v11.4.1
-	github.com/go-viper/mapstructure/v2 v2.5.0
-	github.com/stretchr/testify v1.12.1
-	go.yaml.in/yaml/v3 v3.0.5
-)
+require github.com/stretchr/testify v1.12.1
+
+require go.yaml.in/yaml/v3 v3.0.6 // indirect

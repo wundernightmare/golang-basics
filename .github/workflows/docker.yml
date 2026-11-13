@@ -86,6 +86,8 @@ jobs:
             SERVICE=${{ matrix.service }}
             GO_VERSION=${{ needs.versions.outputs.GO_VERSION }}
             KAFKA_PROVIDER=${{ vars.KAFKA_PROVIDER || 'rdkafka' }}
+            FIPS=${{ vars.FIPS || '0' }}
+            GOFIPS140_VERSION=${{ vars.GOFIPS140_VERSION || 'v1.0.0' }}
             VERSION=${{ steps.stamp.outputs.version }}
             GIT_SHA=${{ github.sha }}
             BUILD_TIME=${{ steps.stamp.outputs.build_time }}

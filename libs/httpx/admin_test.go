@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // admin serves one admin request and returns the status and the decoded body.
@@ -170,7 +171,7 @@ func TestLogLevel_NotAvailableForForeignLogger(t *testing.T) {
 func TestAdminToken_GuardsAdminAndDebugButNotProbes(t *testing.T) {
 	t.Parallel()
 
-	srv, buf := loggedServer(t, httpx.Config{Addr: ":0", AdminAddr: ":0", AdminToken: "s3cret"})
+	srv, buf := loggedServer(t, httpx.Config{Addr: ":0", AdminAddr: ":0", AdminToken: secret.New("s3cret")})
 
 	for _, path := range []string{"/healthz", "/livez", "/version", "/metrics"} {
 		code, _ := admin(t, srv, http.MethodGet, path)
@@ -225,12 +226,12 @@ func TestAdminConfig_ShowsRedactedConfig(t *testing.T) {
 
 	// Default: the effective httpx.Config itself, with its tokens hidden and
 	// the defaults applied.
-	srv, _ := loggedServer(t, httpx.Config{Addr: ":1234", AdminAddr: ":0", AdminToken: "s3cret", DebugToken: "dbg"})
+	srv, _ := loggedServer(t, httpx.Config{Addr: ":1234", AdminAddr: ":0", AdminToken: secret.New("s3cret"), DebugToken: secret.New("dbg")})
 	code, body := admin(t, srv, http.MethodGet, "/admin/config", "Authorization", "Bearer s3cret")
 	require.Equal(t, http.StatusOK, code)
 	assert.Equal(t, ":1234", body["http_addr"], "named by the yaml tag")
-	assert.Equal(t, "[redacted]", body["admin_token"])
-	assert.Equal(t, "[redacted]", body["debug_token"])
+	assert.Equal(t, "[redacted:1ec1c26b]", body["admin_token"], "hidden, with the fingerprint that shows a rotation: sha256(s3cret)[:4]")
+	assert.Equal(t, "[redacted:22879e7c]", body["debug_token"])
 	assert.Equal(t, "24h0m0s", body["log_level_max_ttl"], "durations read as durations, defaults applied")
 	assert.Equal(t, "30s", body["read_timeout"])
 
@@ -261,6 +262,8 @@ func TestVersion_CarriesBuildStartTimeAndUptime(t *testing.T) {
 	assert.Equal(t, httpx.Version, body["version"])
 	assert.NotEmpty(t, body["go_version"])
 	assert.NotEmpty(t, body["revision"])
+	assert.Equal(t, false, body["fips140"], "always present; a plain test binary is not in FIPS mode")
+
 	raw, ok := body["started_at"].(string)
 	require.True(t, ok)
 
@@ -293,7 +296,7 @@ func TestAdminRun_AnnouncesAuthMode(t *testing.T) {
 		t.Run(tc.want, func(t *testing.T) {
 			t.Parallel()
 
-			srv, buf := loggedServer(t, httpx.Config{AdminAddr: "127.0.0.1:0", AdminToken: tc.token, ShutdownTimeout: time.Second})
+			srv, buf := loggedServer(t, httpx.Config{AdminAddr: "127.0.0.1:0", AdminToken: secret.New(tc.token), ShutdownTimeout: time.Second})
 			ctx, cancel := context.WithCancel(t.Context())
 
 			done := make(chan error, 1)
@@ -308,7 +311,7 @@ func TestAdminRun_AnnouncesAuthMode(t *testing.T) {
 			require.NoError(t, <-done)
 			line := buf.Find(t, map[string]any{"msg": "admin server listening"})
 			require.NotNil(t, line)
-			assert.Equal(t, tc.want, line["auth"], "the admin auth mode is said out loud")
+			assert.Equal(t, tc.want, line["guard"], "the admin auth mode is said out loud")
 		})
 	}
 }

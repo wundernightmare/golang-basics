@@ -3,10 +3,11 @@ module github.com/tracehubmmp/golang-basics/libs/kafka
 go 1.27.0
 
 require (
-	github.com/caarlos0/env/v11 v11.4.1
+	github.com/caarlos0/env/v11 v11.4.2
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
 	github.com/tracehubmmp/golang-basics/libs/httpx v0.0.0
+	github.com/tracehubmmp/golang-basics/libs/secret v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
@@ -28,8 +29,9 @@ require (
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.47.0 // indirect
 	go.uber.org/goleak v1.3.0 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
+	go.yaml.in/yaml/v3 v3.0.6 // indirect
 	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
 
@@ -38,3 +40,5 @@ replace github.com/tracehubmmp/golang-basics/libs/testx => ../testx
 replace github.com/tracehubmmp/golang-basics/libs/httpx => ../httpx
 
 replace github.com/tracehubmmp/golang-basics/libs/testx/containers => ../testx/containers
+
+replace github.com/tracehubmmp/golang-basics/libs/secret => ../secret
