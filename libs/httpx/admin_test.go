@@ -262,6 +262,8 @@ func TestVersion_CarriesBuildStartTimeAndUptime(t *testing.T) {
 	assert.Equal(t, httpx.Version, body["version"])
 	assert.NotEmpty(t, body["go_version"])
 	assert.NotEmpty(t, body["revision"])
+	assert.Equal(t, false, body["fips140"], "always present; a plain test binary is not in FIPS mode")
+
 	raw, ok := body["started_at"].(string)
 	require.True(t, ok)
 
@@ -309,7 +311,7 @@ func TestAdminRun_AnnouncesAuthMode(t *testing.T) {
 			require.NoError(t, <-done)
 			line := buf.Find(t, map[string]any{"msg": "admin server listening"})
 			require.NotNil(t, line)
-			assert.Equal(t, tc.want, line["auth"], "the admin auth mode is said out loud")
+			assert.Equal(t, tc.want, line["guard"], "the admin auth mode is said out loud")
 		})
 	}
 }

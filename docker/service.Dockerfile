@@ -6,6 +6,7 @@
 #     --build-arg SERVICE=ping \
 #     --build-arg GO_VERSION="$(scripts/mise-pins.sh | sed -n 's/^GO_VERSION=//p')" \
 #     --build-arg KAFKA_PROVIDER=rdkafka \          ← or franz (tasks, consumer, ingest)
+#     --build-arg FIPS=0 \                          ← 1: Go's FIPS 140-3 module (needs franz)
 #     --build-arg VERSION="$(git describe --tags --always --dirty)" \
 #     --build-arg GIT_SHA="$(git rev-parse HEAD)" \
 #     --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -33,6 +34,10 @@
 #       franz             — franz-go, pure Go: CGO_ENABLED=0 -tags kafka_franz.
 #     Services without Kafka (ping, heartbeat) build with CGO_ENABLED=0
 #     either way; pgx and valkey-go are pure Go.
+#   • FIPS=1: built against Go's frozen FIPS 140-3 module (GOFIPS140 =
+#     GOFIPS140_VERSION), so the binary runs with fips140=on and reports
+#     "fips140": true on /version. Go's own crypto only — refused with the
+#     rdkafka provider (OpenSSL through cgo); docs/RUNTIME.md "FIPS 140-3".
 #   • -trimpath -s -w; Version / Revision / BuildTime stamped into libs/httpx
 #     (build_info, /version, OTel service.version) from VERSION / GIT_SHA /
 #     BUILD_TIME, mirrored in the OCI labels
@@ -88,6 +93,11 @@ ARG GO_VERSION
 ARG SERVICE
 # rdkafka (default) | franz — which Kafka client tasks / consumer / ingest link.
 ARG KAFKA_PROVIDER=rdkafka
+# 1 = build against Go's FIPS 140-3 module, the snapshot GOFIPS140_VERSION
+# (one under $(go env GOROOT)/lib/fips140 of the builder). Same knobs and the
+# same rule as scripts/build-service.sh: not with the rdkafka provider.
+ARG FIPS=0
+ARG GOFIPS140_VERSION=v1.0.0
 # The Alpine package mirror (a closed network's proxy), for the C toolchain
 # the rdkafka build needs.
 ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org/alpine
@@ -107,7 +117,8 @@ ARG BUILD_TIME=
 RUN test -n "${SERVICE}" || { echo "build-arg SERVICE is required (ping, heartbeat, tasks, consumer, ingest)" >&2; exit 1; } \
  && { test "$(go env GOVERSION)" = "go${GO_VERSION}" \
     || { echo "builder is $(go env GOVERSION), GO_VERSION is ${GO_VERSION}: update GOLANG_DIGEST" >&2; exit 1; }; } \
- && case "${KAFKA_PROVIDER}" in rdkafka|franz) ;; *) echo "KAFKA_PROVIDER: rdkafka or franz, not '${KAFKA_PROVIDER}'" >&2; exit 1 ;; esac
+ && case "${KAFKA_PROVIDER}" in rdkafka|franz) ;; *) echo "KAFKA_PROVIDER: rdkafka or franz, not '${KAFKA_PROVIDER}'" >&2; exit 1 ;; esac \
+ && case "${FIPS}" in 0|1) ;; *) echo "FIPS: 1 or 0, not '${FIPS}'" >&2; exit 1 ;; esac
 
 # The C toolchain for cgo (librdkafka): gcc and the musl headers.
 RUN sed -i "s#https\?://dl-cdn.alpinelinux.org/alpine#${ALPINE_MIRROR}#" /etc/apk/repositories \
@@ -134,7 +145,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       if [ "${KAFKA_PROVIDER}" = franz ]; then tags=kafka_franz; \
       else cgo=1 tags=musl,netgo,osusergo extld='-linkmode external -extldflags "-static"'; fi; \
     fi \
- && CGO_ENABLED="$cgo" go build -trimpath -buildvcs=false -tags "$tags" \
+ && fips=off \
+ && if [ "${FIPS}" = 1 ]; then \
+      [ "$cgo" = 0 ] || { echo "FIPS=1 needs KAFKA_PROVIDER=franz for ${SERVICE}: the rdkafka provider links librdkafka and OpenSSL through cgo, which Go's FIPS module does not cover" >&2; exit 1; }; \
+      fips="${GOFIPS140_VERSION}"; \
+    fi \
+ && GOFIPS140="$fips" CGO_ENABLED="$cgo" go build -trimpath -buildvcs=false -tags "$tags" \
       -ldflags="-s -w $extld \
         -X github.com/tracehubmmp/golang-basics/libs/httpx.Version=${VERSION} \
         -X github.com/tracehubmmp/golang-basics/libs/httpx.Revision=${GIT_SHA} \
@@ -149,12 +165,13 @@ FROM ${GCR}/distroless/static-debian13:nonroot@${DISTROLESS_DIGEST} AS runtime
 
 ARG SERVICE
 ARG KAFKA_PROVIDER=rdkafka
+ARG FIPS=0
 ARG VERSION=dev
 ARG GIT_SHA=
 ARG BUILD_TIME=
 
 LABEL org.opencontainers.image.title="${SERVICE}" \
-      org.opencontainers.image.description="golang-basics ${SERVICE} service (kafka provider: ${KAFKA_PROVIDER})" \
+      org.opencontainers.image.description="golang-basics ${SERVICE} service (kafka provider: ${KAFKA_PROVIDER}, fips: ${FIPS})" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.created="${BUILD_TIME}" \

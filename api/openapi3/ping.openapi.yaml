@@ -65,6 +65,7 @@ components:
         - build_time
         - modified
         - go_version
+        - fips140
       properties:
         service:
           type: string
@@ -84,6 +85,9 @@ components:
         go_version:
           type: string
           description: Go toolchain version.
+        fips140:
+          type: boolean
+          description: The Go Cryptographic Module runs in FIPS 140-3 mode (a FIPS=1 build).
       description: |-
         Build identity of the running binary — the same document the admin
         listener serves on /version (libs/httpx.BuildInfo).

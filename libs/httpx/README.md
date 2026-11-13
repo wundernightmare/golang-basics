@@ -87,18 +87,60 @@ In order, outermost first:
 3. **tracing** — a server span per request (see *Traces* below);
 4. **access log** — one line per request;
 5. **metrics** — count, latency, sizes, in-flight;
-6. **`WithMiddleware(...)` extras** — an authenticator, a tenant resolver, a
-   rate limiter; they see the request id and the deadline, the handler sees
+6. **rate limit** — when `HTTP_RATE_LIMIT` or `HTTP_RATE_LIMIT_PER_CLIENT` is
+   set: a token bucket for all requests and one per client address; over it
+   → 429 problem with `Retry-After`, a tick of
+   `http_rate_limited_total{scope}`. It is the service's last line — an
+   ingress should shed first — and it sits outside the extras below, so what
+   is shed costs no authentication;
+7. **`WithMiddleware(...)` extras** — an authenticator, a tenant resolver, a
+   per-tenant quota; they see the request id and the deadline, the handler sees
    what they add to the context, and a request they reject (401, 429) is
    still traced, logged and counted like any other;
-7. **recovery** — a panic becomes a 500 problem, an error log with the stack,
+8. **recovery** — a panic becomes a 500 problem, an error log with the stack,
    an error span and a tick of `http_unhandled_errors_total`;
-8. **body limit** — `HTTP_MAX_BODY_BYTES`; `DecodeJSON` turns an overrun into 413;
-9. **routing** — unknown path → 404, known path with the wrong method → 405
+9. **body limit** — `HTTP_MAX_BODY_BYTES`; `DecodeJSON` turns an overrun into 413;
+10. **routing** — unknown path → 404, known path with the wrong method → 405
    with `Allow`, both as `problem+json`; the matched pattern becomes the
    `route` of the logs, metrics and span (`httpx.RouteFromContext`).
 
 `httpx.Middleware` is `func(http.Handler) http.Handler`.
+
+**Background tasks** get the recovery too: `srv.Guard(name, ctx, task)` wraps
+a worker loop so that a panic in it is logged with its stack, counted in
+`background_panics_total{task}` and returned as an error (`httpx.ErrPanic`).
+In an errgroup that stops the service in order — the server drains — instead
+of the runtime killing the process mid-flight:
+
+```go
+g.Go(srv.Guard("outbox-relay", ctx, relay.Run))
+```
+
+## Logs
+
+One JSON line per record on stdout. `LOG_FORMAT=ecs` writes the same record
+under Elastic Common Schema names — `@timestamp`, `log.level`, `message`,
+`service.name`, `trace.id`, `span.id`, `http.request.id`, `error.message`,
+`error.stack_trace`, `ecs.version` — so an Elastic pipeline needs no rename
+step; `text` is for a terminal.
+
+**Private data is masked in every attribute, in every format**, before the
+line is written:
+
+- by key: an attribute whose name says it is a secret — `password`, `token`,
+  `secret`, `api_key`, `authorization`, `credential`, `dsn`, … (the list
+  `Redact` uses) — or is listed in `LOG_REDACT_KEYS` (`email,phone,card` —
+  the private data of your domain) is logged as `[redacted]`;
+- by shape: a URL with credentials or a secret query parameter, and a keyword
+  DSN with a password, are masked wherever they appear — under any key, and
+  inside an error's text;
+- headers (`Authorization`, `Cookie`, `Set-Cookie`, anything named like a
+  secret), string maps and structs are masked entry by entry.
+
+Numbers, booleans and durations pass whatever their key (`max_tokens: 4096`
+is not a secret). The **message is not rewritten**: do not format secrets
+into it. Masking by key over-redacts on purpose — an attribute called `auth`
+or `token_type` is hidden too; name it otherwise if it must be read.
 
 ## Errors: problem+json
 
@@ -152,6 +194,15 @@ only allows when `ADMIN_ADDR` is loopback (`127.0.0.1:9080`, `localhost:9080`,
 listening" log line says `auth=bearer` or `auth=off`.
 
 ## Runtime debugging
+
+**One tenant, not everyone.** `PUT /admin/debug-subjects/{subject}?ttl=15m`
+puts a tenant or a user under investigation; the service says who a request
+is for — `ctx = srv.DebugSubject(ctx, tenantID)`, in its authenticator — and
+that subject's requests are logged at debug level, unsampled, and their span
+carries `debug.subject`, which the tail-sampling collector keeps
+(`docker/observability/otel-collector.yml`). Everyone else is untouched. `ttl` is
+required and capped at `LOG_LEVEL_MAX_TTL`; the list is per process (add the
+subject on each replica) and holds at most a hundred.
 
 **Log level for a while.** Every change expires — `ttl` defaults to and is
 capped at `LOG_LEVEL_MAX_TTL` (24h) — so a debug level nobody remembered to

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
+	"runtime/trace"
 	"slices"
 	"strings"
 	"time"
@@ -112,6 +113,10 @@ type diagnostics struct {
 	crashFile  *os.File  // kept open for the runtime
 	lastMemory time.Time // last memory-pressure capture
 	nextSpool  time.Time
+
+	flight         *trace.FlightRecorder // nil: no flight recorder (flight.go)
+	flightRequests chan string           // snapshot requests for the watcher; nil when off
+	lastFlight     time.Time
 }
 
 func newDiagnostics(cfg Config, build BuildInfo, log *slog.Logger) *diagnostics {
@@ -120,12 +125,18 @@ func newDiagnostics(cfg Config, build BuildInfo, log *slog.Logger) *diagnostics 
 		instance = "unknown"
 	}
 
+	var flightRequests chan string
+	if cfg.DiagFlightRecorder {
+		flightRequests = make(chan string, 1)
+	}
+
 	return &diagnostics{
-		cfg: cfg, build: build, log: log, instance: instance,
+		flightRequests: flightRequests,
+		cfg:            cfg, build: build, log: log, instance: instance,
 		root: os.DirFS("/"), now: time.Now,
 		dumps: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "diag_dumps_total",
-			Help: "Diagnostic artifacts produced, by kind (crash, memory) and result (uploaded, spooled, failed).",
+			Help: "Diagnostic artifacts produced, by kind (crash, memory, flight) and result (uploaded, spooled, failed).",
 		}, []string{"kind", "result"}),
 	}
 }
@@ -146,6 +157,8 @@ func (d *diagnostics) start(ctx context.Context) (stop func()) {
 		d.armCrashCapture(ctx)
 	}
 
+	stopFlight := d.startFlight(ctx)
+
 	// The watcher owns every field from here on; stop waits for it before
 	// touching the crash file.
 	ctx, cancel := context.WithCancel(ctx)
@@ -160,6 +173,7 @@ func (d *diagnostics) start(ctx context.Context) (stop func()) {
 	return func() {
 		cancel()
 		<-done
+		stopFlight()
 		d.disarmCrashCapture()
 	}
 }
@@ -174,6 +188,8 @@ func (d *diagnostics) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case reason := <-d.flightRequests:
+			d.snapshotFlight(ctx, reason)
 		case <-ticker.C:
 			d.checkMemory(ctx)
 
@@ -334,6 +350,9 @@ func (d *diagnostics) checkMemory(ctx context.Context) {
 	for _, art := range d.memoryArtifacts(now.UTC(), usage, limit) {
 		d.deliver(ctx, art)
 	}
+
+	// What the goroutines were doing while the memory went up.
+	d.snapshotFlight(ctx, "memory pressure")
 }
 
 func (d *diagnostics) memoryArtifacts(at time.Time, usage, limit int64) []artifact {
@@ -520,6 +539,8 @@ func (d *diagnostics) spooled(path, name string, info fs.FileInfo) (artifact, bo
 	case "memory.json":
 		art.contentType = contentJSON
 	case "heap.pb.gz", "goroutine.pb.gz":
+	case flightFile:
+		art.kind = dumpKindFlight
 	default:
 		return artifact{}, false
 	}

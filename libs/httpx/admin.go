@@ -20,6 +20,9 @@ import (
 //	GET    /admin/log-level   current log level, base level, expiry of a runtime change
 //	PUT    /admin/log-level   change the level for a while: level=debug|info|warn|error, ttl=30m (capped)
 //	DELETE /admin/log-level   revert to the base level now
+//	GET    /admin/debug-subjects            tenants / users under investigation, and when each expires
+//	PUT    /admin/debug-subjects/{subject}  debug logs and a kept trace for that subject: ttl=15m (required, capped)
+//	DELETE /admin/debug-subjects/{subject}  stop now
 //	GET    /debug/pprof/…     Go runtime profiles (cpu, heap, goroutine, block, mutex, trace)
 //
 // The probes, /metrics and /version are open: they carry nothing an attacker
@@ -48,6 +51,9 @@ func newAdminMux(s *Server) *http.ServeMux {
 	mux.Handle("GET /admin/log-level", guard(http.HandlerFunc(s.getLogLevel)))
 	mux.Handle("PUT /admin/log-level", guard(http.HandlerFunc(s.putLogLevel)))
 	mux.Handle("DELETE /admin/log-level", guard(http.HandlerFunc(s.deleteLogLevel)))
+	mux.Handle("GET /admin/debug-subjects", guard(http.HandlerFunc(s.getDebugSubjects)))
+	mux.Handle("PUT /admin/debug-subjects/{subject}", guard(http.HandlerFunc(s.putDebugSubject)))
+	mux.Handle("DELETE /admin/debug-subjects/{subject}", guard(http.HandlerFunc(s.deleteDebugSubject)))
 	// Explicit registration so nothing depends on http.DefaultServeMux.
 	mux.Handle("/debug/pprof/", guard(http.HandlerFunc(pprof.Index)))
 	mux.Handle("/debug/pprof/cmdline", guard(http.HandlerFunc(pprof.Cmdline)))
