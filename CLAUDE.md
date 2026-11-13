@@ -152,7 +152,7 @@ README; this file is only the high-signal, easy-to-miss bits.
   `resilient-http-client`, `grpcx`, `resilience` and `secret` stay dependency-free — and so do their module
   graphs: `libs/testx` (the light harness) pulls no Docker client. A dependency-free library that
   needs a container-backed suite gets a nested module next to its code
-  (`libs/resilient-http-client/integration`: own `go.mod`, in `go.work`), never a
+  (`libs/resilient-http-client/integration`, `libs/grpcx/integration`: own `go.mod`, in `go.work`), never a
   `libs/testx/containers` require in its own `go.mod` and never one shared "all integration tests"
   module.
 
