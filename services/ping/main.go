@@ -57,7 +57,7 @@ func run(cfg httpx.Config) error {
 	ctx, stop := httpx.SignalContext()
 	defer stop()
 
-	logger.Info("ping starting", "addr", cfg.Addr, "admin_addr", cfg.AdminAddr, "version", httpx.Version)
+	logger.Info("ping starting", "addr", cfg.Addr, "admin_addr", cfg.AdminAddr, "version", httpx.Version, "fips140", httpx.FIPS140())
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("ping exited with error", "err", err)

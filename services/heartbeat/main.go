@@ -48,7 +48,7 @@ func run(cfg config.Config) error {
 	ctx, stop := httpx.SignalContext()
 	defer stop()
 
-	logger.Info("heartbeat starting", "admin_addr", cfg.AdminAddr, "interval", cfg.Interval, "version", httpx.Version)
+	logger.Info("heartbeat starting", "admin_addr", cfg.AdminAddr, "interval", cfg.Interval, "version", httpx.Version, "fips140", httpx.FIPS140())
 
 	// Both the HTTP server and the worker return nil on graceful (ctx-driven)
 	// shutdown; a non-nil result means one of them genuinely failed, which

@@ -244,6 +244,10 @@ error kinds); the client library is a build-time choice:
 KAFKA_PROVIDER=franz scripts/build-service.sh tasks   # or just docker-build / docker/stack.yml
 ```
 
+A FIPS 140-3 build (`FIPS=1`, Go's native module — [docs/RUNTIME.md](docs/RUNTIME.md#fips-140-3--a-build-mode))
+covers Go's own crypto only, so it requires `franz`: the build refuses
+`FIPS=1` with librdkafka (OpenSSL through cgo).
+
 Every buffer a client keeps is a named key with a bounded default
 (`KAFKA_PRODUCER_QUEUE_MAX_KBYTES`, `KAFKA_PRODUCER_QUEUE_MAX_MESSAGES`,
 `KAFKA_MESSAGE_MAX_BYTES`, `KAFKA_CONSUMER_QUEUE_MAX_KBYTES`,

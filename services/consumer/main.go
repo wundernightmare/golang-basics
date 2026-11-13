@@ -80,7 +80,7 @@ func run(cfg config.Config) error {
 	ctx, stop := httpx.SignalContext()
 	defer stop()
 
-	logger.Info("consumer starting", "admin_addr", cfg.AdminAddr, "topics", cfg.Kafka.Topics, "group", cfg.Kafka.Group, "version", httpx.Version)
+	logger.Info("consumer starting", "admin_addr", cfg.AdminAddr, "topics", cfg.Kafka.Topics, "group", cfg.Kafka.Group, "version", httpx.Version, "fips140", httpx.FIPS140())
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return srv.Run(gctx) })

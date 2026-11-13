@@ -240,6 +240,7 @@ func TestBuild_ReportsServiceAndVersion(t *testing.T) {
 	assert.Equal(t, httpx.Version, b.Version)
 	assert.NotEmpty(t, b.GoVersion)
 	assert.NotEmpty(t, b.Revision)
+	assert.False(t, b.FIPS140, "a test binary is built without GOFIPS140 (e2e TestFIPSBuild covers a FIPS=1 build)")
 }
 
 func TestSignalContext_CancelledByTheFirstSignal(t *testing.T) {

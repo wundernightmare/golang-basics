@@ -294,5 +294,10 @@ README; this file is only the high-signal, easy-to-miss bits.
   `VERSION`, `GIT_SHA`, `BUILD_TIME` Docker build args set `libs/httpx.Version`,
   `.Revision`, `.BuildTime` (a Docker build has no `.git`); read them via
   `httpx.Build`, do not add per-service version constants.
+- **FIPS 140-3 is a build mode** (`FIPS=1` in `scripts/build-service.sh` / the
+  Dockerfile → `GOFIPS140=$GOFIPS140_VERSION`, Go's native module; `docs/RUNTIME.md`).
+  It covers Go's crypto only, so both build lines refuse it with the rdkafka
+  provider — keep that refusal. `/version` reports `fips140` from
+  `crypto/fips140.Enabled()`; never a `build_info` label.
 - Both binaries use the `run() error` + `os.Exit` pattern in `main` so deferred
   cleanup runs before exit (golangci-lint `gocritic:exitAfterDefer` enforces it).

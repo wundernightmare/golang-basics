@@ -164,7 +164,7 @@ func run(cfg config.Config) error {
 	ctx, stop := httpx.SignalContext()
 	defer stop()
 
-	logger.Info("tasks starting", "addr", cfg.Addr, "admin_addr", cfg.AdminAddr, "version", httpx.Version)
+	logger.Info("tasks starting", "addr", cfg.Addr, "admin_addr", cfg.AdminAddr, "version", httpx.Version, "fips140", httpx.FIPS140())
 
 	if err := serve(ctx, srv, relay, st, cfg, logger); err != nil {
 		logger.Error("tasks exited with error", "err", err)
