@@ -12,6 +12,7 @@
 //   libs/httpx                  — shared HTTP server scaffolding (the example common lib)
 //   libs/resilience             — circuit breaker + retry budget shared by the outbound clients (HTTP, gRPC)
 //   libs/resilient-http-client  — policy-per-target outbound HTTP client (rate limit, CB, retry…)
+//   libs/resilient-http-client/integration — its integration suite: real servers (Caddy, Redpanda, Postgres), HTTP/1.1–3, TLS, Toxiproxy (_test only)
 //   libs/pgx                    — shared PostgreSQL pool (pgx)
 //   libs/valkey                 — shared Valkey cache (valkey-go)
 //   libs/kafka                  — shared Kafka producer/consumer, provider-neutral (no cgo)
@@ -43,6 +44,7 @@ use (
 	./libs/pgx
 	./libs/resilience
 	./libs/resilient-http-client
+	./libs/resilient-http-client/integration
 	./libs/s3
 	./libs/secret
 	./libs/testx
