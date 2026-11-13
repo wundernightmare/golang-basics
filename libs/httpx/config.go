@@ -41,6 +41,11 @@ import (
 //	PING_HTTP_REQUEST_TIMEOUT_MIN floor for a deadline shortened by X-Request-Timeout-Ms (default "1s", 0 = none)
 //	PING_HTTP_MAX_HEADER_BYTES   request header limit                      (default 1048576)
 //	PING_HTTP_MAX_BODY_BYTES     request body limit; larger bodies → 413   (default 1048576)
+//	PING_HTTP_RATE_LIMIT         requests per second the API accepts, all clients together; over it → 429 (default 0 = no limit)
+//	PING_HTTP_RATE_BURST         depth of that token bucket                (default 0 = ceil(rate))
+//	PING_HTTP_RATE_LIMIT_PER_CLIENT  requests per second per client address (default 0 = no limit)
+//	PING_HTTP_RATE_BURST_PER_CLIENT  depth of a client's bucket            (default 0 = ceil(rate))
+//	PING_HTTP_RATE_CLIENTS_MAX   client buckets kept; when all are in use a new client is shed (default 10000)
 //	PING_HTTP_SHUTDOWN_DELAY     wait after readiness flips before closing (default "2s")
 //	PING_HTTP_SHUTDOWN_TIMEOUT   graceful-shutdown budget                  (default "10s")
 //	PING_HTTP_SLOW_REQUEST       log a request at warn above this latency  (default "1s", 0 = off)
@@ -49,7 +54,8 @@ import (
 //	PING_HEALTH_CHECK_TIMEOUT    per-check timeout                         (default "3s")
 //	PING_LOG_LEVEL               debug|info|warn|error                     (default "info")
 //	PING_LOG_LEVEL_MAX_TTL       cap on how long PUT /admin/log-level lasts (default "24h")
-//	PING_LOG_FORMAT              json|text                                 (default "json")
+//	PING_LOG_FORMAT              json|text|ecs (ecs: JSON with Elastic Common Schema field names) (default "json")
+//	PING_LOG_REDACT_KEYS         comma-separated attribute keys logged as "[redacted]", on top of the built-in secret names (default "")
 //	PING_LOG_SAMPLE_INITIAL      per second, per message: pass the first N (default 100, 0 = no sampling)
 //	PING_LOG_SAMPLE_THEREAFTER   … then every M-th                         (default 100)
 //	PING_RUNTIME_MEMORY_LIMIT_RATIO   Go memory limit as a share of the container's memory limit; negative = leave it alone (default 0.85)
@@ -64,6 +70,11 @@ import (
 //	PING_DIAG_SPOOL_RETRY        how often the dump directory is re-sent     (default "1m")
 //	PING_DIAG_SPOOL_MAX_FILES    files kept in the dump directory            (default 20)
 //	PING_DIAG_CRASH_MAX_BYTES    longest crash report shipped                (default 8388608)
+//	PING_DIAG_FLIGHT_RECORDER    keep the last seconds of the execution trace in memory and ship a snapshot on an anomaly (default false)
+//	PING_DIAG_FLIGHT_MIN_AGE     how far back the window reaches             (default "10s")
+//	PING_DIAG_FLIGHT_MAX_BYTES   upper bound of the window in memory         (default 8388608)
+//	PING_DIAG_FLIGHT_SLOW_REQUEST  a request this slow triggers a snapshot; 0 = requests never do (default "0s")
+//	PING_DIAG_FLIGHT_COOLDOWN    shortest time between two snapshots         (default "5m")
 //
 // The DIAG_ keys do nothing until the service installs a sink
 // ([Server.SetDumpSink]) or sets DIAG_DUMP_DIR (diagnostics.go).
@@ -98,6 +109,13 @@ type Config struct {
 	RequestTimeoutMin time.Duration `env:"HTTP_REQUEST_TIMEOUT_MIN" envDefault:"1s" yaml:"request_timeout_min"`
 	MaxHeaderBytes    int           `env:"HTTP_MAX_HEADER_BYTES" envDefault:"1048576" yaml:"max_header_bytes"`
 	MaxBodyBytes      int64         `env:"HTTP_MAX_BODY_BYTES" envDefault:"1048576" yaml:"max_body_bytes"`
+	// The server's own inbound rate limit (ratelimit.go): the last line of
+	// defence, behind whatever the ingress does. 0 = off.
+	RateLimit          float64 `env:"HTTP_RATE_LIMIT" envDefault:"0" yaml:"rate_limit"`
+	RateBurst          int     `env:"HTTP_RATE_BURST" envDefault:"0" yaml:"rate_burst"`
+	RateLimitPerClient float64 `env:"HTTP_RATE_LIMIT_PER_CLIENT" envDefault:"0" yaml:"rate_limit_per_client"`
+	RateBurstPerClient int     `env:"HTTP_RATE_BURST_PER_CLIENT" envDefault:"0" yaml:"rate_burst_per_client"`
+	RateClientsMax     int     `env:"HTTP_RATE_CLIENTS_MAX" envDefault:"10000" yaml:"rate_clients_max"`
 
 	ShutdownDelay   time.Duration `env:"HTTP_SHUTDOWN_DELAY" envDefault:"2s" yaml:"shutdown_delay"`
 	ShutdownTimeout time.Duration `env:"HTTP_SHUTDOWN_TIMEOUT" envDefault:"10s" yaml:"shutdown_timeout"`
@@ -110,6 +128,7 @@ type Config struct {
 	LogLevel            string        `env:"LOG_LEVEL" envDefault:"info" yaml:"log_level"`
 	LogLevelMaxTTL      time.Duration `env:"LOG_LEVEL_MAX_TTL" envDefault:"24h" yaml:"log_level_max_ttl"`
 	LogFormat           string        `env:"LOG_FORMAT" envDefault:"json" yaml:"log_format"`
+	LogRedactKeys       []string      `env:"LOG_REDACT_KEYS" yaml:"log_redact_keys"`
 	LogSampleInitial    int           `env:"LOG_SAMPLE_INITIAL" envDefault:"100" yaml:"log_sample_initial"`
 	LogSampleThereafter int           `env:"LOG_SAMPLE_THEREAFTER" envDefault:"100" yaml:"log_sample_thereafter"`
 
@@ -133,19 +152,28 @@ type Config struct {
 	DiagSpoolRetry      time.Duration `env:"DIAG_SPOOL_RETRY" envDefault:"1m" yaml:"diag_spool_retry"`
 	DiagSpoolMaxFiles   int           `env:"DIAG_SPOOL_MAX_FILES" envDefault:"20" yaml:"diag_spool_max_files"`
 	DiagCrashMaxBytes   int64         `env:"DIAG_CRASH_MAX_BYTES" envDefault:"8388608" yaml:"diag_crash_max_bytes"`
+
+	DiagFlightRecorder    bool          `env:"DIAG_FLIGHT_RECORDER" envDefault:"false" yaml:"diag_flight_recorder"`
+	DiagFlightMinAge      time.Duration `env:"DIAG_FLIGHT_MIN_AGE" envDefault:"10s" yaml:"diag_flight_min_age"`
+	DiagFlightMaxBytes    int64         `env:"DIAG_FLIGHT_MAX_BYTES" envDefault:"8388608" yaml:"diag_flight_max_bytes"`
+	DiagFlightSlowRequest time.Duration `env:"DIAG_FLIGHT_SLOW_REQUEST" envDefault:"0s" yaml:"diag_flight_slow_request"`
+	DiagFlightCooldown    time.Duration `env:"DIAG_FLIGHT_COOLDOWN" envDefault:"5m" yaml:"diag_flight_cooldown"`
 }
 
 // Defaults applied by [Config.withDefaults] when a service builds a Config by
 // hand and leaves a field zero. They mirror the envDefault tags above.
 const (
-	defaultLogLevelMaxTTL    = 24 * time.Hour
-	defaultReadHeaderTimeout = 5 * time.Second
-	defaultReadTimeout       = 30 * time.Second
-	defaultWriteTimeout      = 30 * time.Second
-	defaultIdleTimeout       = 120 * time.Second
-	defaultMaxHeaderBytes    = 1 << 20
-	defaultMaxBodyBytes      = 1 << 20
-	defaultShutdownTimeout   = 10 * time.Second
+	defaultLogLevelMaxTTL     = 24 * time.Hour
+	defaultReadHeaderTimeout  = 5 * time.Second
+	defaultReadTimeout        = 30 * time.Second
+	defaultWriteTimeout       = 30 * time.Second
+	defaultIdleTimeout        = 120 * time.Second
+	defaultMaxHeaderBytes     = 1 << 20
+	defaultMaxBodyBytes       = 1 << 20
+	defaultDiagFlightMinAge   = 10 * time.Second
+	defaultDiagFlightMaxBytes = 8 << 20
+	defaultRateClientsMax     = 10_000
+	defaultShutdownTimeout    = 10 * time.Second
 )
 
 // LoadConfig parses a [Config] from the environment using the given key
@@ -200,6 +228,10 @@ func (c *Config) withDefaults() {
 
 	if c.MaxHeaderBytes == 0 {
 		c.MaxHeaderBytes = defaultMaxHeaderBytes
+	}
+
+	if c.RateClientsMax == 0 {
+		c.RateClientsMax = defaultRateClientsMax
 	}
 
 	if c.MaxBodyBytes == 0 {
@@ -270,6 +302,14 @@ func (c *Config) withDiagDefaults() {
 		c.DiagSpoolMaxFiles = defaultDiagSpoolMaxFiles
 	}
 
+	if c.DiagFlightMinAge == 0 {
+		c.DiagFlightMinAge = defaultDiagFlightMinAge
+	}
+
+	if c.DiagFlightMaxBytes == 0 {
+		c.DiagFlightMaxBytes = defaultDiagFlightMaxBytes
+	}
+
 	if c.DiagCrashMaxBytes == 0 {
 		c.DiagCrashMaxBytes = defaultDiagCrashMaxBytes
 	}
@@ -289,9 +329,9 @@ func (c *Config) Validate() error {
 	}
 
 	switch strings.ToLower(c.LogFormat) {
-	case "json", "text":
+	case "json", "text", "ecs":
 	default:
-		errs = append(errs, fmt.Errorf("LOG_FORMAT: unknown format %q (want json|text)", c.LogFormat))
+		errs = append(errs, fmt.Errorf("LOG_FORMAT: unknown format %q (want json|text|ecs)", c.LogFormat))
 	}
 
 	if c.Addr == "" && c.AdminAddr == "" {
@@ -316,6 +356,10 @@ func (c *Config) Validate() error {
 
 	if c.ShutdownDelay < 0 {
 		errs = append(errs, errors.New("HTTP_SHUTDOWN_DELAY must not be negative"))
+	}
+
+	if c.RateLimit < 0 || c.RateLimitPerClient < 0 || c.RateBurst < 0 || c.RateBurstPerClient < 0 || c.RateClientsMax < 0 {
+		errs = append(errs, errors.New("HTTP_RATE_* values must not be negative"))
 	}
 
 	if c.MaxBodyBytes <= 0 {
@@ -371,6 +415,10 @@ func (c *Config) validateRuntime() []error {
 		errs = append(errs, errors.New("DIAG_SPOOL_MAX_FILES and DIAG_CRASH_MAX_BYTES must be positive"))
 	}
 
+	if c.DiagFlightRecorder && (c.DiagFlightMinAge < 0 || c.DiagFlightMaxBytes < 0 || c.DiagFlightSlowRequest < 0 || c.DiagFlightCooldown < 0) {
+		errs = append(errs, errors.New("DIAG_FLIGHT_* durations and sizes must not be negative"))
+	}
+
 	if strings.Trim(c.DiagKeyPrefix, "/") == "" {
 		errs = append(errs, errors.New("DIAG_KEY_PREFIX must not be empty"))
 	}
@@ -388,6 +436,7 @@ func (c Config) LogConfig() LogConfig {
 		Service:          c.Service,
 		Level:            c.LogLevel,
 		Format:           c.LogFormat,
+		RedactKeys:       c.LogRedactKeys,
 		SampleInitial:    c.LogSampleInitial,
 		SampleThereafter: c.LogSampleThereafter,
 	}

@@ -309,7 +309,7 @@ func TestAdminRun_AnnouncesAuthMode(t *testing.T) {
 			require.NoError(t, <-done)
 			line := buf.Find(t, map[string]any{"msg": "admin server listening"})
 			require.NotNil(t, line)
-			assert.Equal(t, tc.want, line["auth"], "the admin auth mode is said out loud")
+			assert.Equal(t, tc.want, line["guard"], "the admin auth mode is said out loud")
 		})
 	}
 }

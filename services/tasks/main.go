@@ -181,21 +181,23 @@ func run(cfg config.Config) error {
 // twice — and only then does run() close the producer and the pool.
 func serve(ctx context.Context, srv *httpx.Server, relay *outbox.Relay, st *store.Store, cfg config.Config, log *slog.Logger) error {
 	// A worker returning an error cancels gctx, which stops the server too.
-	g, gctx := errgroup.WithContext(ctx)
+	group, gctx := errgroup.WithContext(ctx)
 	// The workers outlive the signal until the server has drained.
 	workers, stopWorkers := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopWorkers()
 
-	g.Go(func() error {
+	group.Go(func() error {
 		defer stopWorkers()
 		return srv.Run(gctx)
 	})
-	g.Go(func() error { return relay.Run(workers) })
-	g.Go(func() error {
-		return st.RunJanitor(workers, cfg.Idempotency.TTL, cfg.Idempotency.PurgeInterval, log)
-	})
+	// Guarded: a panic in a worker becomes an error, which stops the service
+	// in order — the server drains — instead of the runtime killing it.
+	group.Go(srv.Guard("outbox-relay", workers, relay.Run))
+	group.Go(srv.Guard("idempotency-janitor", workers, func(ctx context.Context) error {
+		return st.RunJanitor(ctx, cfg.Idempotency.TTL, cfg.Idempotency.PurgeInterval, log)
+	}))
 
-	return g.Wait()
+	return group.Wait()
 }
 
 // reportIntegrations says which optional integrations this process runs with:

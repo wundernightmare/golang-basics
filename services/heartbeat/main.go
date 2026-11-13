@@ -55,7 +55,7 @@ func run(cfg config.Config) error {
 	// cancels gctx and tears the other down too.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return srv.Run(gctx) })
-	g.Go(func() error { return w.Run(gctx) })
+	g.Go(srv.Guard("heartbeat", gctx, w.Run)) // a panic in the worker stops the service in order
 
 	if err := g.Wait(); err != nil {
 		logger.Error("heartbeat exited with error", "err", err)
