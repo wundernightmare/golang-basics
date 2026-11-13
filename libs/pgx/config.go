@@ -62,6 +62,15 @@ import (
 // They are the database's own guard rails: a runaway query, a migration
 // queued behind a long lock, a handler that forgot to commit — each is ended
 // by Postgres instead of holding a connection (and its locks) forever.
+//
+// Behind a connection pooler (PgBouncer) startup parameters do not reach the
+// server: a stock PgBouncer refuses the connection, and one told to ignore
+// them (ignore_startup_parameters) drops them silently — [New] then fails
+// with [ErrGuardRailOff]. There, set the timeouts on the role or database
+// (ALTER ROLE … SET statement_timeout = '30s') and leave these three at 0.
+// In transaction pooling pgx's statement cache also needs PgBouncer's
+// max_prepared_statements > 0, or default_query_exec_mode=exec in the URL.
+// README "Behind PgBouncer" has the whole table; pgbouncer_test.go proves it.
 type Config struct {
 	URL string `env:"DATABASE_URL" yaml:"url"`
 

@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -404,4 +405,19 @@ func TestNew_UnreachableDatabaseFailsFast(t *testing.T) {
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 5*time.Second)
 	assert.NotErrorIs(t, err, context.Canceled)
+}
+
+// Boot errors that need no database: a DSN that does not parse, and a
+// password file that is not there when the pool is built.
+func TestNew_BadDSNAndMissingPasswordFile(t *testing.T) {
+	t.Parallel()
+
+	_, err := pgx.New(t.Context(), pgx.Config{URL: "postgres://app@localhost:not-a-port/app"}, nil)
+	require.ErrorContains(t, err, "pgx: parse dsn")
+
+	_, err = pgx.New(t.Context(), pgx.Config{
+		URL:          "postgres://app@localhost:5432/app",
+		PasswordFile: filepath.Join(t.TempDir(), "no-such-secret"),
+	}, nil)
+	require.ErrorContains(t, err, "DB_PASSWORD_FILE")
 }

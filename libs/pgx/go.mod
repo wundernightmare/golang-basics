@@ -6,8 +6,10 @@ require (
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/exaring/otelpgx v0.13.0
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/moby/moby/api v1.56.1
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
+	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/tracehubmmp/golang-basics/libs/secret v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/containers v0.0.0
@@ -47,7 +49,6 @@ require (
 	github.com/mdelapenya/tlscert v0.2.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/go-archive v0.3.3 // indirect
-	github.com/moby/moby/api v1.56.1 // indirect
 	github.com/moby/moby/client v0.6.2 // indirect
 	github.com/moby/patternmatcher v0.6.1 // indirect
 	github.com/moby/sys/sequential v0.7.0 // indirect
@@ -63,7 +64,6 @@ require (
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/shirou/gopsutil/v4 v4.26.9 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
-	github.com/testcontainers/testcontainers-go v0.44.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/kafka v0.44.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/toxiproxy v0.44.0 // indirect
