@@ -31,7 +31,7 @@ easy-to-miss conventions, [`CONTRIBUTING.md`](CONTRIBUTING.md) the workflow.
 | [`libs/resilient-http-client`](libs/resilient-http-client) | Library | — | Policy-per-target **outbound** client: per-attempt timeout, rate limit, bulkhead, circuit breaker, budgeted jittered retry (Retry-After aware), traceparent injection, metrics. Not used by a service yet — copy it in when one calls out. |
 | [`libs/grpcx`](libs/grpcx) | Library | — | Policy-per-target **outbound gRPC** connections: default deadline, retries and retry throttling through the gRPC service config, plus a circuit breaker, metrics and tracing. A template library — nothing here imports it yet. |
 | [`libs/resilience`](libs/resilience) | Library | — | Circuit breaker and retry budget shared by the two outbound clients. Pure logic, injected clock. |
-| [`libs/pgx`](libs/pgx) | Library | — | PostgreSQL pool (`jackc/pgx`): config, readiness, migrations, pool metrics. |
+| [`libs/pgx`](libs/pgx) | Library | — | PostgreSQL pool (`jackc/pgx`): config, readiness, migrations, pool metrics, a light unit of work (`InTx` / `Conn` / `AfterCommit`). |
 | [`libs/valkey`](libs/valkey) | Library | — | Valkey cache (`valkey-go`): get/set/del, readiness, cache-aside helper. |
 | [`libs/tiercache`](libs/tiercache) | Library | — | Two-level read cache: off-heap fixed-size L1 (`fastcache`) + Valkey L2, stale-while-revalidate, Pub/Sub invalidation; keeps serving without Valkey. |
 | [`libs/secret`](libs/secret) | Library | — | `secret.String`: a config value that fmt, `slog`, JSON, YAML and `/admin/config` render as `[redacted:1a2b3c4d]` (a short SHA-256 fingerprint that changes when the secret does); `Expose()` is the one way to it. Reads from YAML, env and viper/mapstructure. Standard library only. |
