@@ -200,7 +200,7 @@ puts a tenant or a user under investigation; the service says who a request
 is for — `ctx = srv.DebugSubject(ctx, tenantID)`, in its authenticator — and
 that subject's requests are logged at debug level, unsampled, and their span
 carries `debug.subject`, which the tail-sampling collector keeps
-(`docker/otel-collector.yaml`). Everyone else is untouched. `ttl` is
+(`docker/observability/otel-collector.yml`). Everyone else is untouched. `ttl` is
 required and capped at `LOG_LEVEL_MAX_TTL`; the list is per process (add the
 subject on each replica) and holds at most a hundred.
 

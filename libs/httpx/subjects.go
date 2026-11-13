@@ -14,7 +14,7 @@ import (
 
 // DebugSubjectAttribute is the span attribute a request of a subject under
 // investigation carries. A tail-sampling collector keeps every trace that has
-// it (docker/otel-collector.yaml).
+// it (docker/observability/otel-collector.yml).
 const DebugSubjectAttribute = "debug.subject"
 
 // maxDebugSubjects bounds the list: it is a debugging switch for a handful of
