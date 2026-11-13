@@ -8,10 +8,13 @@ replace github.com/tracehubmmp/golang-basics/libs/testx/containers => ../testx/c
 
 replace github.com/tracehubmmp/golang-basics/libs/valkey => ../valkey
 
+replace github.com/tracehubmmp/golang-basics/libs/resilience => ../resilience
+
 require (
 	github.com/VictoriaMetrics/fastcache v1.12.5 // the 1.12 line: 1.13 requires snappy v1, which `go work sync` and the per-module tidy gate cannot both accept while other modules resolve v0.0.4
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
+	github.com/tracehubmmp/golang-basics/libs/resilience v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/containers v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/valkey v0.0.0-00010101000000-000000000000
