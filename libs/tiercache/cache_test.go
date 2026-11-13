@@ -208,7 +208,7 @@ func TestUnreachableL2NeverFailsARead(t *testing.T) {
 			assert.Equal(t, "v1", rig.version(t, keys[i]))
 		}
 
-		assert.Less(t, remote.gets.Load(), int64(5), "the breaker stopped asking")
+		assert.Less(t, remote.gets.Load(), int64(10), "the breaker stopped asking")
 		assert.Positive(t, rig.metric(t, "tiercache_l2_bypassed_total", nil))
 
 		for _, key := range keys {

@@ -54,8 +54,9 @@ on read and overwritten by the ring buffer in due course.
 L1 is the always-on level. Pass the untyped `nil` as the remote and the cache
 runs on L1 and the loader alone. With a remote that is unreachable, slow or
 cutting connections, no read fails either: every L2 command has its own
-deadline (`VALKEY_OP_TIMEOUT`), a breaker skips L2 after `BreakerThreshold`
-consecutive failures for `BreakerCooldown`, and the loader answers. What is
+deadline (`VALKEY_OP_TIMEOUT`), the circuit breaker of
+[`libs/resilience`](../resilience) skips L2 for `BreakerOpenTimeout` once
+`BreakerFailureRatio` of its recent calls failed, and the loader answers. What is
 lost meanwhile is sharing between processes and invalidation, both bounded
 by the TTL; when the subscription comes back, L1 starts over.
 
@@ -103,7 +104,8 @@ cache with an `envPrefix`.
 | `TIERCACHE_STALE_IF_ERROR` | `stale_if_error` | `0` | grace past `HARD_TTL` while the loader fails |
 | `TIERCACHE_REFRESH_TIMEOUT` / `_CONCURRENCY` | `refresh_timeout` / `refresh_concurrency` | `5s` / `16` | background refresh bounds |
 | `TIERCACHE_TOMBSTONE_TTL` | `tombstone_ttl` | `5s` | a few times the slowest load |
-| `TIERCACHE_BREAKER_THRESHOLD` / `_COOLDOWN` | `breaker_threshold` / `breaker_cooldown` | `5` / `5s` | when L2 is skipped |
+| `TIERCACHE_BREAKER_FAILURE_RATIO` / `_MIN_REQUESTS` / `_WINDOW` | `breaker_failure_ratio` / `breaker_min_requests` / `breaker_window` | `0.5` / `10` / `10s` | when L2 is skipped: this share of at least this many calls in the window failed |
+| `TIERCACHE_BREAKER_OPEN_TIMEOUT` | `breaker_open_timeout` | `5s` | for how long, before one call probes it |
 | `TIERCACHE_DISABLE_INVALIDATION` | `disable_invalidation` | `false` | no Pub/Sub |
 
 Refresh traffic does not follow the request rate: every key read at least
@@ -119,7 +121,7 @@ Listed in [docs/METRICS.md](../../docs/METRICS.md); every series carries
 
 | Layer | File | What it proves |
 | --- | --- | --- |
-| Unit | `internal_test.go`, `credential/` | envelope and codec (table, fuzz, byte-compatibility with `google.golang.org/protobuf`), breaker, config |
+| Unit | `internal_test.go`, `credential/` | envelope and codec (table, fuzz, byte-compatibility with `google.golang.org/protobuf`), config |
 | Unit, virtual time | `cache_test.go` | every read rule and race above against an in-memory L2 (`testing/synctest`: no sleeps), the allocation budget of a fresh read, the L1 capacity bound |
 | Integration | `integration_test.go` | the same cache on a real Valkey: TTLs, `SET NX` / `IFEQ`, tombstones, Pub/Sub, values from 0 bytes to 4 MiB |
 | Chaos | `chaos_test.go` | Valkey down, frozen, slow, black-holed, resetting, cutting replies mid-value: every read answers correctly within a bound, and L2 is picked up again |
