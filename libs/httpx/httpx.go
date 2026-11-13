@@ -38,6 +38,7 @@ type Server struct {
 	Build      BuildInfo
 	Metrics    *Metrics
 	Health     *Health
+	diag       *diagnostics
 	// LogLevel is the runtime level control of the logger passed to
 	// [NewServer], nil when that logger did not come from [NewLogger].
 	LogLevel *LogLevel
@@ -136,6 +137,9 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
 		Metrics:    metrics, Health: h,
 		LogLevel: LogLevelOf(log),
 	}
+
+	s.diag = newDiagnostics(cfg, build, log)
+	metrics.Registry.MustRegister(s.diag.dumps)
 
 	mws := []Middleware{s.entry}
 	if cfg.DebugToken != "" {
@@ -309,6 +313,11 @@ func (s *Server) Run(ctx context.Context) error {
 	defer stopHealth()
 
 	go s.Health.Run(healthCtx)
+
+	s.tuneRuntime(healthCtx)
+
+	stopDiagnostics := s.diag.start(healthCtx)
+	defer stopDiagnostics()
 
 	s.Health.SetReady(true)
 

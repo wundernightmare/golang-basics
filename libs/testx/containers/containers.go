@@ -3,6 +3,7 @@ package containers
 import (
 	"context"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,27 @@ const (
 	PostgresImage = "postgres:18-alpine"
 	ValkeyImage   = "valkey/valkey:9.0"
 	KafkaImage    = "confluentinc/confluent-local:7.5.0"
+	// RustFSImage is the S3-compatible object store (Apache-2.0, a single
+	// static binary): what the S3 fixtures run instead of AWS.
+	RustFSImage = "rustfs/rustfs:1.0.5"
+)
+
+// S3Store is how a test reaches the shared object store: a plaintext
+// endpoint and the root credentials the container was started with. The
+// store starts empty; a test creates its bucket (libs/s3 does, with
+// AutoCreateBucket) and owns a key prefix in it.
+type S3Store struct {
+	Endpoint  string // http://host:port
+	AccessKey string
+	SecretKey string
+	Region    string
+}
+
+// Credentials and port of the S3 fixture.
+const (
+	s3AccessKey = "testaccess"
+	s3SecretKey = "testsecret-0123456789"
+	s3Port      = "9000/tcp"
 )
 
 // shared is one dependency per test binary: started on first use, reused by
@@ -41,6 +63,7 @@ var (
 	postgres shared[string]
 	valkey   shared[string]
 	kafka    shared[[]string]
+	s3store  shared[S3Store]
 )
 
 // Main terminates the shared containers after the package's tests have run.
@@ -57,7 +80,11 @@ func Main(m *testing.M) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	for _, term := range []func(context.Context) error{postgres.terminate, valkey.terminate, kafka.terminate, toxi.terminate} {
+	terms := []func(context.Context) error{postgres.terminate, valkey.terminate, kafka.terminate, s3store.terminate}
+	terms = append(terms, fixtures.terminators()...)
+	terms = append(terms, toxi.terminate) // last: it fronts the others
+
+	for _, term := range terms {
 		if term != nil {
 			_ = term(ctx)
 		}
@@ -139,6 +166,120 @@ func Kafka(tb testing.TB) []string {
 
 		return brokers, c, err
 	})
+}
+
+// S3 returns the package's shared S3-compatible object store (RustFS).
+func S3(tb testing.TB) S3Store {
+	tb.Helper()
+
+	return use(tb, &s3store, "s3", func(ctx context.Context) (S3Store, testcontainers.Container, error) {
+		ctr, err := testcontainers.Run(ctx, RustFSImage,
+			testcontainers.WithExposedPorts(s3Port),
+			testcontainers.WithEnv(map[string]string{
+				"RUSTFS_ACCESS_KEY": s3AccessKey,
+				"RUSTFS_SECRET_KEY": s3SecretKey,
+			}),
+			// /health answers once the store serves the S3 API; the port
+			// alone opens a moment earlier.
+			testcontainers.WithWaitStrategy(wait.ForHTTP("/health").WithPort(s3Port).
+				WithStartupTimeout(60*time.Second)))
+		if err != nil {
+			return S3Store{}, ctr, err
+		}
+
+		endpoint, err := ctr.PortEndpoint(ctx, s3Port, "http")
+
+		return S3Store{Endpoint: endpoint, AccessKey: s3AccessKey, SecretKey: s3SecretKey, Region: "us-east-1"}, ctr, err
+	})
+}
+
+// fixtureSet is the package's own fixtures (see [Fixture]), by name.
+type fixtureSet struct {
+	mu     sync.Mutex
+	byName map[string]any // *shared[V]
+	order  []func() func(context.Context) error
+}
+
+var fixtures fixtureSet
+
+func (f *fixtureSet) terminators() []func(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]func(context.Context) error, 0, len(f.order))
+	for _, terminate := range slices.Backward(f.order) { // reverse start order
+		out = append(out, terminate())
+	}
+
+	return out
+}
+
+// Fixture runs a container only one package needs — an HTTP server with a
+// particular configuration, a broker flavour — under the same rules as the
+// shared dependencies: started once per test binary on first use, skipped
+// under -short, required in CI, terminated by [Main]. start returns the
+// value tests use (an address, a struct of them) and the container.
+//
+// The name identifies the fixture within the test binary; asking for it again
+// returns the same value. The container is reachable for [ProxyTo] through
+// [FixtureContainer].
+func Fixture[V any](tb testing.TB, name string, start func(context.Context) (V, testcontainers.Container, error)) V {
+	tb.Helper()
+
+	return use(tb, fixture[V](tb, name), name, start)
+}
+
+// FixtureContainer returns the container of a started [Fixture].
+func FixtureContainer(tb testing.TB, name string) testcontainers.Container {
+	tb.Helper()
+
+	fixtures.mu.Lock()
+	defer fixtures.mu.Unlock()
+
+	holder, ok := fixtures.byName[name].(interface {
+		ctr() testcontainers.Container
+	})
+	if !ok || holder.ctr() == nil {
+		tb.Fatalf("containers: fixture %q is not started", name)
+	}
+
+	return holder.ctr()
+}
+
+func (s *shared[V]) ctr() testcontainers.Container { return s.container }
+
+func fixture[V any](tb testing.TB, name string) *shared[V] {
+	tb.Helper()
+
+	fixtures.mu.Lock()
+	defer fixtures.mu.Unlock()
+
+	if existing, ok := fixtures.byName[name]; ok {
+		typed, ok := existing.(*shared[V])
+		if !ok {
+			tb.Fatalf("containers: fixture %q was started with another value type", name)
+		}
+
+		return typed
+	}
+
+	if fixtures.byName == nil {
+		fixtures.byName = map[string]any{}
+	}
+
+	created := &shared[V]{}
+	fixtures.byName[name] = created
+	fixtures.order = append(fixtures.order, func() func(context.Context) error { return created.terminate })
+
+	return created
+}
+
+// HostPort returns the host-side port a container's exposed port ("8080/tcp",
+// "8443/udp") is mapped to.
+func HostPort(tb testing.TB, c testcontainers.Container, port string) string {
+	tb.Helper()
+
+	return mappedHostPort(tb, c, port)
 }
 
 // use starts the container once (three attempts: a container runtime under

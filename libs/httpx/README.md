@@ -181,6 +181,10 @@ with — after YAML, env and defaults — through `httpx.Redact`:
   `cert`) or tagged `secret:"true"` become `[redacted]` (an empty value stays
   empty); a struct, slice or map under such a name is redacted as a whole;
   `secret:"false"` opts a false positive out;
+- a field of a secret *type* ([`secret.String`](../secret)) is redacted whatever its
+  name or tags say, and shown as `[redacted:1a2b3c4d]` — a short SHA-256
+  fingerprint that changes when the secret does; the type also keeps the value
+  out of logs and `fmt`;
 - the password of a URL with userinfo becomes `xxxxx`
   (`postgres://app:xxxxx@db/app`, also when `net/url` cannot parse it), secret-looking query parameters
   (`?sslpassword=`, `?token=`, `?api_key=`) become `[redacted]`, and so does
@@ -325,6 +329,27 @@ With prefix `PING_`:
 | `PING_LOG_FORMAT`                | `log_format`            | `json`           | `json` or `text`                                           |
 | `PING_LOG_SAMPLE_INITIAL`        | `log_sample_initial`    | `100`            | per message per second: pass the first N (`0` = no sampling) |
 | `PING_LOG_SAMPLE_THEREAFTER`     | `log_sample_thereafter` | `100`            | … then every M-th                                          |
+| `PING_RUNTIME_MEMORY_LIMIT_RATIO` | `runtime_memory_limit_ratio` | `0.85`     | Go memory limit as a share of the container's memory limit (negative = leave the runtime alone; a `GOMEMLIMIT` in the environment wins) |
+| `PING_RUNTIME_MEMORY_LIMIT_REFRESH` | `runtime_memory_limit_refresh` | `30s`  | how often the container limit is re-read, for in-place resizes (negative = only at start) |
+| `PING_RUNTIME_TRACEBACK`         | `runtime_traceback`     | `all`            | `none`/`single`/`all`/`system`/`crash`: goroutines printed when the process dies |
+
+| `PING_DIAG_DUMP_DIR`             | `diag_dump_dir`         | *(none)*         | directory (an `emptyDir`) for crash capture and artifacts not uploaded yet |
+| `PING_DIAG_KEY_PREFIX`           | `diag_key_prefix`       | `diagnostics`    | first segment of the object keys in the dump sink          |
+| `PING_DIAG_MEMORY_THRESHOLD`     | `diag_memory_threshold` | `0.9`            | share of the container's memory limit at which profiles are captured (negative = never) |
+| `PING_DIAG_MEMORY_COOLDOWN`      | `diag_memory_cooldown`  | `10m`            | shortest time between two memory captures                  |
+| `PING_DIAG_CHECK_INTERVAL`       | `diag_check_interval`   | `5s`             | how often container memory is read                         |
+| `PING_DIAG_UPLOAD_TIMEOUT`       | `diag_upload_timeout`   | `15s`            | one upload to the dump sink                                |
+| `PING_DIAG_SPOOL_RETRY`          | `diag_spool_retry`      | `1m`             | how often the dump directory is re-sent                    |
+| `PING_DIAG_SPOOL_MAX_FILES`      | `diag_spool_max_files`  | `20`             | files kept in the dump directory                           |
+| `PING_DIAG_CRASH_MAX_BYTES`      | `diag_crash_max_bytes`  | `8388608`        | longest crash report shipped                               |
+
+The `DIAG_` keys do nothing until the service calls `srv.SetDumpSink(sink)`
+(libs/s3's client is one) or sets `DIAG_DUMP_DIR`: crash reports and
+memory-pressure profiles, shipped to object storage —
+[docs/DIAGNOSTICS.md](../../docs/DIAGNOSTICS.md).
+
+`GOMAXPROCS` has no key on purpose: the runtime follows the container's CPU
+limit by itself. [docs/RUNTIME.md](../../docs/RUNTIME.md) explains all of it.
 
 Note that the defaults put the admin listener on every interface with no
 token, which `Validate` rejects: set `ADMIN_TOKEN`, a loopback `ADMIN_ADDR`,

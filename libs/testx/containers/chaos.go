@@ -6,7 +6,7 @@ package containers
 // trusted. Two mechanisms:
 //
 //   - [Proxy] puts Toxiproxy between the service and a shared container
-//     (Postgres, Valkey): the proxy can be disabled (connection refused) or
+//     (Postgres, Valkey, S3): the proxy can be disabled (connection refused) or
 //     given a latency toxic (slow), then reset. The service is wired to the
 //     proxied address instead of the container's.
 //   - [Pause] freezes a shared container (Kafka, whose advertised listeners
@@ -37,7 +37,19 @@ import (
 const ToxiproxyImage = "ghcr.io/shopify/toxiproxy:2.12.0"
 
 // Proxy listen ports inside the Toxiproxy container, one per dependency.
-var proxyPorts = map[string]int{"postgres": 8666, "valkey": 8667}
+var proxyPorts = map[string]int{"postgres": 8666, "valkey": 8667, "s3": 8668}
+
+// Spare listen ports for [ProxyTo]: proxies in front of a package's own
+// fixtures, handed out by name in the order they are asked for.
+const (
+	sparePortFirst = 8680
+	sparePortCount = 12
+)
+
+var spare struct {
+	mu     sync.Mutex
+	byName map[string]int
+}
 
 var toxi shared[*toxiclient.Client]
 
@@ -50,6 +62,10 @@ func toxiproxy(tb testing.TB) *toxiclient.Client {
 	return use(tb, &toxi, "toxiproxy", func(ctx context.Context) (*toxiclient.Client, testcontainers.Container, error) {
 		exposed := []string{tctoxiproxy.ControlPort}
 		for _, p := range proxyPorts {
+			exposed = append(exposed, strconv.Itoa(p)+"/tcp")
+		}
+
+		for p := sparePortFirst; p < sparePortFirst+sparePortCount; p++ {
 			exposed = append(exposed, strconv.Itoa(p)+"/tcp")
 		}
 
@@ -82,10 +98,11 @@ type Proxy struct {
 	Addr string
 }
 
-// Proxied returns a proxy in front of the named shared dependency ("postgres"
-// or "valkey"), creating the container and the proxy on first use. The
-// dependency itself is started through [Postgres] / [Valkey] as usual; only
-// the address the service dials changes.
+// Proxied returns a proxy in front of the named shared dependency ("postgres",
+// "valkey" or "s3"), creating the container and the proxy on first use. The
+// dependency itself is started through [Postgres] / [Valkey] / [S3] as usual;
+// only the address the service dials changes (for S3: "http://" + Addr, with
+// the store's credentials — the signature covers the Host the client used).
 func Proxied(tb testing.TB, dep string) *Proxy {
 	tb.Helper()
 
@@ -101,10 +118,51 @@ func Proxied(tb testing.TB, dep string) *Proxy {
 	case "valkey":
 		Valkey(tb)
 		upstreamHost = mappedHostPort(tb, valkey.container, "6379/tcp")
+	case "s3":
+		S3(tb)
+		upstreamHost = mappedHostPort(tb, s3store.container, s3Port)
 	}
 
+	return proxyOn(tb, dep, port, upstreamHost)
+}
+
+// ProxyTo returns a proxy in front of one TCP port of any container — a
+// package's own [Fixture], usually — creating it on first use. name
+// identifies the proxy within the test binary: the same name returns the same
+// proxy (and, like every [Proxy], is restored when the test ends), so tests
+// that share one are serial. A dozen distinct names are available.
+//
+// Toxiproxy speaks TCP only: a UDP port (HTTP/3) cannot be proxied.
+func ProxyTo(tb testing.TB, name string, upstream testcontainers.Container, port string) *Proxy {
+	tb.Helper()
+
+	upstreamHost := mappedHostPort(tb, upstream, port)
+
+	spare.mu.Lock()
+
+	listen, ok := spare.byName[name]
+	if !ok {
+		if spare.byName == nil {
+			spare.byName = map[string]int{}
+		}
+
+		require.Lessf(tb, len(spare.byName), sparePortCount, "containers: no spare proxy port left for %q", name)
+
+		listen = sparePortFirst + len(spare.byName)
+		spare.byName[name] = listen
+	}
+
+	spare.mu.Unlock()
+
+	return proxyOn(tb, name, listen, upstreamHost)
+}
+
+// proxyOn creates (or finds) the proxy name listening on port inside the
+// Toxiproxy container, in front of the host-mapped upstream port.
+func proxyOn(tb testing.TB, name string, port int, upstreamHost string) *Proxy {
+	tb.Helper()
+
 	cli := toxiproxy(tb)
-	name := dep
 
 	p, err := cli.Proxy(name)
 	if err != nil { // not created yet
@@ -159,7 +217,7 @@ func (p *Proxy) Reset() {
 	_ = p.proxy.Enable()
 }
 
-// Pause freezes the named shared container ("kafka", "postgres", "valkey")
+// Pause freezes the named shared container ("kafka", "postgres", "valkey", "s3")
 // until the returned func or the test's cleanup runs. A frozen dependency does
 // not refuse connections, it stops answering: exactly what timeouts, readiness
 // deadlines and best-effort paths are there for.
@@ -188,6 +246,10 @@ func Pause(tb testing.TB, dep string) (unpause func()) {
 		Valkey(tb)
 
 		container = valkey.container
+	case "s3":
+		S3(tb)
+
+		container = s3store.container
 	default:
 		tb.Fatalf("containers: cannot pause %q", dep)
 	}

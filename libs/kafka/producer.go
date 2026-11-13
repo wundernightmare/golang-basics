@@ -33,8 +33,8 @@ type Producer struct {
 
 // NewProducer builds a producer from cfg with the linked provider (see
 // [Driver]) and verifies broker connectivity (so a misconfigured broker or
-// credential fails fast at boot). The caller owns it and must call
-// [Producer.Close].
+// credential fails fast at boot; [WithLazyConnect] skips the check). The
+// caller owns it and must call [Producer.Close].
 func NewProducer(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) (*Producer, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -54,10 +54,9 @@ func NewProducer(ctx context.Context, cfg Config, log *slog.Logger, opts ...Opti
 		return nil, fmt.Errorf("kafka: new %s producer: %w", drv.Name(), err)
 	}
 
-	pingCtx, cancel := context.WithTimeout(ctx, cfg.DialTimeout)
-	defer cancel()
-
-	if err := client.Ping(pingCtx); err != nil {
+	if applyOptions(opts).lazy {
+		log.InfoContext(ctx, "kafka producer: boot-time broker check skipped (lazy connect)")
+	} else if err := pingBrokers(ctx, client, cfg.DialTimeout); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("kafka: producer: brokers unreachable: %w", err)
 	}
@@ -69,6 +68,13 @@ func NewProducer(ctx context.Context, cfg Config, log *slog.Logger, opts ...Opti
 		"auto_topic_creation", cfg.AllowAutoTopicCreation)
 
 	return &Producer{cl: client, cfg: cfg, log: log, metrics: newProducerMetrics(client.Stats, drv.Name()), tel: newTelemetry(opts)}, nil
+}
+
+func pingBrokers(ctx context.Context, client ProducerClient, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	return client.Ping(ctx)
 }
 
 // Send publishes msg and blocks until the brokers acknowledge it or

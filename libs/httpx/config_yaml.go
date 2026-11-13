@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"bytes"
+	"encoding"
 	"errors"
 	"fmt"
 	"io"
@@ -107,7 +108,7 @@ func fillZero(dst, def reflect.Value) {
 		}
 
 		d := def.Field(i)
-		if f.Kind() == reflect.Struct && f.Type() != reflect.TypeFor[time.Time]() {
+		if f.Kind() == reflect.Struct && !isScalarStruct(f.Type()) {
 			fillZero(f, d)
 			continue
 		}
@@ -116,4 +117,11 @@ func fillZero(dst, def reflect.Value) {
 			f.Set(d)
 		}
 	}
+}
+
+// isScalarStruct reports whether a struct type is one configuration value
+// rather than a group of them: time.Time, and anything that reads itself from
+// text (libs/secret's String) — its fields are not ours to fill one by one.
+func isScalarStruct(t reflect.Type) bool {
+	return t == reflect.TypeFor[time.Time]() || reflect.PointerTo(t).Implements(reflect.TypeFor[encoding.TextUnmarshaler]())
 }

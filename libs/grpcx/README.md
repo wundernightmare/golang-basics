@@ -68,6 +68,10 @@ the caller's context ending first. A message on a stream decides nothing. A
 caller that stops reading must cancel its context (gRPC's own rule) — that is
 when an abandoned stream reports, and until then a half-open probe keeps its
 slot. gRPC retries a stream only until the server's first message.
+`timeout` is the deadline of the **whole stream**, not of a message: a stream
+meant to stay open, or a reader slower than the timeout, needs `timeout: 0`
+on its target (or its own deadline) — otherwise it is cut mid-way with
+`DeadlineExceeded` and the breaker counts a failure.
 
 **Retries** — only the codes in `retry_codes` (default `UNAVAILABLE`), at
 most 5 attempts (grpc-go's own cap; a larger value is rejected, not clamped).
@@ -77,9 +81,38 @@ timeout in grpc-go — `timeout` bounds the whole call. Retry throttling: a
 failed call takes a token, a successful one returns `token_ratio`, and
 retries stop while the bucket is at most half full.
 
+Two things the integration suite pins about retries on a real network:
+
+- **A retry is a second delivery.** When the connection dies after the
+  request was sent and before the answer came back, gRPC sends it again and
+  the caller sees `OK` — the server received the write twice. With the
+  default `retry_methods: []` that applies to every method.
+- **Retries do not bridge an outage.** They are spent within a few hundred
+  milliseconds, while a channel that lost its connection dials again after
+  about a second (grpc-go's reconnect backoff). A call made in that gap fails
+  with `Unavailable` although the server is back well before its deadline.
+  `wait_for_ready: true` is the setting for restarts and failovers: the call
+  waits for the connection. With it, a target must have a `timeout` — on a
+  connection that can never be made (a rejected certificate) the wait ends
+  only there.
+
+`grpc_client_retries_total` counts every attempt after the first, including
+grpc-go's transparent retries (a request that never left the client), which
+do not count against `retry_max_attempts`.
+
 **Keepalive** — off by default, on purpose: a gRPC server closes a connection
 that pings more often than its enforcement policy allows (every 5 minutes by
-default), so `keepalive_time` has to be agreed with the server side.
+default), so `keepalive_time` has to be agreed with the server side. What it
+buys: a connection that went silent (packets dropped, no FIN) otherwise holds
+a call until its deadline; with `keepalive_time: 10s` and
+`keepalive_timeout: 1s` the call fails as `Unavailable` after about eleven
+seconds.
+
+**Gateways** — when an HTTP proxy answers instead of the service, grpc-go
+maps its status: 502, 503, 504 and 429 become `Unavailable` (retried, a
+breaker failure), 401 `Unauthenticated`, 403 `PermissionDenied`, 404
+`Unimplemented` (answers: not retried, not failures), and a 200 that is not
+gRPC becomes `Unknown` (a failure).
 
 **Close** — closes every connection; calls in flight fail with `Canceled`
 (gRPC has no client-side drain). Close after whatever makes the calls has
@@ -165,6 +198,14 @@ neither), no outlier detection or xDS, no server side. The breaker is per
 target, not per backend address: it is meant for a dependency behind one
 virtual address; with client-side balancing over many addresses, gRPC's
 outlier detection is the finer tool.
+
+## Tests
+
+| Layer | Where | Owns |
+| --- | --- | --- |
+| Unit | `*_test.go` here — an in-process gRPC server on loopback | the breaker's view of every status, streams, config and service-config rendering |
+| Mutation | `.gremlins.yaml`, nightly | whether those tests notice a flipped comparison |
+| Integration | [`integration/`](integration) — a module of its own, so testcontainers, Toxiproxy and the OTLP stubs stay out of this `go.mod` | a real server (Jaeger) over cleartext, TLS, TLS 1.3 and mutual TLS; a real stream; an HTTP gateway and a database on the other end; TCP faults at a named point; what retries, `wait_for_ready` and keepalive do on a real network |
 
 ## Develop
 

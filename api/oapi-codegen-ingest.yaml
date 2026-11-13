@@ -1,0 +1,7 @@
+# oapi-codegen — Go types for the ingest API (models only, as for tasks).
+package: ingestapi
+output: libs/contracts/ingestapi/types.gen.go # relative to the workspace root (`just contracts` runs from there)
+generate:
+  models: true
+output-options:
+  skip-prune: true

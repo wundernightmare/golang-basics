@@ -125,8 +125,8 @@ func (b Boot[T]) usage(w io.Writer, fs *flag.FlagSet) {
 // ConfigReference writes one line per configuration key of cfg — the
 // environment name (with prefix), the YAML path and the value cfg holds
 // (pass the defaults) — derived from the env/yaml/envPrefix struct tags, the
-// same ones [LoadYAML] reads. A field tagged secret:"true" shows "(secret)"
-// instead of a value.
+// same ones [LoadYAML] reads. A field tagged secret:"true", or of a secret
+// type (libs/secret's String), shows "(secret)" instead of a value.
 func ConfigReference(w io.Writer, prefix string, cfg any) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "ENV\tYAML\tDEFAULT")
@@ -181,6 +181,14 @@ func walkConfig(v reflect.Value, envPrefix, yamlPrefix string, emit func(env, ya
 // formatDefault renders a value for the reference: "-" for an empty string
 // or list (unset), "(secret)" for a set secret.
 func formatDefault(v reflect.Value, secret bool) string {
+	if s, ok := reflect.TypeAssert[typedSecret](v); ok {
+		if s.IsZero() {
+			return "-"
+		}
+
+		return "(secret)"
+	}
+
 	switch {
 	case v.IsZero() && (v.Kind() == reflect.String || v.Kind() == reflect.Slice):
 		return "-"
