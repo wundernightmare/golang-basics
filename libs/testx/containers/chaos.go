@@ -39,6 +39,18 @@ const ToxiproxyImage = "ghcr.io/shopify/toxiproxy:2.12.0"
 // Proxy listen ports inside the Toxiproxy container, one per dependency.
 var proxyPorts = map[string]int{"postgres": 8666, "valkey": 8667, "s3": 8668}
 
+// Spare listen ports for [ProxyTo]: proxies in front of a package's own
+// fixtures, handed out by name in the order they are asked for.
+const (
+	sparePortFirst = 8680
+	sparePortCount = 12
+)
+
+var spare struct {
+	mu     sync.Mutex
+	byName map[string]int
+}
+
 var toxi shared[*toxiclient.Client]
 
 // toxiproxy starts the shared Toxiproxy container once. The proxies reach
@@ -50,6 +62,10 @@ func toxiproxy(tb testing.TB) *toxiclient.Client {
 	return use(tb, &toxi, "toxiproxy", func(ctx context.Context) (*toxiclient.Client, testcontainers.Container, error) {
 		exposed := []string{tctoxiproxy.ControlPort}
 		for _, p := range proxyPorts {
+			exposed = append(exposed, strconv.Itoa(p)+"/tcp")
+		}
+
+		for p := sparePortFirst; p < sparePortFirst+sparePortCount; p++ {
 			exposed = append(exposed, strconv.Itoa(p)+"/tcp")
 		}
 
@@ -107,8 +123,46 @@ func Proxied(tb testing.TB, dep string) *Proxy {
 		upstreamHost = mappedHostPort(tb, s3store.container, s3Port)
 	}
 
+	return proxyOn(tb, dep, port, upstreamHost)
+}
+
+// ProxyTo returns a proxy in front of one TCP port of any container — a
+// package's own [Fixture], usually — creating it on first use. name
+// identifies the proxy within the test binary: the same name returns the same
+// proxy (and, like every [Proxy], is restored when the test ends), so tests
+// that share one are serial. A dozen distinct names are available.
+//
+// Toxiproxy speaks TCP only: a UDP port (HTTP/3) cannot be proxied.
+func ProxyTo(tb testing.TB, name string, upstream testcontainers.Container, port string) *Proxy {
+	tb.Helper()
+
+	upstreamHost := mappedHostPort(tb, upstream, port)
+
+	spare.mu.Lock()
+
+	listen, ok := spare.byName[name]
+	if !ok {
+		if spare.byName == nil {
+			spare.byName = map[string]int{}
+		}
+
+		require.Lessf(tb, len(spare.byName), sparePortCount, "containers: no spare proxy port left for %q", name)
+
+		listen = sparePortFirst + len(spare.byName)
+		spare.byName[name] = listen
+	}
+
+	spare.mu.Unlock()
+
+	return proxyOn(tb, name, listen, upstreamHost)
+}
+
+// proxyOn creates (or finds) the proxy name listening on port inside the
+// Toxiproxy container, in front of the host-mapped upstream port.
+func proxyOn(tb testing.TB, name string, port int, upstreamHost string) *Proxy {
+	tb.Helper()
+
 	cli := toxiproxy(tb)
-	name := dep
 
 	p, err := cli.Proxy(name)
 	if err != nil { // not created yet

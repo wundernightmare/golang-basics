@@ -9,6 +9,8 @@
 //   - [Proxied] puts Toxiproxy in front of a dependency so it can be cut off
 //     or slowed down; [Pause] freezes a container so it hangs instead of
 //     refusing.
+//   - [Fixture] runs a container only one package needs under the same
+//     rules, and [ProxyTo] puts Toxiproxy in front of any container's port.
 //
 // It is its own module so that only container-backed test packages carry
 // testcontainers, the Docker client and Toxiproxy in their dependency graph.

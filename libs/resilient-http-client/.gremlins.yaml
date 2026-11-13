@@ -24,7 +24,6 @@
 #       backoff.go  secs >= maxRetryAfter      (== gives the same value either way)
 #       client.go   RetryMaxAttempts > 1       (1 attempt either way)
 #                   time.Until(dl) <= delay    (equality is not reachable in a test)
-#                   n > 1 && GetBody != nil    (GetBody on attempt 1 yields the same body)
 #                   d <= 0 in sleep            (a zero timer fires at once)
 #                   "attempt", n+1             (a debug log field)
 #

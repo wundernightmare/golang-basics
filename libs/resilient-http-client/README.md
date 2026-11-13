@@ -64,7 +64,10 @@ closed, and only then does the breaker hear a success. The attempt timeout
 covers the read; a read that fails returns an `*OutboundError`
 (`KindTimeout`, `KindConnection`, `KindCanceled`) and counts for the breaker
 like the same failure before the headers. If the attempt's context ends while
-the caller still holds the body, the breaker hears that too. A failed body is
+the caller still holds the body, the breaker hears that too — and the attempt
+is released (bulkhead slot, in-flight count) without waiting for a `Close`
+that may never come: a forgotten body costs one attempt timeout, not a slot
+for the life of the process. A failed body is
 not retried (the response was already handed over), and
 `http_client_requests_total` keeps the outcome known at the headers (`2xx`).
 
@@ -78,7 +81,9 @@ they were admitted in).
 `Idempotency-Key` header, and only with a replayable body (`GetBody`, which
 `http.NewRequest` sets for in-memory bodies). Retried: timeouts, connection
 errors, 408, 425, 429, 5xx except 501/505. Never: local rejections,
-cancellation. The delay is full-jitter backoff or `Retry-After` (seconds or
+cancellation, a server certificate the client rejects (unknown authority,
+wrong name, expired — the next attempt would meet the same certificate; it
+still counts against the breaker). The delay is full-jitter backoff or `Retry-After` (seconds or
 HTTP-date), whichever is longer; a `Retry-After` above `retry_max_delay`, or a
 delay past the caller's deadline, ends the retries. The **retry budget** caps
 retries per target at `retry_budget_min_retries + retry_budget_ratio ×
@@ -194,9 +199,23 @@ your client, which is never modified; its idle connections are yours to close.
 ## Develop
 
 ```sh
-just test          # go test ./...
+just test          # go test ./... — unit, on loopback sockets, no Docker
 just test-verbose  # + race detector
 just lint          # golangci-lint run
 just bench         # Send micro-benchmark (the breaker's is in libs/resilience)
 just mutate libs/resilient-http-client   # from the repo root; scope in .gremlins.yaml
+just mod libs/resilient-http-client/integration test   # from the repo root; needs Docker
 ```
+
+## Tests
+
+| Layer | Where | Owns |
+| --- | --- | --- |
+| Unit | `*_test.go` here — `httptest` on loopback, no mocks of the transport | every decision: what is retried, what the breaker hears, the order of an attempt, shutdown, config |
+| Mutation | `.gremlins.yaml`, nightly | whether those tests notice a flipped comparison in the decision logic |
+| Fuzz | `FuzzParseRetryAfter` | the one parser of external bytes |
+| Integration | [`integration/`](integration) — a module of its own, so testcontainers, Toxiproxy and an HTTP/3 stack stay out of this `go.mod` | what only real servers and a real network show: the protocol the server saw (HTTP/1.1, h2c, HTTP/2, HTTP/3), TLS trust and handshake failures, TCP faults at a named point, a real API's view of retries |
+
+The integration suite does not repeat the unit layer: it has no test of the
+backoff arithmetic or the breaker's window. See its
+[README](integration/README.md).
