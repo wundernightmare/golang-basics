@@ -11,10 +11,14 @@
 //   - tracing (a client span per query via otelpgx) and metrics: pool
 //     statistics plus query latency and errors by operation ([DB.Collectors],
 //     [WithOperation]);
+//   - a light unit of work: [DB.InTx] runs a function in one transaction,
+//     [DB.Conn] gives repositories the transaction of their context or the
+//     pool, [DB.AfterCommit] defers a side effect until the commit;
 //   - a versioned migration runner over NNN_name.sql files, safe for
 //     replicas booting together ([Migrate]).
 //
-// It deliberately stops at "give me a healthy *pgxpool.Pool"; query building,
+// It deliberately stops at "give me a healthy *pgxpool.Pool" and a
+// transaction boundary; query building,
 // repositories and the domain model live in each service (see services/tasks
 // for a worked example). pgx is chosen over database/sql + lib/pq because it
 // is the actively-maintained, batteries-included PostgreSQL driver for Go and
