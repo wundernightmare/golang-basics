@@ -9,6 +9,7 @@
 //   e2e                         — end-to-end suite: spawns the service binaries (go test -tags e2e)
 //   libs/contracts              — generated Go types of the TypeSpec contracts (api/): tasks HTTP API + Kafka events
 //   libs/grpcx                  — policy-per-target outbound gRPC connections (service config, CB, metrics, tracing)
+//   libs/grpcx/integration      — its integration suite: a real gRPC server (Jaeger), TLS, an HTTP gateway, Toxiproxy (_test only)
 //   libs/httpx                  — shared HTTP server scaffolding (the example common lib)
 //   libs/resilience             — circuit breaker + retry budget shared by the outbound clients (HTTP, gRPC)
 //   libs/resilient-http-client  — policy-per-target outbound HTTP client (rate limit, CB, retry…)
@@ -36,6 +37,7 @@ use (
 	./e2e
 	./libs/contracts
 	./libs/grpcx
+	./libs/grpcx/integration
 	./libs/httpx
 	./libs/kafka
 	./libs/kafka-franz
