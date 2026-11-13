@@ -138,6 +138,51 @@ a weaker guarantee. `ReadOnly()` on a nested call is not enforced.
 - The unit belongs to its `DB`: two pools in one process never share a
   transaction through a context.
 
+## Behind PgBouncer
+
+`pgbouncer_test.go` runs the library through a real PgBouncer (1.24, built
+from `testdata/pgbouncer/Dockerfile`) in front of the shared Postgres, in
+transaction and in session pooling, with PgBouncer's defaults and with a tuned
+configuration. What it found, per setting:
+
+| Setting / feature | Session pooling | Transaction pooling |
+| --- | --- | --- |
+| `DB_STATEMENT_TIMEOUT`, `DB_LOCK_TIMEOUT`, `DB_IDLE_IN_TX_TIMEOUT` (sent as startup parameters) | **Not through a stock PgBouncer**: the connection is refused (`unsupported startup parameter`). **Unsafe with `ignore_startup_parameters`**: the connection is accepted and the timeouts are dropped — in both modes. `New` reads them back and fails with `ErrGuardRailOff` instead of starting without guard rails. | same |
+| The same timeouts set on the role or database (`ALTER ROLE app SET statement_timeout = '30s'`), and `0` in the config | **Safe**: in effect on every server connection | **Safe** |
+| pgx's default statement cache (named prepared statements) | **Safe**: one server connection per client | **Unsafe with `max_prepared_statements = 0`**: the statement is executed on a connection that never prepared it (`26000`). **Safe with `max_prepared_statements > 0`** (PgBouncer ≥ 1.21 re-prepares), or with `default_query_exec_mode=exec` / `simple_protocol` in the DSN |
+| `search_path` in the DSN | Refused by a stock PgBouncer. **Safe with `track_extra_parameters = search_path`** (PostgreSQL 18 reports it, so PgBouncer can carry it to whichever server connection serves the client) | same |
+| A session-level `SET` | **Safe**: lasts for the client's connection; `server_reset_query` wipes it before the next client | **Unsafe**: stays on the server connection and is inherited by the next client. Use `SET LOCAL` inside `InTx` |
+| `pg_advisory_lock` (session) | Safe | **Unsafe**: the unlock is served by another connection, returns false, and the lock stays held. Use `pg_advisory_xact_lock` — which `Migrate` does |
+| `Migrate`, concurrent runners | Safe | **Safe** (transaction-scoped lock) |
+| `InTx`, savepoints, `AfterCommit`, batches, `CopyFrom` | Safe | **Safe**: a transaction stays on one server connection |
+| Context cancellation | **Safe**: the cancel request reaches the backend and the query stops | **Safe** |
+| Pool size | PgBouncer's `pool_size` is the real limit, not `DB_MAX_CONNS`. A query that finds no server connection waits in PgBouncer: a context deadline ends the wait, `query_wait_timeout` ends it otherwise | same — and a unit of work holds a server connection for as long as it runs |
+
+The setup the tests arrive at:
+
+```ini
+; pgbouncer.ini
+pool_mode = transaction
+max_prepared_statements = 200            ; pgx's statement cache keeps working
+track_extra_parameters = IntervalStyle,search_path
+query_wait_timeout = 5                   ; never wait forever for a server connection
+; no ignore_startup_parameters for the timeouts: set them on the role instead
+```
+
+```sql
+ALTER ROLE app SET statement_timeout = '30s';
+ALTER ROLE app SET lock_timeout = '5s';
+ALTER ROLE app SET idle_in_transaction_session_timeout = '60s';
+```
+
+```sh
+DB_STATEMENT_TIMEOUT=0 DB_LOCK_TIMEOUT=0 DB_IDLE_IN_TX_TIMEOUT=0   # the role's values stand
+```
+
+Not covered: `LISTEN` / `NOTIFY` (the library does not use them; they need
+session pooling), PgBouncer's own TLS and `auth_query`, and statement pooling
+mode (it forbids multi-statement transactions, so `InTx` cannot work there).
+
 ## Metrics
 
 | Metric | Meaning |
@@ -168,4 +213,5 @@ real deadlock retried, a pool of one connection, `statement_timeout` and
 `idle_in_transaction_session_timeout` ending a unit, two pools kept apart —
 and its chaos tests through Toxiproxy in front of the same Postgres: the
 connection lost mid-unit, the reply to `COMMIT` lost, a deadline on a slow
-link.
+link. `pgbouncer_test.go` runs the library behind PgBouncer in both
+pooling modes — see [Behind PgBouncer](#behind-pgbouncer).
