@@ -7,9 +7,9 @@
 # Topology
 #
 #   services ─(OTLP/HTTP :4318)─▶ otel-collector ─(OTLP)─▶ Jaeger        http://localhost:16686
-#                                 └ tail sampling: errors, slow, debug.subject, 1% of the rest
-#                                   (a fast successful request is, most of the time, NOT in Jaeger —
-#                                    OTEL_TAIL_SAMPLING_PERCENTAGE=100 just obs-up keeps everything)
+#                                 └ tail sampling: errors, slow, debug.subject, a share of the rest
+#                                   (100 % in this local stack; the file's own default is 1 % —
+#                                    OTEL_TAIL_SAMPLING_PERCENTAGE=1 just obs-up shows what production keeps)
 #   services ─(stdout JSON)─────▶ vector (docker socket) ─▶ Loki         http://localhost:3100
 #   services :908x/metrics ◀─(scrape)─ VictoriaMetrics                    http://localhost:9095
 #   postgres-exporter / valkey-exporter / redpanda /public_metrics ◀─(scrape)─┘
@@ -63,7 +63,10 @@ services:
       OTEL_TAIL_DECISION_WAIT: ${OTEL_TAIL_DECISION_WAIT:-10s}
       OTEL_TAIL_NUM_TRACES: ${OTEL_TAIL_NUM_TRACES:-50000}
       OTEL_TAIL_SLOW_THRESHOLD_MS: ${OTEL_TAIL_SLOW_THRESHOLD_MS:-500}
-      OTEL_TAIL_SAMPLING_PERCENTAGE: ${OTEL_TAIL_SAMPLING_PERCENTAGE:-1}
+      # The collector file's own default is 1 %: what production runs. This
+      # local stack keeps everything unless told otherwise — a developer
+      # looking for the one request they just made must find it.
+      OTEL_TAIL_SAMPLING_PERCENTAGE: ${OTEL_TAIL_SAMPLING_PERCENTAGE:-100}
     volumes:
       - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro,z
     ports:

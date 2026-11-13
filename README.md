@@ -302,9 +302,9 @@ propagators and a no-op provider.
 decides per finished trace: it keeps every trace with an error, every trace
 slower than 500 ms, every trace carrying the span attribute `debug.subject`
 (set it for a tenant or a user under investigation), and 1% of the rest
-(`OTEL_TAIL_*` in `.env.example`). So a fast successful request is usually
-*not* in the local Jaeger — `OTEL_TAIL_SAMPLING_PERCENTAGE=100 just obs-up`
-keeps everything. Two rules come with it, both explained in
+(`OTEL_TAIL_*` in `.env.example`). The local stack (`just obs-up`) overrides
+that share to 100 %, so the request you just made is in Jaeger; set
+`OTEL_TAIL_SAMPLING_PERCENTAGE=1` to see what production keeps. Two rules come with it, both explained in
 [`libs/otelx`](libs/otelx#sampling-head-in-the-service-tail-in-the-collector):
 services head-sample at 1.0 (`*_OTEL_TRACES_SAMPLER_RATIO`, the default),
 because the collector cannot keep what it was never sent; and one collector
