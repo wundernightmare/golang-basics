@@ -38,6 +38,8 @@ type fakePublisher struct {
 	records []record
 	failOn  map[string]error
 	delay   time.Duration
+	// afterSend runs once a record was published, with its key.
+	afterSend func(key string)
 }
 
 func (f *fakePublisher) Send(_ context.Context, msg kafka.Message) error {
@@ -60,6 +62,10 @@ func (f *fakePublisher) Send(_ context.Context, msg kafka.Message) error {
 	}
 
 	f.records = append(f.records, record{topic: topic, key: string(key), value: string(value), headers: h})
+
+	if f.afterSend != nil {
+		f.afterSend(string(key))
+	}
 
 	return nil
 }
@@ -136,6 +142,38 @@ func TestRelayOnce_PublishesInOrderWithHeadersAndDeletes(t *testing.T) {
 	n, err = relay.RelayOnce(context.Background())
 	require.NoError(t, err)
 	assert.Zero(t, n, "nothing left")
+}
+
+// Shutdown in the middle of a batch: the relay stops publishing, and what it
+// already published is committed — deleted from the outbox — not left to be
+// sent a second time by the next start. What it did not get to stays.
+func TestRelayOnce_ShutdownMidBatchCommitsWhatWasPublished(t *testing.T) {
+	t.Parallel()
+
+	db := testsupport.DB(t, containers.Postgres(t))
+	enqueue(t, context.Background(), propagation.TraceContext{}, db, "t1", "t2", "t3")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pub := &fakePublisher{afterSend: func(key string) {
+		if key == "t1" {
+			cancel() // SIGTERM arrives while the batch is being published
+		}
+	}}
+	relay := outbox.NewRelay(db.Pool(), pub, outbox.Config{Topic: "tasks.events"}, nil)
+
+	n, err := relay.RelayOnce(ctx)
+	require.NoError(t, err, "a shutdown is not a failure")
+	assert.Equal(t, 1, n)
+	assert.Equal(t, []string{"t1"}, pub.keys(), "nothing was published after the cancellation")
+	assert.Equal(t, int64(2), pending(t, relay), "the published row is gone, the other two wait")
+
+	// The next start publishes the rest, and only the rest.
+	n, err = relay.RelayOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+	assert.Equal(t, []string{"t1", "t2", "t3"}, pub.keys(), "each event exactly once, in order")
 }
 
 func TestRelayOnce_StopsAtTheFirstFailureAndKeepsTheRest(t *testing.T) {
