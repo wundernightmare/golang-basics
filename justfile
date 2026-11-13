@@ -49,7 +49,7 @@ STAMP := "VERSION='" + VERSION + "' GIT_SHA='" + GIT_SHA + "' BUILD_TIME='" + BU
 # Every `docker build`: the required GO_VERSION + build stamp, then the
 # closed-network knobs in value-less form (taken from the environment, skipped
 # when unset, so an open-network build sees the Dockerfile defaults).
-DOCKER_BUILD_ARGS := "--build-arg GO_VERSION=" + GO_VERSION + " --build-arg VERSION=" + VERSION + " --build-arg GIT_SHA=" + GIT_SHA + " --build-arg BUILD_TIME=" + BUILD_TIME + " --build-arg KAFKA_PROVIDER --build-arg ALPINE_MIRROR --build-arg DOCKER_HUB --build-arg GCR --build-arg GOPROXY --build-arg GOSUMDB --build-arg GONOSUMDB --build-arg GOFLAGS --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY"
+DOCKER_BUILD_ARGS := "--build-arg GO_VERSION=" + GO_VERSION + " --build-arg VERSION=" + VERSION + " --build-arg GIT_SHA=" + GIT_SHA + " --build-arg BUILD_TIME=" + BUILD_TIME + " --build-arg KAFKA_PROVIDER --build-arg FIPS --build-arg GOFIPS140_VERSION --build-arg ALPINE_MIRROR --build-arg DOCKER_HUB --build-arg GCR --build-arg GOPROXY --build-arg GOSUMDB --build-arg GONOSUMDB --build-arg GOFLAGS --build-arg HTTP_PROXY --build-arg HTTPS_PROXY --build-arg NO_PROXY"
 
 # Scanner inputs that a closed network points at vendored rules / offline DBs.
 SEMGREP_CONFIG := env("SEMGREP_CONFIG", "p/owasp-top-ten p/golang")

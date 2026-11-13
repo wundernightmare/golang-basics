@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"crypto/fips140"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -35,14 +36,22 @@ type BuildInfo struct {
 	BuildTime string `json:"build_time"` // vcs.time or the injected BuildTime, RFC 3339, when known
 	Modified  bool   `json:"modified"`   // vcs.modified: built from a dirty tree
 	GoVersion string `json:"go_version"`
+	FIPS140   bool   `json:"fips140"` // the Go Cryptographic Module runs in FIPS 140-3 mode, see [FIPS140]
 }
+
+// FIPS140 reports whether the Go Cryptographic Module runs in FIPS 140-3 mode
+// ([fips140.Enabled]): the binary was built with GOFIPS140 (FIPS=1 in
+// scripts/build-service.sh, which makes fips140=on the default GODEBUG) or was
+// started with GODEBUG=fips140=on. It covers Go's own crypto (TLS, hashes,
+// signatures) and nothing linked through cgo — docs/RUNTIME.md "FIPS 140-3".
+func FIPS140() bool { return fips140.Enabled() }
 
 // Build reads the toolchain-embedded build metadata for service. Everything
 // but Service and Version comes from [debug.ReadBuildInfo], which is populated
 // when the binary is built inside a git checkout (`-buildvcs`, on by default),
 // with the injected Revision / BuildTime as the fallback.
 func Build(service string) BuildInfo {
-	build := BuildInfo{Service: service, Version: Version, Revision: Revision, BuildTime: BuildTime}
+	build := BuildInfo{Service: service, Version: Version, Revision: Revision, BuildTime: BuildTime, FIPS140: FIPS140()}
 	if build.Revision == "" {
 		build.Revision = "unknown"
 	}

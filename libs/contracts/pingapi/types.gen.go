@@ -36,6 +36,9 @@ type VersionResponse struct {
 	// BuildTime vcs.time, RFC 3339, empty when unknown.
 	BuildTime string `json:"build_time"`
 
+	// Fips140 The Go Cryptographic Module runs in FIPS 140-3 mode (a FIPS=1 build).
+	Fips140 bool `json:"fips140"`
+
 	// GoVersion Go toolchain version.
 	GoVersion string `json:"go_version"`
 

@@ -15,10 +15,14 @@ import (
 
 // LogConfig configures [NewLogger]. See [Config] for the environment keys.
 type LogConfig struct {
-	Service string    // added as a "service" attribute to every record when set
-	Level   string    // debug|info|warn|error (unknown → info); the base level, changeable at runtime via [LogLevel]
-	Format  string    // "text" for human-readable output, anything else → JSON
-	Writer  io.Writer // destination; nil means os.Stdout (tests pass a buffer)
+	Service string // added as a "service" attribute to every record when set
+	Level   string // debug|info|warn|error (unknown → info); the base level, changeable at runtime via [LogLevel]
+	Format  string // "text" for human-readable output, "ecs" for JSON in Elastic Common Schema field names, anything else → JSON
+	// RedactKeys are attribute keys logged as "[redacted]" on top of the
+	// built-in secret names (password, token, secret, …): the place for the
+	// private data of the domain — email, phone, card. Case-insensitive.
+	RedactKeys []string
+	Writer     io.Writer // destination; nil means os.Stdout (tests pass a buffer)
 
 	// Sampling of debug/info records, per message per second: the first
 	// SampleInitial pass, then every SampleThereafter-th. Warn and error are
@@ -31,7 +35,11 @@ type LogConfig struct {
 }
 
 // NewLogger builds a [slog.Logger] writing one line per record to stdout, in
-// JSON (the default) or text. Every record gets trace_id / span_id attributes
+// JSON (the default), JSON with Elastic Common Schema field names ("ecs":
+// @timestamp, log.level, message, service.name, trace.id, error.message, …)
+// or text. Whatever the format, private data is masked in every attribute —
+// by key name and by shape, see [LogConfig].RedactKeys and the rules of
+// [Redact] — before the record is written. Every record gets trace_id / span_id attributes
 // when the context carries an active OpenTelemetry span and request_id when
 // it carries one of the server's requests — pass the request or message
 // context via the *Context methods (log.InfoContext(ctx, …)) — and debug/info
@@ -46,7 +54,8 @@ func NewLogger(cfg LogConfig) *slog.Logger {
 	// The inner handler gets the same LevelVar for completeness, but the
 	// decision is levelHandler's: slog consults only the outermost Enabled,
 	// and Handle does not re-check the level.
-	opts := &slog.HandlerOptions{Level: &level.lv}
+	ecs := strings.EqualFold(cfg.Format, "ecs")
+	opts := &slog.HandlerOptions{Level: &level.lv, ReplaceAttr: newAttrRewriter(ecs, cfg.RedactKeys).replace}
 
 	w := cfg.Writer
 	if w == nil {
@@ -68,6 +77,10 @@ func NewLogger(cfg LogConfig) *slog.Logger {
 	h = levelHandler{Handler: h, level: level}
 
 	log := slog.New(h)
+	if ecs {
+		log = log.With("ecs.version", ecsVersion)
+	}
+
 	if cfg.Service != "" {
 		log = log.With("service", cfg.Service)
 	}

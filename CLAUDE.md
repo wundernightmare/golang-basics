@@ -105,7 +105,13 @@ README; this file is only the high-signal, easy-to-miss bits.
   requires a collector. Export is OTLP over **HTTP** (`:4318`) and **TLS by
   default**: a local collector needs `*_OTEL_EXPORTER_OTLP_INSECURE=true`.
   Metrics are Prometheus-only (scraped from the admin port); there is no OTel
-  meter provider, on purpose. Metric names, labels, units and buckets are a
+  meter provider, on purpose. **Sampling is decided in two places**: the
+  collector tail-samples (`docker/observability/otel-collector.yml`: errors,
+  slow, `debug.subject`, a share of the rest — `OTEL_TAIL_*`), so services
+  keep head sampling at 1.0 (`*_OTEL_TRACES_SAMPLER_RATIO`); a lower ratio
+  hides traces from the collector, errors included. That file is tested as
+  shipped by `libs/otelx/integration` — change a policy there, prove it there.
+  Metric names, labels, units and buckets are a
   contract shared with nodejs-basics, written down in `docs/METRICS.md`: a new
   or renamed metric changes that file (and the sibling repo) first. What the
   broker or a server-side exporter measures better (consumer-group lag,
@@ -152,7 +158,7 @@ README; this file is only the high-signal, easy-to-miss bits.
   `resilient-http-client`, `grpcx`, `resilience` and `secret` stay dependency-free — and so do their module
   graphs: `libs/testx` (the light harness) pulls no Docker client. A dependency-free library that
   needs a container-backed suite gets a nested module next to its code
-  (`libs/resilient-http-client/integration`, `libs/grpcx/integration`, `libs/secret/compat`: own `go.mod`, in `go.work`), never a
+  (`libs/resilient-http-client/integration`, `libs/grpcx/integration`, `libs/otelx/integration`, `libs/secret/compat`: own `go.mod`, in `go.work`), never a
   `libs/testx/containers` require in its own `go.mod` and never one shared "all integration tests"
   module.
 
@@ -294,5 +300,10 @@ README; this file is only the high-signal, easy-to-miss bits.
   `VERSION`, `GIT_SHA`, `BUILD_TIME` Docker build args set `libs/httpx.Version`,
   `.Revision`, `.BuildTime` (a Docker build has no `.git`); read them via
   `httpx.Build`, do not add per-service version constants.
+- **FIPS 140-3 is a build mode** (`FIPS=1` in `scripts/build-service.sh` / the
+  Dockerfile → `GOFIPS140=$GOFIPS140_VERSION`, Go's native module; `docs/RUNTIME.md`).
+  It covers Go's crypto only, so both build lines refuse it with the rdkafka
+  provider — keep that refusal. `/version` reports `fips140` from
+  `crypto/fips140.Enabled()`; never a `build_info` label.
 - Both binaries use the `run() error` + `os.Exit` pattern in `main` so deferred
   cleanup runs before exit (golangci-lint `gocritic:exitAfterDefer` enforces it).

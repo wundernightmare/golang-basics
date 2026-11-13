@@ -33,6 +33,8 @@ type Metrics struct {
 	// handler panic): the 500 a handler returns on purpose is already in
 	// http_requests_total, this one is a bug.
 	unhandled prometheus.Counter
+	// backgroundPanics counts panics recovered by [Server.Guard], by task.
+	backgroundPanics *prometheus.CounterVec
 }
 
 // Latency buckets tuned for a service that answers in milliseconds: the
@@ -55,6 +57,8 @@ var schedLatencies = collectors.GoRuntimeMetricsRule{Matcher: regexp.MustCompile
 //	http_request_duration_seconds{method,route}       histogram (classic + native)
 //	http_requests_in_flight
 //	http_unhandled_errors_total                       handler panics recovered (answered 500)
+//	http_rate_limited_total{scope}                    requests answered 429 by the server's own limit (only with HTTP_RATE_*)
+//	background_panics_total{task}                     panics recovered in a background task ([Server.Guard])
 //	log_dropped_total{level}                          records dropped by log sampling
 //
 // The names are the workspace's metrics contract, shared with nodejs-basics.
@@ -112,8 +116,12 @@ func NewMetrics(build BuildInfo, log *slog.Logger) *Metrics {
 			Name: "http_unhandled_errors_total",
 			Help: "Requests that failed outside the handler's own error handling (a recovered panic, answered 500).",
 		}),
+		backgroundPanics: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "background_panics_total",
+			Help: "Panics recovered in a background task (Server.Guard), by task.",
+		}, []string{"task"}),
 	}
-	reg.MustRegister(buildInfo, metrics.reqTotal, metrics.reqDur, metrics.inFlight, metrics.unhandled)
+	reg.MustRegister(buildInfo, metrics.reqTotal, metrics.reqDur, metrics.inFlight, metrics.unhandled, metrics.backgroundPanics)
 
 	if dropped := logDropped(log); dropped != nil {
 		reg.MustRegister(

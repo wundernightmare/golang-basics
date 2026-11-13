@@ -20,6 +20,7 @@ and, for crash reports, by setting `DIAG_DUMP_DIR` to a writable directory
 | --- | --- | --- |
 | crash: an unrecovered panic or a runtime fatal error | the runtime's report with every goroutine (`RUNTIME_TRACEBACK=all`), as JSON | by the next start of the container |
 | memory pressure: working set ≥ `DIAG_MEMORY_THRESHOLD` of the limit | heap profile, goroutine profile, a JSON summary of where the memory is | at once |
+| an anomaly, with `DIAG_FLIGHT_RECORDER=true`: a request slower than `DIAG_FLIGHT_SLOW_REQUEST`, the memory-pressure capture, or `srv.CaptureFlightTrace(reason)` | the last `DIAG_FLIGHT_MIN_AGE` of the Go execution trace (`…-flight.trace`): what every goroutine was doing — scheduling, blocking, GC, syscalls — in the seconds before | at once, at most one per `DIAG_FLIGHT_COOLDOWN` |
 | OOM kill, SIGKILL, node loss | nothing at that moment — there is no hook | the memory-pressure capture is the evidence, taken before |
 
 ## Where it goes
@@ -59,6 +60,24 @@ The heap profile is sampled (one allocation per 512 KiB on average) and
 reflects the last completed collection — near the limit collections are
 frequent, so it is current.
 
+## Reading a flight trace
+
+```sh
+go tool trace 20261114T101500.000Z-flight.trace
+```
+
+A profile says where the CPU went on average. The execution trace says what
+happened in one window of time: the goroutine of the slow request, what it
+was blocked on and for how long, whether a GC cycle or a scheduler delay sat
+in the middle of it. The recorder keeps that window in memory all the time
+(`runtime/trace.FlightRecorder`) and writes it out only on an anomaly, so
+the evidence exists for the request that was slow, not for one somebody tried
+to reproduce later.
+
+It is off by default: the runtime traces continuously while it is on — a per
+cent or two of CPU and up to `DIAG_FLIGHT_MAX_BYTES` of memory. The runtime
+allows one flight recorder per process.
+
 ## Reading a crash report
 
 ```json
@@ -94,6 +113,11 @@ Keys of `httpx.Config` (with the service's prefix; YAML name = lower case):
 | `DIAG_KEY_PREFIX` | `diagnostics` | first segment of the object keys |
 | `DIAG_MEMORY_THRESHOLD` | `0.9` | share of the container's memory limit that triggers a capture; negative = never |
 | `DIAG_MEMORY_COOLDOWN` | `10m` | shortest time between two captures |
+| `DIAG_FLIGHT_RECORDER` | `false` | keep the last seconds of the execution trace in memory |
+| `DIAG_FLIGHT_MIN_AGE` | `10s` | how far back the window reaches |
+| `DIAG_FLIGHT_MAX_BYTES` | `8388608` | upper bound of the window in memory |
+| `DIAG_FLIGHT_SLOW_REQUEST` | `0s` | a request this slow triggers a snapshot; 0 = requests never do |
+| `DIAG_FLIGHT_COOLDOWN` | `5m` | shortest time between two snapshots |
 | `DIAG_CHECK_INTERVAL` | `5s` | how often container memory is read |
 | `DIAG_UPLOAD_TIMEOUT` | `15s` | one upload |
 | `DIAG_SPOOL_RETRY` | `1m` | how often files waiting in the directory are re-sent |

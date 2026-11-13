@@ -39,6 +39,8 @@ repo). Where the Go implementation lives is in the last column.
 | `http_request_duration_seconds` | histogram (classic + native) | `method, route` |
 | `http_requests_in_flight` | gauge | — |
 | `http_unhandled_errors_total` | counter | — (a recovered panic, answered 500) |
+| `http_rate_limited_total` | counter | `scope` (global, client) — requests answered 429 by the server's own limit; only with `HTTP_RATE_*` set; Go only for now |
+| `background_panics_total` | counter | `task` — panics recovered in a background task (`Server.Guard`); Go only for now |
 
 ## HTTP client — `libs/resilient-http-client` (registered by the service that uses it)
 
@@ -155,7 +157,7 @@ are the `cache_*` series above.
 | Metric | Type | Labels |
 | --- | --- | --- |
 | `health_check_up` | gauge (1/0) | `check, critical` |
-| `diag_dumps_total` | counter | `kind` (crash, memory), `result` (uploaded, spooled, failed) — post-mortem artifacts, [DIAGNOSTICS.md](DIAGNOSTICS.md); Go only |
+| `diag_dumps_total` | counter | `kind` (crash, memory, flight), `result` (uploaded, spooled, failed) — post-mortem artifacts, [DIAGNOSTICS.md](DIAGNOSTICS.md); Go only |
 | `health_check_duration_seconds` | histogram (Go) | `check` |
 | `build_info` | gauge (1) | `version, revision` — no `service` (the scrape adds it), no runtime version (`go_info` has it) |
 | `app_integration_enabled` | gauge (1/0) | `integration` |

@@ -16,6 +16,7 @@ an environment variable written next to them does not follow, and a stale
 | traceback level (`GOTRACEBACK`) | `libs/httpx`, `all` by default | no |
 | `GOGC` | nobody: the default | only with a profile that says so |
 | `GODEBUG` | nobody | only for a diagnosis, then removed |
+| FIPS 140-3 mode (`fips140`) | the build: `FIPS=1` | no — see [FIPS 140-3](#fips-140-3--a-build-mode) |
 
 Every service built on `libs/httpx` gets this from `Server.Run`; there is
 nothing to call. The keys (with the service's prefix, e.g. `INGEST_`):
@@ -152,6 +153,78 @@ image if that matters.
 - **`GOMEMLIMIT` by hand** — legitimate as an override on one deployment
   while investigating. In a chart shared by many services it is the stale
   constant this document exists to remove.
+
+## FIPS 140-3 — a build mode
+
+Opt-in, off by default. `FIPS=1` builds a service against Go's own FIPS 140-3
+module — the Go Cryptographic Module, pure Go: no cgo, no BoringCrypto, the
+same static binary on the same `distroless/static` image.
+
+```sh
+FIPS=1 scripts/build-service.sh ping                        # no Kafka: nothing else to choose
+FIPS=1 KAFKA_PROVIDER=franz scripts/build-service.sh tasks  # Kafka: the pure-Go client only
+FIPS=1 KAFKA_PROVIDER=franz just docker-build tasks         # the image; docker/stack.yml and CI read the same names
+```
+
+What the knob does: the build runs with `GOFIPS140=$GOFIPS140_VERSION`. The
+toolchain then compiles `crypto/...` against that frozen snapshot of the
+module instead of the tree's current code, and makes `fips140=on` the
+binary's default `GODEBUG` — nothing to set in a manifest.
+
+**The version is pinned.** `GOFIPS140_VERSION` defaults to `v1.0.0`, the
+snapshot the pinned toolchain lists as certified
+(`$(go env GOROOT)/lib/fips140/certified.txt`); only snapshots shipped in that
+directory can be built. The default is written in `scripts/build-service.sh`
+and `docker/service.Dockerfile` (the two build lines); override it with the
+variable, never with `GOFIPS140` — the script sets that itself from `FIPS`.
+Not `latest`: that is the unvalidated code of the current tree. A toolchain
+bump that drops the snapshot fails the build, it does not fall back.
+`go version -m <binary>` shows what was linked (`GOFIPS140=v1.0.0-…`,
+`DefaultGODEBUG=fips140=on`).
+
+**What it guarantees.** In a process running in this mode:
+
+- the cryptography of the standard library — TLS, hashes, HMAC, signatures,
+  key agreement, AES, random numbers — is served by the validated module,
+  which checks its own integrity and runs its self-tests at start;
+- `crypto/tls` negotiates only FIPS-approved protocol versions, cipher suites
+  and signature algorithms, on every connection that uses it: the HTTP
+  listeners and clients, pgx, valkey-go, franz-go, the S3 client, OTLP export;
+- `crypto/rand` draws from the module's DRBG.
+
+**How to see it.** `GET /version` on the admin port carries `"fips140": true`
+and the `<service> starting` log line `fips140=true`. Both are
+`crypto/fips140.Enabled()` asked of the running process, not a flag stamped at
+build time: a FIPS binary started with `GODEBUG=fips140=off` honestly reports
+`false`, and an ordinary binary started with `GODEBUG=fips140=on` reports
+`true` (that runs the tree's own, unpinned module — a way to try the mode, not
+a release). There is no `build_info` label for it: metric labels are a
+contract with nodejs-basics (`docs/METRICS.md`).
+
+**The limits.**
+
+- **Only the Go module.** Anything linked through cgo is outside it. The
+  default Kafka provider is librdkafka with its bundled OpenSSL, so
+  `scripts/build-service.sh` and the Dockerfile refuse `FIPS=1` for a service
+  that would link it (`FIPS=1 needs KAFKA_PROVIDER=franz`); build with
+  `KAFKA_PROVIDER=franz` (`CGO_ENABLED=0`). The same goes for whatever
+  terminates TLS in front of the pod, and for Postgres, Valkey and the broker
+  themselves.
+- **`fips140=on` restricts TLS and nothing else.** Code that calls a
+  non-approved algorithm directly (MD5, SHA-1 signatures, ChaCha20-Poly1305,
+  a third-party cipher) still works. `GODEBUG=fips140=only` is the strict
+  variant: such a call returns an error or panics. It is a tool for finding
+  those calls on a stand; the Go documentation describes it as best-effort,
+  so it is not the default here. Set it on one deployment, read the logs.
+- **A mode, not a certificate.** Compliance also needs an operating
+  environment the module's Security Policy lists, and is judged for the
+  system as a whole. This build gives the technical precondition and a way to
+  prove it is on.
+- Cryptography written outside the standard library (a dependency's own
+  implementation of an algorithm) is not covered by the module either.
+
+The e2e suite builds ping both ways and checks what the process reports
+(`e2e/fips_test.go`), and that the rdkafka combination is refused.
 
 ## Kubernetes checklist
 

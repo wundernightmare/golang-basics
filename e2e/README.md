@@ -16,12 +16,15 @@ Only what a real process shows — everything else is owned by a lower layer
 | `TestHeartbeat` | `/version`; `heartbeat_beats_total` increases (polled); admin token |
 | `TestGracefulShutdown` | SIGTERM → exit 0 within 5s, no error-level log line, `servers stopped cleanly` logged and the last line says stopped cleanly (ping, heartbeat) |
 | `TestTasksPipeline` | tasks + consumer: `/version`, admin token, `POST /tasks` → 201, `GET /tasks/{id}` → 200, the consumer's `consumer_events_total` increases within 30s (outbox relay → Kafka → consumer), then both shut down cleanly |
+| `TestFIPSBuild` | builds ping itself through `scripts/build-service.sh` with `FIPS=1` and without: `/version` and the start-up line report `fips140` true / false (docs/RUNTIME.md "FIPS 140-3") |
+| `TestFIPSBuildRefusesRdkafka` | the build script refuses `FIPS=1` for a service that would link librdkafka (exit 2, no binary) |
 
 ## Harness (`harness_test.go`)
 
 For every `start(t, spec)`:
 
-- binary `$E2E_BIN_DIR/<name>` (default `../.build/<name>`);
+- binary `$E2E_BIN_DIR/<name>` (default `../.build/<name>`), or the one a
+  test built itself (`spec.bin` — the FIPS tests);
 - **free ports**: the harness listens on `127.0.0.1:0`, closes, and passes the
   address as `<SVC>_HTTP_ADDR` / `<SVC>_ADMIN_ADDR` — never a fixed port, so
   runs (and worktrees) do not collide;

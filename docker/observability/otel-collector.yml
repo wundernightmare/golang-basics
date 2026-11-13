@@ -11,8 +11,34 @@
 # on the admin ports, nothing is pushed over OTLP — and logs are stdout →
 # Vector → Loki, so there is no metrics or logs pipeline here.
 #
-# This is where production-only concerns would go without touching a service:
-# tail_sampling, attribute redaction, a second exporter.
+# Tail sampling happens here: the collector holds every span of a trace for
+# OTEL_TAIL_DECISION_WAIT, then keeps the whole trace or drops it.
+#
+#   kept, always : a trace with a span in status ERROR
+#                  a trace longer than OTEL_TAIL_SLOW_THRESHOLD_MS
+#                  a trace with the span attribute debug.subject (any value) —
+#                  what a service sets for a tenant or a user under investigation
+#   kept, a share: OTEL_TAIL_SAMPLING_PERCENTAGE percent of everything else
+#
+# Policies are OR-ed: one "keep" is enough. Two rules follow from deciding
+# after the fact:
+#
+#   1. The collector only sees what the services send. Tail sampling needs
+#      head sampling at 1.0 in the services (*_OTEL_TRACES_SAMPLER_RATIO, the
+#      default): at a lower ratio an error trace the SDK did not sample never
+#      arrives, and no policy here can bring it back.
+#   2. One collector must see every span of a trace. With several replicas,
+#      put a tier with the loadbalancing exporter (routing_key: traceID) in
+#      front of them; behind a plain load balancer each replica decides on a
+#      fragment of the trace.
+#
+# The knobs are environment variables of the collector process (defaults
+# below; docker/observability.yml passes them through, .env.example lists
+# them). libs/otelx/integration runs this very file in a real collector and
+# asserts each policy.
+#
+# This is also where other production-only concerns go without touching a
+# service: attribute redaction, a second exporter.
 
 receivers:
   otlp:
@@ -27,6 +53,38 @@ processors:
     check_interval: 1s
     limit_mib: 256
     spike_limit_mib: 64
+  tail_sampling:
+    # How long a trace is held, from its first span, before the decision. It
+    # must outlast the slowest trace worth keeping whole plus the services'
+    # batch delay (*_OTEL_BSP_SCHEDULE_DELAY, 5s): spans that arrive after
+    # the decision are judged without the rest of their trace.
+    decision_wait: ${env:OTEL_TAIL_DECISION_WAIT:-10s}
+    # Traces held in memory at once; past it the oldest is decided early.
+    # Size it as (traces per second) x decision_wait, with headroom.
+    num_traces: ${env:OTEL_TAIL_NUM_TRACES:-50000}
+    policies:
+      - name: errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: slow
+        type: latency
+        latency:
+          threshold_ms: ${env:OTEL_TAIL_SLOW_THRESHOLD_MS:-500}
+      # Presence of the attribute, whatever its value or type. (string_attribute
+      # would need a list of values or a regex, and only reads strings.)
+      - name: debug-subject
+        type: ottl_condition
+        ottl_condition:
+          error_mode: ignore
+          span:
+            - attributes["debug.subject"] != nil
+      - name: baseline
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: ${env:OTEL_TAIL_SAMPLING_PERCENTAGE:-1}
+  # After tail_sampling, never before it: batching first would only delay the
+  # spans the sampler is waiting for.
   batch:
     timeout: 1s
     send_batch_size: 512
@@ -34,7 +92,7 @@ processors:
 
 exporters:
   otlp/jaeger:
-    endpoint: jaeger:4317
+    endpoint: ${env:OTEL_COLLECTOR_TRACES_ENDPOINT:-jaeger:4317}
     tls:
       insecure: true
 
@@ -58,5 +116,5 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, tail_sampling, batch]
       exporters: [otlp/jaeger]
