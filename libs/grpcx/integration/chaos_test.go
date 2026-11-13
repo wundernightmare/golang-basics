@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/resolver/manual"
 	"google.golang.org/grpc/status"
@@ -318,25 +319,30 @@ func TestChaos_ThrottledStreamRunsIntoTheDeadline(t *testing.T) {
 	assert.Less(t, read, 150)
 }
 
-// The connection is killed while no call is in flight. The next call must not
-// be the one that finds out: gRPC notices the closed connection and dials
-// again before the caller is involved.
+// The connection is killed while no call is in flight. gRPC notices and
+// dials again on its own; whether the next call sees any of it depends on
+// wait_for_ready. With it the call waits for the new connection and succeeds,
+// whatever moment the channel is at. Without it there is a window — the
+// channel tried to reconnect while the path was still down, and is waiting
+// out its backoff — in which a call fails at once: that window is what
+// TestChaos_AShortOutageAndWaitForReady pins.
 //
 //nolint:paralleltest // serial: shares the Toxiproxy proxy in front of Jaeger
 func TestChaos_IdleConnectionKilled(t *testing.T) {
 	proxy := through(t, "otlp-plain", otlpPlain)
-	client, conn := dial(t, policy(proxy.Addr, cleartext, noRetries))
+	client, conn := dial(t, policy(proxy.Addr, cleartext, noRetries, func(tc *grpcx.TargetConfig) { tc.WaitForReady = true }))
 
 	require.NoError(t, export(t.Context(), t, conn, 1, "idle"))
 
 	proxy.Down() // closes the connection
 	proxy.Up()
 
-	require.Eventually(t, func() bool { return conn.GetState().String() != "READY" }, 5*time.Second, 10*time.Millisecond,
+	require.Eventually(t, func() bool { return conn.GetState() != connectivity.Ready }, 5*time.Second, 10*time.Millisecond,
 		"the channel noticed its connection is gone")
 
-	require.NoError(t, export(t.Context(), t, conn, 1, "idle"), "a plain call, no retries: the caller never saw the dead connection")
+	require.NoError(t, export(t.Context(), t, conn, 1, "idle"), "one call, no retries: the caller never saw the dead connection")
 	assert.InDelta(t, 0, calls(t, client, "unavailable"), 0)
+	assert.InDelta(t, 2, calls(t, client, "ok"), 0)
 }
 
 // A connection that went silent — packets dropped, no FIN — holds a call
