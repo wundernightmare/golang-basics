@@ -167,7 +167,7 @@ func openViaBouncer(tb testing.TB, cfg bouncerConfig, alias string, mut func(*pg
 func directDB(tb testing.TB) *pgx.DB {
 	tb.Helper()
 
-	return newDB(tb, pgx.Config{URL: containers.Postgres(tb), MaxConns: 2, ConnectTimeout: 5 * time.Second})
+	return newDB(tb, pgx.Config{URL: containers.Postgres(tb), MaxConns: 2, MinConns: 1, ConnectTimeout: 5 * time.Second})
 }
 
 // freshSchema creates a schema of the test's own and returns its name.
