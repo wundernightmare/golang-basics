@@ -1,9 +1,9 @@
 package resilient
 
 import (
+	"crypto/tls"
 	"errors"
-	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- retry-backoff jitter is not security-sensitive; a CSPRNG (crypto/rand) is unnecessary here.
-	"math/rand/v2"
+	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- retry-backoff jitter, not security-sensitive
 	"net/http"
 	"strconv"
 	"strings"
@@ -76,13 +76,16 @@ func idempotent(req *http.Request) bool {
 }
 
 // retryable reports whether a failed attempt is worth another one: a timeout,
-// a connection error, or a status that says "try again".
+// a connection error other than a certificate this client rejects, or a
+// status that says "try again".
 func retryable(err *OutboundError) bool {
 	// Every Kind is listed (no default): a new Kind fails `exhaustive` until
 	// someone decides whether it is retryable.
 	switch err.Kind {
-	case KindTimeout, KindConnection:
+	case KindTimeout:
 		return true
+	case KindConnection:
+		return !certificateRejected(err.Err)
 	case KindStatus:
 		return retryableStatus(err.StatusCode)
 	case KindCircuitOpen, KindRateLimited, KindBulkheadFull, KindShutdown,
@@ -91,6 +94,16 @@ func retryable(err *OutboundError) bool {
 	}
 
 	return false // unreachable for a valid Kind; the zero Kind is not retryable
+}
+
+// certificateRejected reports whether the connection failed because this
+// client refused the server's certificate — unknown authority, wrong name,
+// expired. The next attempt meets the same certificate: retrying only delays
+// the answer. (It still counts against the breaker: the target is unusable.)
+func certificateRejected(err error) bool {
+	var verification *tls.CertificateVerificationError
+
+	return errors.As(err, &verification)
 }
 
 func retryableStatus(code int) bool {
