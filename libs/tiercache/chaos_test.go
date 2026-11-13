@@ -257,9 +257,12 @@ func TestChaosSoak(t *testing.T) {
 			for ctx.Err() == nil {
 				i := rand.IntN(keyCount/2)*2 + worker
 
+				// The bound goes up before the value is published: a reader
+				// that loads the new value and then reads the bound must
+				// never find the bound still behind it.
 				next := committed[i].Load() + 1
-				src.set(keys[i], int(next))
 				committed[i].Store(next)
+				src.set(keys[i], int(next))
 
 				_ = rig.cache.Invalidate(context.Background(), keys[i]) // fails while Valkey is away: that is the test
 
