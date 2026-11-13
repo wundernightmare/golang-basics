@@ -19,7 +19,8 @@ const (
 	// Counts as a breaker failure; retryable (before the headers).
 	KindTimeout Kind = iota + 1
 	// KindConnection: dial, TLS, reset or another transport failure. Counts
-	// as a breaker failure; retryable.
+	// as a breaker failure; retryable — except a server certificate this
+	// client refuses to trust, which the next attempt would meet again.
 	KindConnection
 	// KindStatus: the dependency answered with status ≥ 400 (see
 	// StatusCode). 5xx counts as a breaker failure; 408, 425, 429 and 5xx

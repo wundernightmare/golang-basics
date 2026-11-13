@@ -9,14 +9,17 @@
 //   e2e                         — end-to-end suite: spawns the service binaries (go test -tags e2e)
 //   libs/contracts              — generated Go types of the TypeSpec contracts (api/): tasks HTTP API + Kafka events
 //   libs/grpcx                  — policy-per-target outbound gRPC connections (service config, CB, metrics, tracing)
+//   libs/grpcx/integration      — its integration suite: a real gRPC server (Jaeger), TLS, an HTTP gateway, Toxiproxy (_test only)
 //   libs/httpx                  — shared HTTP server scaffolding (the example common lib)
 //   libs/resilience             — circuit breaker + retry budget shared by the outbound clients (HTTP, gRPC)
 //   libs/resilient-http-client  — policy-per-target outbound HTTP client (rate limit, CB, retry…)
+//   libs/resilient-http-client/integration — its integration suite: real servers (Caddy, Redpanda, Postgres), HTTP/1.1–3, TLS, Toxiproxy (_test only)
 //   libs/pgx                    — shared PostgreSQL pool (pgx)
 //   libs/valkey                 — shared Valkey cache (valkey-go)
 //   libs/kafka                  — shared Kafka producer/consumer, provider-neutral (no cgo)
 //   libs/kafka-rdkafka          — Kafka provider: librdkafka via confluent-kafka-go (cgo; the default)
 //   libs/kafka-franz            — Kafka provider: franz-go (pure Go)
+//   libs/secret                 — secret.String: a config value no formatter, logger or marshaller prints; Expose() is the only way out
 //   libs/s3                     — shared S3 client (aws-sdk-go-v2): bounded calls, streaming uploads
 //   libs/otelx                  — shared OpenTelemetry tracing setup
 //   libs/tiercache              — two-level cache: off-heap fastcache L1 + Valkey L2 (SWR, Pub/Sub invalidation)
@@ -34,6 +37,7 @@ use (
 	./e2e
 	./libs/contracts
 	./libs/grpcx
+	./libs/grpcx/integration
 	./libs/httpx
 	./libs/kafka
 	./libs/kafka-franz
@@ -42,7 +46,9 @@ use (
 	./libs/pgx
 	./libs/resilience
 	./libs/resilient-http-client
+	./libs/resilient-http-client/integration
 	./libs/s3
+	./libs/secret
 	./libs/testx
 	./libs/testx/containers
 	./libs/testx/contract

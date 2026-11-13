@@ -31,9 +31,10 @@ easy-to-miss conventions, [`CONTRIBUTING.md`](CONTRIBUTING.md) the workflow.
 | [`libs/resilient-http-client`](libs/resilient-http-client) | Library | — | Policy-per-target **outbound** client: per-attempt timeout, rate limit, bulkhead, circuit breaker, budgeted jittered retry (Retry-After aware), traceparent injection, metrics. Not used by a service yet — copy it in when one calls out. |
 | [`libs/grpcx`](libs/grpcx) | Library | — | Policy-per-target **outbound gRPC** connections: default deadline, retries and retry throttling through the gRPC service config, plus a circuit breaker, metrics and tracing. A template library — nothing here imports it yet. |
 | [`libs/resilience`](libs/resilience) | Library | — | Circuit breaker and retry budget shared by the two outbound clients. Pure logic, injected clock. |
-| [`libs/pgx`](libs/pgx) | Library | — | PostgreSQL pool (`jackc/pgx`): config, readiness, migrations, pool metrics. |
+| [`libs/pgx`](libs/pgx) | Library | — | PostgreSQL pool (`jackc/pgx`): config, readiness, migrations, pool metrics, a light unit of work (`InTx` / `Conn` / `AfterCommit`). |
 | [`libs/valkey`](libs/valkey) | Library | — | Valkey cache (`valkey-go`): get/set/del, readiness, cache-aside helper. |
 | [`libs/tiercache`](libs/tiercache) | Library | — | Two-level read cache: off-heap fixed-size L1 (`fastcache`) + Valkey L2, stale-while-revalidate, Pub/Sub invalidation; keeps serving without Valkey. |
+| [`libs/secret`](libs/secret) | Library | — | `secret.String`: a config value that fmt, `slog`, JSON, YAML and `/admin/config` render as `[redacted:1a2b3c4d]` (a short SHA-256 fingerprint that changes when the secret does); `Expose()` is the one way to it. Reads from YAML, env and viper/mapstructure. Standard library only. |
 | [`libs/s3`](libs/s3) | Library | — | S3 client (`aws-sdk-go-v2`) for AWS and S3-compatible stores: every call under its own deadline, streaming multipart uploads, readiness, metrics, tracing. |
 | [`libs/kafka`](libs/kafka) | Library | — | Kafka, provider-neutral (no cgo): synchronous producer with an error taxonomy, at-least-once consumer group (commit-after-handle, retries, DLQ, drain), TLS / SASL / mTLS, every buffer a named key, one set of metric names; a conformance suite (`kafkatest`). **[Read its README](libs/kafka/README.md)** — provider comparison and every safe default. |
 | [`libs/kafka-rdkafka`](libs/kafka-rdkafka) | Library | — | Kafka provider: **librdkafka** via confluent-kafka-go — the default; cgo, a static musl binary in the image; any librdkafka property through `KAFKA_*_EXTRA_PROPERTIES`. |
@@ -63,7 +64,7 @@ golang-basics/                 ← bare-repo CONTAINER (.bare + .git pointer + w
     ├── justfile               ← workspace task runner (+ a justfile per module)
     ├── mise.toml              ← core toolchain pins; mise.{appsec,ide,perf,report}.toml = opt-in profiles
     ├── api/                   ← TypeSpec contracts (→ api/openapi3, api/jsonschema)
-    ├── libs/                  ← contracts, httpx, resilient-http-client, grpcx, resilience, pgx, valkey, kafka, otelx, testx{,/containers,/contract}
+    ├── libs/                  ← contracts, httpx, resilient-http-client, grpcx, resilience, secret, pgx, valkey, kafka, otelx, testx{,/containers,/contract}
     ├── services/              ← ping, heartbeat, tasks, consumer (main.go + internal/…)
     ├── e2e/                   ← Go e2e suite (build tag e2e)
     ├── docker/                ← service.Dockerfile, deps.yml, stack*.yml, observability*.{yml,/}
@@ -306,8 +307,8 @@ number, and every behaviour is checked at exactly one layer.
 |---|---|---|---|
 | **Unit** | `*_test.go` next to the code, `-short` | pure logic, config parsing, handlers behind small interfaces with fakes, readiness cache semantics, log sampling arithmetic, route ↔ listener wiring | anything that needs a real dependency |
 | **Contract** | telemetry: `libs/otelx/telemetry_test.go`, `*/metrics_test.go`; API: exchanges validated with `libs/testx/contract` | the access-log line, the span and the counters describe the same request; every exposition is promlint-clean; every request/response and every published event conforms to the TypeSpec-generated OpenAPI / JSON Schema | route behaviour (unit), real dependencies (integration) |
-| **Integration** | `libs/{pgx,valkey}`, `libs/kafka-{rdkafka,franz}` (the shared `kafka/kafkatest` conformance suite, once per provider), `services/tasks/internal/integration`, `services/consumer/internal/worker` — one shared container per test binary | the libs against real Postgres / Valkey / Kafka (spans, trace propagation through the broker, pool / hit-miss / client metrics); the tasks vertical wired as `main.go` wires it, including the outbox relay | route contracts proven with fakes; process-level behaviour |
-| **Chaos** | `services/tasks/internal/integration/chaos_test.go` (`containers.Proxied`, `containers.Pause`) | what the design promises when a dependency fails, slows down or hangs: cache bypassed, outbox catches up, readiness degrades only for the critical dependency, probes stay fast, everything recovers | happy-path behaviour (integration) |
+| **Integration** | `libs/resilient-http-client/integration` (a module of its own inside the client's folder: Caddy over HTTP/1.1, h2c, HTTP/2 and HTTP/3 with TLS, Redpanda's HTTP API, Postgres as a non-HTTP peer), `libs/grpcx/integration` (likewise: Jaeger as a real gRPC server over cleartext, TLS and mutual TLS, a real server stream, Caddy as an HTTP gateway), `libs/{pgx,valkey}`, `libs/kafka-{rdkafka,franz}` (the shared `kafka/kafkatest` conformance suite, once per provider), `services/tasks/internal/integration`, `services/consumer/internal/worker` — one shared container per test binary | the libs against real Postgres / Valkey / Kafka (spans, trace propagation through the broker, pool / hit-miss / client metrics); the tasks vertical wired as `main.go` wires it, including the outbox relay | route contracts proven with fakes; process-level behaviour |
+| **Chaos** | `services/tasks/internal/integration/chaos_test.go` (`containers.Proxied`, `containers.Pause`); `libs/pgx/tx_chaos_test.go`; `libs/grpcx/integration/chaos_test.go` (the same faults under gRPC, plus keepalive, a short outage with and without `wait_for_ready`, a dead address behind a balancer); `libs/resilient-http-client/integration/chaos_test.go` (TCP cut, reset and black-holed during the TLS handshake, mid-body, on an idle connection; a lost acknowledgement) | what the design promises when a dependency fails, slows down or hangs: cache bypassed, outbox catches up, readiness degrades only for the critical dependency, probes stay fast, everything recovers | happy-path behaviour (integration) |
 | **E2E** | `e2e/` (Go, real binaries, `-tags e2e`) | what only a real process shows: it boots from env, is ready on its admin listener, `/version` carries the build stamp, the admin surface is token-guarded, SIGTERM exits 0 with "servers stopped cleanly", and tasks → outbox → Kafka → consumer across processes | per-route behaviour, error bodies (unit), the CRUD flow (integration) |
 | **Generative** | `just schemathesis <svc>` | "bad input → 4xx problem", no 5xx, every response in the contract's shape | business semantics (unit), effects on dependencies (integration) |
 | **Mutation** | `libs/resilient-http-client`, `libs/grpcx`, `libs/resilience` (`just mutate <module>`) | whether the tests of the decision logic notice a wrong comparison or operator | — |
@@ -323,13 +324,15 @@ harness waits for `/readyz`; asynchronous effects are polled with
 | Module | What | Pulls in |
 |---|---|---|
 | [`libs/testx`](libs/testx) | `Recorder` (real OTel SDK, in-memory spans), `LogBuffer` (real logger into memory; `Lines`, `Find`), `Metric` / `LintMetrics` (real registry), `Unique(prefix)` | OTel SDK, Prometheus — no Docker |
-| [`libs/testx/containers`](libs/testx/containers) | `Postgres(t)`, `Valkey(t)`, `Kafka(t)`: one container per test binary, started on first use, terminated by `func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }`; skipped under `-short` and without Docker locally, **failed** when `CI` is set. Chaos: `Proxied(t, dep)` (Toxiproxy: `Down`, `Up`, `Latency`, `Reset`), `Pause(t, dep)` (SIGSTOP) | testcontainers, Docker client |
+| [`libs/testx/containers`](libs/testx/containers) | `Postgres(t)`, `Valkey(t)`, `Kafka(t)`: one container per test binary, started on first use, terminated by `func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }`; skipped under `-short` and without Docker locally, **failed** when `CI` is set. Chaos: `Proxied(t, dep)` (Toxiproxy: `Down`, `Up`, `Latency`, `Toxic`, `Reset`), `Pause(t, dep)` (SIGSTOP). A package's own containers: `Fixture(t, name, start)` under the same rules, `ProxyTo(t, name, container, port)` to put Toxiproxy in front of one | testcontainers, Docker client |
 | [`libs/testx/contract`](libs/testx/contract) | `LoadOpenAPI(t, rel).Validate(...)` for an HTTP exchange, `LoadJSONSchema(t, rel).Validate(t, doc)` for an event | kin-openapi, JSON Schema validator |
 
 Tests isolate through `testx.Unique` — a schema, a key prefix, a topic, a
 consumer group — never through a fresh container. A module needs Docker
 exactly when its `go.mod` requires `libs/testx/containers`, which keeps
-`ping`, `heartbeat`, `httpx`, `resilient-http-client`, `grpcx` and `resilience` Docker-free. A
+`ping`, `heartbeat`, `httpx`, `resilient-http-client`, `grpcx` and `resilience` Docker-free — a
+library whose integration suite needs containers keeps it in a nested module (`<lib>/integration`, as
+the HTTP client and `grpcx` do), so the suite's dependencies never reach the library's own `go.mod`. A
 `depguard` rule in `.golangci.yml` forbids all three modules, testify and
 testcontainers in non-test files.
 
