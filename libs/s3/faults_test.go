@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/s3"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // These tests need no object store: a local HTTP server answers the way a
@@ -47,7 +48,7 @@ func faulty(t *testing.T, handler http.HandlerFunc, mutate ...func(*s3.Config)) 
 
 	cfg := s3.Config{
 		Bucket: "b", Endpoint: srv.URL, Insecure: true, UsePathStyle: true,
-		AccessKeyID: "k", SecretAccessKey: "s", MaxAttempts: 1, OpTimeout: 5 * time.Second,
+		AccessKeyID: "k", SecretAccessKey: secret.New("s"), MaxAttempts: 1, OpTimeout: 5 * time.Second,
 		UploadPartBytes: s3.MinUploadPartBytes,
 	}
 	for _, m := range mutate {
@@ -96,7 +97,7 @@ func TestNew_CAFile(t *testing.T) {
 	good := filepath.Join(dir, "ca.pem")
 	require.NoError(t, os.WriteFile(good, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
 
-	cfg := s3.Config{Bucket: "b", Endpoint: "https://s3.internal:9000", AccessKeyID: "k", SecretAccessKey: "s", CAFile: good}
+	cfg := s3.Config{Bucket: "b", Endpoint: "https://s3.internal:9000", AccessKeyID: "k", SecretAccessKey: secret.New("s"), CAFile: good}
 
 	client, err := s3.New(context.Background(), cfg, nil)
 	require.NoError(t, err)

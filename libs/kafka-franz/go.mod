@@ -5,6 +5,7 @@ go 1.27.0
 require (
 	github.com/stretchr/testify v1.12.1
 	github.com/tracehubmmp/golang-basics/libs/kafka v0.0.0
+	github.com/tracehubmmp/golang-basics/libs/secret v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/testx/containers v0.0.0-00010101000000-000000000000
 	github.com/twmb/franz-go v1.22.2
 	github.com/twmb/franz-go/pkg/kadm v1.19.0
@@ -91,3 +92,5 @@ replace github.com/tracehubmmp/golang-basics/libs/httpx => ../httpx
 replace github.com/tracehubmmp/golang-basics/libs/testx => ../testx
 
 replace github.com/tracehubmmp/golang-basics/libs/testx/containers => ../testx/containers
+
+replace github.com/tracehubmmp/golang-basics/libs/secret => ../secret

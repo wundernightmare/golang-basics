@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 )
 
@@ -18,7 +19,7 @@ import (
 // logs one debug line with the request context.
 func debugServer(t testing.TB, token string) (*httpx.Server, *testx.LogBuffer) {
 	t.Helper()
-	srv, buf := loggedServer(t, httpx.Config{DebugToken: token})
+	srv, buf := loggedServer(t, httpx.Config{DebugToken: secret.New(token)})
 	srv.Mux().HandleFunc("GET /work", func(w http.ResponseWriter, r *http.Request) {
 		srv.Logger().DebugContext(r.Context(), "handler detail", "step", 1)
 		w.WriteHeader(http.StatusNoContent)

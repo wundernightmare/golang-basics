@@ -181,6 +181,10 @@ with — after YAML, env and defaults — through `httpx.Redact`:
   `cert`) or tagged `secret:"true"` become `[redacted]` (an empty value stays
   empty); a struct, slice or map under such a name is redacted as a whole;
   `secret:"false"` opts a false positive out;
+- the libs' own credentials are that type — `ADMIN_TOKEN`, `DEBUG_TOKEN`,
+  `DB_PASSWORD`, `VALKEY_PASSWORD`, `KAFKA_SASL_PASSWORD`,
+  `S3_SECRET_ACCESS_KEY` — so they are also safe in a log line or a `%+v` of
+  the config, not only here;
 - a field of a secret *type* ([`secret.String`](../secret)) is redacted whatever its
   name or tags say, and shown as `[redacted:1a2b3c4d]` — a short SHA-256
   fingerprint that changes when the secret does; the type also keeps the value

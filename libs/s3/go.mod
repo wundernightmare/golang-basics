@@ -11,6 +11,7 @@ require (
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
+	github.com/tracehubmmp/golang-basics/libs/secret v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/containers v0.0.0
 	go.opentelemetry.io/otel v1.47.0
@@ -99,3 +100,5 @@ require (
 replace github.com/tracehubmmp/golang-basics/libs/testx => ../testx
 
 replace github.com/tracehubmmp/golang-basics/libs/testx/containers => ../testx/containers
+
+replace github.com/tracehubmmp/golang-basics/libs/secret => ../secret

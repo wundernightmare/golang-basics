@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/s3"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/libs/testx/containers"
 	"github.com/tracehubmmp/golang-basics/services/ingest/internal/archive"
@@ -42,7 +43,7 @@ func newFixture(t *testing.T) *fixture {
 	backend := containers.S3(t)
 	store, err := s3.New(context.Background(), s3.Config{
 		Bucket: "ingest-compact-test", Endpoint: backend.Endpoint, Region: backend.Region,
-		AccessKeyID: backend.AccessKey, SecretAccessKey: backend.SecretKey,
+		AccessKeyID: backend.AccessKey, SecretAccessKey: secret.New(backend.SecretKey),
 		UsePathStyle: true, Insecure: true, AutoCreateBucket: true,
 		UploadPartBytes: s3.MinUploadPartBytes,
 	}, nil)

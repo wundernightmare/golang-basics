@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // Config is the Kafka client configuration, populated from the environment
@@ -116,10 +118,10 @@ type Config struct {
 	PublishTimeout     time.Duration `env:"KAFKA_PUBLISH_TIMEOUT" envDefault:"5s" yaml:"publish_timeout"`
 	StatisticsInterval int           `env:"KAFKA_STATISTICS_INTERVAL_MS" envDefault:"15000" yaml:"statistics_interval_ms"`
 
-	SecurityProtocol string `env:"KAFKA_SECURITY_PROTOCOL" yaml:"security_protocol"`
-	SASLMechanism    string `env:"KAFKA_SASL_MECHANISM" yaml:"sasl_mechanism"`
-	SASLUsername     string `env:"KAFKA_SASL_USERNAME" yaml:"sasl_username"`
-	SASLPassword     string `env:"KAFKA_SASL_PASSWORD" secret:"true" yaml:"sasl_password"`
+	SecurityProtocol string        `env:"KAFKA_SECURITY_PROTOCOL" yaml:"security_protocol"`
+	SASLMechanism    string        `env:"KAFKA_SASL_MECHANISM" yaml:"sasl_mechanism"`
+	SASLUsername     string        `env:"KAFKA_SASL_USERNAME" yaml:"sasl_username"`
+	SASLPassword     secret.String `env:"KAFKA_SASL_PASSWORD" yaml:"sasl_password"`
 	// SASLPasswordFile keeps the secret out of the environment (and
 	// /admin/config): a Kubernetes/Docker secret mount.
 	SASLPasswordFile                   string `env:"KAFKA_SASL_PASSWORD_FILE" secret:"false" yaml:"sasl_password_file"`
@@ -406,8 +408,8 @@ func (c *Config) validateSecurity() []error {
 		return errs
 	}
 
-	hasPassword := c.SASLPassword != "" || c.SASLPasswordFile != ""
-	if c.SASLPassword != "" && c.SASLPasswordFile != "" {
+	hasPassword := !c.SASLPassword.IsZero() || c.SASLPasswordFile != ""
+	if !c.SASLPassword.IsZero() && c.SASLPasswordFile != "" {
 		errs = append(errs, errors.New("KAFKA_SASL_PASSWORD and KAFKA_SASL_PASSWORD_FILE are both set: pick one"))
 	}
 

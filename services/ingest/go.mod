@@ -36,6 +36,7 @@ require (
 	github.com/tracehubmmp/golang-basics/libs/otelx v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/resilience v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/s3 v0.0.0
+	github.com/tracehubmmp/golang-basics/libs/secret v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/containers v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/contract v0.0.0
@@ -147,3 +148,5 @@ require (
 	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
+
+replace github.com/tracehubmmp/golang-basics/libs/secret => ../../libs/secret

@@ -76,6 +76,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/valkey v0.44.0 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
+	github.com/tracehubmmp/golang-basics/libs/secret v0.0.0-00010101000000-000000000000 // indirect
 	github.com/valkey-io/valkey-go v1.0.78 // indirect
 	github.com/valkey-io/valkey-go/valkeyotel v1.0.78 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
@@ -92,3 +93,5 @@ require (
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 )
+
+replace github.com/tracehubmmp/golang-basics/libs/secret => ../secret

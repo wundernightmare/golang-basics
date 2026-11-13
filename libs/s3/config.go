@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // Config is the S3 client configuration, populated from the environment with
@@ -53,15 +55,15 @@ import (
 // conservative one. Uploaded bytes are still covered by the request signature
 // over TLS and by the store's ETag.
 type Config struct {
-	Bucket           string `env:"S3_BUCKET" yaml:"bucket"`
-	Endpoint         string `env:"S3_ENDPOINT" yaml:"endpoint"`
-	Region           string `env:"S3_REGION" envDefault:"us-east-1" yaml:"region"`
-	AccessKeyID      string `env:"S3_ACCESS_KEY_ID" yaml:"access_key_id"`
-	SecretAccessKey  string `env:"S3_SECRET_ACCESS_KEY" secret:"true" yaml:"secret_access_key"`
-	UsePathStyle     bool   `env:"S3_USE_PATH_STYLE" envDefault:"true" yaml:"use_path_style"`
-	Insecure         bool   `env:"S3_INSECURE" envDefault:"false" yaml:"insecure"`
-	CAFile           string `env:"S3_CA_FILE" yaml:"ca_file"`
-	AutoCreateBucket bool   `env:"S3_AUTO_CREATE_BUCKET" envDefault:"false" yaml:"auto_create_bucket"`
+	Bucket           string        `env:"S3_BUCKET" yaml:"bucket"`
+	Endpoint         string        `env:"S3_ENDPOINT" yaml:"endpoint"`
+	Region           string        `env:"S3_REGION" envDefault:"us-east-1" yaml:"region"`
+	AccessKeyID      string        `env:"S3_ACCESS_KEY_ID" yaml:"access_key_id"`
+	SecretAccessKey  secret.String `env:"S3_SECRET_ACCESS_KEY" yaml:"secret_access_key"`
+	UsePathStyle     bool          `env:"S3_USE_PATH_STYLE" envDefault:"true" yaml:"use_path_style"`
+	Insecure         bool          `env:"S3_INSECURE" envDefault:"false" yaml:"insecure"`
+	CAFile           string        `env:"S3_CA_FILE" yaml:"ca_file"`
+	AutoCreateBucket bool          `env:"S3_AUTO_CREATE_BUCKET" envDefault:"false" yaml:"auto_create_bucket"`
 
 	DialTimeout time.Duration `env:"S3_DIAL_TIMEOUT" envDefault:"5s" yaml:"dial_timeout"`
 	// OpTimeout bounds one small call — put, head, one list page, one delete
@@ -167,7 +169,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("S3_BUCKET must be set"))
 	}
 
-	if (c.AccessKeyID == "") != (c.SecretAccessKey == "") {
+	if (c.AccessKeyID == "") != c.SecretAccessKey.IsZero() {
 		errs = append(errs, errors.New("S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY go together: set both, or neither for the AWS default credential chain"))
 	}
 

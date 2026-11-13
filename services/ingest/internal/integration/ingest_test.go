@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/s3"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/services/ingest/internal/archive"
 	"github.com/tracehubmmp/golang-basics/services/ingest/internal/shard"
@@ -152,7 +153,7 @@ func TestCompactModeRunsOnce(t *testing.T) {
 
 	store, err := s3.New(context.Background(), s3.Config{
 		Bucket: bucket, Endpoint: back.store.Endpoint, Region: back.store.Region,
-		AccessKeyID: back.store.AccessKey, SecretAccessKey: back.store.SecretKey,
+		AccessKeyID: back.store.AccessKey, SecretAccessKey: secret.New(back.store.SecretKey),
 		UsePathStyle: true, Insecure: true, AutoCreateBucket: true,
 	}, nil)
 	require.NoError(t, err)
