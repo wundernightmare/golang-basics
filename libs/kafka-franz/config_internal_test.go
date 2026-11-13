@@ -20,6 +20,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // Every named buffer key reaches its franz-go option: nothing is left to
@@ -69,7 +70,7 @@ func TestSASLMechanism(t *testing.T) {
 	t.Parallel()
 
 	for _, m := range []string{"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"} {
-		mech, err := saslMechanism(kafka.Config{SecurityProtocol: "sasl_ssl", SASLMechanism: m, SASLUsername: "u", SASLPassword: "p"})
+		mech, err := saslMechanism(kafka.Config{SecurityProtocol: "sasl_ssl", SASLMechanism: m, SASLUsername: "u", SASLPassword: secret.New("p")})
 		require.NoError(t, err)
 		assert.Equal(t, m, mech.Name())
 	}
@@ -197,7 +198,7 @@ func TestCommonOpts_SecurityAndErrors(t *testing.T) {
 	dir, _, _ := writeCA(t)
 	cfg := kafka.Config{
 		Brokers: []string{"localhost:1"}, SecurityProtocol: "sasl_ssl", SASLMechanism: "SCRAM-SHA-256",
-		SASLUsername: "u", SASLPassword: "p", SSLCALocation: filepath.Join(dir, "ca.crt"), AllowAutoTopicCreation: true,
+		SASLUsername: "u", SASLPassword: secret.New("p"), SSLCALocation: filepath.Join(dir, "ca.crt"), AllowAutoTopicCreation: true,
 	}
 	require.NoError(t, cfg.Validate())
 	opts, err := commonOpts(cfg, newStats(cfg))

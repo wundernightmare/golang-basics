@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // The tests below read the environment through a prefix no deployment uses,
@@ -118,7 +119,7 @@ func TestConfigValidate(t *testing.T) {
 		{"no listener at all", func(c *httpx.Config) { c.Addr, c.AdminAddr = "", "" }, "neither HTTP_ADDR nor ADMIN_ADDR"},
 		{"worker: admin only", func(c *httpx.Config) { c.Addr = "" }, ""},
 		{"api only", func(c *httpx.Config) { c.AdminAddr = "" }, ""},
-		{"same fixed address", func(c *httpx.Config) { c.Addr, c.AdminAddr, c.AdminToken = ":8080", ":8080", "t" }, "are both"},
+		{"same fixed address", func(c *httpx.Config) { c.Addr, c.AdminAddr, c.AdminToken = ":8080", ":8080", secret.New("t") }, "are both"},
 		{"both ephemeral", func(c *httpx.Config) { c.Addr, c.AdminAddr = "127.0.0.1:0", "127.0.0.1:0" }, ""},
 		{"negative shutdown timeout", func(c *httpx.Config) { c.ShutdownTimeout = -time.Second }, "HTTP_SHUTDOWN_TIMEOUT"},
 		{"negative shutdown delay", func(c *httpx.Config) { c.ShutdownDelay = -time.Second }, "HTTP_SHUTDOWN_DELAY"},
@@ -135,7 +136,7 @@ func TestConfigValidate(t *testing.T) {
 		{"open admin on localhost", func(c *httpx.Config) { c.AdminAddr = "localhost:9080" }, ""},
 		{"open admin on ::1", func(c *httpx.Config) { c.AdminAddr = "[::1]:9080" }, ""},
 		{"open admin, insecure acknowledged", func(c *httpx.Config) { c.AdminAddr, c.AdminInsecure = ":9080", true }, ""},
-		{"guarded admin anywhere", func(c *httpx.Config) { c.AdminAddr, c.AdminToken = ":9080", "s3cret" }, ""},
+		{"guarded admin anywhere", func(c *httpx.Config) { c.AdminAddr, c.AdminToken = ":9080", secret.New("s3cret") }, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

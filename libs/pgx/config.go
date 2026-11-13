@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // Config is the PostgreSQL pool configuration, populated from the environment
@@ -63,10 +65,10 @@ import (
 type Config struct {
 	URL string `env:"DATABASE_URL" yaml:"url"`
 
-	Host     string `env:"DB_HOST" envDefault:"localhost" yaml:"host"`
-	Port     int    `env:"DB_PORT" envDefault:"5432" yaml:"port"`
-	User     string `env:"DB_USER" envDefault:"app" yaml:"user"`
-	Password string `env:"DB_PASSWORD" envDefault:"app" yaml:"password" secret:"true"`
+	Host     string        `env:"DB_HOST" envDefault:"localhost" yaml:"host"`
+	Port     int           `env:"DB_PORT" envDefault:"5432" yaml:"port"`
+	User     string        `env:"DB_USER" envDefault:"app" yaml:"user"`
+	Password secret.String `env:"DB_PASSWORD" envDefault:"app" yaml:"password"`
 	// PasswordFile names a file with the password, so the secret stays out of
 	// the environment (and /admin/config): a Kubernetes/Docker secret mount.
 	PasswordFile string `env:"DB_PASSWORD_FILE" yaml:"password_file"`
@@ -115,7 +117,7 @@ func (c Config) DSN() string {
 
 	u := url.URL{
 		Scheme: "postgres",
-		User:   url.UserPassword(c.User, c.Password),
+		User:   url.UserPassword(c.User, c.Password.Expose()),
 		Host:   c.Host + ":" + strconv.Itoa(c.Port),
 		Path:   "/" + c.Name,
 	}

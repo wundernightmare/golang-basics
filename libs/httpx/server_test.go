@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 )
 
@@ -198,7 +199,7 @@ func TestAdmin_TokenGuardsAdminAndDebug(t *testing.T) {
 	t.Parallel()
 
 	log := httpx.NewLogger(httpx.LogConfig{Level: "error", Format: "text", Writer: io.Discard})
-	srv, err := httpx.NewServer(httpx.Config{Addr: ":0", AdminAddr: ":9099", AdminToken: "s3cret"}, log)
+	srv, err := httpx.NewServer(httpx.Config{Addr: ":0", AdminAddr: ":9099", AdminToken: secret.New("s3cret")}, log)
 	require.NoError(t, err)
 
 	for _, path := range []string{"/healthz", "/livez", "/metrics", "/version"} {
@@ -216,7 +217,7 @@ func TestAdmin_TokenGuardsAdminAndDebug(t *testing.T) {
 	req.Header.Set("Authorization", "bearer s3cret") // scheme is case-insensitive
 	rec := do(srv.Admin(), req)
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), `"admin_token":"[redacted]"`)
+	assert.Contains(t, rec.Body.String(), `"admin_token":"[redacted:1ec1c26b]"`)
 }
 
 func TestReadyz_ProbeCancellationDoesNotPoisonTheCache(t *testing.T) {

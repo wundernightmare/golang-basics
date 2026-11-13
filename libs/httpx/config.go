@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // Config is the shared HTTP-server configuration, populated from the
@@ -76,12 +78,12 @@ import (
 // that is not loopback unless AdminInsecure is set: pprof, the effective
 // config and the log-level switch are not things to leave open on a pod IP.
 type Config struct {
-	Service       string `env:"SERVICE_NAME" yaml:"service_name"`
-	Addr          string `env:"HTTP_ADDR" envDefault:":8080" yaml:"http_addr"`
-	AdminAddr     string `env:"ADMIN_ADDR" envDefault:":9080" yaml:"admin_addr"`
-	AdminToken    string `env:"ADMIN_TOKEN" secret:"true" yaml:"admin_token"`
-	AdminInsecure bool   `env:"ADMIN_INSECURE" envDefault:"false" yaml:"admin_insecure"`
-	DebugToken    string `env:"DEBUG_TOKEN" secret:"true" yaml:"debug_token"`
+	Service       string        `env:"SERVICE_NAME" yaml:"service_name"`
+	Addr          string        `env:"HTTP_ADDR" envDefault:":8080" yaml:"http_addr"`
+	AdminAddr     string        `env:"ADMIN_ADDR" envDefault:":9080" yaml:"admin_addr"`
+	AdminToken    secret.String `env:"ADMIN_TOKEN" yaml:"admin_token"`
+	AdminInsecure bool          `env:"ADMIN_INSECURE" envDefault:"false" yaml:"admin_insecure"`
+	DebugToken    secret.String `env:"DEBUG_TOKEN" yaml:"debug_token"`
 
 	ReadHeaderTimeout time.Duration `env:"HTTP_READ_HEADER_TIMEOUT" envDefault:"5s" yaml:"read_header_timeout"`
 	ReadTimeout       time.Duration `env:"HTTP_READ_TIMEOUT" envDefault:"30s" yaml:"read_timeout"`
@@ -342,7 +344,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("HTTP_TRUSTED_PROXIES: %w", err))
 	}
 
-	if c.AdminAddr != "" && c.AdminToken == "" && !c.AdminInsecure && !isLoopback(c.AdminAddr) {
+	if c.AdminAddr != "" && c.AdminToken.IsZero() && !c.AdminInsecure && !isLoopback(c.AdminAddr) {
 		errs = append(errs, fmt.Errorf("ADMIN_TOKEN is empty and ADMIN_ADDR %q is not loopback: set a token, or ADMIN_INSECURE=true for local development", c.AdminAddr))
 	}
 

@@ -93,3 +93,5 @@ require (
 	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
+
+replace github.com/tracehubmmp/golang-basics/libs/secret => ../../secret

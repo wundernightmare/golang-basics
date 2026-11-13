@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/tracehubmmp/golang-basics/libs/pgx"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/libs/testx/containers"
 )
@@ -37,7 +38,7 @@ func TestConfigDSN(t *testing.T) {
 	t.Run("assembled from fields", func(t *testing.T) {
 		t.Parallel()
 
-		cfg := pgx.Config{Host: "db", Port: 5432, User: "app", Password: "s3cret", Name: "app", SSLMode: "disable"}
+		cfg := pgx.Config{Host: "db", Port: 5432, User: "app", Password: secret.New("s3cret"), Name: "app", SSLMode: "disable"}
 		assert.Equal(t, "postgres://app:s3cret@db:5432/app?sslmode=disable", cfg.DSN())
 	})
 }

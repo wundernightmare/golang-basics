@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/s3"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/libs/testx/containers"
 )
@@ -30,7 +31,7 @@ func storeConfig(t testing.TB) s3.Config {
 
 	return s3.Config{
 		Bucket: testBucket, Endpoint: store.Endpoint, Region: store.Region,
-		AccessKeyID: store.AccessKey, SecretAccessKey: store.SecretKey,
+		AccessKeyID: store.AccessKey, SecretAccessKey: secret.New(store.SecretKey),
 		UsePathStyle: true, Insecure: true, AutoCreateBucket: true,
 	}
 }

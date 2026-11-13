@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // The provider-neutral loop against a scripted client: the paths a real
@@ -459,7 +461,7 @@ func TestProducer_WrapsForeignErrorsAndWarnsPlainSASL(t *testing.T) {
 	use(t, nil, fp, nil)
 
 	cfg := testConfig()
-	cfg.SecurityProtocol, cfg.SASLMechanism, cfg.SASLUsername, cfg.SASLPassword = "sasl_plaintext", "PLAIN", "u", "p"
+	cfg.SecurityProtocol, cfg.SASLMechanism, cfg.SASLUsername, cfg.SASLPassword = "sasl_plaintext", "PLAIN", "u", secret.New("p")
 
 	var logs safeBuffer
 

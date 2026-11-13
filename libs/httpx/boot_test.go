@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 type bootSection struct {
@@ -144,7 +145,7 @@ func TestConfigReference_HidesSecrets(t *testing.T) {
 	t.Parallel()
 
 	var out bytes.Buffer
-	httpx.ConfigReference(&out, "SVC_", httpx.Config{AdminToken: "s3cret", DebugToken: ""})
+	httpx.ConfigReference(&out, "SVC_", httpx.Config{AdminToken: secret.New("s3cret"), DebugToken: secret.New("")})
 	assert.NotContains(t, out.String(), "s3cret")
 	assert.Regexp(t, `SVC_ADMIN_TOKEN\s+admin_token\s+\(secret\)`, out.String())
 	assert.Regexp(t, `SVC_DEBUG_TOKEN\s+debug_token\s+-`, out.String())
