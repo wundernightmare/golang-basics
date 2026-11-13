@@ -19,6 +19,18 @@
 #                      the image links a fully static musl binary)
 #   franz              franz-go: CGO_ENABLED=0 -tags kafka_franz
 #
+# FIPS=1 builds against Go's frozen FIPS 140-3 module (GOFIPS140, no cgo, no
+# BoringCrypto): the binary runs with GODEBUG fips140=on by default and says so
+# on /version ("fips140": true) and in its start-up line. docs/RUNTIME.md
+# "FIPS 140-3" has what that does and does not guarantee.
+#
+#   GOFIPS140_VERSION  the module snapshot, default v1.0.0 — must exist under
+#                      $(go env GOROOT)/lib/fips140
+#
+# Only Go's own crypto is covered: librdkafka brings OpenSSL through cgo, so a
+# FIPS build of a service with Kafka needs KAFKA_PROVIDER=franz and is refused
+# otherwise.
+#
 # COVER=1 builds a coverage-instrumented binary (every workspace package,
 # -covermode=atomic) that writes its counters to GOCOVERDIR on a clean exit —
 # how the e2e layer contributes to the merged coverage. Never for a release.
@@ -59,5 +71,20 @@ if [ -d "$root/services/$svc/internal/kafkaprovider" ]; then
   esac
 fi
 
+# GOFIPS140 is always set from FIPS, so a stray GOFIPS140 in the environment
+# cannot make a build FIPS (or not) behind the knob's back.
+fips=off
+case "${FIPS:-0}" in
+  0) ;;
+  1)
+    if [ "$cgo" = 1 ]; then
+      echo "build-service.sh: FIPS=1 needs KAFKA_PROVIDER=franz for $svc: the rdkafka provider links librdkafka and OpenSSL through cgo, which Go's FIPS module does not cover" >&2
+      exit 2
+    fi
+    fips="${GOFIPS140_VERSION:-v1.0.0}"
+    ;;
+  *) echo "build-service.sh: FIPS is 1 or 0, not '$FIPS'" >&2; exit 2 ;;
+esac
+
 cd "$root/services/$svc"
-CGO_ENABLED=$cgo go build -trimpath -tags "$tags" ${cover[@]+"${cover[@]}"} -ldflags="$ldflags" -o "$out" .
+GOFIPS140=$fips CGO_ENABLED=$cgo go build -trimpath -tags "$tags" ${cover[@]+"${cover[@]}"} -ldflags="$ldflags" -o "$out" .

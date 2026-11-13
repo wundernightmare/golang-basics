@@ -71,7 +71,7 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, onServer f
 		onServer(srv)
 	}
 
-	logger.InfoContext(ctx, "ingest starting", "mode", cfg.Mode, "addr", cfg.Addr, "admin_addr", cfg.AdminAddr, "version", httpx.Version)
+	logger.InfoContext(ctx, "ingest starting", "mode", cfg.Mode, "addr", cfg.Addr, "admin_addr", cfg.AdminAddr, "version", httpx.Version, "fips140", httpx.FIPS140())
 
 	if cfg.Mode == config.ModeCompact {
 		err = runCompact(ctx, cfg, srv, store, logger)

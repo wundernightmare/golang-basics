@@ -40,6 +40,8 @@ model VersionResponse {
   modified: boolean;
   /** Go toolchain version. */
   go_version: string;
+  /** The Go Cryptographic Module runs in FIPS 140-3 mode (a FIPS=1 build). */
+  fips140: boolean;
 }
 
 interface PingOps {
