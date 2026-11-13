@@ -6,7 +6,9 @@
 //   - configuration from the environment (per-service prefix) or YAML, meant
 //     to be embedded in the service's own config (see [Config]);
 //   - server-side guard rails on every connection: statement_timeout,
-//     lock_timeout and idle_in_transaction_session_timeout (see [New]);
+//     lock_timeout and idle_in_transaction_session_timeout (see [New]),
+//     read back after connecting so that a pooler which accepts and drops
+//     them cannot leave a pool without guard rails ([ErrGuardRailOff]);
 //   - a readiness check that plugs straight into libs/httpx ([DB.ReadyCheck]);
 //   - tracing (a client span per query via otelpgx) and metrics: pool
 //     statistics plus query latency and errors by operation ([DB.Collectors],
