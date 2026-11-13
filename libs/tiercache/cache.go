@@ -13,6 +13,7 @@ import (
 	"github.com/VictoriaMetrics/fastcache"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/tracehubmmp/golang-basics/libs/resilience"
 	"github.com/tracehubmmp/golang-basics/libs/valkey"
 )
 
@@ -45,7 +46,7 @@ type Cache[T any] struct {
 	load    Loader[T]
 	log     *slog.Logger
 	metrics *metrics
-	breaker breaker
+	breaker *resilience.Breaker // keeps a failing L2 from costing every miss a command timeout
 	flight  singleflight.Group
 	buffers sync.Pool // *[]byte
 
@@ -100,7 +101,6 @@ func New[T any](cfg Config, codec Codec[T], load Loader[T], remote Remote, log *
 		load:       load,
 		log:        log,
 		metrics:    newMetrics(cfg.Name, local),
-		breaker:    breaker{threshold: int64(cfg.BreakerThreshold), cooldown: cfg.BreakerCooldown},
 		buffers:    sync.Pool{New: func() any { return new([]byte) }},
 		prefix:     "tc:" + cfg.Name + ":",
 		channel:    "tc:" + cfg.Name + ":inv",
@@ -108,6 +108,12 @@ func New[T any](cfg Config, codec Codec[T], load Loader[T], remote Remote, log *
 		life:       life,
 		stop:       stop,
 	}
+
+	cache.breaker = resilience.NewBreaker(cfg.breaker(), time.Now, func(_, to resilience.State) {
+		if to == resilience.StateOpen {
+			cache.warn(life, "tiercache: L2 is failing, skipping it", "cache", cfg.Name, "for", cfg.BreakerOpenTimeout.String())
+		}
+	})
 
 	if remote != nil && !cfg.DisableInvalidation {
 		cache.wg.Go(cache.subscribe)
@@ -206,15 +212,13 @@ func (c *Cache[T]) Invalidate(ctx context.Context, key Key) error {
 		return nil
 	}
 
-	// The breaker is not consulted: an invalidation is worth one attempt
-	// even while reads are skipping L2.
+	// The breaker is neither consulted nor told: an invalidation is worth
+	// one attempt even while reads are skipping L2.
 	tombErr := c.remote.Tombstone(ctx, c.remoteKey(key), c.cfg.TombstoneTTL)
-	c.observeRemote(ctx, tombErr)
 
 	var pubErr error
 	if !c.cfg.DisableInvalidation {
 		pubErr = c.remote.Publish(ctx, c.channel, string(key[:]))
-		c.observeRemote(ctx, pubErr)
 	}
 
 	if err := errors.Join(tombErr, pubErr); err != nil {
@@ -333,7 +337,7 @@ func (c *Cache[T]) resolve(ctx context.Context, key Key, refreshing bool) (resul
 		c.invalidateLocal(key)
 
 		if heldFound {
-			c.observeRemote(ctx, c.remote.Tombstone(ctx, remoteKey, c.cfg.TombstoneTTL))
+			_ = c.remote.Tombstone(ctx, remoteKey, c.cfg.TombstoneTTL) // best effort: the entry's TTL bounds it otherwise
 		}
 
 		return none, err
@@ -544,14 +548,15 @@ func (c *Cache[T]) remoteGet(ctx context.Context, remoteKey string) (string, boo
 		return "", false
 	}
 
-	if !c.breaker.allow(time.Now()) {
+	ticket, allowed := c.breaker.Allow()
+	if !allowed {
 		c.metrics.bypassed.Inc()
 
 		return "", false
 	}
 
 	value, found, err := c.remote.Get(ctx, remoteKey)
-	c.observeRemote(ctx, err)
+	c.breaker.Record(ticket, outcome(err))
 
 	return value, found && err == nil
 }
@@ -561,7 +566,12 @@ func (c *Cache[T]) remoteGet(ctx context.Context, remoteKey string) (string, boo
 // L1 may keep it too: yes when L2 took it or could not be asked, no when L2
 // refused it.
 func (c *Cache[T]) remoteStore(ctx context.Context, remoteKey, old, env string, ttl time.Duration, replace bool) bool {
-	if c.remote == nil || !c.breaker.allow(time.Now()) {
+	if c.remote == nil {
+		return true
+	}
+
+	ticket, allowed := c.breaker.Allow()
+	if !allowed {
 		return true
 	}
 
@@ -576,14 +586,21 @@ func (c *Cache[T]) remoteStore(ctx context.Context, remoteKey, old, env string, 
 		stored, err = c.remote.SetNX(ctx, remoteKey, env, ttl)
 	}
 
-	c.observeRemote(ctx, err)
+	c.breaker.Record(ticket, outcome(err))
 
 	return stored || err != nil
 }
 
-func (c *Cache[T]) observeRemote(ctx context.Context, err error) {
-	if c.breaker.record(time.Now(), err) {
-		c.warn(ctx, "tiercache: L2 is failing, skipping it", "cache", c.cfg.Name, "cooldown", c.cfg.BreakerCooldown.String(), "err", err)
+// outcome is what an L2 call tells the breaker: a caller that went away says
+// nothing about L2; any other error — a timeout included — is its failure.
+func outcome(err error) resilience.Outcome {
+	switch {
+	case err == nil:
+		return resilience.OutcomeSuccess
+	case errors.Is(err, context.Canceled):
+		return resilience.OutcomeIgnored
+	default:
+		return resilience.OutcomeFailure
 	}
 }
 

@@ -34,7 +34,9 @@ func realTime(name string, soft, hard time.Duration) func(*tiercache.Config) {
 	return func(cfg *tiercache.Config) {
 		cfg.SoftTTL, cfg.HardTTL = soft, hard
 		cfg.TombstoneTTL = 300 * time.Millisecond
-		cfg.BreakerCooldown = 300 * time.Millisecond
+		cfg.BreakerOpenTimeout = 300 * time.Millisecond
+		cfg.BreakerMinRequests = 4
+		cfg.BreakerWindow = 2 * time.Second
 
 		if name != "" {
 			cfg.Name = name
