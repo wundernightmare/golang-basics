@@ -39,7 +39,7 @@ easy-to-miss conventions, [`CONTRIBUTING.md`](CONTRIBUTING.md) the workflow.
 | [`libs/kafka`](libs/kafka) | Library | — | Kafka, provider-neutral (no cgo): synchronous producer with an error taxonomy, at-least-once consumer group (commit-after-handle, retries, DLQ, drain), TLS / SASL / mTLS, every buffer a named key, one set of metric names; a conformance suite (`kafkatest`). **[Read its README](libs/kafka/README.md)** — provider comparison and every safe default. |
 | [`libs/kafka-rdkafka`](libs/kafka-rdkafka) | Library | — | Kafka provider: **librdkafka** via confluent-kafka-go — the default; cgo, a static musl binary in the image; any librdkafka property through `KAFKA_*_EXTRA_PROPERTIES`. |
 | [`libs/kafka-franz`](libs/kafka-franz) | Library | — | Kafka provider: **franz-go**, pure Go (`KAFKA_PROVIDER=franz`, `CGO_ENABLED=0`). |
-| [`libs/otelx`](libs/otelx) | Library | — | OpenTelemetry tracing: OTLP over HTTP (TLS by default), W3C propagation; opt-in. |
+| [`libs/otelx`](libs/otelx) | Library | — | OpenTelemetry tracing: OTLP over HTTP (TLS by default), W3C propagation; opt-in. Head sampling here, tail sampling in the collector (config shipped and tested: [`libs/otelx/integration`](libs/otelx/integration)). |
 | [`libs/testx`](libs/testx) | Test helpers | — | `_test`-only, no Docker: span recorder, log buffer, metric helpers, unique names. |
 | [`libs/testx/containers`](libs/testx/containers) | Test helpers | — | `_test`-only: one shared Postgres / Valkey / Kafka per test binary (testcontainers), Toxiproxy chaos. A module needs Docker exactly when it requires this. |
 | [`libs/testx/contract`](libs/testx/contract) | Test helpers | — | `_test`-only: validates exchanges against the OpenAPI / JSON Schema documents. |
@@ -276,8 +276,8 @@ mTLS, topics as broker policy, the error taxonomy and the metrics.
 | Identity / debugging | admin port | `/version` (version, revision, build time), `PUT /admin/log-level?level=debug&ttl=30m`, `GET /admin/config` (redacted), `X-Debug-Token` per request — see [`libs/httpx`](libs/httpx#runtime-debugging) |
 
 `docker/observability.yml` is an optional local receiving end shaped like
-production: an OpenTelemetry Collector (OTLP/HTTP `:4318`, traces → Jaeger;
-no metrics / logs pipeline), Jaeger, VictoriaMetrics scraping the admin ports
+production: an OpenTelemetry Collector (OTLP/HTTP `:4318`, traces → Jaeger
+after **tail sampling**; no metrics / logs pipeline), Jaeger, VictoriaMetrics scraping the admin ports
 and the dependency exporters, **vmalert** with starter rules
 ([`docker/observability/rules.yml`](docker/observability/rules.yml): 5xx
 ratio, p99 latency, unhandled errors, target / readiness down, consumer
@@ -297,6 +297,20 @@ TASKS_OTEL_ENABLED=true TASKS_OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4318 \
 Tracing is opt-in (`*_OTEL_ENABLED`); unset, `otelx` installs only the W3C
 propagators and a no-op provider.
 
+**Sampling is the collector's job.** The shipped collector configuration
+([`docker/observability/otel-collector.yml`](docker/observability/otel-collector.yml))
+decides per finished trace: it keeps every trace with an error, every trace
+slower than 500 ms, every trace carrying the span attribute `debug.subject`
+(set it for a tenant or a user under investigation), and 1% of the rest
+(`OTEL_TAIL_*` in `.env.example`). So a fast successful request is usually
+*not* in the local Jaeger — `OTEL_TAIL_SAMPLING_PERCENTAGE=100 just obs-up`
+keeps everything. Two rules come with it, both explained in
+[`libs/otelx`](libs/otelx#sampling-head-in-the-service-tail-in-the-collector):
+services head-sample at 1.0 (`*_OTEL_TRACES_SAMPLER_RATIO`, the default),
+because the collector cannot keep what it was never sent; and one collector
+must see all spans of a trace. [`libs/otelx/integration`](libs/otelx/integration)
+runs that file in a real collector and asserts each policy.
+
 ## Tests
 
 Tests are plain `go test`: `func TestX(t *testing.T)`, testify, `t.Run`
@@ -311,7 +325,7 @@ number, and every behaviour is checked at exactly one layer.
 |---|---|---|---|
 | **Unit** | `*_test.go` next to the code, `-short` | pure logic, config parsing, handlers behind small interfaces with fakes, readiness cache semantics, log sampling arithmetic, route ↔ listener wiring | anything that needs a real dependency |
 | **Contract** | telemetry: `libs/otelx/telemetry_test.go`, `*/metrics_test.go`; API: exchanges validated with `libs/testx/contract` | the access-log line, the span and the counters describe the same request; every exposition is promlint-clean; every request/response and every published event conforms to the TypeSpec-generated OpenAPI / JSON Schema | route behaviour (unit), real dependencies (integration) |
-| **Integration** | `libs/resilient-http-client/integration` (a module of its own inside the client's folder: Caddy over HTTP/1.1, h2c, HTTP/2 and HTTP/3 with TLS, Redpanda's HTTP API, Postgres as a non-HTTP peer), `libs/grpcx/integration` (likewise: Jaeger as a real gRPC server over cleartext, TLS and mutual TLS, a real server stream, Caddy as an HTTP gateway), `libs/{pgx,valkey}`, `libs/kafka-{rdkafka,franz}` (the shared `kafka/kafkatest` conformance suite, once per provider), `services/tasks/internal/integration`, `services/consumer/internal/worker` — one shared container per test binary | the libs against real Postgres / Valkey / Kafka (spans, trace propagation through the broker, pool / hit-miss / client metrics); the tasks vertical wired as `main.go` wires it, including the outbox relay | route contracts proven with fakes; process-level behaviour |
+| **Integration** | `libs/resilient-http-client/integration` (a module of its own inside the client's folder: Caddy over HTTP/1.1, h2c, HTTP/2 and HTTP/3 with TLS, Redpanda's HTTP API, Postgres as a non-HTTP peer), `libs/grpcx/integration` (likewise: Jaeger as a real gRPC server over cleartext, TLS and mutual TLS, a real server stream, Caddy as an HTTP gateway), `libs/otelx/integration` (likewise: `otelx.Init` → the shipped collector configuration in a real OpenTelemetry Collector → Jaeger; what tail sampling keeps and drops), `libs/{pgx,valkey}`, `libs/kafka-{rdkafka,franz}` (the shared `kafka/kafkatest` conformance suite, once per provider), `services/tasks/internal/integration`, `services/consumer/internal/worker` — one shared container per test binary | the libs against real Postgres / Valkey / Kafka (spans, trace propagation through the broker, pool / hit-miss / client metrics); the tasks vertical wired as `main.go` wires it, including the outbox relay | route contracts proven with fakes; process-level behaviour |
 | **Chaos** | `services/tasks/internal/integration/chaos_test.go` (`containers.Proxied`, `containers.Pause`); `libs/pgx/tx_chaos_test.go`; `libs/grpcx/integration/chaos_test.go` (the same faults under gRPC, plus keepalive, a short outage with and without `wait_for_ready`, a dead address behind a balancer); `libs/resilient-http-client/integration/chaos_test.go` (TCP cut, reset and black-holed during the TLS handshake, mid-body, on an idle connection; a lost acknowledgement) | what the design promises when a dependency fails, slows down or hangs: cache bypassed, outbox catches up, readiness degrades only for the critical dependency, probes stay fast, everything recovers | happy-path behaviour (integration) |
 | **E2E** | `e2e/` (Go, real binaries, `-tags e2e`) | what only a real process shows: it boots from env, is ready on its admin listener, `/version` carries the build stamp, the admin surface is token-guarded, SIGTERM exits 0 with "servers stopped cleanly", and tasks → outbox → Kafka → consumer across processes | per-route behaviour, error bodies (unit), the CRUD flow (integration) |
 | **Generative** | `just schemathesis <svc>` | "bad input → 4xx problem", no 5xx, every response in the contract's shape | business semantics (unit), effects on dependencies (integration) |
@@ -336,7 +350,7 @@ consumer group — never through a fresh container. A module needs Docker
 exactly when its `go.mod` requires `libs/testx/containers`, which keeps
 `ping`, `heartbeat`, `httpx`, `resilient-http-client`, `grpcx` and `resilience` Docker-free — a
 library whose integration suite needs containers keeps it in a nested module (`<lib>/integration`, as
-the HTTP client and `grpcx` do), so the suite's dependencies never reach the library's own `go.mod`. A
+the HTTP client, `grpcx` and `otelx` do), so the suite's dependencies never reach the library's own `go.mod`. A
 `depguard` rule in `.golangci.yml` forbids all three modules, testify and
 testcontainers in non-test files.
 

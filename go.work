@@ -23,6 +23,7 @@
 //   libs/secret/compat          — libs/secret against YAML, caarlos0/env and mapstructure (_test only)
 //   libs/s3                     — shared S3 client (aws-sdk-go-v2): bounded calls, streaming uploads
 //   libs/otelx                  — shared OpenTelemetry tracing setup
+//   libs/otelx/integration      — its integration suite: the shipped collector config (tail sampling) in a real collector, in front of Jaeger (_test only)
 //   libs/tiercache              — two-level cache: off-heap fastcache L1 + Valkey L2 (SWR, Pub/Sub invalidation)
 //   libs/testx                  — shared test harness (signal helpers, unique names; _test only, no Docker)
 //   libs/testx/containers       — shared containers + chaos helpers (testcontainers, Toxiproxy; _test only)
@@ -44,6 +45,7 @@ use (
 	./libs/kafka-franz
 	./libs/kafka-rdkafka
 	./libs/otelx
+	./libs/otelx/integration
 	./libs/pgx
 	./libs/resilience
 	./libs/resilient-http-client

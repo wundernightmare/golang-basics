@@ -7,6 +7,9 @@
 # Topology
 #
 #   services ─(OTLP/HTTP :4318)─▶ otel-collector ─(OTLP)─▶ Jaeger        http://localhost:16686
+#                                 └ tail sampling: errors, slow, debug.subject, 1% of the rest
+#                                   (a fast successful request is, most of the time, NOT in Jaeger —
+#                                    OTEL_TAIL_SAMPLING_PERCENTAGE=100 just obs-up keeps everything)
 #   services ─(stdout JSON)─────▶ vector (docker socket) ─▶ Loki         http://localhost:3100
 #   services :908x/metrics ◀─(scrape)─ VictoriaMetrics                    http://localhost:9095
 #   postgres-exporter / valkey-exporter / redpanda /public_metrics ◀─(scrape)─┘
@@ -42,14 +45,25 @@ name: golang-basics-obs
 
 services:
   # ── OpenTelemetry Collector ─────────────────────────────────────────────────
-  # The one endpoint services know about. Receives OTLP over HTTP, batches,
-  # forwards traces to Jaeger. Swap the exporter (or add tail sampling) here
-  # and no service changes. Config: observability/otel-collector.yml.
+  # The one endpoint services know about. Receives OTLP over HTTP, tail-samples
+  # (keeps every trace with an error, every slow one, every one marked
+  # debug.subject, and a small share of the rest), batches, forwards to Jaeger.
+  # Swap the exporter or the policies here and no service changes.
+  # Config: observability/otel-collector.yml — the policies, their knobs and
+  # the two rules that come with tail sampling are written there; the same
+  # file and image are what libs/otelx/integration tests.
   otel-collector:
-    image: ${DOCKER_HUB:-docker.io}/otel/opentelemetry-collector-contrib:0.128.0
+    image: ${DOCKER_HUB:-docker.io}/otel/opentelemetry-collector-contrib:0.162.0
     container_name: golang-basics-otel-collector
     restart: unless-stopped
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    environment:
+      # Tail-sampling knobs (.env.example). The defaults repeat the ones in
+      # the config file, which also stands on its own outside compose.
+      OTEL_TAIL_DECISION_WAIT: ${OTEL_TAIL_DECISION_WAIT:-10s}
+      OTEL_TAIL_NUM_TRACES: ${OTEL_TAIL_NUM_TRACES:-50000}
+      OTEL_TAIL_SLOW_THRESHOLD_MS: ${OTEL_TAIL_SLOW_THRESHOLD_MS:-500}
+      OTEL_TAIL_SAMPLING_PERCENTAGE: ${OTEL_TAIL_SAMPLING_PERCENTAGE:-1}
     volumes:
       - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro,z
     ports:
