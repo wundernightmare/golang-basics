@@ -1,0 +1,69 @@
+== setup: fault=nft-drop job=stream op_timeout=5s observe=30s
+NOTICE:  relation "chaos_job" already exists, skipping
+
+== baseline (healthy)
+
+[t=  -4s] ---------------------------------------------------------------
+  A: pid 1266968 alive | {"in_phase_s":1,"name":"a","phase":"idle","runs":3} | READY
+  B: pid 1266969 alive | {"in_phase_s":0,"name":"b","phase":"ch-stream","runs":3} | READY
+  pg advisory lock pid=186 granted=t state=idle in transaction xact_age=0s wait=ClientRead
+  job progress     runs=7 last_by=b 1s ago
+
+[t=  -2s] ---------------------------------------------------------------
+  A: pid 1266968 alive | {"in_phase_s":0.3,"name":"a","phase":"ch-stream","runs":4} | READY
+  B: pid 1266969 alive | {"in_phase_s":0.5,"name":"b","phase":"idle","runs":5} | READY
+  pg advisory lock nobody holds it
+  job progress     runs=10 last_by=a 1s ago
+
+== FAULT INJECTED on replica A's ClickHouse path: nft-drop
+
+[t=  10s] ---------------------------------------------------------------
+  A: pid 1266968 alive | {"in_phase_s":0.2,"name":"a","phase":"ch-query","runs":5} | NOT READY (clickhouse: context deadline exceeded [1.001s]; postgres: context deadline exceeded [1.001s])
+  B: pid 1266969 alive | {"in_phase_s":0.8,"name":"b","phase":"pg-wait-lock","runs":8} | NOT READY (postgres: context deadline exceeded [1s])
+  pg advisory lock pid=100 granted=t state=idle in transaction xact_age=2s wait=ClientRead
+  job progress     runs=14 last_by=b 2s ago
+
+[t=  22s] ---------------------------------------------------------------
+  A: pid 1266968 alive | {"in_phase_s":0,"name":"a","phase":"idle","runs":5} | NOT READY (clickhouse: failed to query server hello: failed to query server hello info: sendQ [1.001s])
+  B: pid 1266969 alive | {"in_phase_s":0.7,"name":"b","phase":"idle","runs":12} | READY
+  pg advisory lock nobody holds it
+  job progress     runs=17 last_by=b 3s ago
+
+[t=  34s] ---------------------------------------------------------------
+  A: pid 1266968 alive | {"in_phase_s":0.8,"name":"a","phase":"idle","runs":5} | NOT READY (clickhouse: failed to query server hello: failed to query server hello info: sendQ [1s])
+  B: pid 1266969 alive | {"in_phase_s":1.5,"name":"b","phase":"idle","runs":15} | READY
+  pg advisory lock pid=100 granted=t state=idle in transaction xact_age=1s wait=ClientRead || pid=186 granted=f state=active xact_age=0s wait=advisory
+  job progress     runs=20 last_by=b 4s ago
+
+== FAULT REMOVED (network healthy again)
+
+[t=heal+8s] ---------------------------------------------------------------
+  A: pid 1266968 alive | {"in_phase_s":1.2,"name":"a","phase":"idle","runs":9} | READY
+  B: pid 1266969 alive | {"in_phase_s":0.9,"name":"b","phase":"idle","runs":19} | READY
+  pg advisory lock nobody holds it
+  job progress     runs=28 last_by=b 1s ago
+
+[t=heal+17s] ---------------------------------------------------------------
+  A: pid 1266968 alive | {"in_phase_s":0.1,"name":"a","phase":"idle","runs":14} | READY
+  B: pid 1266969 alive | {"in_phase_s":0.1,"name":"b","phase":"ch-stream","runs":23} | READY
+  pg advisory lock nobody holds it
+  job progress     runs=38 last_by=b 1s ago
+
+[t=heal+25s] ---------------------------------------------------------------
+  A: pid 1266968 alive | {"in_phase_s":1,"name":"a","phase":"idle","runs":18} | READY
+  B: pid 1266969 alive | {"in_phase_s":0.6,"name":"b","phase":"idle","runs":28} | READY
+  pg advisory lock nobody holds it
+  job progress     runs=46 last_by=b 1s ago
+
+== replica logs
+  A| time=2026-11-11T08:59:44.879+03:00 level=ERROR msg="iteration failed" replica=a err="ch query: sendQuery: Post \"http://default@127.0.0.1:28302?client_protocol_version=54460&database=default&default_format=Native&max_execution_time=9\": dial tcp 127.0.0.1:28302: i/o timeout" took=2.002s
+  A| time=2026-11-11T08:59:48.382+03:00 level=ERROR msg="iteration failed" replica=a err="ch query: failed to query server hello: failed to query server hello info: sendQuery: Post \"http://default@127.0.0.1:28302?client_protocol_version=54460&database=default&default_format=Native&max_execution_time=6\": clickhouse: acquire conn timeout. you can increase the number of max open conn or the dial timeout" took=2.002s
+  A| time=2026-11-11T08:59:51.884+03:00 level=ERROR msg="iteration failed" replica=a err="ch query: failed to query server hello: failed to query server hello info: sendQuery: Post \"http://default@127.0.0.1:28302?client_protocol_version=54460&database=default&default_format=Native&max_execution_time=6\": clickhouse: acquire conn timeout. you can increase the number of max open conn or the dial timeout" took=2.002s
+  A| time=2026-11-11T08:59:55.388+03:00 level=ERROR msg="iteration failed" replica=a err="ch query: failed to query server hello: failed to query server hello info: sendQuery: Post \"http://default@127.0.0.1:28302?client_protocol_version=54460&database=default&default_format=Native&max_execution_time=6\": clickhouse: acquire conn timeout. you can increase the number of max open conn or the dial timeout" took=2.003s
+  A| time=2026-11-11T08:59:58.890+03:00 level=ERROR msg="iteration failed" replica=a err="ch query: failed to query server hello: failed to query server hello info: sendQuery: Post \"http://default@127.0.0.1:28302?client_protocol_version=54460&database=default&default_format=Native&max_execution_time=6\": clickhouse: acquire conn timeout. you can increase the number of max open conn or the dial timeout" took=2.002s
+  A| time=2026-11-11T09:00:02.393+03:00 level=ERROR msg="iteration failed" replica=a err="ch query: failed to query server hello: failed to query server hello info: sendQuery: Post \"http://default@127.0.0.1:28302?client_protocol_version=54460&database=default&default_format=Native&max_execution_time=6\": clickhouse: acquire conn timeout. you can increase the number of max open conn or the dial timeout" took=2.002s
+  A| time=2026-11-11T09:00:05.895+03:00 level=ERROR msg="iteration failed" replica=a err="ch query: failed to query server hello: failed to query server hello info: sendQuery: Post \"http://default@127.0.0.1:28302?client_protocol_version=54460&database=default&default_format=Native&max_execution_time=6\": clickhouse: acquire conn timeout. you can increase the number of max open conn or the dial timeout" took=2.001s
+  A| time=2026-11-11T09:00:09.397+03:00 level=ERROR msg="iteration failed" replica=a err="ch query: failed to query server hello: failed to query server hello info: sendQuery: Post \"http://default@127.0.0.1:28302?client_protocol_version=54460&database=default&default_format=Native&max_execution_time=6\": clickhouse: acquire conn timeout. you can increase the number of max open conn or the dial timeout" took=2.001s
+  B| time=2026-11-11T08:59:26.121+03:00 level=INFO msg=listening replica=b addr=127.0.0.1:28502 job=stream op_timeout=5s
+
+goroutine dumps taken during the fault: out/incident-nft-drop-stream-optimeout-5s/{a,b}.stacks.txt
