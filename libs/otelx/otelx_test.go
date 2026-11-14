@@ -195,7 +195,7 @@ func TestInit_EnabledInstallsAnSDKProvider(t *testing.T) {
 func TestInit_TLSConfigErrorIsReturned(t *testing.T) {
 	restoreGlobals(t)
 	_, err := Init(context.Background(), Config{Enabled: true, CACert: filepath.Join(t.TempDir(), "absent.pem")}, nil)
-	require.ErrorContains(t, err, "read OTLP CA certificate")
+	require.ErrorContains(t, err, "OTLP CA certificate: open ")
 }
 
 func TestTLSConfig(t *testing.T) {
@@ -226,7 +226,14 @@ func TestTLSConfig(t *testing.T) {
 
 		tc, err := tlsConfig(Config{CACert: ca})
 		require.NoError(t, err)
-		assert.NotNil(t, tc.RootCAs)
+
+		block, _ := pem.Decode(certPEM)
+		authority, err := x509.ParseCertificate(block.Bytes)
+		require.NoError(t, err)
+
+		only := x509.NewCertPool()
+		only.AddCert(authority)
+		assert.True(t, tc.RootCAs.Equal(only), "the bundle is the trust store: the system roots are not added to it")
 	})
 	t.Run("mTLS", func(t *testing.T) {
 		t.Parallel()
@@ -241,8 +248,8 @@ func TestTLSConfig(t *testing.T) {
 		cfg  Config
 		want string
 	}{
-		{"missing CA file", Config{CACert: filepath.Join(dir, "absent.pem")}, "read OTLP CA certificate"},
-		{"CA without PEM", Config{CACert: junk}, "no PEM certificates found"},
+		{"missing CA file", Config{CACert: filepath.Join(dir, "absent.pem")}, "OTLP CA certificate: open "},
+		{"CA without PEM", Config{CACert: junk}, "holds no PEM certificate"},
 		{"cert without key", Config{ClientCert: cert}, "must both be set"},
 		{"key without cert", Config{ClientKey: key}, "must both be set"},
 		{"mismatched pair", Config{ClientCert: junk, ClientKey: key}, "load OTLP client certificate"},

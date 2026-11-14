@@ -5,8 +5,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -15,6 +13,7 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 
 	"github.com/wundernightmare/golang-basics/libs/kafka"
+	"github.com/wundernightmare/golang-basics/libs/secret"
 )
 
 // minBrokerReadBytes is the floor of BrokerMaxReadBytes: besides fetches,
@@ -163,7 +162,8 @@ func balancer(strategy string) kgo.GroupBalancer {
 }
 
 // tlsConfig maps the SSL keys to a *tls.Config, or nil without TLS. The CA
-// file is added to the system roots; ServerName is left to franz-go, which
+// file is the trust store, as it is in librdkafka (without one: the system
+// roots); ServerName is left to franz-go, which
 // sets it per broker from the dialed host. Endpoint identification "none"
 // keeps verifying the chain against the CA — only the host name check is
 // skipped, as in librdkafka.
@@ -172,19 +172,12 @@ func tlsConfig(cfg kafka.Config) (*tls.Config, error) {
 		return nil, nil //nolint:nilnil // nil config means "plaintext", not an error
 	}
 
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
-	}
+	var pool *x509.CertPool // nil: the system roots
 
 	if cfg.SSLCALocation != "" {
-		pem, err := os.ReadFile(cfg.SSLCALocation)
-		if err != nil {
-			return nil, fmt.Errorf("kafka: read KAFKA_SSL_CA_LOCATION: %w", err)
-		}
-
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("kafka: KAFKA_SSL_CA_LOCATION %q holds no PEM certificate", cfg.SSLCALocation)
+		var err error
+		if pool, err = secret.CertPool(cfg.SSLCALocation); err != nil {
+			return nil, fmt.Errorf("kafka: KAFKA_SSL_CA_LOCATION: %w", err)
 		}
 	}
 
@@ -226,17 +219,12 @@ func saslMechanism(cfg kafka.Config) (sasl.Mechanism, error) {
 		return nil, nil //nolint:nilnil // nil mechanism means "no SASL", not an error
 	}
 
-	password := cfg.SASLPassword.Expose()
-	if cfg.SASLPasswordFile != "" {
-		b, err := os.ReadFile(cfg.SASLPasswordFile)
-		if err != nil {
-			return nil, fmt.Errorf("kafka: KAFKA_SASL_PASSWORD_FILE: %w", err)
-		}
-
-		if password = strings.TrimRight(string(b), "\r\n"); password == "" {
-			return nil, fmt.Errorf("kafka: KAFKA_SASL_PASSWORD_FILE: %s is empty", cfg.SASLPasswordFile)
-		}
+	held, err := cfg.SASLSecret()
+	if err != nil {
+		return nil, fmt.Errorf("kafka: %w", err)
 	}
+
+	password := held.Expose()
 
 	switch cfg.SASLMechanism {
 	case "PLAIN":

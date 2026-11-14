@@ -153,7 +153,7 @@ func TestConfig_RuntimeKeys(t *testing.T) {
 	cfg, err := LoadConfigFrom("", base)
 	require.NoError(t, err)
 	assert.InDelta(t, 0.85, cfg.RuntimeMemoryLimitRatio, 1e-9)
-	assert.Equal(t, defaultMemoryLimitRefresh, cfg.RuntimeMemoryLimitRefresh)
+	assert.Equal(t, "30s", cfg.RuntimeMemoryLimitRefresh.String())
 	assert.Equal(t, "all", cfg.RuntimeTraceback)
 
 	for key, value := range map[string]string{

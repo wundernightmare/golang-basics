@@ -60,6 +60,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.45.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/kafka v0.45.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0 // indirect
+	github.com/testcontainers/testcontainers-go/modules/redpanda v0.45.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/toxiproxy v0.45.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/valkey v0.45.0 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect

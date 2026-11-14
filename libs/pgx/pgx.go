@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/multitracer"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/wundernightmare/golang-basics/libs/secret"
 )
 
 // DB wraps a pgx connection pool together with a structured logger. Construct
@@ -72,12 +74,12 @@ func New(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) (*DB
 	}
 
 	if cfg.PasswordFile != "" {
-		pw, err := readSecretFile(cfg.PasswordFile)
+		pw, err := secret.ReadFile(cfg.PasswordFile)
 		if err != nil {
 			return nil, fmt.Errorf("pgx: DB_PASSWORD_FILE: %w", err)
 		}
 
-		poolCfg.ConnConfig.Password = pw // over the URL's and DB_PASSWORD
+		poolCfg.ConnConfig.Password = pw.Expose() // over the URL's and DB_PASSWORD
 	}
 
 	connectTimeout := cfg.ConnectTimeout

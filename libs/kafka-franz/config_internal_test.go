@@ -61,6 +61,7 @@ func TestTLSConfig(t *testing.T) {
 	tc, err = tlsConfig(kafka.Config{SecurityProtocol: "ssl", SSLEndpointIdentificationAlgorithm: "none"})
 	require.NoError(t, err)
 	require.NotNil(t, tc.VerifyConnection, "the chain is still verified without the host name check")
+	assert.Nil(t, tc.RootCAs, "no CA file: the system roots")
 
 	_, err = tlsConfig(kafka.Config{SecurityProtocol: "ssl", SSLCALocation: "/nonexistent/ca.pem"})
 	require.Error(t, err)
@@ -128,7 +129,7 @@ func writeCA(t *testing.T) (dir string, caCert *x509.Certificate, leaf tls.Certi
 func TestTLSConfig_PrivateCAAndClientCert(t *testing.T) {
 	t.Parallel()
 
-	dir, _, leaf := writeCA(t)
+	dir, authority, leaf := writeCA(t)
 	cfg := kafka.Config{
 		SecurityProtocol: "ssl", SSLCALocation: filepath.Join(dir, "ca.crt"),
 		SSLCertificateLocation: filepath.Join(dir, "client.crt"), SSLKeyLocation: filepath.Join(dir, "client.key"),
@@ -137,6 +138,10 @@ func TestTLSConfig_PrivateCAAndClientCert(t *testing.T) {
 	tc, err := tlsConfig(cfg)
 	require.NoError(t, err)
 	require.Len(t, tc.Certificates, 1, "the client presents its certificate")
+
+	only := x509.NewCertPool()
+	only.AddCert(authority)
+	assert.True(t, tc.RootCAs.Equal(only), "the CA file is the trust store, as in librdkafka: the system roots are not added")
 
 	peer, err := x509.ParseCertificate(leaf.Certificate[0])
 	require.NoError(t, err)

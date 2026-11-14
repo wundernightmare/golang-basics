@@ -57,8 +57,24 @@ two lines. The hook is tested against `go-viper/mapstructure/v2`, the decoder
 own store is outside the type: `v.AllSettings()` and `v.Debug()` print what was
 loaded, raw.
 
-The text is taken as is — no trimming. A secret read from a file with a
-trailing newline keeps it; trim at the place that reads the file.
+The text is taken as is — no trimming.
+
+## Mounted files
+
+What a pod mounts instead of putting it in the environment is read through
+the package too, so every client means the same thing by the same kind of
+file:
+
+- `secret.ReadFile(path)` — a password or token file, as a `String`: the
+  whole file without the line break an editor or `echo` leaves at the end;
+  a file that is missing or holds nothing is an error (`ErrEmptyFile`), not
+  an empty secret. `DB_PASSWORD_FILE` and `KAFKA_SASL_PASSWORD_FILE` are
+  read with it.
+- `secret.CertPool(path)` — a PEM bundle of certificate authorities, as the
+  pool to verify a dependency with. The pool is the file and nothing else:
+  a CA file names whom to trust, the system roots are what a client uses
+  without one. `KAFKA_SSL_CA_LOCATION` (franz-go), `S3_CA_FILE` and
+  `OTEL_EXPORTER_OTLP_CERTIFICATE` are read with it.
 
 ## Fingerprint
 

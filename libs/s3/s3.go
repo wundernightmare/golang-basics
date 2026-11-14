@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +11,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
@@ -26,6 +24,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/wundernightmare/golang-basics/libs/secret"
 )
 
 // ErrNotFound is what [Client.Get] and [Client.Head] return for a key that
@@ -187,14 +187,9 @@ func newHTTPClient(cfg Config) (*http.Client, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 
 	if cfg.CAFile != "" {
-		pem, err := os.ReadFile(cfg.CAFile)
+		pool, err := secret.CertPool(cfg.CAFile)
 		if err != nil {
-			return nil, fmt.Errorf("s3: read S3_CA_FILE: %w", err)
-		}
-
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("s3: S3_CA_FILE %q holds no PEM certificate", cfg.CAFile)
+			return nil, fmt.Errorf("s3: S3_CA_FILE: %w", err)
 		}
 
 		tlsCfg.RootCAs = pool

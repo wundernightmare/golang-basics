@@ -3,7 +3,6 @@ package otelx
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,6 +21,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+
+	"github.com/wundernightmare/golang-basics/libs/secret"
 )
 
 // ShutdownFunc flushes and tears down the tracer provider. Defer it in main so
@@ -194,24 +195,16 @@ func newExporter(ctx context.Context, cfg Config) (*otlptrace.Exporter, error) {
 	return exporter, nil
 }
 
-// tlsConfig builds the exporter's TLS config: the system roots plus cfg.CACert
-// when given, and a client certificate for mTLS when both halves are set.
+// tlsConfig builds the exporter's TLS config: the system roots, or cfg.CACert
+// in their place when given (what the SDK's own OTEL_EXPORTER_OTLP_CERTIFICATE
+// means), and a client certificate for mTLS when both halves are set.
 func tlsConfig(cfg Config) (*tls.Config, error) {
 	tc := &tls.Config{MinVersion: tls.VersionTLS12}
 
 	if cfg.CACert != "" {
-		pem, err := os.ReadFile(cfg.CACert)
+		pool, err := secret.CertPool(cfg.CACert)
 		if err != nil {
-			return nil, fmt.Errorf("otelx: read OTLP CA certificate: %w", err)
-		}
-
-		pool, err := x509.SystemCertPool()
-		if err != nil || pool == nil {
-			pool = x509.NewCertPool()
-		}
-
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, errors.New("otelx: OTLP CA certificate: no PEM certificates found")
+			return nil, fmt.Errorf("otelx: OTLP CA certificate: %w", err)
 		}
 
 		tc.RootCAs = pool

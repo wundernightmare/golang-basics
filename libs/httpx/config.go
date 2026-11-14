@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"reflect"
 	"strings"
 	"time"
 
@@ -160,21 +161,32 @@ type Config struct {
 	DiagFlightCooldown    time.Duration `env:"DIAG_FLIGHT_COOLDOWN" envDefault:"5m" yaml:"diag_flight_cooldown"`
 }
 
-// Defaults applied by [Config.withDefaults] when a service builds a Config by
-// hand and leaves a field zero. They mirror the envDefault tags above.
-const (
-	defaultLogLevelMaxTTL     = 24 * time.Hour
-	defaultReadHeaderTimeout  = 5 * time.Second
-	defaultReadTimeout        = 30 * time.Second
-	defaultWriteTimeout       = 30 * time.Second
-	defaultIdleTimeout        = 120 * time.Second
-	defaultMaxHeaderBytes     = 1 << 20
-	defaultMaxBodyBytes       = 1 << 20
-	defaultDiagFlightMinAge   = 10 * time.Second
-	defaultDiagFlightMaxBytes = 8 << 20
-	defaultRateClientsMax     = 10_000
-	defaultShutdownTimeout    = 10 * time.Second
-)
+// keepsZero reports whether [Config.withDefaults] leaves the field alone:
+// its zero is a setting of its own — no API listener, no deadline, no
+// sampling, no delay — so a hand-built Config that leaves it zero means it.
+func keepsZero(field string) bool {
+	switch field {
+	case "Addr", "AdminAddr",
+		"RequestTimeout", "RequestTimeoutMin",
+		"ShutdownDelay", "SlowRequest",
+		"LogSampleInitial", "LogSampleThereafter",
+		"DiagFlightCooldown":
+		return true
+	default:
+		return false
+	}
+}
+
+// tagDefaults is a Config with nothing but its envDefault tags applied: the
+// one place the default values are written.
+func tagDefaults() Config {
+	var cfg Config
+	if err := env.ParseWithOptions(&cfg, env.Options{Environment: map[string]string{}}); err != nil {
+		panic(fmt.Sprintf("httpx: the envDefault tags of Config do not parse: %v", err))
+	}
+
+	return cfg
+}
 
 // LoadConfig parses a [Config] from the environment using the given key
 // prefix (use "" for no prefix), validates it and returns it fully defaulted,
@@ -199,119 +211,21 @@ func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 
 // withDefaults fills the zero fields a hand-built Config may leave, so a
 // service that projects its own struct into [Config] gets the same server
-// timeouts and limits as one that used [LoadConfig]. Negative durations mean
-// "off" where the field allows it and are left alone.
+// timeouts and limits as one that used [LoadConfig]: every field still zero
+// takes the value of its envDefault tag, except those in [keepsZero].
+// Negative durations mean "off" where the field allows it and are left alone.
 func (c *Config) withDefaults() {
 	if c.Service == "" {
 		c.Service = defaultServiceName()
 	}
 
-	if c.LogLevelMaxTTL == 0 {
-		c.LogLevelMaxTTL = defaultLogLevelMaxTTL
-	}
+	defaults := tagDefaults()
+	dst, def := reflect.ValueOf(c).Elem(), reflect.ValueOf(&defaults).Elem()
 
-	if c.ReadHeaderTimeout == 0 {
-		c.ReadHeaderTimeout = defaultReadHeaderTimeout
-	}
-
-	if c.ReadTimeout == 0 {
-		c.ReadTimeout = defaultReadTimeout
-	}
-
-	if c.WriteTimeout == 0 {
-		c.WriteTimeout = defaultWriteTimeout
-	}
-
-	if c.IdleTimeout == 0 {
-		c.IdleTimeout = defaultIdleTimeout
-	}
-
-	if c.MaxHeaderBytes == 0 {
-		c.MaxHeaderBytes = defaultMaxHeaderBytes
-	}
-
-	if c.RateClientsMax == 0 {
-		c.RateClientsMax = defaultRateClientsMax
-	}
-
-	if c.MaxBodyBytes == 0 {
-		c.MaxBodyBytes = defaultMaxBodyBytes
-	}
-
-	if c.ShutdownTimeout == 0 {
-		c.ShutdownTimeout = defaultShutdownTimeout
-	}
-
-	if c.HealthInterval == 0 {
-		c.HealthInterval = defaultHealthInterval
-	}
-
-	if c.HealthTimeout == 0 {
-		c.HealthTimeout = defaultHealthTimeout
-	}
-
-	if c.LogLevel == "" {
-		c.LogLevel = "info"
-	}
-
-	if c.LogFormat == "" {
-		c.LogFormat = "json"
-	}
-
-	if c.RuntimeMemoryLimitRatio == 0 {
-		c.RuntimeMemoryLimitRatio = defaultMemoryLimitRatio
-	}
-
-	if c.RuntimeMemoryLimitRefresh == 0 {
-		c.RuntimeMemoryLimitRefresh = defaultMemoryLimitRefresh
-	}
-
-	if c.RuntimeTraceback == "" {
-		c.RuntimeTraceback = defaultTraceback
-	}
-
-	c.withDiagDefaults()
-}
-
-func (c *Config) withDiagDefaults() {
-	if c.DiagKeyPrefix == "" {
-		c.DiagKeyPrefix = defaultDiagKeyPrefix
-	}
-
-	if c.DiagMemoryThreshold == 0 {
-		c.DiagMemoryThreshold = defaultDiagMemoryThreshold
-	}
-
-	if c.DiagMemoryCooldown == 0 {
-		c.DiagMemoryCooldown = defaultDiagMemoryCooldown
-	}
-
-	if c.DiagCheckInterval == 0 {
-		c.DiagCheckInterval = defaultDiagCheckInterval
-	}
-
-	if c.DiagUploadTimeout == 0 {
-		c.DiagUploadTimeout = defaultDiagUploadTimeout
-	}
-
-	if c.DiagSpoolRetry == 0 {
-		c.DiagSpoolRetry = defaultDiagSpoolRetry
-	}
-
-	if c.DiagSpoolMaxFiles == 0 {
-		c.DiagSpoolMaxFiles = defaultDiagSpoolMaxFiles
-	}
-
-	if c.DiagFlightMinAge == 0 {
-		c.DiagFlightMinAge = defaultDiagFlightMinAge
-	}
-
-	if c.DiagFlightMaxBytes == 0 {
-		c.DiagFlightMaxBytes = defaultDiagFlightMaxBytes
-	}
-
-	if c.DiagCrashMaxBytes == 0 {
-		c.DiagCrashMaxBytes = defaultDiagCrashMaxBytes
+	for i := range dst.NumField() {
+		if field := dst.Field(i); field.IsZero() && !keepsZero(dst.Type().Field(i).Name) {
+			field.Set(def.Field(i))
+		}
 	}
 }
 

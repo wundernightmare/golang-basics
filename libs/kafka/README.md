@@ -137,7 +137,7 @@ client library's default happens to be in the version you link. `<service>
 | `KAFKA_SECURITY_PROTOCOL` | `security.protocol` | `DialTLSConfig` + `SASL` | `plaintext` |
 | `KAFKA_SASL_MECHANISM` | `sasl.mechanism` | `plain` / `scram` mechanism | — (`PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`) |
 | `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` / `_FILE` | `sasl.username`, `sasl.password` | `Auth{User, Pass}` | — |
-| `KAFKA_SSL_CA_LOCATION` | `ssl.ca.location` | `tls.Config.RootCAs` (system roots + the file) | system roots |
+| `KAFKA_SSL_CA_LOCATION` | `ssl.ca.location` | `tls.Config.RootCAs` (the file alone) | system roots |
 | `KAFKA_SSL_CERTIFICATE_LOCATION`, `KAFKA_SSL_KEY_LOCATION` | `ssl.certificate.location`, `ssl.key.location` | `tls.Config.Certificates` | — (mTLS) |
 | `KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM` | `ssl.endpoint.identification.algorithm` | host name check on / chain-only `VerifyConnection` | `https` |
 
@@ -366,8 +366,9 @@ TASKS_KAFKA_SSL_CERTIFICATE_LOCATION=/etc/kafka-secret/client.crt
 TASKS_KAFKA_SSL_KEY_LOCATION=/etc/kafka-secret/client.key
 ```
 
-- The CA is **added** to the system roots (franz-go) / used as the trust
-  store (librdkafka); a publicly trusted cluster needs no CA key at all.
+- The CA file **is** the trust store, in both clients: with it set, a broker
+  certificate signed by a public authority is refused. A publicly trusted
+  cluster needs no CA key at all (the system roots).
 - The broker's host name is verified against its certificate
   (`ssl.endpoint.identification.algorithm=https`); `none` skips only that —
   the chain is still verified against the CA, in both clients.
@@ -481,6 +482,7 @@ unreachable shows in readiness and `kafka_client_brokers_up`.
 | `libs/kafka-rdkafka`, `libs/kafka-franz` (unit) | every named key reaches the client (librdkafka accepts the property map; franz-go's option values), the passthrough rules, the code → kind maps, statistics parsing |
 | **conformance** (`libs/kafka/kafkatest`, run by each provider against one Kafka container) | round trip with headers and both trace paths, client gauges, retries, `Permanent` and exhausted records on the DLQ with their headers and the exact committed offset, DLQ off stopping `Run`, shutdown mid-batch committing exactly what finished (checked by restarting a member), a two-member rebalance without loss and with bounded duplicates, the error taxonomy (missing topic, oversized record) |
 | `TestSASLSSL` (both providers) | produce + consume through `examples/kafka-sasl-ssl` — runs when `KAFKA_SASL_SSL_BROKERS` is set (`just kafka-sasl-ssl-test`) |
+| `TestTrustStore` (both providers) | what `KAFKA_SSL_CA_LOCATION` means, against Redpanda with TLS from a private CA and SASL/SCRAM (a container of the suite's own): the CA file connects, the system roots alone do not, another CA's file does not — and, in a child process whose system root *is* the broker's CA, another CA's file still does not (the file replaces the system roots; skipped for librdkafka, which does not read `SSL_CERT_FILE`) |
 | services | the tasks / consumer integration suites and e2e run with the default build; CI runs them with `-tags kafka_franz` too |
 
 On rootless Podman set `TESTCONTAINERS_RYUK_DISABLED=true`. A new provider

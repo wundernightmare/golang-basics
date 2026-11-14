@@ -310,3 +310,34 @@ func TestConfig_RedactsSecretPassThroughProperties(t *testing.T) {
 
 	assert.NotContains(t, string(out), "s3cret")
 }
+
+// Both providers take the SASL password from here: the configured one, or
+// the content of the mounted file, read at the moment a client is built.
+func TestSASLSecret(t *testing.T) {
+	t.Parallel()
+
+	inline := Config{SASLPassword: secret.New("inline")}
+	got, err := inline.SASLSecret()
+	require.NoError(t, err)
+	assert.Equal(t, "inline", got.Expose())
+
+	path := filepath.Join(t.TempDir(), "password")
+	require.NoError(t, os.WriteFile(path, []byte("first\n"), 0o600))
+
+	mounted := Config{SASLPasswordFile: path}
+	got, err = mounted.SASLSecret()
+	require.NoError(t, err)
+	assert.Equal(t, "first", got.Expose(), "without the trailing newline")
+
+	require.NoError(t, os.WriteFile(path, []byte("rotated"), 0o600))
+
+	got, err = mounted.SASLSecret()
+	require.NoError(t, err)
+	assert.Equal(t, "rotated", got.Expose(), "a rotated mount reaches the next client")
+
+	require.NoError(t, os.Remove(path))
+
+	got, err = mounted.SASLSecret()
+	require.ErrorContains(t, err, "KAFKA_SASL_PASSWORD_FILE: open "+path)
+	assert.True(t, got.IsZero())
+}
