@@ -1,0 +1,44 @@
+# go-test-coverage — the unit-layer floor (second pass of `scripts/cover.sh gate`).
+#
+# .testcoverage.yml gates the merge of all three layers, where a statement
+# counts as soon as anything executed it: a line of libs/httpx is "covered"
+# when a service's integration test happened to pass through it. For the
+# libraries that are pure logic that is too weak a claim — their behaviour
+# has to be pinned by fast tests that run without Docker, on every push and
+# in the pre-push hook. This file gates the unit layer alone (`go test
+# -short`, .cover/unit.out) for exactly those packages.
+#
+# Only the overrides below gate anything: the general thresholds are 0
+# because the libraries that need a dependency (pgx 29%, valkey 16% in the
+# unit layer) are tested where it is real, in the integration layer.
+# The numbers are the measured unit coverage at the time (grpcx 96.8, httpx
+# 95.0, resilience 100, resilient-http-client 98.8, secret 100, tiercache
+# 97.8) minus a few points of room: a ratchet, raised when it improves.
+#
+# Still not a proof of assertions — the unit layer also instruments the whole
+# workspace, so another module's unit test counts here too. `just mutate` is
+# the check that a covered line is a checked one.
+profile: .cover/unit.out
+
+threshold:
+  file: 0
+  package: 0
+  total: 0
+
+exclude:
+  paths:
+    - \.gen\.go$
+
+override:
+  - path: ^libs/httpx$
+    threshold: 90
+  - path: ^libs/resilient-http-client$
+    threshold: 95
+  - path: ^libs/grpcx$
+    threshold: 92
+  - path: ^libs/resilience$
+    threshold: 95
+  - path: ^libs/secret$
+    threshold: 95
+  - path: ^libs/tiercache$
+    threshold: 92

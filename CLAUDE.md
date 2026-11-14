@@ -246,6 +246,9 @@ README; this file is only the high-signal, easy-to-miss bits.
   (`scripts/cover.sh`, `just cov-check`, `.testcoverage.yml`). Tests write
   `-test.gocoverdir`, e2e binaries are built with `COVER=1` and write
   `GOCOVERDIR`. Raise the threshold when it improves; lower only with a reason.
+  The pure-logic libraries also have a floor on the unit layer alone
+  (`.testcoverage.unit.yml`): logic there is pinned by `-short` tests, not
+  by an integration test passing through it.
   A new package must reach some layer's profile: the gate
   (`scripts/cover-files.go`) fails on a file with code that no instrumented
   binary contained — add a test or have e2e run the binary, or exclude the

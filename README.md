@@ -406,6 +406,11 @@ name. And what it means: a statement counts when any layer executed it —
 every layer instruments the whole workspace — which is evidence of execution,
 not of an assertion; `just mutate` is the check for the second.
 
+The pure-logic libraries (`httpx`, `resilient-http-client`, `grpcx`,
+`resilience`, `secret`, `tiercache`) have a second floor on the **unit layer
+alone** (`.testcoverage.unit.yml`, 90–95%): there, coverage that exists only
+because an integration test passed through the code does not count.
+
 Two gates, both on the merged profile: the floors above, and **no
 regression** — the `coverage` job keeps master's per-package breakdown
 (`coverage-breakdown.json`) and compares a pull request's merged total to it.
