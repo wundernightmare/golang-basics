@@ -246,6 +246,10 @@ README; this file is only the high-signal, easy-to-miss bits.
   (`scripts/cover.sh`, `just cov-check`, `.testcoverage.yml`). Tests write
   `-test.gocoverdir`, e2e binaries are built with `COVER=1` and write
   `GOCOVERDIR`. Raise the threshold when it improves; lower only with a reason.
+  A new package must reach some layer's profile: the gate
+  (`scripts/cover-files.go`) fails on a file with code that no instrumented
+  binary contained — add a test or have e2e run the binary, or exclude the
+  path in `.testcoverage.yml` with the reason (test code only).
   The gate is `scripts/cover.sh gate`, never a bare `go-test-coverage`: with
   no go.mod at the workspace root the tool names files per module, and every
   `^libs/…` exclude and override in `.testcoverage.yml` matches nothing.

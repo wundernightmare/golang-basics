@@ -396,6 +396,16 @@ gates. Every layer uses `-covermode=atomic` (covdata cannot merge mixed modes,
 and `-race` implies atomic), and the merge fails on any covdata error rather
 than gate a partial profile.
 
+What the number does not include: test code that lives in non-`_test` files
+(`libs/testx`, `libs/kafka/kafkatest`, each service's `internal/testsupport`)
+and generated code — see `exclude` in `.testcoverage.yml`. What it must
+include: every other file with code. A package that no instrumented binary
+contained is absent from a profile rather than at 0%, so
+`scripts/cover-files.go` (part of `cover.sh gate`) fails on such a file by
+name. And what it means: a statement counts when any layer executed it —
+every layer instruments the whole workspace — which is evidence of execution,
+not of an assertion; `just mutate` is the check for the second.
+
 Two gates, both on the merged profile: the floors above, and **no
 regression** — the `coverage` job keeps master's per-package breakdown
 (`coverage-breakdown.json`) and compares a pull request's merged total to it.

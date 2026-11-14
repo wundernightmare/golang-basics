@@ -43,10 +43,16 @@ threshold:
   package: 50   # every package (overrides below raise it for pure logic)
   total: 70     # unit + integration + e2e merged (set from the first full run; ratchet up)
 
+# Everything a default build compiles and that is not listed here must be in
+# the profile: scripts/cover-files.go (run by `cover.sh gate`) fails on a
+# file with code that no layer's binaries contained — such a file is not at
+# 0%, it is absent, and no threshold above would ever count it.
 exclude:
   paths:
     - ^libs/[^/]+/doc\.go$
     - ^libs/testx/      # the harness (testx, testx/containers, testx/contract) is not a coverage target
+    - ^libs/kafka/kafkatest/  # the Kafka conformance suite both providers' tests run: test code in a non-_test file
+    - /internal/testsupport/  # a service's test fixtures (fakes, builders), imported only by its tests
     - ^libs/secret/compat/  # libs/secret against the config libraries: test code, not a target
     - ^libs/grpcx/integration/  # the gRPC wiring's integration suite: test code, not a target
     - ^libs/resilient-http-client/integration/  # the client's integration suite: test code, not a target

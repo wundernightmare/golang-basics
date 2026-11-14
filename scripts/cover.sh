@@ -52,7 +52,7 @@ case "${1:?usage: cover.sh unit|integration|e2e|merge|gate}" in
     # Cover-instrumented release binaries (COVER=1: -cover -covermode=atomic
     # over every workspace package) into $bin, where the harness looks.
     mkdir -p "$bin"
-    for s in ping heartbeat tasks consumer; do COVER=1 "$root/scripts/build-service.sh" "$s" "$bin/$s"; done
+    for s in ping heartbeat tasks consumer ingest; do COVER=1 "$root/scripts/build-service.sh" "$s" "$bin/$s"; done
     # The harness passes E2E_COVER_DIR to every child as GOCOVERDIR and stops
     # it with SIGTERM + wait, so each graceful exit flushes its counters.
     # tasks/consumer run only when E2E_DATABASE_URL / E2E_VALKEY_URL /
@@ -111,6 +111,10 @@ case "${1:?usage: cover.sh unit|integration|e2e|merge|gate}" in
     status=0
     (cd "$root" && gotestcov --config .testcoverage.yml "$@") || status=$?
     rm -f "$root/go.mod"
+    # A package that no instrumented binary contains is not at 0% in the
+    # profile, it is absent from it — and so from every threshold above.
+    # GOWORK=off: the file is a stdlib-only program outside every module.
+    (cd "$root" && GOWORK=off go run scripts/cover-files.go "$root" "$root/coverage-merged.out") || status=$?
     # The proof that the names are workspace-relative: without it the gate
     # would pass or fail on patterns that match nothing.
     if ! grep -q '^libs/' "$root/coverage-breakdown.json"; then
