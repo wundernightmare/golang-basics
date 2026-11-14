@@ -108,8 +108,12 @@ func Postgres(tb testing.TB) string {
 	tb.Helper()
 
 	return use(tb, &postgres, "postgres", func(ctx context.Context) (string, testcontainers.Container, error) {
-		c, err := tcpostgres.Run(ctx, PostgresImage,
+		ctr, err := tcpostgres.Run(ctx, PostgresImage,
 			tcpostgres.WithDatabase("app"), tcpostgres.WithUsername("app"), tcpostgres.WithPassword("app"),
+			// The data directory in memory: a fixture needs no durability,
+			// and initdb plus every commit's fsync through the container's
+			// overlay filesystem is most of what a store test waits for.
+			testcontainers.WithTmpfs(map[string]string{"/var/lib/postgresql": "rw"}),
 			// The log line says the server is up; the listening-port check says the
 			// host-side port mapping is, which can lag the log by a moment.
 			testcontainers.WithWaitStrategy(wait.ForAll(
@@ -120,9 +124,9 @@ func Postgres(tb testing.TB) string {
 			return "", nil, err
 		}
 
-		dsn, err := c.ConnectionString(ctx, "sslmode=disable")
+		dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
 
-		return dsn, c, err
+		return dsn, ctr, err
 	})
 }
 
@@ -179,6 +183,10 @@ func S3(tb testing.TB) S3Store {
 				"RUSTFS_ACCESS_KEY": s3AccessKey,
 				"RUSTFS_SECRET_KEY": s3SecretKey,
 			}),
+			// Objects in memory, for the same reason as Postgres above: on
+			// an overlay filesystem a thousand small PUTs took 40s and a
+			// batch delete ran past the client's timeout.
+			testcontainers.WithTmpfs(map[string]string{"/data": "rw,mode=1777"}),
 			// /health answers once the store serves the S3 API; the port
 			// alone opens a moment earlier.
 			testcontainers.WithWaitStrategy(wait.ForHTTP("/health").WithPort(s3Port).
@@ -325,8 +333,12 @@ func use[V any](tb testing.TB, s *shared[V], name string,
 	return s.value
 }
 
+// terminator removes a container without waiting for it to shut down: a
+// fixture has nothing worth flushing, and the graceful stop is what a test
+// binary would spend its last seconds on — the Kafka image ignores SIGTERM
+// for the whole default grace period (10s, measured), once per package.
 func terminator(c testcontainers.Container) func(context.Context) error {
 	return func(ctx context.Context) error {
-		return testcontainers.TerminateContainer(c, testcontainers.StopContext(ctx))
+		return testcontainers.TerminateContainer(c, testcontainers.StopContext(ctx), testcontainers.StopTimeout(0))
 	}
 }

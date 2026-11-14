@@ -25,8 +25,6 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 MODULES := `scripts/touched-modules.sh --all | xargs`
 # Service names (services/<name>) — each builds one binary / one image.
 SERVICES := `scripts/touched-modules.sh --services | xargs`
-# Modules with Docker-backed suites: their go.mod requires libs/testx/containers.
-INTEGRATION_MODULES := `scripts/touched-modules.sh --integration | xargs`
 # The Go pin, handed to every docker build (the Dockerfile requires it).
 GO_VERSION := `scripts/mise-pins.sh | sed -n 's/^GO_VERSION=//p'`
 
@@ -131,9 +129,10 @@ test *args:
 test-short *args:
     for m in {{MODULES}}; do echo "── test -short $m"; (cd "$m" && go test -short -shuffle=on ./... {{args}}); done
 
-# Docker-backed suites (modules requiring libs/testx/containers) under -race
+# Docker-backed suites (modules requiring libs/testx/containers) under -race,
+# JOBS modules at a time (default 4): scripts/test-integration.sh
 test-integration *args:
-    for m in {{INTEGRATION_MODULES}}; do echo "── integration $m"; (cd "$m" && go test -race -shuffle=on ./... {{args}}); done
+    scripts/test-integration.sh {{args}}
 
 # Every module's tests with the race detector
 test-race *args:

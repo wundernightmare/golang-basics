@@ -102,7 +102,7 @@ just bench-smoke                   # k6 against ping (perf profile)
 
 ```sh
 just vet | build | test | test-short | test-race    # every module
-just test-integration     # Docker-backed modules (require libs/testx/containers), -race
+just test-integration     # Docker-backed modules (require libs/testx/containers), -race, 4 modules at a time (JOBS=8 just test-integration)
 just test-junit -short    # gotestsum → .reports/junit/<module>.xml; then `just allure`
 just lint                 # golangci-lint every module + shellcheck (lint-sh)
 just fmt | fmt-check      # gofmt over the module dirs
