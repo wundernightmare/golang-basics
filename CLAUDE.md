@@ -196,6 +196,11 @@ README; this file is only the high-signal, easy-to-miss bits.
   `HTTP_SHUTDOWN_TIMEOUT` → forced close → admin listener.** `Run` binds
   synchronously and evaluates readiness once before opening the gate; tests
   use `Addr: "127.0.0.1:0"` and `srv.ListenAddr()`, never fixed ports.
+- **A worker a request can wait for outlives the server**: run it with
+  `srv.RunWith(ctx, httpx.Worker{…})` — the server drains, then the workers
+  stop, each guarded against a panic (tasks: relay and janitor; ingest: the
+  archive writer). A worker nothing waits for (consumer, heartbeat) runs under
+  `srv.Guard` with the server's own context. Never a bare `go worker.Run`.
 - **Durability patterns live in the tasks vertical**: writes go through a
   transactional outbox (row + event in one transaction, relay publishes), the
   consumer retries with backoff and dead-letters to `<topic>.dlq` (or stops

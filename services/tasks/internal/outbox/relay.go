@@ -5,8 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
-	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- poll-backoff jitter is not security-sensitive; a CSPRNG (crypto/rand) is unnecessary here.
+	"log/slog" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- poll-backoff jitter is not security-sensitive; a CSPRNG (crypto/rand) is unnecessary here.
 	"strings"
 	"time"
 
@@ -20,6 +19,7 @@ import (
 
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
 	pgxlib "github.com/tracehubmmp/golang-basics/libs/pgx"
+	"github.com/tracehubmmp/golang-basics/libs/resilience"
 )
 
 // Publisher sends one record (satisfied by libs/kafka.Producer).
@@ -172,7 +172,7 @@ func (r *Relay) Run(ctx context.Context) error {
 		switch {
 		case err != nil:
 			failures++
-			wait = backoff(failures, r.cfg.PollInterval, r.cfg.MaxBackoff)
+			wait = resilience.Backoff(failures, r.cfg.PollInterval, r.cfg.MaxBackoff)
 			r.log.WarnContext(ctx, "outbox relay pass failed, backing off",
 				"err", err, "failures", failures, "retry_in", wait.String())
 		case taken == r.cfg.BatchSize: // published or stepped aside: either way more may be due
@@ -230,23 +230,6 @@ func (r *Relay) watch(ctx context.Context) error {
 		case <-t.C:
 		}
 	}
-}
-
-// backoff is interval·2^(n-1) capped at maxDelay, with "equal jitter".
-func backoff(n int, interval, maxDelay time.Duration) time.Duration {
-	d := interval
-	for i := 1; i < n && d < maxDelay; i++ {
-		d *= 2
-	}
-
-	d = min(d, maxDelay)
-
-	half := d / 2
-	if half <= 0 {
-		return d
-	}
-
-	return half + rand.N(half+1) //nolint:gosec // jitter, not a secret
 }
 
 // relayLockSQL makes one relay (across all replicas) the active one for a

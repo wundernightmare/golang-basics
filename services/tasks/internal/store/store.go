@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 
@@ -27,7 +26,7 @@ import (
 
 // Store is the task repository.
 type Store struct {
-	pool *pgxpool.Pool
+	db   *pgxlib.DB
 	prop propagation.TextMapPropagator
 }
 
@@ -41,9 +40,12 @@ func WithPropagator(p propagation.TextMapPropagator) Option {
 	return func(s *Store) { s.prop = p }
 }
 
-// New wraps a pool whose schema is migrated (see the migrations package).
-func New(pool *pgxpool.Pool, opts ...Option) *Store {
-	s := &Store{pool: pool}
+// New wraps a database whose schema is migrated (see the migrations
+// package). Every change is one unit of work of db ([pgxlib.DB.InTx]): the
+// row and its outbox event commit together or not at all, and a caller that
+// is already inside a unit of the same db has the change join it.
+func New(db *pgxlib.DB, opts ...Option) *Store {
+	s := &Store{db: db}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -65,25 +67,6 @@ func scanTask(row pgx.Row) (domain.Task, error) {
 	return t, err
 }
 
-// inTx runs fn in a transaction, committing when it returns nil.
-func (s *Store) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("store: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }() // no-op after commit
-
-	if err := fn(tx); err != nil {
-		return err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("store: commit: %w", err)
-	}
-
-	return nil
-}
-
 // Create inserts a task titled title with the given id, and its task.created
 // event, in one transaction; created_at comes from the database clock. With
 // idem, a repeat of the same key returns the task the first request created
@@ -96,7 +79,9 @@ func (s *Store) Create(ctx context.Context, id, title string, idem *domain.Idemp
 
 	var replayID string
 
-	err = s.inTx(ctx, func(tx pgx.Tx) error {
+	err = s.db.InTx(ctx, func(ctx context.Context) error {
+		tx := s.db.Conn(ctx)
+
 		created, err := scanTask(tx.QueryRow(ctx,
 			`INSERT INTO tasks (id, title) VALUES ($1, $2) RETURNING `+taskColumns, id, title))
 		if err != nil {
@@ -162,7 +147,7 @@ var errReplay = errors.New("store: idempotent replay")
 func (s *Store) Get(ctx context.Context, id string) (domain.Task, error) {
 	ctx = pgxlib.WithOperation(ctx, "tasks.get")
 
-	t, err := scanTask(s.pool.QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id = $1`, id))
+	t, err := scanTask(s.db.Conn(ctx).QueryRow(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Task{}, domain.ErrNotFound
 	}
@@ -190,11 +175,11 @@ func (s *Store) List(ctx context.Context, req domain.PageRequest) (domain.Page, 
 		err  error
 	)
 	if req.Cursor == nil {
-		rows, err = s.pool.Query(ctx,
+		rows, err = s.db.Conn(ctx).Query(ctx,
 			`SELECT `+taskColumns+` FROM tasks ORDER BY created_at DESC, id DESC LIMIT $1`, limit+1)
 	} else {
 		// Row-value comparison: exactly the index order, one range scan.
-		rows, err = s.pool.Query(ctx,
+		rows, err = s.db.Conn(ctx).Query(ctx,
 			`SELECT `+taskColumns+` FROM tasks WHERE (created_at, id) < ($1, $2)
 			 ORDER BY created_at DESC, id DESC LIMIT $3`, req.Cursor.CreatedAt, req.Cursor.ID, limit+1)
 	}
@@ -227,7 +212,9 @@ func (s *Store) Update(ctx context.Context, id string, patch domain.Patch, expec
 
 	var out domain.Task
 
-	err := s.inTx(ctx, func(tx pgx.Tx) error {
+	err := s.db.InTx(ctx, func(ctx context.Context) error {
+		tx := s.db.Conn(ctx)
+
 		updated, err := scanTask(tx.QueryRow(ctx,
 			`UPDATE tasks SET title = coalesce($2, title), done = coalesce($3, done), version = version + 1
 			  WHERE id = $1 AND ($4::bigint IS NULL OR version = $4)
@@ -265,7 +252,9 @@ func (s *Store) Update(ctx context.Context, id string, patch domain.Patch, expec
 func (s *Store) Delete(ctx context.Context, id string, expect *int64) error {
 	ctx = pgxlib.WithOperation(ctx, "tasks.delete")
 
-	return s.inTx(ctx, func(tx pgx.Tx) error {
+	return s.db.InTx(ctx, func(ctx context.Context) error {
+		tx := s.db.Conn(ctx)
+
 		var version int64
 
 		err := tx.QueryRow(ctx,
@@ -293,7 +282,7 @@ func (s *Store) Delete(ctx context.Context, id string, expect *int64) error {
 }
 
 // missOrMismatch explains a conditional UPDATE/DELETE that matched no row.
-func (s *Store) missOrMismatch(ctx context.Context, tx pgx.Tx, id string) error {
+func (s *Store) missOrMismatch(ctx context.Context, tx pgxlib.Querier, id string) error {
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1)`, id).Scan(&exists); err != nil {
 		return fmt.Errorf("store: check task %q: %w", id, err)
@@ -322,7 +311,7 @@ func createdEvent(t domain.Task) (payload []byte, eventID string, err error) {
 
 // PurgeIdempotencyKeys deletes keys older than ttl and returns how many.
 func (s *Store) PurgeIdempotencyKeys(ctx context.Context, ttl time.Duration) (int64, error) {
-	tag, err := s.pool.Exec(pgxlib.WithOperation(ctx, "tasks.purge_idempotency_keys"),
+	tag, err := s.db.Conn(ctx).Exec(pgxlib.WithOperation(ctx, "tasks.purge_idempotency_keys"),
 		`DELETE FROM idempotency_keys WHERE created_at < now() - make_interval(secs => $1)`, ttl.Seconds())
 	if err != nil {
 		return 0, fmt.Errorf("store: purge idempotency keys: %w", err)

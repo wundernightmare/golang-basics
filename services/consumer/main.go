@@ -46,12 +46,7 @@ func run(cfg config.Config) error {
 		logger.Error("tracing init failed", "err", err)
 		return err
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		_ = tel.Shutdown(ctx)
-	}()
+	defer tel.Stop()
 
 	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelBoot()

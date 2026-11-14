@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
+	"github.com/tracehubmmp/golang-basics/libs/resilience"
 )
 
 // errDraining reports that the drain budget ran out (or the loop was told to
@@ -294,7 +295,7 @@ func (c *Consumer) process(ctx context.Context, msg Message, handler Handler) er
 			break
 		}
 
-		wait := backoff(attempt-1, c.cfg.RetryBackoff, c.cfg.RetryBackoffMax)
+		wait := resilience.Backoff(attempt, c.cfg.RetryBackoff, c.cfg.RetryBackoffMax)
 		c.log.WarnContext(logCtx, "kafka handler failed; retrying",
 			"topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "attempt", attempt, "backoff", wait, "err", err)
 
@@ -448,7 +449,7 @@ func (c *Consumer) deadLetter(ctx, logCtx context.Context, record Message, topic
 			return err
 		}
 
-		wait := backoff(n, c.cfg.RetryBackoff, c.cfg.RetryBackoffMax)
+		wait := resilience.Backoff(n+1, c.cfg.RetryBackoff, c.cfg.RetryBackoffMax) // n is 0-based
 		c.log.WarnContext(logCtx, "kafka dead-letter publish failed; retrying", "dead_letter_topic", topic, "backoff", wait, "err", err)
 
 		if !sleep(ctx, wait) {
