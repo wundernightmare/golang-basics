@@ -28,11 +28,13 @@ model Task {
    * characters, at least one of them not whitespace, no control characters
    * other than tab (NUL in particular — PostgreSQL TEXT rejects it; found by
    * Schemathesis). The pattern states the rules so that a generated,
-   * schema-compliant request is always accepted.
+   * schema-compliant request is always accepted. It lists the whitespace
+   * code points one by one instead of `\s`: what `\s` covers differs between
+   * regex engines (U+00A0, U+0085), and the server trims Unicode White_Space.
    */
   @minLength(1)
   @maxLength(200)
-  @pattern("^[^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*[^\\s\\u0000-\\u001F\\u007F][^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*$")
+  @pattern("^[^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000][^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*$")
   title: string;
   /** Completion flag. */
   done: boolean;
@@ -52,7 +54,7 @@ model CreateTaskRequest {
   /** Title of the task; surrounding whitespace is trimmed (rules as Task.title). */
   @minLength(1)
   @maxLength(200)
-  @pattern("^[^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*[^\\s\\u0000-\\u001F\\u007F][^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*$")
+  @pattern("^[^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000][^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*$")
   title: string;
 }
 
@@ -66,7 +68,7 @@ model UpdateTaskRequest {
   /** New title; surrounding whitespace is trimmed (rules as Task.title). */
   @minLength(1)
   @maxLength(200)
-  @pattern("^[^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*[^\\s\\u0000-\\u001F\\u007F][^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*$")
+  @pattern("^[^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000][^\\u0000-\\u0008\\u000A-\\u001F\\u007F]*$")
   title?: string;
   /** New completion flag. */
   done?: boolean;
