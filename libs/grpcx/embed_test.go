@@ -49,7 +49,8 @@ grpc:
     - name: billing
       address: dns:///billing.internal:443
       timeout: 2s
-      breaker_failure_ratio: 0
+      breaker:
+        failure_ratio: 0
     - name: search
       address: dns:///search.internal:443
       retry_max_attempts: 0
@@ -58,7 +59,7 @@ grpc:
 
 	billing := grpcx.DefaultTarget("billing", "dns:///billing.internal:443")
 	billing.Timeout = 2 * time.Second
-	billing.FailureRatio = 0
+	billing.Breaker.FailureRatio = 0
 
 	search := grpcx.DefaultTarget("search", "dns:///search.internal:443")
 	search.RetryMaxAttempts = 0

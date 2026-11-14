@@ -21,10 +21,10 @@ import (
 //	TIERCACHE_REFRESH_TIMEOUT      [refresh_timeout]      deadline of one background refresh        (default 5s)
 //	TIERCACHE_REFRESH_CONCURRENCY  [refresh_concurrency]  background refreshes in flight            (default 16)
 //	TIERCACHE_TOMBSTONE_TTL        [tombstone_ttl]        how long an invalidation blocks L2 fills  (default 5s)
-//	TIERCACHE_BREAKER_FAILURE_RATIO [breaker_failure_ratio] share of failed L2 calls that opens it  (default 0.5)
-//	TIERCACHE_BREAKER_MIN_REQUESTS  [breaker_min_requests]  L2 calls in the window before it counts (default 10)
-//	TIERCACHE_BREAKER_WINDOW        [breaker_window]        window the ratio is measured over       (default 10s)
-//	TIERCACHE_BREAKER_OPEN_TIMEOUT  [breaker_open_timeout]  how long L2 is skipped once open        (default 5s)
+//	TIERCACHE_BREAKER_FAILURE_RATIO [breaker.failure_ratio] share of failed L2 calls that opens it  (default 0.5)
+//	TIERCACHE_BREAKER_MIN_REQUESTS  [breaker.min_requests]  L2 calls in the window before it counts (default 10)
+//	TIERCACHE_BREAKER_WINDOW        [breaker.window]        window the ratio is measured over       (default 10s)
+//	TIERCACHE_BREAKER_OPEN_TIMEOUT  [breaker.open_timeout]  how long L2 is skipped once open        (default 5s)
 //	TIERCACHE_DISABLE_INVALIDATION [disable_invalidation] no Pub/Sub subscription                   (default false)
 type Config struct {
 	// Name identifies the cache: the `cache` metric label, the L2 key prefix
@@ -52,14 +52,13 @@ type Config struct {
 	// TombstoneTTL is how long [Cache.Invalidate] keeps L2 fills of the key
 	// refused: a few times the slowest load.
 	TombstoneTTL time.Duration `env:"TIERCACHE_TOMBSTONE_TTL" yaml:"tombstone_ttl"`
-	// The L2 circuit breaker (libs/resilience, the one the outbound HTTP and
-	// gRPC clients use, under the same yaml keys): when BreakerFailureRatio of
-	// at least BreakerMinRequests L2 calls within BreakerWindow failed, L2 is
-	// skipped for BreakerOpenTimeout; then one call probes it.
-	BreakerFailureRatio float64       `env:"TIERCACHE_BREAKER_FAILURE_RATIO" yaml:"breaker_failure_ratio"`
-	BreakerMinRequests  int           `env:"TIERCACHE_BREAKER_MIN_REQUESTS" yaml:"breaker_min_requests"`
-	BreakerWindow       time.Duration `env:"TIERCACHE_BREAKER_WINDOW" yaml:"breaker_window"`
-	BreakerOpenTimeout  time.Duration `env:"TIERCACHE_BREAKER_OPEN_TIMEOUT" yaml:"breaker_open_timeout"`
+	// Breaker is the L2 circuit breaker (libs/resilience, configured like
+	// every other one): when breaker.failure_ratio of at least
+	// breaker.min_requests L2 calls within breaker.window failed, L2 is
+	// skipped for breaker.open_timeout; then breaker.half_open_probes calls
+	// probe it. Defaults: 0.5 of 10 in 10s, 5s, one probe — a cache wants L2
+	// back soon and has no use for several probes.
+	Breaker resilience.BreakerConfig `envPrefix:"TIERCACHE_BREAKER_" yaml:"breaker"`
 	// DisableInvalidation turns the Pub/Sub subscription off: entries then
 	// leave L1 by TTL only.
 	DisableInvalidation bool `env:"TIERCACHE_DISABLE_INVALIDATION" yaml:"disable_invalidation"`
@@ -89,32 +88,24 @@ func (c *Config) applyDefaults() {
 		c.TombstoneTTL = 5 * time.Second
 	}
 
-	if c.BreakerFailureRatio <= 0 {
-		c.BreakerFailureRatio = 0.5
+	if c.Breaker.FailureRatio <= 0 {
+		c.Breaker.FailureRatio = 0.5
 	}
 
-	if c.BreakerMinRequests <= 0 {
-		c.BreakerMinRequests = 10
+	if c.Breaker.MinRequests <= 0 {
+		c.Breaker.MinRequests = 10
 	}
 
-	if c.BreakerWindow <= 0 {
-		c.BreakerWindow = 10 * time.Second
+	if c.Breaker.Window <= 0 {
+		c.Breaker.Window = 10 * time.Second
 	}
 
-	if c.BreakerOpenTimeout <= 0 {
-		c.BreakerOpenTimeout = 5 * time.Second
+	if c.Breaker.OpenTimeout <= 0 {
+		c.Breaker.OpenTimeout = 5 * time.Second
 	}
-}
 
-// breaker is the policy handed to libs/resilience. A cache wants L2 back
-// soon and has no use for several probes: one decides.
-func (c Config) breaker() resilience.BreakerConfig {
-	return resilience.BreakerConfig{
-		FailureRatio:   c.BreakerFailureRatio,
-		MinRequests:    c.BreakerMinRequests,
-		Window:         c.BreakerWindow,
-		OpenTimeout:    c.BreakerOpenTimeout,
-		HalfOpenProbes: 1,
+	if c.Breaker.HalfOpenProbes <= 0 {
+		c.Breaker.HalfOpenProbes = 1
 	}
 }
 
@@ -131,8 +122,8 @@ func (c Config) Validate() error {
 		return errors.New("tiercache: StaleIfError must not be negative")
 	}
 
-	if errs := c.breaker().Validate(); len(errs) > 0 {
-		return fmt.Errorf("tiercache: %w", errors.Join(errs...))
+	if errs := c.Breaker.Validate(); len(errs) > 0 {
+		return fmt.Errorf("tiercache: breaker: %w", errors.Join(errs...))
 	}
 
 	return nil

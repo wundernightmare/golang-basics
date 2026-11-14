@@ -89,10 +89,10 @@ func TestConfig(t *testing.T) {
 	require.ErrorContains(t, Config{Name: "c", HardTTL: time.Second, SoftTTL: time.Minute}.Validate(), "SoftTTL")
 	require.ErrorContains(t, Config{Name: "c", HardTTL: time.Second, StaleIfError: -1}.Validate(), "StaleIfError")
 
-	assert.Equal(t, resilience.BreakerConfig{FailureRatio: 0.5, MinRequests: 10, Window: 10 * time.Second, OpenTimeout: 5 * time.Second, HalfOpenProbes: 1}, cfg.breaker())
+	assert.Equal(t, resilience.BreakerConfig{FailureRatio: 0.5, MinRequests: 10, Window: 10 * time.Second, OpenTimeout: 5 * time.Second, HalfOpenProbes: 1}, cfg.Breaker)
 
-	cfg.BreakerFailureRatio = 1.5
-	require.ErrorContains(t, cfg.Validate(), "breaker_failure_ratio")
+	cfg.Breaker.FailureRatio = 1.5
+	require.ErrorContains(t, cfg.Validate(), "breaker: failure_ratio")
 }
 
 func TestMetricsAreLintClean(t *testing.T) {

@@ -3,6 +3,7 @@ package httpx_test
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -205,4 +206,39 @@ func TestRunWith_ServerFailureStopsTheWorkers(t *testing.T) {
 	}})
 	require.Error(t, err, "the port is taken")
 	assert.True(t, stopped.Load())
+}
+
+// A connection that was opened on the admin listener and never used (a
+// client's spare one, a port check) is still there when the service stops:
+// net/http waits five seconds for it, the admin listener two. That is not a
+// failure of the service — Run closes it, says so, and returns cleanly.
+func TestRun_AnUnusedAdminConnectionDoesNotFailShutdown(t *testing.T) {
+	t.Parallel()
+
+	srv, logs := loggedServer(t, httpx.Config{AdminAddr: "127.0.0.1:0", ShutdownTimeout: time.Second})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() { done <- srv.Run(ctx) }()
+
+	servingAddr(t, srv)
+
+	idle, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", srv.AdminListenAddr())
+	require.NoError(t, err)
+
+	defer func() { _ = idle.Close() }()
+
+	// The server has accepted it before the shutdown starts.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err, "an unused admin connection is not an error")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+
+	assert.NotNil(t, logs.Find(t, map[string]any{"msg": "admin listener: connections still open after its drain budget, closed"}))
 }

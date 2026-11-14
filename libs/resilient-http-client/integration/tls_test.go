@@ -164,7 +164,7 @@ func TestTLS_SchemeAndPortDisagree(t *testing.T) {
 	t.Parallel()
 
 	srv := web(t)
-	client := newClient(t, policy(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }), nil)
+	client := newClient(t, policy(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }), nil)
 
 	// HTTP to the TLS port: the server answers, in cleartext, that this is
 	// the wrong door. An answer is an answer — a 400, and a live dependency.
@@ -182,7 +182,7 @@ func TestTLS_SchemeAndPortDisagree(t *testing.T) {
 	_, err = client.Send(api, get(t, "https://"+srv.Plain+"/whoami")) //nolint:bodyclose // error
 	require.ErrorIs(t, err, resilient.KindConnection)
 	require.ErrorContains(t, err, "HTTP response to HTTPS client")
-	assert.Equal(t, resilient.StateOpen, breakerState(t, client), "with breaker_min_requests 1 this failure opens it")
+	assert.Equal(t, resilient.StateOpen, breakerState(t, client), "with breaker.min_requests 1 this failure opens it")
 }
 
 // The redirect policy against a real server's Location headers, over TLS:
@@ -192,7 +192,7 @@ func TestTLS_Redirects(t *testing.T) {
 
 	srv := web(t)
 	base := "https://" + srv.TLS
-	client := newClient(t, policy(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }),
+	client := newClient(t, policy(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }),
 		func(c *resilient.Config) { c.MaxRedirects = 3 })
 
 	resp, err := client.Send(api, get(t, base+"/redirect/same"))
@@ -226,7 +226,7 @@ func TestH3_NobodyListening(t *testing.T) {
 	srv := web(t)
 	client := newClient(t, policy(func(tc *resilient.TargetConfig) {
 		tc.Timeout = 500 * time.Millisecond
-		tc.BreakerMinRequests = 1
+		tc.Breaker.MinRequests = 1
 	}), nil, h3Options(nil)(t)...)
 
 	// The TLS 1.3 listener is TCP only: its port number is unused on UDP.

@@ -94,22 +94,11 @@ type TargetConfig struct {
 	// (default 0 = do not wait: reject at once when full).
 	MaxConcurrentWait time.Duration `yaml:"max_concurrent_wait"`
 
-	// BreakerFailureRatio trips the circuit breaker when failures / requests
-	// in the window reach it, in (0, 1] (default 0.5; 0 = no breaker).
-	BreakerFailureRatio float64 `yaml:"breaker_failure_ratio"`
-	// BreakerMinRequests is the least requests in the window before the ratio
-	// is evaluated (default 20; must be ≥ 1 with a breaker).
-	BreakerMinRequests int `yaml:"breaker_min_requests"`
-	// BreakerWindow is the sliding window the ratio is measured over
-	// (default 10s; must be > 0 with a breaker).
-	BreakerWindow time.Duration `yaml:"breaker_window"`
-	// BreakerOpenTimeout is how long the breaker stays open before admitting
-	// probes (default 30s; must be > 0 with a breaker).
-	BreakerOpenTimeout time.Duration `yaml:"breaker_open_timeout"`
-	// BreakerHalfOpenProbes is how many probes half-open admits; all must
-	// succeed to close it, any failure re-opens it (default 1; must be ≥ 1
-	// with a breaker).
-	BreakerHalfOpenProbes int `yaml:"breaker_half_open_probes"`
+	// Breaker is the circuit breaker (libs/resilience): breaker.failure_ratio
+	// (default 0.5; 0 = no breaker), breaker.min_requests (20),
+	// breaker.window (10s), breaker.open_timeout (30s),
+	// breaker.half_open_probes (1).
+	Breaker resilience.BreakerConfig `yaml:"breaker"`
 
 	// RetryMaxAttempts is the total attempts [Client.SendWithRetry] makes,
 	// the first included (default 3; 0 or 1 = no retries).
@@ -128,17 +117,6 @@ type TargetConfig struct {
 	// RetryBudgetWindow is the sliding window of the retry budget
 	// (default 10s; 0 = no budget: retries are only bounded by attempts).
 	RetryBudgetWindow time.Duration `yaml:"retry_budget_window"`
-}
-
-// breaker is the target's circuit-breaker policy.
-func (t *TargetConfig) breaker() resilience.BreakerConfig {
-	return resilience.BreakerConfig{
-		FailureRatio:   t.BreakerFailureRatio,
-		MinRequests:    t.BreakerMinRequests,
-		Window:         t.BreakerWindow,
-		OpenTimeout:    t.BreakerOpenTimeout,
-		HalfOpenProbes: t.BreakerHalfOpenProbes,
-	}
 }
 
 // DefaultConfig returns the defaults documented on [Config], with the given
@@ -161,16 +139,10 @@ func DefaultConfig(targets ...string) Config {
 
 // DefaultTarget returns the defaults documented on [TargetConfig].
 func DefaultTarget(name string) TargetConfig {
-	breaker := resilience.DefaultBreakerConfig()
-
 	return TargetConfig{
 		Name:                  name,
 		Timeout:               5 * time.Second,
-		BreakerFailureRatio:   breaker.FailureRatio,
-		BreakerMinRequests:    breaker.MinRequests,
-		BreakerWindow:         breaker.Window,
-		BreakerOpenTimeout:    breaker.OpenTimeout,
-		BreakerHalfOpenProbes: breaker.HalfOpenProbes,
+		Breaker:               resilience.DefaultBreakerConfig(),
 		RetryMaxAttempts:      3,
 		RetryBaseDelay:        100 * time.Millisecond,
 		RetryMaxDelay:         5 * time.Second,

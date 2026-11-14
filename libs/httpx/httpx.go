@@ -392,11 +392,14 @@ func (s *Server) shutdown(api, admin *http.Server, cancelBase context.CancelFunc
 		cancel()
 
 		if err != nil {
+			// Not a failure of the service: nothing a caller waits for is
+			// served here. What outlives the budget is a scrape cut short
+			// or — the common case — a connection a client opened and
+			// never used, which net/http counts as active for five
+			// seconds. Close it and say so; the exit code stays clean.
 			_ = admin.Close()
 
-			if first == nil {
-				first = fmt.Errorf("httpx: admin drain: %w", err)
-			}
+			s.log.Warn("admin listener: connections still open after its drain budget, closed", "budget", adminShutdownBudget.String(), "err", err)
 		}
 	}
 

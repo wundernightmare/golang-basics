@@ -19,7 +19,8 @@ targets:
   - name: billing
     timeout: 2s
     rate_limit: 2.5
-    breaker_failure_ratio: 0
+    breaker:
+      failure_ratio: 0
   - name: search
 `))
 	require.NoError(t, err)
@@ -29,7 +30,7 @@ targets:
 	want.HTTP2PingInterval = 0
 	want.Targets[0].Timeout = 2 * time.Second
 	want.Targets[0].RateLimit = 2.5
-	want.Targets[0].BreakerFailureRatio = 0
+	want.Targets[0].Breaker.FailureRatio = 0
 	assert.Equal(t, want, cfg, "omitted keys keep their defaults; an explicit 0 disables")
 }
 
@@ -84,12 +85,12 @@ func TestValidate(t *testing.T) {
 		{"rate", func(c *Config) { c.Targets[0].RateLimit = -0.5 }, "rate_limit"},
 		{"burst", func(c *Config) { c.Targets[0].RateBurst = -1 }, "rate_limit"},
 		{"bulkhead", func(c *Config) { c.Targets[0].MaxConcurrent = -1 }, "max_concurrent"},
-		{"ratio low", func(c *Config) { c.Targets[0].BreakerFailureRatio = -0.1 }, "breaker_failure_ratio"},
-		{"ratio high", func(c *Config) { c.Targets[0].BreakerFailureRatio = 1.01 }, "breaker_failure_ratio"},
-		{"min requests", func(c *Config) { c.Targets[0].BreakerMinRequests = 0 }, "breaker_min_requests"},
-		{"window", func(c *Config) { c.Targets[0].BreakerWindow = 0 }, "breaker_window"},
-		{"open timeout", func(c *Config) { c.Targets[0].BreakerOpenTimeout = 0 }, "breaker_window"},
-		{"probes", func(c *Config) { c.Targets[0].BreakerHalfOpenProbes = 0 }, "probes"},
+		{"ratio low", func(c *Config) { c.Targets[0].Breaker.FailureRatio = -0.1 }, "breaker: failure_ratio"},
+		{"ratio high", func(c *Config) { c.Targets[0].Breaker.FailureRatio = 1.01 }, "breaker: failure_ratio"},
+		{"min requests", func(c *Config) { c.Targets[0].Breaker.MinRequests = 0 }, "breaker: min_requests"},
+		{"window", func(c *Config) { c.Targets[0].Breaker.Window = 0 }, "breaker: window"},
+		{"open timeout", func(c *Config) { c.Targets[0].Breaker.OpenTimeout = 0 }, "breaker: window"},
+		{"probes", func(c *Config) { c.Targets[0].Breaker.HalfOpenProbes = 0 }, "probes"},
 		{"attempts", func(c *Config) { c.Targets[0].RetryMaxAttempts = -1 }, "retry_max_attempts"},
 		{"base delay", func(c *Config) { c.Targets[0].RetryBaseDelay = -1 }, "retry delays"},
 		{"max < base", func(c *Config) { c.Targets[0].RetryMaxDelay = c.Targets[0].RetryBaseDelay - 1 }, "retry delays"},
@@ -113,17 +114,17 @@ func TestValidate(t *testing.T) {
 
 	// Bounds are inclusive where the doc says so.
 	defaults := DefaultConfig("a")
-	defaults.Targets[0].BreakerFailureRatio = 1
+	defaults.Targets[0].Breaker.FailureRatio = 1
 	defaults.Targets[0].RetryBudgetRatio = 1
 	defaults.Targets[0].RetryMaxDelay = defaults.Targets[0].RetryBaseDelay
-	defaults.Targets[0].BreakerMinRequests = 1
-	defaults.Targets[0].BreakerHalfOpenProbes = 1
+	defaults.Targets[0].Breaker.MinRequests = 1
+	defaults.Targets[0].Breaker.HalfOpenProbes = 1
 	require.NoError(t, defaults.Validate())
 
 	// Breaker knobs are free when the breaker is off.
 	defaults = DefaultConfig("a")
-	defaults.Targets[0].BreakerFailureRatio = 0
-	defaults.Targets[0].BreakerMinRequests, defaults.Targets[0].BreakerWindow, defaults.Targets[0].BreakerHalfOpenProbes = 0, 0, 0
+	defaults.Targets[0].Breaker.FailureRatio = 0
+	defaults.Targets[0].Breaker.MinRequests, defaults.Targets[0].Breaker.Window, defaults.Targets[0].Breaker.HalfOpenProbes = 0, 0, 0
 	require.NoError(t, defaults.Validate())
 
 	// Every problem is reported, not just the first.
