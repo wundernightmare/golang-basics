@@ -53,7 +53,9 @@ type Task struct {
 	// characters, at least one of them not whitespace, no control characters
 	// other than tab (NUL in particular — PostgreSQL TEXT rejects it; found by
 	// Schemathesis). The pattern states the rules so that a generated,
-	// schema-compliant request is always accepted.
+	// schema-compliant request is always accepted. It lists the whitespace
+	// code points one by one instead of `\s`: what `\s` covers differs between
+	// regex engines (U+00A0, U+0085), and the server trims Unicode White_Space.
 	Title string `json:"title"`
 
 	// Version Starts at 1 and grows by one with every change. The ETag of the task is

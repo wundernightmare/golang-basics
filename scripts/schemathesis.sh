@@ -102,7 +102,11 @@ else
   # host-gateway alias.
   # --user: the results directory belongs to the invoking user; on Linux the
   # image's default user could not write into it (found on the GitHub runner).
-  docker run --rm --add-host=host.docker.internal:host-gateway --user "$(id -u):$(id -g)" \
+  # -w /tmp: the image's working directory is not writable by that user, and
+  # Schemathesis keeps its crash cache and coverage page there — without a
+  # writable one every run ends in a PermissionError traceback, green or red,
+  # and a real finding has to be dug out from under it.
+  docker run --rm --add-host=host.docker.internal:host-gateway --user "$(id -u):$(id -g)" -w /tmp \
     -v "$root/api:/api:ro" -v "$results:/results" "$image" \
     --config-file /api/schemathesis.toml run "/$spec" --url "http://host.docker.internal:$port" \
     --checks all --max-examples "$max_examples" --report junit --report-junit-path "/results/schemathesis-$svc.xml"
