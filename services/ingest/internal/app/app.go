@@ -59,6 +59,7 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, onServer f
 	defer store.Close()
 
 	srv.Metrics.Registry.MustRegister(store.Collectors()...)
+	srv.Metrics.Registry.MustRegister(tel.Collectors()...) // trace_retro_*: the retroactive sampling buffer
 	// Crash reports and memory-pressure profiles go to the same bucket,
 	// under diag_key_prefix (libs/httpx diagnostics.go).
 	srv.SetDumpSink(store)

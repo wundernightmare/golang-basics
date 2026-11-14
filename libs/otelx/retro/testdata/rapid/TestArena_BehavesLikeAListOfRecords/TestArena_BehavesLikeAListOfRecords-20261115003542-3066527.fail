@@ -1,0 +1,64 @@
+# 2026/11/15 00:35:42.566286 [TestArena_BehavesLikeAListOfRecords] [rapid] draw capacity: 30
+# 2026/11/15 00:35:42.566302 [TestArena_BehavesLikeAListOfRecords] [rapid] draw action: "offer"
+# 2026/11/15 00:35:42.566304 [TestArena_BehavesLikeAListOfRecords] [rapid] draw trace: 0
+# 2026/11/15 00:35:42.566305 [TestArena_BehavesLikeAListOfRecords] [rapid] draw size: 0
+# 2026/11/15 00:35:42.566309 [TestArena_BehavesLikeAListOfRecords] [rapid] draw action: "offer"
+# 2026/11/15 00:35:42.566310 [TestArena_BehavesLikeAListOfRecords] [rapid] draw trace: 1
+# 2026/11/15 00:35:42.566311 [TestArena_BehavesLikeAListOfRecords] [rapid] draw size: 0
+# 2026/11/15 00:35:42.566315 [TestArena_BehavesLikeAListOfRecords] [rapid] draw action: "trigger"
+# 2026/11/15 00:35:42.566316 [TestArena_BehavesLikeAListOfRecords] [rapid] draw trace: 1
+# 2026/11/15 00:35:42.566385 [TestArena_BehavesLikeAListOfRecords] 
+# 	Error Trace:	/home/developer/Workspace/wundernightmare/golang-basics/feat-retro-sampling/libs/otelx/retro/arena_test.go:406
+# 	            				/home/developer/go/pkg/mod/pgregory.net/rapid@v1.3.0/statemachine.go:153
+# 	            				/home/developer/go/pkg/mod/pgregory.net/rapid@v1.3.0/statemachine.go:128
+# 	            				/home/developer/go/pkg/mod/pgregory.net/rapid@v1.3.0/statemachine.go:61
+# 	            				/home/developer/Workspace/wundernightmare/golang-basics/feat-retro-sampling/libs/otelx/retro/arena_test.go:359
+# 	            				/home/developer/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:458
+# 	            				/home/developer/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:467
+# 	            				/home/developer/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:292
+# 	            				/home/developer/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:207
+# 	            				/home/developer/Workspace/wundernightmare/golang-basics/feat-retro-sampling/libs/otelx/retro/arena_test.go:339
+# 	Error:      	Not equal: 
+# 	            	expected: [][]uint8{[]uint8{}}
+# 	            	actual  : [][]uint8(nil)
+# 	            	
+# 	            	Diff:
+# 	            	--- Expected
+# 	            	+++ Actual
+# 	            	@@ -1,5 +1,2 @@
+# 	            	-([][]uint8) (len=1) {
+# 	            	- ([]uint8) {
+# 	            	- }
+# 	            	-}
+# 	            	+([][]uint8) <nil>
+# 	            	 
+# 	Test:       	TestArena_BehavesLikeAListOfRecords
+# 
+v0.4.8#14476365464765684969
+0x0
+0x0
+0x0
+0x1084210842108
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1084210842108
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0
+0x1084210842108
+0x0
+0x1
+0x0
+0x0
+0x1

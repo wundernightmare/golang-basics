@@ -109,8 +109,20 @@ README; this file is only the high-signal, easy-to-miss bits.
   collector tail-samples (`docker/observability/otel-collector.yml`: errors,
   slow, `debug.subject`, a share of the rest — `OTEL_TAIL_*`), so services
   keep head sampling at 1.0 (`*_OTEL_TRACES_SAMPLER_RATIO`); a lower ratio
-  hides traces from the collector, errors included. That file is tested as
+  hides traces from the collector. That file is tested as
   shipped by `libs/otelx/integration` — change a policy there, prove it there.
+  **The head sampler is ours** (`libs/otelx/sampler.go`): children follow the
+  parent, an edge (`*_OTEL_TRACES_TRUST_REMOTE_PARENT=false`) redraws a remote
+  parent and drops its tracestate, a request with the debug token is forced
+  and marked `dbg=1` for the services behind (`httpx.ForceTrace` /
+  `FollowDebugTrace` — a library that starts the span of a unit of work calls
+  the latter). **Unsampled spans wait in `libs/otelx/retro`** — an arena of
+  byte rings of a fixed size (`*_OTEL_RETRO_BUFFER_MIB`) — and a warn / error
+  line of their trace exports them; so `trace_id` in a log line means "there
+  is a trace", and an unsampled trace is logged as `trace_unsampled_id`. Keep
+  the arena's invariants when touching it: no per-span heap object survives
+  `OnEnd`, nothing shared is written per span outside a shard's lock, the
+  codec reads back every field it writes (its tests fail otherwise).
   Metric names, labels, units and buckets are a
   contract shared with nodejs-basics, written down in `docs/METRICS.md`: a new
   or renamed metric changes that file (and the sibling repo) first. What the
@@ -291,7 +303,8 @@ README; this file is only the high-signal, easy-to-miss bits.
   `^libs/…` exclude and override in `.testcoverage.yml` matches nothing.
 - **Mutation testing is scoped**: `just mutate <module>` runs gremlins on the
   modules with a `.gremlins.yaml` (`libs/resilient-http-client`, `libs/grpcx`,
-  `libs/resilience`, `libs/httpx`, `libs/tiercache`, `libs/secret`; each file
+  `libs/resilience`, `libs/httpx`, `libs/tiercache`, `libs/secret`, `libs/otelx`
+  (the sampler and the retroactive buffer); each file
   says what it excludes and which survivors are known equivalents) with
   thresholds that fail the run. The oracle is the unit layer (`-short`). Always through `scripts/mutate.sh`, never a bare `gremlins
   unleash`: gremlins tests a copy of the module outside the workspace, and a

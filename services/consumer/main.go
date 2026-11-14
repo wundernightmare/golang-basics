@@ -70,6 +70,7 @@ func run(cfg config.Config) error {
 	// Consume outcomes / retries / DLQ / lag from the lib, the worker's own
 	// counters next to them — one /metrics on the admin listener has it all.
 	srv.Metrics.Registry.MustRegister(consumer.Collectors()...)
+	srv.Metrics.Registry.MustRegister(tel.Collectors()...) // trace_retro_*: the retroactive sampling buffer
 	w := worker.New(consumer, logger, srv.Metrics.Registry, worker.Options{DedupeSize: cfg.DedupeSize})
 
 	ctx, stop := httpx.SignalContext()

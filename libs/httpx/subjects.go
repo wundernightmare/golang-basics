@@ -117,15 +117,23 @@ func (d *debugSubjects) list() map[string]time.Time {
 // keeps the trace; otherwise ctx is returned as it is. The check is a map
 // lookup: call it for every request.
 //
-// A trace can only be kept if it was recorded: with head sampling below 1.0
-// (OTEL_TRACES_SAMPLER_RATIO) the requests the head sampler dropped are not
-// brought back by this.
+// The subject is known only after the request's span started, so the
+// sampling decision is already taken. With the retroactive buffer on
+// (OTEL_RETRO_BUFFER_MIB, the default) an unsampled trace is exported all
+// the same — the spans of this process; the services behind it still see
+// "not sampled". Without the buffer, a request the head sampler dropped is
+// not brought back. A request that must be traced end to end carries the
+// debug token instead (see [ForceTrace]).
 func (s *Server) DebugSubject(ctx context.Context, subject string) context.Context {
 	if subject == "" || !s.subjects.active(subject) {
 		return ctx
 	}
 
 	trace.SpanFromContext(ctx).SetAttributes(attribute.String(DebugSubjectAttribute, subject))
+	// The subject is known after the span started, so its sampling decision
+	// is taken; what was not sampled is exported through the retroactive
+	// buffer when there is one.
+	triggerTrace(ctx, s.log)
 
 	return WithDebugLogging(ctx)
 }
