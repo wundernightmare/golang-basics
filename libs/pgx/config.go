@@ -3,9 +3,7 @@ package pgx
 import (
 	"fmt"
 	"net/url"
-	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -163,28 +161,10 @@ func (c Config) runtimeParams() map[string]string {
 // the pool first dials.
 func (c Config) Validate() error {
 	if c.PasswordFile != "" {
-		if _, err := readSecretFile(c.PasswordFile); err != nil {
+		if _, err := secret.ReadFile(c.PasswordFile); err != nil {
 			return fmt.Errorf("DB_PASSWORD_FILE: %w", err)
 		}
 	}
 
 	return nil
-}
-
-// readSecretFile reads a mounted secret: the whole file, without the
-// trailing newline an editor or `echo` leaves. An empty file is an error — a
-// secret that silently became "" would surface later as a confusing auth
-// failure.
-func readSecretFile(path string) (string, error) {
-	b, err := os.ReadFile(path) //nolint:gosec // path is operator-supplied config, not user input
-	if err != nil {
-		return "", err
-	}
-
-	s := strings.TrimRight(string(b), "\r\n")
-	if s == "" {
-		return "", fmt.Errorf("%s is empty", path)
-	}
-
-	return s, nil
 }

@@ -137,7 +137,7 @@ client library's default happens to be in the version you link. `<service>
 | `KAFKA_SECURITY_PROTOCOL` | `security.protocol` | `DialTLSConfig` + `SASL` | `plaintext` |
 | `KAFKA_SASL_MECHANISM` | `sasl.mechanism` | `plain` / `scram` mechanism | — (`PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`) |
 | `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` / `_FILE` | `sasl.username`, `sasl.password` | `Auth{User, Pass}` | — |
-| `KAFKA_SSL_CA_LOCATION` | `ssl.ca.location` | `tls.Config.RootCAs` (system roots + the file) | system roots |
+| `KAFKA_SSL_CA_LOCATION` | `ssl.ca.location` | `tls.Config.RootCAs` (the file alone) | system roots |
 | `KAFKA_SSL_CERTIFICATE_LOCATION`, `KAFKA_SSL_KEY_LOCATION` | `ssl.certificate.location`, `ssl.key.location` | `tls.Config.Certificates` | — (mTLS) |
 | `KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM` | `ssl.endpoint.identification.algorithm` | host name check on / chain-only `VerifyConnection` | `https` |
 
@@ -366,8 +366,9 @@ TASKS_KAFKA_SSL_CERTIFICATE_LOCATION=/etc/kafka-secret/client.crt
 TASKS_KAFKA_SSL_KEY_LOCATION=/etc/kafka-secret/client.key
 ```
 
-- The CA is **added** to the system roots (franz-go) / used as the trust
-  store (librdkafka); a publicly trusted cluster needs no CA key at all.
+- The CA file **is** the trust store, in both clients: with it set, a broker
+  certificate signed by a public authority is refused. A publicly trusted
+  cluster needs no CA key at all (the system roots).
 - The broker's host name is verified against its certificate
   (`ssl.endpoint.identification.algorithm=https`); `none` skips only that —
   the chain is still verified against the CA, in both clients.

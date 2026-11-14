@@ -212,6 +212,38 @@ func TestConfigValidate_ReportsEveryProblemAndAppliesDefaults(t *testing.T) {
 	assert.Equal(t, int64(7), cfg.DiagFlightMaxBytes)
 }
 
+// A hand-built config and a loaded one agree on every default: there is one
+// place the values are written. The exceptions are the fields whose zero is
+// a setting of its own, which a hand-built config keeps.
+func TestConfigValidate_AHandBuiltConfigGetsTheLoadedDefaults(t *testing.T) {
+	t.Parallel()
+
+	loaded, err := httpx.LoadConfigFrom("", map[string]string{"ADMIN_INSECURE": "true"})
+	require.NoError(t, err)
+
+	built := httpx.Config{Addr: loaded.Addr, AdminAddr: loaded.AdminAddr, AdminInsecure: true}
+	require.NoError(t, built.Validate())
+
+	assert.Zero(t, built.RequestTimeout, "no deadline")
+	assert.Zero(t, built.RequestTimeoutMin)
+	assert.Zero(t, built.ShutdownDelay, "no delay")
+	assert.Zero(t, built.SlowRequest)
+	assert.Zero(t, built.LogSampleInitial, "no sampling")
+	assert.Zero(t, built.LogSampleThereafter)
+	assert.Zero(t, built.DiagFlightCooldown)
+
+	worker := httpx.Config{AdminAddr: "127.0.0.1:0"}
+	require.NoError(t, worker.Validate())
+	assert.Empty(t, worker.Addr, "no API listener: a worker")
+
+	built.RequestTimeout, built.RequestTimeoutMin = loaded.RequestTimeout, loaded.RequestTimeoutMin
+	built.ShutdownDelay, built.SlowRequest = loaded.ShutdownDelay, loaded.SlowRequest
+	built.LogSampleInitial, built.LogSampleThereafter = loaded.LogSampleInitial, loaded.LogSampleThereafter
+	built.DiagFlightCooldown = loaded.DiagFlightCooldown
+
+	assert.Equal(t, loaded, built)
+}
+
 func TestConfig_LogConfigProjection(t *testing.T) {
 	t.Parallel()
 

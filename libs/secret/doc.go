@@ -13,5 +13,8 @@
 // caarlos0/env and flag.TextVar decode through; [DecodeHook] does the same
 // for mapstructure, and with it for viper.
 //
+// [ReadFile] and [CertPool] read what a pod mounts instead: a secret in a
+// file, and the CA bundle that usually sits next to it.
+//
 // The package imports the standard library only.
 package secret

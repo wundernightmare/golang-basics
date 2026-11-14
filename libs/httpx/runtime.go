@@ -30,10 +30,6 @@ import (
 //   - RUNTIME_TRACEBACK is applied before anything else.
 
 const (
-	defaultMemoryLimitRatio   = 0.85
-	defaultMemoryLimitRefresh = 30 * time.Second
-	defaultTraceback          = "all"
-
 	// cgroup v1 reports "no limit" as a page-rounded MaxInt64; nothing real
 	// is anywhere near this.
 	cgroupUnlimited = int64(1) << 60

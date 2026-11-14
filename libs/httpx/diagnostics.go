@@ -58,15 +58,6 @@ type DumpSink interface {
 func (s *Server) SetDumpSink(sink DumpSink) { s.diag.sink = sink }
 
 const (
-	defaultDiagKeyPrefix       = "diagnostics"
-	defaultDiagMemoryThreshold = 0.9
-	defaultDiagMemoryCooldown  = 10 * time.Minute
-	defaultDiagCheckInterval   = 5 * time.Second
-	defaultDiagUploadTimeout   = 15 * time.Second
-	defaultDiagSpoolRetry      = time.Minute
-	defaultDiagCrashMaxBytes   = 8 << 20
-	defaultDiagSpoolMaxFiles   = 20
-
 	dumpKindCrash  = "crash"
 	dumpKindMemory = "memory"
 
