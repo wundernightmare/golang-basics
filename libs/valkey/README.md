@@ -70,6 +70,48 @@ Both are what [`libs/tiercache`](../tiercache) is built on.
 | `TASKS_VALKEY_ADDR` / `_PASSWORD` / `_DB` | `addr` / `password` / `db` | — / — / `0` | |
 | `TASKS_VALKEY_DIAL_TIMEOUT` | `dial_timeout` | `5s` | also bounds the boot PING |
 | `TASKS_VALKEY_OP_TIMEOUT` | `op_timeout` | `500ms` | every command; past it the caller treats the cache as a miss |
+| `TASKS_VALKEY_PIPELINE_CONNS` | `pipeline_conns` | `4` | shared connections every ordinary command is pipelined over; a power of two, 1–256 |
+| `TASKS_VALKEY_POOL_SIZE` | `pool_size` | `32` | dedicated connections (blocking commands, pipelines ≥ 2000, `Dedicated`), at most |
+| `TASKS_VALKEY_POOL_MIN_IDLE` / `_POOL_IDLE_TIMEOUT` | `pool_min_idle` / `pool_idle_timeout` | `0` / `5m` | idle dedicated connections kept / closed after (`0`: never) |
+| `TASKS_VALKEY_CONN_WRITE_TIMEOUT` | `conn_write_timeout` | `10s` | a connection whose peer is silent this long is dropped and replaced |
+| `TASKS_VALKEY_CONN_LIFETIME` | `conn_lifetime` | `1h` | recycle a pipelined connection at this age (`0`: never) |
+
+A value the library would reinterpret (a negative size, a count that is not a
+power of two) is an error at `New` (`valkey.ErrConfig`), before any dial.
+
+### Connections
+
+valkey-go does not take a connection per command. There are two kinds:
+
+- **Pipelined** — `pipeline_conns` connections, opened at boot and shared by
+  every ordinary command (all of `Cache`'s own, a subscription included).
+  That number is the steady footprint on the server whatever the request
+  rate: 200 concurrent callers on 2 connections stay on 2 connections.
+- **Dedicated** — one per call that cannot share: a blocking command (`BLPOP`,
+  `XREAD BLOCK`), a pipeline of 2000 commands or more, `Dedicated` /
+  `Dedicate`, all through `Cache.Client()`. `pool_size` bounds them; a caller
+  beyond it waits and gets its context's error if that ends first.
+
+So one client holds at most `pipeline_conns + pool_size` connections; multiply
+by the replicas and keep it under the server's `maxclients`.
+
+`pool_size` is enforced by this package, not left to the library
+(`bounded.go`): in valkey-go ≤ 1.0.79 a caller whose context ends while it
+waits for a dedicated connection raises the pool's limit by one for good, so
+the limit dissolves under the overload it exists for — in the test, two
+connections allowed, seven opened after ten such callers. A test asserts that
+defect against the bare library, and will fail when an upgrade fixes it. The
+streaming calls (`DoStream`, `DoMultiStream`) would hold connections of a
+second library pool with the same flaw until the caller drains the stream —
+something a wrapper cannot observe — so `Cache.Client()` refuses them: the
+returned stream carries `ErrStreamUnsupported`. Nothing reachable through the
+client is outside the bound.
+
+`conn_write_timeout` is not `op_timeout`: the second bounds what one caller
+waits, the first how long the client keeps sending into a connection whose
+peer stopped answering (a dropped route — nothing closes the socket). All of
+this is tested against a real server in `pool_test.go`, the silent connection
+through Toxiproxy.
 
 ## Metrics
 
