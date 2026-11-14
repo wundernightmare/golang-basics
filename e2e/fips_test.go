@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ozontech/testo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,7 +24,7 @@ import (
 // buildService runs scripts/build-service.sh for svc into out and returns its
 // exit code and output. The build knobs under test are taken only from env:
 // whatever the caller's environment (or a CI matrix) set for them is dropped.
-func buildService(t *testing.T, svc, out string, env ...string) (int, string) {
+func buildService(t testing.TB, svc, out string, env ...string) (int, string) {
 	t.Helper()
 
 	script, err := filepath.Abs(filepath.Join("..", "scripts", "build-service.sh"))
@@ -56,43 +57,45 @@ func buildService(t *testing.T, svc, out string, env ...string) (int, string) {
 // in FIPS mode and says so on /version and in its start-up line; the same
 // build line without the knob does not.
 func TestFIPSBuild(t *testing.T) {
-	t.Parallel()
+	scenario(t, "FIPS build", func(t T) {
+		t.Parallel()
 
-	for _, tc := range []struct {
-		name string
-		env  []string
-		want bool
-	}{
-		{name: "FIPS=1", env: []string{"FIPS=1"}, want: true},
-		{name: "FIPS unset", want: false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+		for _, tc := range []struct {
+			name string
+			env  []string
+			want bool
+		}{
+			{name: "FIPS=1", env: []string{"FIPS=1"}, want: true},
+			{name: "FIPS unset", want: false},
+		} {
+			testo.Run(t, tc.name, func(t T) {
+				t.Parallel()
 
-			bin := filepath.Join(t.TempDir(), "ping")
-			code, out := buildService(t, "ping", bin, tc.env...)
-			require.Equal(t, 0, code, "build-service.sh ping: %s", out)
+				bin := filepath.Join(t.TempDir(), "ping")
+				code, out := buildService(t, "ping", bin, tc.env...)
+				require.Equal(t, 0, code, "build-service.sh ping: %s", out)
 
-			sp := pingSpec()
-			sp.bin = bin
-			s := start(t, sp)
+				sp := pingSpec()
+				sp.bin = bin
+				s := start(t, sp)
 
-			bi := s.version(t)
-			require.NotNil(t, bi.FIPS140, "/version has no fips140 field")
-			assert.Equal(t, tc.want, *bi.FIPS140, "/version fips140")
+				bi := s.version(t)
+				require.NotNil(t, bi.FIPS140, "/version has no fips140 field")
+				assert.Equal(t, tc.want, *bi.FIPS140, "/version fips140")
 
-			var starting map[string]any
+				var starting map[string]any
 
-			for _, l := range s.logLines() {
-				if l["msg"] == "ping starting" {
-					starting = l
+				for _, l := range s.logLines() {
+					if l["msg"] == "ping starting" {
+						starting = l
+					}
 				}
-			}
 
-			require.NotNil(t, starting, "no \"ping starting\" log line")
-			assert.Equal(t, tc.want, starting["fips140"], "start-up line fips140")
-		})
-	}
+				require.NotNil(t, starting, "no \"ping starting\" log line")
+				assert.Equal(t, tc.want, starting["fips140"], "start-up line fips140")
+			})
+		}
+	})
 }
 
 // TestFIPSBuildRefusesRdkafka: librdkafka brings OpenSSL through cgo, which
@@ -100,23 +103,25 @@ func TestFIPSBuild(t *testing.T) {
 // service that would link it — before compiling anything — instead of
 // producing a binary that reports FIPS mode over non-FIPS crypto.
 func TestFIPSBuildRefusesRdkafka(t *testing.T) {
-	t.Parallel()
+	scenario(t, "FIPS build", func(t T) {
+		t.Parallel()
 
-	for _, tc := range []struct {
-		name string
-		env  []string
-	}{
-		{name: "KAFKA_PROVIDER=rdkafka", env: []string{"FIPS=1", "KAFKA_PROVIDER=rdkafka"}},
-		{name: "the default provider", env: []string{"FIPS=1"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+		for _, tc := range []struct {
+			name string
+			env  []string
+		}{
+			{name: "KAFKA_PROVIDER=rdkafka", env: []string{"FIPS=1", "KAFKA_PROVIDER=rdkafka"}},
+			{name: "the default provider", env: []string{"FIPS=1"}},
+		} {
+			testo.Run(t, tc.name, func(t T) {
+				t.Parallel()
 
-			bin := filepath.Join(t.TempDir(), "tasks")
-			code, out := buildService(t, "tasks", bin, tc.env...)
-			assert.Equal(t, 2, code, out)
-			assert.Contains(t, out, "FIPS=1 needs KAFKA_PROVIDER=franz")
-			assert.NoFileExists(t, bin, "a refused build leaves no binary")
-		})
-	}
+				bin := filepath.Join(t.TempDir(), "tasks")
+				code, out := buildService(t, "tasks", bin, tc.env...)
+				assert.Equal(t, 2, code, out)
+				assert.Contains(t, out, "FIPS=1 needs KAFKA_PROVIDER=franz")
+				assert.NoFileExists(t, bin, "a refused build leaves no binary")
+			})
+		}
+	})
 }

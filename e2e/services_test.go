@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ozontech/testo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,88 +30,94 @@ func heartbeatSpec() spec {
 }
 
 func TestPing(t *testing.T) {
-	t.Parallel()
-	s := start(t, pingSpec())
-
-	t.Run("ready on the admin port", func(t *testing.T) {
+	scenario(t, "Service process", func(t T) {
 		t.Parallel()
+		s := start(t, pingSpec())
 
-		code, body, err := s.get(s.adminURL+"/readyz", "")
-		require.NoError(t, err)
-		assert.Equal(t, http.StatusOK, code, "%s", body)
-	})
+		testo.Run(t, "ready on the admin port", func(t T) {
+			t.Parallel()
 
-	t.Run("version carries the build stamp", func(t *testing.T) {
-		t.Parallel()
-		assertBuildStamp(t, s)
-	})
+			code, body, err := s.get(s.adminURL+"/readyz", "")
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusOK, code, "%s", body)
+		})
 
-	t.Run("echoes msg", func(t *testing.T) {
-		t.Parallel()
+		testo.Run(t, "version carries the build stamp", func(t T) {
+			t.Parallel()
+			assertBuildStamp(t, s)
+		})
 
-		code, body, err := s.get(s.apiURL+"/ping?msg=x", "")
-		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, code, "%s", body)
+		testo.Run(t, "echoes msg", func(t T) {
+			t.Parallel()
 
-		var pong struct {
-			Message string `json:"message"`
-			Echo    string `json:"echo"`
-		}
-		require.NoError(t, json.Unmarshal(body, &pong), "%s", body)
-		assert.Equal(t, "pong", pong.Message)
-		assert.Equal(t, "x", pong.Echo)
-	})
+			code, body, err := s.get(s.apiURL+"/ping?msg=x", "")
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, code, "%s", body)
 
-	t.Run("admin surface is not on the API port", func(t *testing.T) {
-		t.Parallel()
+			var pong struct {
+				Message string `json:"message"`
+				Echo    string `json:"echo"`
+			}
+			require.NoError(t, json.Unmarshal(body, &pong), "%s", body)
+			assert.Equal(t, "pong", pong.Message)
+			assert.Equal(t, "x", pong.Echo)
+		})
 
-		code, _, err := s.get(s.apiURL+"/metrics", "")
-		require.NoError(t, err)
-		assert.Equal(t, http.StatusNotFound, code)
-	})
+		testo.Run(t, "admin surface is not on the API port", func(t T) {
+			t.Parallel()
 
-	t.Run("admin config requires the token", func(t *testing.T) {
-		t.Parallel()
-		assertAdminGuarded(t, s)
+			code, _, err := s.get(s.apiURL+"/metrics", "")
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusNotFound, code)
+		})
+
+		testo.Run(t, "admin config requires the token", func(t T) {
+			t.Parallel()
+			assertAdminGuarded(t, s)
+		})
 	})
 }
 
 func TestHeartbeat(t *testing.T) {
-	t.Parallel()
-	s := start(t, heartbeatSpec())
-
-	t.Run("version carries the build stamp", func(t *testing.T) {
+	scenario(t, "Service process", func(t T) {
 		t.Parallel()
-		assertBuildStamp(t, s)
-	})
+		s := start(t, heartbeatSpec())
 
-	t.Run("beats counter increases", func(t *testing.T) {
-		t.Parallel()
-		first := s.metric(t, "heartbeat_beats_total")
-		eventually(t, 10*time.Second, "heartbeat_beats_total never advanced", func(c *assert.CollectT) {
-			assert.Greater(c, s.metric(t, "heartbeat_beats_total"), first)
+		testo.Run(t, "version carries the build stamp", func(t T) {
+			t.Parallel()
+			assertBuildStamp(t, s)
 		})
-	})
 
-	t.Run("admin config requires the token", func(t *testing.T) {
-		t.Parallel()
-		assertAdminGuarded(t, s)
+		testo.Run(t, "beats counter increases", func(t T) {
+			t.Parallel()
+			first := s.metric(t, "heartbeat_beats_total")
+			eventually(t, 10*time.Second, "heartbeat_beats_total never advanced", func(c *assert.CollectT) {
+				assert.Greater(c, s.metric(t, "heartbeat_beats_total"), first)
+			})
+		})
+
+		testo.Run(t, "admin config requires the token", func(t T) {
+			t.Parallel()
+			assertAdminGuarded(t, s)
+		})
 	})
 }
 
 // TestGracefulShutdown: SIGTERM → exit 0 within a few seconds, and the log
 // ends by saying the servers stopped cleanly.
 func TestGracefulShutdown(t *testing.T) {
-	t.Parallel()
+	scenario(t, "Graceful shutdown", func(t T) {
+		t.Parallel()
 
-	for _, sp := range []spec{pingSpec(), heartbeatSpec()} {
-		t.Run(sp.name, func(t *testing.T) {
-			t.Parallel()
-			s := start(t, sp)
-			require.True(t, s.terminate(5*time.Second), "%s did not exit within 5s of SIGTERM", sp.name)
-			assertCleanExit(t, s)
-		})
-	}
+		for _, sp := range []spec{pingSpec(), heartbeatSpec()} {
+			testo.Run(t, sp.name, func(t T) {
+				t.Parallel()
+				s := start(t, sp)
+				require.True(t, s.terminate(5*time.Second), "%s did not exit within 5s of SIGTERM", sp.name)
+				assertCleanExit(t, s)
+			})
+		}
+	})
 }
 
 // assertCleanExit checks an exited process: status 0, nothing at error
@@ -118,7 +125,7 @@ func TestGracefulShutdown(t *testing.T) {
 // own "… stopped" — the shutdown of the HTTP server and of the worker loops
 // interleave (a consumer's partitions are revoked while the server drains),
 // so only the final line is required to be a clean stop.
-func assertCleanExit(t *testing.T, s *service) {
+func assertCleanExit(t testing.TB, s *service) {
 	t.Helper()
 	require.Equal(t, 0, s.exitCode(), "%s exit status (%v)", s.name, s.err)
 	lines := s.logLines()
@@ -141,7 +148,7 @@ func assertCleanExit(t *testing.T, s *service) {
 }
 
 // assertBuildStamp checks the /version fields a release depends on are set.
-func assertBuildStamp(t *testing.T, s *service) {
+func assertBuildStamp(t testing.TB, s *service) {
 	t.Helper()
 	bi := s.version(t)
 	assert.Equal(t, s.name, bi.Service)
@@ -158,7 +165,7 @@ func assertBuildStamp(t *testing.T, s *service) {
 // assertAdminGuarded: the harness starts every service with an ADMIN_TOKEN,
 // so /admin/config refuses a missing or wrong bearer token and serves the
 // right one — without echoing the token back.
-func assertAdminGuarded(t *testing.T, s *service) {
+func assertAdminGuarded(t testing.TB, s *service) {
 	t.Helper()
 
 	url := s.adminURL + "/admin/config"
@@ -182,54 +189,56 @@ func assertAdminGuarded(t *testing.T, s *service) {
 // anything starts, and --check-config / --config-reference answer without
 // starting the service.
 func TestConfigFlagsAndExitCodes(t *testing.T) {
-	t.Parallel()
+	scenario(t, "Configuration", func(t T) {
+		t.Parallel()
 
-	run := func(name, prefix string, env map[string]string, args ...string) (int, string) {
-		t.Helper()
-		cmd := exec.Command(filepath.Join(binDir(t), name), args...) // the harness's own build output
-		cmd.Env = childEnv(prefix, env)
-		out, err := cmd.CombinedOutput()
+		run := func(name, prefix string, env map[string]string, args ...string) (int, string) {
+			t.Helper()
+			cmd := exec.Command(filepath.Join(binDir(t), name), args...) // the harness's own build output
+			cmd.Env = childEnv(prefix, env)
+			out, err := cmd.CombinedOutput()
 
-		if exit, ok := errors.AsType[*exec.ExitError](err); ok {
-			return exit.ExitCode(), string(out)
+			if exit, ok := errors.AsType[*exec.ExitError](err); ok {
+				return exit.ExitCode(), string(out)
+			}
+
+			require.NoError(t, err, string(out))
+
+			return 0, string(out)
 		}
 
-		require.NoError(t, err, string(out))
+		code, out := run("ping", "PING_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0"}, "--check-config")
+		assert.Equal(t, 0, code, out)
+		assert.Equal(t, "config ok\n", out)
 
-		return 0, string(out)
-	}
+		code, out = run("ping", "PING_", nil, "--config-reference")
+		assert.Equal(t, 0, code, out)
+		assert.Regexp(t, `PING_HTTP_ADDR\s+http_addr\s+:8080`, out)
+		assert.Regexp(t, `PING_ADMIN_TOKEN\s+admin_token\s+-`, out)
 
-	code, out := run("ping", "PING_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0"}, "--check-config")
-	assert.Equal(t, 0, code, out)
-	assert.Equal(t, "config ok\n", out)
+		code, out = run("heartbeat", "HEARTBEAT_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0", "INTERVAL": "-1s"})
+		assert.Equal(t, 78, code, "a bad value ends a normal boot with EX_CONFIG: %s", out)
+		assert.Contains(t, out, "INTERVAL must be positive")
 
-	code, out = run("ping", "PING_", nil, "--config-reference")
-	assert.Equal(t, 0, code, out)
-	assert.Regexp(t, `PING_HTTP_ADDR\s+http_addr\s+:8080`, out)
-	assert.Regexp(t, `PING_ADMIN_TOKEN\s+admin_token\s+-`, out)
+		code, out = run("consumer", "CONSUMER_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0"}, "--check-config")
+		assert.Equal(t, 78, code, out)
+		assert.Contains(t, out, "KAFKA_BROKERS must be set", "a consumer needs its broker")
 
-	code, out = run("heartbeat", "HEARTBEAT_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0", "INTERVAL": "-1s"})
-	assert.Equal(t, 78, code, "a bad value ends a normal boot with EX_CONFIG: %s", out)
-	assert.Contains(t, out, "INTERVAL must be positive")
+		code, out = run("tasks", "TASKS_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0", "KAFKA_TOPIC": "x"}, "--check-config")
+		assert.Equal(t, 78, code, out)
+		assert.Contains(t, out, "KAFKA_BROKERS is not", "a Kafka key without the brokers is not silently ignored")
 
-	code, out = run("consumer", "CONSUMER_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0"}, "--check-config")
-	assert.Equal(t, 78, code, out)
-	assert.Contains(t, out, "KAFKA_BROKERS must be set", "a consumer needs its broker")
+		// ingest refuses to boot without the sink that makes its acknowledgements
+		// durable, and names the key.
+		code, out = run("ingest", "INGEST_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0"}, "--check-config")
+		assert.Equal(t, 78, code, out)
+		assert.Contains(t, out, "S3_BUCKET must be set", "ingest needs its archive")
 
-	code, out = run("tasks", "TASKS_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0", "KAFKA_TOPIC": "x"}, "--check-config")
-	assert.Equal(t, 78, code, out)
-	assert.Contains(t, out, "KAFKA_BROKERS is not", "a Kafka key without the brokers is not silently ignored")
+		code, out = run("ingest", "INGEST_", nil, "--config-reference")
+		assert.Equal(t, 0, code, out)
+		assert.Regexp(t, `INGEST_HTTP_ADDR\s+http_addr\s+:8084`, out)
 
-	// ingest refuses to boot without the sink that makes its acknowledgements
-	// durable, and names the key.
-	code, out = run("ingest", "INGEST_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0"}, "--check-config")
-	assert.Equal(t, 78, code, out)
-	assert.Contains(t, out, "S3_BUCKET must be set", "ingest needs its archive")
-
-	code, out = run("ingest", "INGEST_", nil, "--config-reference")
-	assert.Equal(t, 0, code, out)
-	assert.Regexp(t, `INGEST_HTTP_ADDR\s+http_addr\s+:8084`, out)
-
-	code, out = run("ping", "PING_", nil, "--bogus")
-	assert.Equal(t, 64, code, out)
+		code, out = run("ping", "PING_", nil, "--bogus")
+		assert.Equal(t, 64, code, out)
+	})
 }

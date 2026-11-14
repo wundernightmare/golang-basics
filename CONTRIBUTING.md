@@ -83,7 +83,7 @@ git hooks use it: `--all` (lint / test / vuln matrices), `--integration`
   own container.
 - E2E lives in `e2e/` (Go, build tag `e2e`): `just e2e` builds the service
   binaries into `.build/` and runs the suite against them.
-- Reports: `just test-junit` (gotestsum → `.reports/junit`) then `just allure`.
+- Reports: `just test-junit` (gotestsum → `.reports/junit`) and/or `just e2e` (native Allure results → `.reports/allure-native`), then `just allure`.
   Coverage: `just cov-all` gates the merged unit + integration + e2e number;
   `just mutate` for pure logic.
 - Load tests live in `benchmarks/` (k6, perf profile).

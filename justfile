@@ -202,16 +202,17 @@ mutate MODULE="libs/resilient-http-client":
     {{PERF}} {{MISE}} scripts/mutate.sh {{MODULE}}
 
 # Input: the JUnit XML in .reports/junit (`just test-junit`, `just
-# schemathesis`). allure-commandline is in the root package.json.
+# schemathesis`) and the e2e suite's native results in .reports/allure-native
+# (`just e2e`), put together by scripts/allure-collect.sh.
+# allure-commandline is in the root package.json.
 
-# Allure HTML report from .reports/junit → .reports/allure (report profile: JRE)
+# Allure HTML report from .reports/{junit,allure-native} → .reports/allure (report profile: JRE)
 allure:
     #!/usr/bin/env bash
     set -euo pipefail
-    compgen -G "{{JUNIT_DIR}}/*.xml" >/dev/null || { echo "no JUnit XML in {{JUNIT_DIR}} — run just test-junit first" >&2; exit 1; }
     [ -d node_modules/allure-commandline ] || {{MISE}} pnpm install --frozen-lockfile
     results=".reports/allure-results"
-    rm -rf "$results" && mkdir -p "$results" && cp "{{JUNIT_DIR}}"/*.xml "$results/"
+    scripts/allure-collect.sh "$results" "{{JUNIT_DIR}}" "{{justfile_directory()}}/.reports/allure-native"
     scripts/allure-meta.sh "$results"
     {{REPORT}} {{MISE}} pnpm exec allure generate --clean --single-file -o .reports/allure "$results"
     echo "report: .reports/allure/index.html"

@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -23,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	allure "github.com/ozontech/testo-allure"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -66,9 +68,9 @@ type spec struct {
 
 // start spawns the service described by sp and returns it once /readyz on
 // its admin port answers 200 and /version names it. The process is stopped
-// (SIGTERM, wait, SIGKILL past the deadline) in t.Cleanup, and its output is
-// logged when the test failed.
-func start(t *testing.T, svcSpec spec) *service {
+// (SIGTERM, wait, SIGKILL past the deadline) in t.Cleanup; its output is
+// attached to the report, and logged as well when the test failed.
+func start(t T, svcSpec spec) *service {
 	t.Helper()
 
 	bin := svcSpec.bin
@@ -111,21 +113,30 @@ func start(t *testing.T, svcSpec spec) *service {
 
 	t.Cleanup(func() {
 		s.stop(t)
+		// After the stop, so the attachment ends with the shutdown.
+		attachOutput(t, s.name, s.out.String())
 
 		if t.Failed() {
 			t.Logf("── %s output ──\n%s", s.name, s.out.String())
 		}
 	})
 
+	booting := time.Now()
+
 	s.waitReady(t)
 	s.checkVersion(t)
+
+	// How long the boot took (tasks runs its migrations first), as a marker
+	// in the report. The wait itself is not inside the step: a step is a
+	// sub-test, and `-run 'TestPing////echoes'` would skip it.
+	allure.Setup(t, fmt.Sprintf("%s ready in %s", s.name, time.Since(booting).Round(time.Millisecond)), nil)
 
 	return s
 }
 
 // waitReady polls /readyz until it answers 200, failing early (with the
 // child's output) when the process exits first.
-func (s *service) waitReady(t *testing.T) {
+func (s *service) waitReady(t testing.TB) {
 	t.Helper()
 
 	deadline := time.Now().Add(readyTimeout)
@@ -170,13 +181,13 @@ type buildInfo struct {
 
 // checkVersion asserts the admin port belongs to the process just started —
 // never pass against a stray one left on the port.
-func (s *service) checkVersion(t *testing.T) {
+func (s *service) checkVersion(t testing.TB) {
 	t.Helper()
 	bi := s.version(t)
 	require.Equal(t, s.name, bi.Service, "/version on %s names another service", s.adminURL)
 }
 
-func (s *service) version(t *testing.T) buildInfo {
+func (s *service) version(t testing.TB) buildInfo {
 	t.Helper()
 
 	code, body, err := s.get(s.adminURL+"/version", "")
@@ -203,7 +214,7 @@ func (s *service) terminate(timeout time.Duration) bool {
 
 // stop is the teardown: SIGTERM, wait for the exit (so coverage counters are
 // written), SIGKILL past the deadline.
-func (s *service) stop(t *testing.T) {
+func (s *service) stop(t testing.TB) {
 	t.Helper()
 
 	select {
@@ -260,7 +271,7 @@ func do(method, url, token string, body io.Reader) (int, []byte, error) {
 
 // metric sums every sample of the named counter/gauge on the admin /metrics
 // (all label sets). A missing metric reads as 0.
-func (s *service) metric(t *testing.T, name string) float64 {
+func (s *service) metric(t testing.TB, name string) float64 {
 	t.Helper()
 
 	code, body, err := s.get(s.adminURL+"/metrics", "")
@@ -317,7 +328,7 @@ func (s *service) logLines() []map[string]any {
 // ── environment ─────────────────────────────────────────────────────────────
 
 // binDir is E2E_BIN_DIR, default ../.build (the workspace root's .build/).
-func binDir(t *testing.T) string {
+func binDir(t testing.TB) string {
 	t.Helper()
 
 	dir := os.Getenv("E2E_BIN_DIR")
@@ -362,7 +373,7 @@ func childEnv(prefix string, env map[string]string) []string {
 // freeAddr returns a loopback address with a port the kernel just handed
 // out. The listener is closed before the child binds it — a tiny window,
 // far smaller than the fixed-port collisions it replaces.
-func freeAddr(t *testing.T) string {
+func freeAddr(t testing.TB) string {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -374,7 +385,7 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
-func randomToken(t *testing.T) string {
+func randomToken(t testing.TB) string {
 	t.Helper()
 
 	b := make([]byte, 16)
@@ -386,7 +397,7 @@ func randomToken(t *testing.T) string {
 
 // dataEnv returns the datastore URLs for tasks/consumer, skipping the test
 // when any is unset.
-func dataEnv(t *testing.T) (dbURL, valkeyURL, brokers string) {
+func dataEnv(t testing.TB) (dbURL, valkeyURL, brokers string) {
 	t.Helper()
 
 	dbURL, valkeyURL, brokers = os.Getenv("E2E_DATABASE_URL"), os.Getenv("E2E_VALKEY_URL"), os.Getenv("E2E_KAFKA_BROKERS")
@@ -398,7 +409,7 @@ func dataEnv(t *testing.T) (dbURL, valkeyURL, brokers string) {
 }
 
 // eventually polls cond every 100ms until it holds or timeout passes.
-func eventually(t *testing.T, timeout time.Duration, msg string, cond func(c *assert.CollectT)) {
+func eventually(t testing.TB, timeout time.Duration, msg string, cond func(c *assert.CollectT)) {
 	t.Helper()
 	assert.EventuallyWithT(t, cond, timeout, 100*time.Millisecond, msg)
 }

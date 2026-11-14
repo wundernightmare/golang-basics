@@ -1,3 +1,9 @@
+github.com/gabriel-vasile/mimetype v1.4.11 h1:AQvxbp830wPhHTqc1u7nzoLT+ZFxGY7emj5DR5DYFik=
+github.com/gabriel-vasile/mimetype v1.4.11/go.mod h1:d+9Oxyo1wTzWdyVUPMmXFvp4F9tea18J8ufA774AB3s=
+github.com/ozontech/testo v1.9.0 h1:WbypfDC7IJ4BT26EVTXqJssDhTuZOrxRg8+zr/l5EDc=
+github.com/ozontech/testo v1.9.0/go.mod h1:pRjW/SqhknsUkwKr8Ouvk39fcOMnmBB5Bb30i6QsUXk=
+github.com/ozontech/testo-allure v1.5.0 h1:LL+FARCTVC/OELCAmS9WCgDkZIePPkdcETmDEs1GNjE=
+github.com/ozontech/testo-allure v1.5.0/go.mod h1:w4zUsEbsPM5uPqKXRVkxm5yoWsDH4ru/B/zoIn32yfE=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 go.yaml.in/yaml/v3 v3.0.6 h1:zcDfvjXEqTQmpjniUBLc91xYJMB2c4QOFxEF/LCEckM=
