@@ -44,6 +44,24 @@ type Telemetry struct {
 	Shutdown ShutdownFunc
 }
 
+// shutdownBudget is how long [Telemetry.Stop] gives the last spans to leave.
+const shutdownBudget = 5 * time.Second
+
+// Stop is Shutdown for a defer: it flushes and stops the provider within
+// five seconds of its own — the process is exiting, the caller's context is
+// already cancelled — and drops the error, which the SDK's error handler has
+// logged by then.
+//
+//	tel, err := otelx.Init(ctx, cfg.OTel, logger)
+//	if err != nil { … }
+//	defer tel.Stop()
+func (t Telemetry) Stop() {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
+	defer cancel()
+
+	_ = t.Shutdown(ctx)
+}
+
 // Init builds the tracer provider and the W3C trace-context + baggage
 // propagators, installs both globally (see [Telemetry]), and routes the
 // SDK's own errors and diagnostics to log. With

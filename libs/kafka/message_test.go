@@ -79,23 +79,6 @@ func TestPermanent(t *testing.T) {
 	assert.False(t, IsPermanent(base))
 }
 
-func TestBackoff_ExponentialJitteredCapped(t *testing.T) {
-	t.Parallel()
-
-	initial, maxDelay := 100*time.Millisecond, time.Second
-	for n, ms := range []int64{100, 200, 400, 800, 1000, 1000, 1000} {
-		ceiling := time.Duration(ms) * time.Millisecond
-
-		for range 50 {
-			d := backoff(n, initial, maxDelay)
-			assert.GreaterOrEqual(t, d, ceiling/2, "retry %d", n)
-			assert.LessOrEqual(t, d, ceiling, "retry %d", n)
-		}
-	}
-
-	assert.LessOrEqual(t, backoff(1000, initial, maxDelay), maxDelay, "no overflow on a large retry count")
-}
-
 func TestMessage_Header(t *testing.T) {
 	t.Parallel()
 

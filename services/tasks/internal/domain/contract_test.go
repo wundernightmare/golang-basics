@@ -60,6 +60,15 @@ func TestTitlePatternAcceptsOnlyWhatTheServerAccepts(t *testing.T) {
 			continue // surrogates are not characters
 		}
 
+		// Every code point up to the end of the CJK punctuation block —
+		// which holds all the whitespace and control characters there are —
+		// every one Unicode itself calls space or control, and beyond that
+		// a sample: the rest are ordinary characters to both sides, and
+		// trying each of a million of them takes a minute under -race.
+		if r > 0x30FF && !unicode.IsSpace(r) && !unicode.IsControl(r) && r%251 != 0 {
+			continue
+		}
+
 		for _, title := range []string{string(r), "a" + string(r), string(r) + "a", "a" + string(r) + "a"} {
 			_, err := domain.NormalizeTitle(title)
 

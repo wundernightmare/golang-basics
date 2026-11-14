@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -66,7 +67,7 @@ func TestCreate_TaskAndEventCommitTogether(t *testing.T) {
 
 	db := testsupport.DB(t, containers.Postgres(t))
 	recorder := testx.Recorder(t) // a real propagator + provider, so the trace context is captured
-	st := store.New(db.Pool(), store.WithPropagator(recorder.Propagator))
+	st := store.New(db, store.WithPropagator(recorder.Propagator))
 
 	ctx, span := recorder.Tracer().Start(context.Background(), "POST /tasks")
 	defer span.End()
@@ -101,7 +102,7 @@ func TestCreate_FailedTransactionLeavesNoEvent(t *testing.T) {
 	t.Parallel()
 
 	db := testsupport.DB(t, containers.Postgres(t))
-	st := store.New(db.Pool())
+	st := store.New(db)
 	ctx := context.Background()
 	_, _, err := st.Create(ctx, newID(1), "first", nil)
 	require.NoError(t, err)
@@ -111,11 +112,48 @@ func TestCreate_FailedTransactionLeavesNoEvent(t *testing.T) {
 	assert.Len(t, outboxRows(t, db), 1, "the failed create wrote no event")
 }
 
+// The store's changes are units of work of the database (pgx.DB.InTx), so a
+// caller that needs two of them — or one of them and something of its own —
+// to stand or fall together wraps them in a unit: nothing of an abandoned
+// one survives, neither the rows nor their events.
+func TestChangesJoinTheCallersUnitOfWork(t *testing.T) {
+	t.Parallel()
+
+	db := testsupport.DB(t, containers.Postgres(t))
+	st := store.New(db)
+	ctx := context.Background()
+	errAbandon := errors.New("abandon")
+
+	err := db.InTx(ctx, func(ctx context.Context) error {
+		_, _, err := st.Create(ctx, newID(1), "first", nil)
+		require.NoError(t, err)
+
+		_, err = st.Update(ctx, newID(1), domain.Patch{Done: new(true)}, nil)
+		require.NoError(t, err)
+
+		return errAbandon
+	})
+	require.ErrorIs(t, err, errAbandon)
+
+	_, err = st.Get(ctx, newID(1))
+	require.ErrorIs(t, err, domain.ErrNotFound, "the task was rolled back with the unit")
+	assert.Empty(t, outboxRows(t, db), "and so were both of its events")
+
+	require.NoError(t, db.InTx(ctx, func(ctx context.Context) error {
+		if _, _, err := st.Create(ctx, newID(2), "second", nil); err != nil {
+			return err
+		}
+
+		return st.Delete(ctx, newID(2), nil)
+	}))
+	assert.Len(t, outboxRows(t, db), 2, "a unit that commits keeps every event of it")
+}
+
 func TestCreate_IdempotencyKey(t *testing.T) {
 	t.Parallel()
 
 	db := testsupport.DB(t, containers.Postgres(t))
-	st := store.New(db.Pool())
+	st := store.New(db)
 	ctx := context.Background()
 	key := &domain.IdempotencyKey{Key: "k", Hash: "h1"}
 
@@ -150,7 +188,7 @@ func TestCreate_IdempotencyKeyUnderConcurrency(t *testing.T) {
 	t.Parallel()
 
 	db := testsupport.DB(t, containers.Postgres(t))
-	st := store.New(db.Pool())
+	st := store.New(db)
 	key := &domain.IdempotencyKey{Key: "race", Hash: "h"}
 
 	const n = 8
@@ -184,7 +222,7 @@ func TestUpdate_VersionsAndEvents(t *testing.T) {
 	t.Parallel()
 
 	db := testsupport.DB(t, containers.Postgres(t))
-	st := store.New(db.Pool())
+	st := store.New(db)
 	ctx := context.Background()
 	task, _, err := st.Create(ctx, newID(1), "draft", nil)
 	require.NoError(t, err)
@@ -230,7 +268,7 @@ func TestDelete_VersionsAndEvent(t *testing.T) {
 	t.Parallel()
 
 	db := testsupport.DB(t, containers.Postgres(t))
-	st := store.New(db.Pool())
+	st := store.New(db)
 	ctx := context.Background()
 	task, _, err := st.Create(ctx, newID(1), "doomed", nil)
 	require.NoError(t, err)
@@ -256,7 +294,7 @@ func TestList_KeysetPagination(t *testing.T) {
 	t.Parallel()
 
 	db := testsupport.DB(t, containers.Postgres(t))
-	st := store.New(db.Pool())
+	st := store.New(db)
 	ctx := context.Background()
 
 	// Seven tasks, three sharing one timestamp (the id breaks the tie).
@@ -321,7 +359,7 @@ func TestPurgeIdempotencyKeys(t *testing.T) {
 	t.Parallel()
 
 	db := testsupport.DB(t, containers.Postgres(t))
-	st := store.New(db.Pool())
+	st := store.New(db)
 	ctx := context.Background()
 	_, _, err := st.Create(ctx, newID(1), "old", &domain.IdempotencyKey{Key: "old", Hash: "h"})
 	require.NoError(t, err)

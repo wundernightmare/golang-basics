@@ -116,6 +116,21 @@ of the runtime killing the process mid-flight:
 g.Go(srv.Guard("outbox-relay", ctx, relay.Run))
 ```
 
+A service whose requests depend on a background worker (a relay, a batch
+writer) runs both with `srv.RunWith`: the server drains first, the workers —
+each under `Guard` — are stopped only after it has, and the first failure of
+any of them stops the rest in that order:
+
+```go
+err := srv.RunWith(ctx,
+    httpx.Worker{Name: "outbox-relay", Run: relay.Run},
+    httpx.Worker{Name: "idempotency-janitor", Run: janitor.Run},
+)
+```
+
+A worker nothing in flight waits for (a consumer loop) stops with the signal
+instead: `g.Go(srv.Guard(…, gctx, w.Run))` next to `srv.Run(gctx)`.
+
 ## Logs
 
 One JSON line per record on stdout. `LOG_FORMAT=ecs` writes the same record
