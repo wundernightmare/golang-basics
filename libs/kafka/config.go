@@ -446,6 +446,23 @@ func (c *Config) validateSecurity() []error {
 	return errs
 }
 
+// SASLSecret is the SASL password a client authenticates with:
+// KAFKA_SASL_PASSWORD, or the content of KAFKA_SASL_PASSWORD_FILE read now —
+// once per client built, so a rotated mount is picked up by the next client.
+// Both providers take it from here.
+func (c *Config) SASLSecret() (secret.String, error) {
+	if c.SASLPasswordFile == "" {
+		return c.SASLPassword, nil
+	}
+
+	password, err := secret.ReadFile(c.SASLPasswordFile)
+	if err != nil {
+		return secret.String{}, fmt.Errorf("KAFKA_SASL_PASSWORD_FILE: %w", err)
+	}
+
+	return password, nil
+}
+
 // validateFiles checks that every file the security keys name is there and
 // readable (the password file also not empty), so a missing secret or
 // certificate mount fails the boot — and --check-config — with the key's
@@ -455,14 +472,8 @@ func (c *Config) validateSecurity() []error {
 func (c *Config) validateFiles() []error {
 	var errs []error
 
-	if c.SASLPasswordFile != "" {
-		b, err := os.ReadFile(c.SASLPasswordFile)
-		switch {
-		case err != nil:
-			errs = append(errs, fmt.Errorf("KAFKA_SASL_PASSWORD_FILE: %w", err))
-		case strings.TrimRight(string(b), "\r\n") == "":
-			errs = append(errs, fmt.Errorf("KAFKA_SASL_PASSWORD_FILE: %s is empty", c.SASLPasswordFile))
-		}
+	if _, err := c.SASLSecret(); err != nil {
+		errs = append(errs, err)
 	}
 
 	for key, path := range map[string]string{

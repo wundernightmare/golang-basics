@@ -50,7 +50,7 @@ the trace ids in them (see `httpx.NewLogger`).
   one fewer dependency tree, and it passes through any HTTP proxy. The
   endpoint is a `host:port` (default `localhost:4318`).
 - **TLS by default**, with the system roots; `OTEL_EXPORTER_OTLP_CERTIFICATE`
-  adds a CA bundle, `…_CLIENT_CERTIFICATE` + `…_CLIENT_KEY` enable mTLS
+  replaces them with a CA bundle, `…_CLIENT_CERTIFICATE` + `…_CLIENT_KEY` enable mTLS
   (both or neither). `OTEL_EXPORTER_OTLP_INSECURE=true` is for a local
   collector only.
 - **Headers** (`k=v,k=v`) carry auth tokens or tenant ids; they are tagged

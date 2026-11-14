@@ -187,6 +187,16 @@ README; this file is only the high-signal, easy-to-miss bits.
   cannot be printed by `fmt`, `slog`, JSON or YAML, shows as `[redacted:<fingerprint>]` on
   `/admin/config`, and its value is one explicit `Expose()` away, at the point of use. The
   `secret:"true"` tag remains for what cannot be that type (a map of headers).
+- **A mounted file is read through `libs/secret`**: `secret.ReadFile` for a
+  password file (`DB_PASSWORD_FILE`, `KAFKA_SASL_PASSWORD_FILE` — through
+  `kafka.Config.SASLSecret`, the one place both providers take it from),
+  `secret.CertPool` for a CA bundle. A CA file *is* the trust store, never an
+  addition to the system roots — the same in Kafka (both providers), S3 and
+  OTLP. No `os.ReadFile` + trim, no `x509.NewCertPool` in a client.
+- **httpx defaults are written once, in the `envDefault` tags**: a hand-built
+  `httpx.Config` gets them from there (`withDefaults`); a field whose zero is
+  a setting of its own is listed in `keepsZero`. Never a second copy of a
+  default as a constant next to the tag.
 - **Service configs embed the lib configs** (`httpx.Config` inline,
   `pgx.Config`/`valkey.Config`/`kafka.Config`/`otelx.Config` nested with an
   `envPrefix`) and load through `httpx.LoadYAML`: env > YAML > `envDefault` tag.

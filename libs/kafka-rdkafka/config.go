@@ -3,7 +3,6 @@ package rdkafka
 import (
 	"fmt"
 	"maps"
-	"os"
 	"slices"
 	"strings"
 
@@ -109,22 +108,15 @@ func commonProperties(cfg kafka.Config) (ckafka.ConfigMap, error) {
 		props["security.protocol"] = cfg.SecurityProtocol
 	}
 
-	if cfg.SASLMechanism != "" { //nolint:nestif // mirrors kafka-franz saslMechanism; moving the password-file read into libs/kafka is a separate design change
-		password := cfg.SASLPassword.Expose()
-		if cfg.SASLPasswordFile != "" {
-			b, err := os.ReadFile(cfg.SASLPasswordFile)
-			if err != nil {
-				return nil, fmt.Errorf("kafka: KAFKA_SASL_PASSWORD_FILE: %w", err)
-			}
-
-			if password = strings.TrimRight(string(b), "\r\n"); password == "" {
-				return nil, fmt.Errorf("kafka: KAFKA_SASL_PASSWORD_FILE: %s is empty", cfg.SASLPasswordFile)
-			}
+	if cfg.SASLMechanism != "" {
+		password, err := cfg.SASLSecret()
+		if err != nil {
+			return nil, fmt.Errorf("kafka: %w", err)
 		}
 
 		props["sasl.mechanism"] = cfg.SASLMechanism
 		props["sasl.username"] = cfg.SASLUsername
-		props["sasl.password"] = password
+		props["sasl.password"] = password.Expose()
 	}
 
 	for k, v := range map[string]string{
