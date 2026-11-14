@@ -319,6 +319,8 @@ func TestPoolSizeCoversEveryDedicatedPath(t *testing.T) {
 	assert.Len(t, connections(t, observer, name), 2)
 }
 
+// UPSTREAM-WORKAROUND(valkey-go): the defect behind bounded.go, asserted.
+//
 // Why this package enforces the bound itself: the library's pool does not
 // hold under the overload it exists for. One caller whose context ends while
 // it waits for a connection raises the limit by one for good. This test
@@ -373,6 +375,8 @@ func TestUpstreamPoolLimitLeaksOnACancelledWaiter(t *testing.T) {
 		"valkey-go no longer leaks its pool limit on a cancelled waiter: remove bounded.go and this test")
 }
 
+// UPSTREAM-WORKAROUND(valkey-go): guards the retry switch in clientOption.
+//
 // Reads keep failing and succeeding while connections are reset and replies
 // cut short — and nothing in the client races. With valkey-go's own retry on
 // (≤ 1.0.79) this test fails under -race within seconds: a retried command is

@@ -217,6 +217,7 @@ func (c Config) clientOption() (valkeygo.ClientOption, error) {
 	opt.BlockingPipeline = blockingPipeline
 	opt.BlockingPoolMinSize = c.PoolMinIdle
 	opt.BlockingPoolCleanup = c.PoolIdleTimeout
+	// UPSTREAM-WORKAROUND(valkey-go), docs/UPSTREAM-WORKAROUNDS.md.
 	// The library's own retry of read-only commands is off. After a
 	// connection error it sends the same command object again on a new
 	// connection and, on success, recycles it — while the writer of the old

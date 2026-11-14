@@ -59,8 +59,8 @@ func (c *Cache) Subscribe(ctx context.Context, channel string, onMessage func(me
 		}
 	})
 
-	// The resubscription is this loop, not the library's retry (off: see
-	// clientOption). Each attempt builds its own command, so nothing is
+	// UPSTREAM-WORKAROUND(valkey-go): the resubscription is this loop, not
+	// the library's retry (off: see clientOption). Each attempt builds its own command, so nothing is
 	// shared with a connection that failed.
 	for attempt := 0; ; attempt++ {
 		err := c.client.Receive(ctx, c.client.B().Subscribe().Channel(channel).Build(), func(msg valkeygo.PubSubMessage) {
