@@ -246,6 +246,13 @@ README; this file is only the high-signal, easy-to-miss bits.
   (`scripts/cover.sh`, `just cov-check`, `.testcoverage.yml`). Tests write
   `-test.gocoverdir`, e2e binaries are built with `COVER=1` and write
   `GOCOVERDIR`. Raise the threshold when it improves; lower only with a reason.
+  The pure-logic libraries also have a floor on the unit layer alone
+  (`.testcoverage.unit.yml`): logic there is pinned by `-short` tests, not
+  by an integration test passing through it.
+  A new package must reach some layer's profile: the gate
+  (`scripts/cover-files.go`) fails on a file with code that no instrumented
+  binary contained — add a test or have e2e run the binary, or exclude the
+  path in `.testcoverage.yml` with the reason (test code only).
   The gate is `scripts/cover.sh gate`, never a bare `go-test-coverage`: with
   no go.mod at the workspace root the tool names files per module, and every
   `^libs/…` exclude and override in `.testcoverage.yml` matches nothing.
@@ -280,7 +287,10 @@ README; this file is only the high-signal, easy-to-miss bits.
 - **Load tests (k6) stay outside Allure**: they run on the load stand and
   report there; do not wire k6 summaries into the test report.
 - **Coverage must not regress**: the `coverage` job diffs a PR's breakdown
-  against master's (`--diff-threshold 0`). Every layer is collected with
+  against master's; the total may drop by at most `diff.threshold` in
+  `.testcoverage.yml` (0.05 points — the measured run-to-run noise of
+  chaos-covered error branches, not room for untested code). Do not re-run the
+  job to get past it and do not widen it without a measurement. Every layer is collected with
   `-covermode=atomic` (covdata cannot merge mixed modes; `-race` implies
   atomic) — keep that flag on any new `go test -cover` / `go build -cover`.
 - **No retries to hide flakes**: `-shuffle=on`, `TZ=UTC`, no retry flags

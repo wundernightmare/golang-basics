@@ -396,10 +396,28 @@ gates. Every layer uses `-covermode=atomic` (covdata cannot merge mixed modes,
 and `-race` implies atomic), and the merge fails on any covdata error rather
 than gate a partial profile.
 
+What the number does not include: test code that lives in non-`_test` files
+(`libs/testx`, `libs/kafka/kafkatest`, each service's `internal/testsupport`)
+and generated code — see `exclude` in `.testcoverage.yml`. What it must
+include: every other file with code. A package that no instrumented binary
+contained is absent from a profile rather than at 0%, so
+`scripts/cover-files.go` (part of `cover.sh gate`) fails on such a file by
+name. And what it means: a statement counts when any layer executed it —
+every layer instruments the whole workspace — which is evidence of execution,
+not of an assertion; `just mutate` is the check for the second.
+
+The pure-logic libraries (`httpx`, `resilient-http-client`, `grpcx`,
+`resilience`, `secret`, `tiercache`) have a second floor on the **unit layer
+alone** (`.testcoverage.unit.yml`, 90–95%): there, coverage that exists only
+because an integration test passed through the code does not count.
+
 Two gates, both on the merged profile: the floors above, and **no
 regression** — the `coverage` job keeps master's per-package breakdown
-(`coverage-breakdown.json`) and compares a pull request to it with
-`--diff-threshold 0`. `main.go` and wiring are covered by e2e, the libs by
+(`coverage-breakdown.json`) and compares a pull request's merged total to it.
+The allowed drop is `diff.threshold` in `.testcoverage.yml` (0.05 points, about
+three statements): the profile is not deterministic — a few error branches are
+reached only when a chaos test's connection cut lands on them — so zero
+tolerance fails unrelated pull requests. `main.go` and wiring are covered by e2e, the libs by
 unit + integration, the service internals by all three — which is the point of
 merging.
 

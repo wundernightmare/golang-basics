@@ -220,6 +220,16 @@ func TestConfigFlagsAndExitCodes(t *testing.T) {
 	assert.Equal(t, 78, code, out)
 	assert.Contains(t, out, "KAFKA_BROKERS is not", "a Kafka key without the brokers is not silently ignored")
 
+	// ingest refuses to boot without the sink that makes its acknowledgements
+	// durable, and names the key.
+	code, out = run("ingest", "INGEST_", map[string]string{"ADMIN_ADDR": "127.0.0.1:0"}, "--check-config")
+	assert.Equal(t, 78, code, out)
+	assert.Contains(t, out, "S3_BUCKET must be set", "ingest needs its archive")
+
+	code, out = run("ingest", "INGEST_", nil, "--config-reference")
+	assert.Equal(t, 0, code, out)
+	assert.Regexp(t, `INGEST_HTTP_ADDR\s+http_addr\s+:8084`, out)
+
 	code, out = run("ping", "PING_", nil, "--bogus")
 	assert.Equal(t, 64, code, out)
 }
