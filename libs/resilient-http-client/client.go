@@ -168,7 +168,7 @@ func (c *Client) newPolicy(tc TargetConfig) *policy {
 		p.limiter = rate.NewLimiter(rate.Limit(tc.RateLimit), burst)
 	}
 
-	p.breaker = resilience.NewBreaker(tc.breaker(), time.Now, func(from, to BreakerState) {
+	p.breaker = resilience.NewBreaker(tc.Breaker, time.Now, func(from, to BreakerState) {
 		c.m.transitions.WithLabelValues(tc.Name, from.String(), to.String()).Inc()
 		// The current state, not `to`, and read under the lock: concurrent
 		// notifications may run out of order, but whichever sets the gauge

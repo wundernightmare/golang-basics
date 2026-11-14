@@ -371,7 +371,7 @@ func TestCall_RetryThrottlingBoundsAmplification(t *testing.T) {
 		srv := serve(t, &backend{check: fail(codes.Unavailable)})
 		_, conn := dial(t, target(srv.addr, func(tc *grpcx.TargetConfig) {
 			tc.RetryThrottleMaxTokens = maxTokens
-			tc.FailureRatio = 0 // no breaker: every call reaches gRPC
+			tc.Breaker.FailureRatio = 0 // no breaker: every call reaches gRPC
 		}))
 
 		for range calls {
@@ -406,8 +406,8 @@ func TestCall_BreakerOpensRejectsAndRecovers(t *testing.T) {
 	client, conn := dial(t, target(srv.addr, func(tc *grpcx.TargetConfig) {
 		noRetries(tc)
 
-		tc.MinRequests = 2
-		tc.OpenTimeout = 50 * time.Millisecond
+		tc.Breaker.MinRequests = 2
+		tc.Breaker.OpenTimeout = 50 * time.Millisecond
 	}), grpcx.WithLogger(slog.New(slog.NewJSONHandler(buf, nil))))
 
 	for range 2 {
@@ -430,7 +430,7 @@ func TestCall_BreakerOpensRejectsAndRecovers(t *testing.T) {
 	assert.NotNil(t, buf.Find(t, map[string]any{"level": "INFO", "msg": "grpcx: circuit breaker open", "target": "api", "from": "closed"}), buf.String())
 
 	down.Store(false)
-	time.Sleep(60 * time.Millisecond) // breaker_open_timeout
+	time.Sleep(60 * time.Millisecond) // breaker.open_timeout
 
 	require.NoError(t, check(t.Context(), conn), "the probe")
 	assert.Equal(t, resilience.StateClosed, state(t, client))
@@ -463,7 +463,7 @@ func TestCall_WhatTheBreakerCounts(t *testing.T) {
 			client, conn := dial(t, target(srv.addr, func(c *grpcx.TargetConfig) {
 				noRetries(c)
 
-				c.MinRequests = 2
+				c.Breaker.MinRequests = 2
 			}))
 
 			for range 3 {
@@ -482,7 +482,7 @@ func TestCall_NoBreakerNeverRejects(t *testing.T) {
 	client, conn := dial(t, target(srv.addr, func(tc *grpcx.TargetConfig) {
 		noRetries(tc)
 
-		tc.BreakerConfig = resilience.BreakerConfig{}
+		tc.Breaker = resilience.BreakerConfig{}
 	}))
 
 	for range 30 {
@@ -505,7 +505,7 @@ func TestCall_CallerDeadlineIsABreakerFailureCancellationIsNot(t *testing.T) {
 	client, conn := dial(t, target(srv.addr, func(tc *grpcx.TargetConfig) {
 		noRetries(tc)
 
-		tc.MinRequests = 2
+		tc.Breaker.MinRequests = 2
 	}))
 
 	for range 4 {
@@ -552,7 +552,7 @@ func TestStream_ReadToTheEndIsOneSuccessfulCall(t *testing.T) {
 	t.Parallel()
 
 	srv := serve(t, &backend{watch: send(3)})
-	client, conn := dial(t, target(srv.addr, func(tc *grpcx.TargetConfig) { tc.MinRequests = 1 }))
+	client, conn := dial(t, target(srv.addr, func(tc *grpcx.TargetConfig) { tc.Breaker.MinRequests = 1 }))
 
 	stream, err := watch(t.Context(), conn)
 	require.NoError(t, err)
@@ -580,7 +580,7 @@ func TestStream_FailureMidStreamIsABreakerFailure(t *testing.T) {
 
 		return status.Error(codes.Unavailable, "going away")
 	}})
-	client, conn := dial(t, target(srv.addr, func(tc *grpcx.TargetConfig) { tc.MinRequests = 1 }))
+	client, conn := dial(t, target(srv.addr, func(tc *grpcx.TargetConfig) { tc.Breaker.MinRequests = 1 }))
 
 	stream, err := watch(t.Context(), conn)
 	require.NoError(t, err)
@@ -616,7 +616,7 @@ func TestStream_AbandonedByCancellationReportsOnce(t *testing.T) {
 
 	t.Cleanup(func() { close(release) })
 
-	client, conn := dial(t, target(srv.addr, func(tc *grpcx.TargetConfig) { tc.MinRequests = 1 }))
+	client, conn := dial(t, target(srv.addr, func(tc *grpcx.TargetConfig) { tc.Breaker.MinRequests = 1 }))
 
 	ctx, cancel := context.WithCancel(t.Context())
 	stream, err := watch(ctx, conn)
@@ -665,7 +665,7 @@ func TestStream_FailsToStart(t *testing.T) {
 	client, conn := dial(t, target("127.0.0.1:1", func(tc *grpcx.TargetConfig) {
 		noRetries(tc)
 
-		tc.MinRequests = 1
+		tc.Breaker.MinRequests = 1
 	}))
 
 	_, err := watch(t.Context(), conn)

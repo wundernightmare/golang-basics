@@ -58,7 +58,7 @@ func policy(addr string, mut ...func(*grpcx.TargetConfig)) grpcx.TargetConfig {
 
 func cleartext(tc *grpcx.TargetConfig)     { tc.Insecure = true }
 func noRetries(tc *grpcx.TargetConfig)     { tc.RetryMaxAttempts = 1 }
-func touchyBreaker(tc *grpcx.TargetConfig) { tc.MinRequests = 1 }
+func touchyBreaker(tc *grpcx.TargetConfig) { tc.Breaker.MinRequests = 1 }
 
 func timeout(d time.Duration) func(*grpcx.TargetConfig) {
 	return func(tc *grpcx.TargetConfig) { tc.Timeout = d }

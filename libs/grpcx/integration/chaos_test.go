@@ -118,15 +118,15 @@ func TestChaos_TLSHandshake(t *testing.T) {
 // A dependency that goes away and comes back, seen through the breaker: the
 // failures open it, an open breaker answers without touching the network —
 // as Unavailable to code that looks at the status, as ErrCircuitOpen to code
-// that asks — and after breaker_open_timeout a probe finds the dependency
+// that asks — and after breaker.open_timeout a probe finds the dependency
 // alive and closes it.
 //
 //nolint:paralleltest // serial: shares the Toxiproxy proxy in front of Jaeger
 func TestChaos_OutageOpensTheBreakerAndAProbeClosesIt(t *testing.T) {
 	proxy := through(t, "otlp-plain", otlpPlain)
 	client, conn := dial(t, policy(proxy.Addr, cleartext, noRetries, func(tc *grpcx.TargetConfig) {
-		tc.MinRequests = 4
-		tc.OpenTimeout = 500 * time.Millisecond
+		tc.Breaker.MinRequests = 4
+		tc.Breaker.OpenTimeout = 500 * time.Millisecond
 	}))
 
 	require.NoError(t, export(t.Context(), t, conn, 1, "breaker"))
@@ -160,7 +160,7 @@ func TestChaos_OutageOpensTheBreakerAndAProbeClosesIt(t *testing.T) {
 	proxy.Up()
 
 	eventually(t, func() error { return export(t.Context(), t, conn, 1, "breaker") },
-		"after breaker_open_timeout, and gRPC's reconnect, a probe goes through")
+		"after breaker.open_timeout, and gRPC's reconnect, a probe goes through")
 	assert.Equal(t, resilience.StateClosed, breaker(t, client))
 }
 

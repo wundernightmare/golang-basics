@@ -104,8 +104,8 @@ cache with an `envPrefix`.
 | `TIERCACHE_STALE_IF_ERROR` | `stale_if_error` | `0` | grace past `HARD_TTL` while the loader fails |
 | `TIERCACHE_REFRESH_TIMEOUT` / `_CONCURRENCY` | `refresh_timeout` / `refresh_concurrency` | `5s` / `16` | background refresh bounds |
 | `TIERCACHE_TOMBSTONE_TTL` | `tombstone_ttl` | `5s` | a few times the slowest load |
-| `TIERCACHE_BREAKER_FAILURE_RATIO` / `_MIN_REQUESTS` / `_WINDOW` | `breaker_failure_ratio` / `breaker_min_requests` / `breaker_window` | `0.5` / `10` / `10s` | when L2 is skipped: this share of at least this many calls in the window failed |
-| `TIERCACHE_BREAKER_OPEN_TIMEOUT` | `breaker_open_timeout` | `5s` | for how long, before one call probes it |
+| `TIERCACHE_BREAKER_FAILURE_RATIO` / `_MIN_REQUESTS` / `_WINDOW` | `breaker.failure_ratio` / `breaker.min_requests` / `breaker.window` | `0.5` / `10` / `10s` | when L2 is skipped: this share of at least this many calls in the window failed |
+| `TIERCACHE_BREAKER_OPEN_TIMEOUT` / `_HALF_OPEN_PROBES` | `breaker.open_timeout` / `breaker.half_open_probes` | `5s` / `1` | for how long, and how many calls then probe it |
 | `TIERCACHE_DISABLE_INVALIDATION` | `disable_invalidation` | `false` | no Pub/Sub |
 
 Refresh traffic does not follow the request rate: every key read at least

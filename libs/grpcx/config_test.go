@@ -22,24 +22,26 @@ targets:
     address: dns:///billing.internal:443
     timeout: 2s
     retry_methods: [billing.v1.Invoices/Get]
-    breaker_failure_ratio: 0
+    breaker:
+      failure_ratio: 0
   - name: search
     address: dns:///search.internal:443
     insecure: true
     retry_max_attempts: 0
-    breaker_min_requests: 5
+    breaker:
+      min_requests: 5
 `))
 	require.NoError(t, err)
 
 	billing := DefaultTarget("billing", "dns:///billing.internal:443")
 	billing.Timeout = 2 * time.Second
 	billing.RetryMethods = []string{"billing.v1.Invoices/Get"}
-	billing.FailureRatio = 0
+	billing.Breaker.FailureRatio = 0
 
 	search := DefaultTarget("search", "dns:///search.internal:443")
 	search.Insecure = true
 	search.RetryMaxAttempts = 0
-	search.MinRequests = 5
+	search.Breaker.MinRequests = 5
 
 	assert.Equal(t, DefaultConfig(billing, search), cfg, "omitted keys keep their defaults; an explicit 0 disables")
 }
@@ -73,7 +75,7 @@ func TestDefaultTarget(t *testing.T) {
 
 	tc := cfg.Targets[0]
 	assert.False(t, tc.Insecure, "TLS unless the config says otherwise")
-	assert.Equal(t, resilience.DefaultBreakerConfig(), tc.BreakerConfig)
+	assert.Equal(t, resilience.DefaultBreakerConfig(), tc.Breaker)
 	assert.Equal(t, []string{"UNAVAILABLE"}, tc.RetryCodes)
 	assert.Zero(t, tc.KeepaliveTime, "keepalive is off unless agreed with the server")
 }
@@ -115,7 +117,7 @@ func TestValidate(t *testing.T) {
 		{"tokens negative", func(t *TargetConfig) { t.RetryThrottleMaxTokens = -1 }, "retry_throttle_max_tokens"},
 		{"tokens above gRPC's cap", func(t *TargetConfig) { t.RetryThrottleMaxTokens = 1001 }, "retry_throttle_max_tokens"},
 		{"token ratio", func(t *TargetConfig) { t.RetryThrottleTokenRatio = 0 }, "retry_throttle_token_ratio"},
-		{"breaker", func(t *TargetConfig) { t.MinRequests = 0 }, "breaker_min_requests"},
+		{"breaker", func(t *TargetConfig) { t.Breaker.MinRequests = 0 }, "breaker: min_requests"},
 	} {
 		c := valid()
 		tc.mut(&c.Targets[0])

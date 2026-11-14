@@ -396,7 +396,7 @@ func TestSendWithRetry_BudgetBoundsAmplification(t *testing.T) {
 	srv, hits := server(t, status(http.StatusServiceUnavailable))
 
 	c := newClient(t, target(func(tc *resilient.TargetConfig) {
-		tc.BreakerFailureRatio = 0
+		tc.Breaker.FailureRatio = 0
 		tc.RetryMaxAttempts = 5
 		tc.RetryBudgetRatio = 0.1
 		tc.RetryBudgetMinRetries = 2
@@ -441,7 +441,7 @@ func TestSend_TimeoutIsABreakerFailure(t *testing.T) {
 
 	client := newClient(t, target(func(tc *resilient.TargetConfig) {
 		tc.Timeout = 20 * time.Millisecond
-		tc.BreakerMinRequests = 2
+		tc.Breaker.MinRequests = 2
 	}))
 	for range 2 {
 		_, err := client.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
@@ -472,7 +472,7 @@ func TestSend_CallerCancellationDoesNotTripBreaker(t *testing.T) {
 		<-r.Context().Done()
 	})
 
-	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }))
+	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }))
 	for range 5 {
 		ctx, cancel := context.WithCancel(t.Context())
 
@@ -498,7 +498,7 @@ func TestSend_CallerDeadlineIsABreakerFailure(t *testing.T) {
 
 	srv, _ := server(t, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
 
-	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 2 }))
+	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 2 }))
 	for range 2 {
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 		_, err := c.Send("api", get(t, ctx, srv.URL)) //nolint:bodyclose // error
@@ -541,7 +541,7 @@ func TestSend_BodyTimeoutIsATypedBreakerFailure(t *testing.T) {
 	srv := hangAfterHead(t)
 	client := newClient(t, target(func(tc *resilient.TargetConfig) {
 		tc.Timeout = 30 * time.Millisecond
-		tc.BreakerMinRequests = 2
+		tc.Breaker.MinRequests = 2
 	}))
 
 	for range 2 {
@@ -574,7 +574,7 @@ func TestSend_BodyCutShortIsAConnectionFailure(t *testing.T) {
 			_ = conn.Close()
 		}
 	})
-	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }))
+	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }))
 
 	resp, err := c.Send("api", get(t, t.Context(), srv.URL))
 	require.NoError(t, err)
@@ -596,7 +596,7 @@ func TestSend_UnreadBodyReportsToBreakerAtAttemptTimeout(t *testing.T) {
 	srv := hangAfterHead(t)
 	c := newClient(t, target(func(tc *resilient.TargetConfig) {
 		tc.Timeout = 30 * time.Millisecond
-		tc.BreakerMinRequests = 2
+		tc.Breaker.MinRequests = 2
 	}))
 
 	for range 2 {
@@ -616,7 +616,7 @@ func TestSend_BodyReadOrClosedEarlyIsABreakerSuccess(t *testing.T) {
 	t.Parallel()
 
 	srv, _ := server(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, strings.Repeat("x", 1<<16)) })
-	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }))
+	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }))
 
 	for i := range 4 {
 		resp, err := client.Send("api", get(t, t.Context(), srv.URL))
@@ -686,7 +686,7 @@ func TestSend_4xxDoesNotTripBreaker(t *testing.T) {
 
 	srv, _ := server(t, status(http.StatusTooManyRequests))
 
-	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }))
+	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }))
 	for range 5 {
 		_, err := c.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
 		require.ErrorIs(t, err, resilient.KindStatus)
@@ -719,7 +719,7 @@ func TestSend_ConnectionErrorTripsBreaker(t *testing.T) {
 
 	addr := ln.Addr().String()
 
-	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }))
+	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }))
 	_, err = c.Send("api", get(t, t.Context(), "http://"+addr)) //nolint:bodyclose // error
 	require.ErrorIs(t, err, resilient.KindConnection)
 
@@ -745,8 +745,8 @@ func TestSend_HalfOpenAdmitsOneProbeUnderConcurrency(t *testing.T) {
 		<-probeGo // hold the probe until every other request was decided
 	})
 	client := newClient(t, target(func(tc *resilient.TargetConfig) {
-		tc.BreakerMinRequests = 1
-		tc.BreakerOpenTimeout = 50 * time.Millisecond
+		tc.Breaker.MinRequests = 1
+		tc.Breaker.OpenTimeout = 50 * time.Millisecond
 	}))
 	_, err := client.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
 	require.ErrorIs(t, err, resilient.KindStatus)
@@ -810,7 +810,7 @@ func TestSend_RateLimitWaitsWithinAttemptTimeout(t *testing.T) {
 	c2 := newClient(t, target(func(tc *resilient.TargetConfig) {
 		tc.RateLimit = 0.5
 		tc.Timeout = 100 * time.Millisecond
-		tc.BreakerMinRequests = 1
+		tc.Breaker.MinRequests = 1
 	}), resilient.WithRegisterer(prometheus.NewRegistry()))
 	resp, err := c2.Send("api", get(t, t.Context(), srv.URL))
 	require.NoError(t, err)
@@ -998,7 +998,7 @@ func TestSend_ReusesConnectionsAfterDrain(t *testing.T) {
 	srv.Start()
 	t.Cleanup(srv.Close)
 
-	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerFailureRatio = 0 }))
+	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.FailureRatio = 0 }))
 	for _, path := range []string{"/ok", "/500", "/404", "/ok", "/500"} {
 		resp, err := c.Send("api", get(t, t.Context(), srv.URL+path))
 		if err == nil {
@@ -1048,7 +1048,7 @@ func TestSend_WarnsOnBodyFailureRequestFailureAndRejection(t *testing.T) {
 	buf := &testx.LogBuffer{}
 	client := newClient(t, target(func(tc *resilient.TargetConfig) {
 		tc.Timeout = 30 * time.Millisecond
-		tc.BreakerMinRequests = 2
+		tc.Breaker.MinRequests = 2
 	}), resilient.WithLogger(slog.New(slog.NewJSONHandler(buf, nil))))
 
 	resp, err := client.Send("api", get(t, t.Context(), srv.URL+"/body"))

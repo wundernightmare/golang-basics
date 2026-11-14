@@ -31,7 +31,7 @@ func TestSend_ForgottenBodyIsReleasedWhenTheAttemptEnds(t *testing.T) {
 	client := newClient(t, target(func(tc *resilient.TargetConfig) {
 		tc.Timeout = 60 * time.Millisecond
 		tc.MaxConcurrent = 1
-		tc.BreakerFailureRatio = 0 // the breaker is another test's subject
+		tc.Breaker.FailureRatio = 0 // the breaker is another test's subject
 	}))
 
 	forgotten, err := client.Send("api", get(t, t.Context(), srv.URL))
@@ -284,7 +284,7 @@ func TestSend_RefusesHTTPSToHTTPRedirect(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }),
+	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }),
 		resilient.WithHTTPClient(srv.Client()))
 
 	_, err := client.SendWithRetry("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
@@ -332,7 +332,7 @@ func TestSendWithRetry_DoesNotRetryARejectedCertificate(t *testing.T) {
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 
-	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 })) // trusts the system roots, not httptest's
+	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 })) // trusts the system roots, not httptest's
 
 	_, err := client.SendWithRetry("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
 	require.ErrorIs(t, err, resilient.KindConnection)

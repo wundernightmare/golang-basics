@@ -115,15 +115,15 @@ func TestChaos_TLSHandshake(t *testing.T) {
 
 // A dependency that goes away and comes back, seen through the breaker: the
 // failures open it, an open breaker answers without touching the network,
-// and after breaker_open_timeout one probe finds the dependency alive and
+// and after breaker.open_timeout one probe finds the dependency alive and
 // closes it.
 //
 //nolint:paralleltest // serial: shares the Toxiproxy proxy in front of the edge
 func TestChaos_OutageOpensTheBreakerAndAProbeClosesIt(t *testing.T) {
 	proxy, base := throughTLS(t)
 	client := newClient(t, policy(func(tc *resilient.TargetConfig) {
-		tc.BreakerMinRequests = 4
-		tc.BreakerOpenTimeout = 400 * time.Millisecond
+		tc.Breaker.MinRequests = 4
+		tc.Breaker.OpenTimeout = 400 * time.Millisecond
 	}), nil)
 
 	require.Equal(t, "HTTP/2.0", whoami(t, client, base).Proto)
@@ -164,7 +164,7 @@ func TestChaos_OutageOpensTheBreakerAndAProbeClosesIt(t *testing.T) {
 		_ = resp.Body.Close()
 
 		return true
-	}, 5*time.Second, 50*time.Millisecond, "after breaker_open_timeout a probe is let through")
+	}, 5*time.Second, 50*time.Millisecond, "after breaker.open_timeout a probe is let through")
 	assert.Equal(t, resilient.StateClosed, breakerState(t, client))
 	assert.InDelta(t, 1, metric(t, client, "http_client_circuit_breaker_transitions_total",
 		map[string]string{"from": "half_open", "to": "closed"}), 0)
@@ -242,7 +242,7 @@ func TestChaos_ConnectionCutInTheMiddleOfTheBody(t *testing.T) {
 	}{{"HTTP/1.1 cleartext", throughPlain}, {"HTTP/2 over TLS", throughTLS}} {
 		t.Run(via.name, func(t *testing.T) {
 			proxy, base := via.through(t)
-			client := newClient(t, policy(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }), nil)
+			client := newClient(t, policy(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }), nil)
 
 			proxy.Toxic("limit_data", "downstream", map[string]any{"bytes": 512 << 10})
 

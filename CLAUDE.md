@@ -201,6 +201,11 @@ README; this file is only the high-signal, easy-to-miss bits.
   stop, each guarded against a panic (tasks: relay and janitor; ingest: the
   archive writer). A worker nothing waits for (consumer, heartbeat) runs under
   `srv.Guard` with the server's own context. Never a bare `go worker.Run`.
+- **A circuit breaker is configured by `resilience.BreakerConfig`, nowhere
+  else**: a field `Breaker resilience.BreakerConfig` with
+  `envPrefix:"…BREAKER_"` / `yaml:"breaker"` (HTTP client, grpcx, tiercache;
+  ingest has two, one per sink). No copies of its five fields, no defaults in
+  its tags — the owner presets its own policy before loading.
 - **Durability patterns live in the tasks vertical**: writes go through a
   transactional outbox (row + event in one transaction, relay publishes), the
   consumer retries with backoff and dead-letters to `<topic>.dlq` (or stops

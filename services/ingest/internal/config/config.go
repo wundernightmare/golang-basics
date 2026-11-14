@@ -91,42 +91,22 @@ type IngestConfig struct {
 	// HTTP_SHUTDOWN_DELAY + HTTP_SHUTDOWN_TIMEOUT + this.
 	DrainTimeout time.Duration `env:"DRAIN_TIMEOUT" envDefault:"15s" yaml:"drain_timeout"`
 
-	KafkaBreaker   BreakerConfig `envPrefix:"KAFKA_BREAKER_" yaml:"kafka_breaker"`
-	ArchiveBreaker BreakerConfig `envPrefix:"ARCHIVE_BREAKER_" yaml:"archive_breaker"`
+	// One circuit breaker per sink (libs/resilience, configured like every
+	// other one). The two sinks see very different call rates — Kafka one
+	// call per request, the archive one per batch — so their presets differ
+	// (see preset); a sink without a breaker would be retried by every
+	// request for its full timeout while it is down, so one is required.
+	KafkaBreaker   resilience.BreakerConfig `envPrefix:"KAFKA_BREAKER_" yaml:"kafka_breaker"`
+	ArchiveBreaker resilience.BreakerConfig `envPrefix:"ARCHIVE_BREAKER_" yaml:"archive_breaker"`
 }
 
-// BreakerConfig is one sink's circuit breaker (libs/resilience).
-// The two sinks see very different call rates — Kafka one call per request,
-// the archive one per batch — so each has its own; the presets differ.
-type BreakerConfig struct {
-	// FailureRatio opens the circuit when failures / calls in Window reach it.
-	FailureRatio float64 `env:"FAILURE_RATIO" envDefault:"0.5" yaml:"failure_ratio"`
-	// MinRequests is the least calls in Window before the ratio counts.
-	MinRequests int `env:"MIN_REQUESTS" envDefault:"10" yaml:"min_requests"`
-	// Window is the sliding window the ratio is measured over.
-	Window time.Duration `env:"WINDOW" envDefault:"10s" yaml:"window"`
-	// OpenTimeout is how long the circuit stays open before a probe.
-	OpenTimeout time.Duration `env:"OPEN_TIMEOUT" envDefault:"5s" yaml:"open_timeout"`
-	// HalfOpenProbes is how many probes must succeed to close it.
-	HalfOpenProbes int `env:"HALF_OPEN_PROBES" envDefault:"1" yaml:"half_open_probes"`
-}
-
-// Resilient converts to the breaker's own config.
-func (b BreakerConfig) Resilient() resilience.BreakerConfig {
-	return resilience.BreakerConfig{
-		FailureRatio: b.FailureRatio, MinRequests: b.MinRequests, Window: b.Window,
-		OpenTimeout: b.OpenTimeout, HalfOpenProbes: b.HalfOpenProbes,
-	}
-}
-
-// validate requires a breaker: a sink without one would be retried by every
-// request for its full timeout while it is down.
-func (b BreakerConfig) validate() error {
+// validateBreaker requires a sink's breaker and checks its policy.
+func validateBreaker(b resilience.BreakerConfig) error {
 	if b.FailureRatio <= 0 {
 		return errors.New("failure_ratio must be in (0, 1]")
 	}
 
-	return errors.Join(b.Resilient().Validate()...)
+	return errors.Join(b.Validate()...)
 }
 
 // ArchiveConfig tunes how events become S3 objects.
@@ -195,7 +175,12 @@ func preset() Config {
 	cfg.S3.OpTimeout = 5 * time.Second
 	// One archive call is a whole batch: two failed batches in a minute are
 	// an outage, where ten failed Kafka requests in ten seconds are.
-	cfg.Ingest.ArchiveBreaker = BreakerConfig{MinRequests: 2, Window: time.Minute, OpenTimeout: 10 * time.Second}
+	cfg.Ingest.KafkaBreaker = resilience.BreakerConfig{
+		FailureRatio: 0.5, MinRequests: 10, Window: 10 * time.Second, OpenTimeout: 5 * time.Second, HalfOpenProbes: 1,
+	}
+	cfg.Ingest.ArchiveBreaker = resilience.BreakerConfig{
+		FailureRatio: 0.5, MinRequests: 2, Window: time.Minute, OpenTimeout: 10 * time.Second, HalfOpenProbes: 1,
+	}
 
 	return cfg
 }
@@ -328,11 +313,11 @@ func (c *Config) validateIngest() []error {
 		errs = append(errs, errors.New("RETRY_AFTER must be at least 1s; KAFKA_ACK_GRACE and DRAIN_TIMEOUT must be positive"))
 	}
 
-	if err := ing.KafkaBreaker.validate(); err != nil {
+	if err := validateBreaker(ing.KafkaBreaker); err != nil {
 		errs = append(errs, fmt.Errorf("KAFKA_BREAKER_*: %w", err))
 	}
 
-	if err := ing.ArchiveBreaker.validate(); err != nil {
+	if err := validateBreaker(ing.ArchiveBreaker); err != nil {
 		errs = append(errs, fmt.Errorf("ARCHIVE_BREAKER_*: %w", err))
 	}
 

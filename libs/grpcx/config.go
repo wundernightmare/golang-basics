@@ -99,10 +99,10 @@ type TargetConfig struct {
 	// (default 0.1; must be > 0 with throttling).
 	RetryThrottleTokenRatio float64 `yaml:"retry_throttle_token_ratio"`
 
-	// The circuit breaker: breaker_failure_ratio (default 0.5; 0 = none),
-	// breaker_min_requests (20), breaker_window (10s), breaker_open_timeout
-	// (30s), breaker_half_open_probes (1).
-	resilience.BreakerConfig `yaml:",inline"`
+	// Breaker is the circuit breaker (libs/resilience): breaker.failure_ratio
+	// (default 0.5; 0 = none), breaker.min_requests (20), breaker.window
+	// (10s), breaker.open_timeout (30s), breaker.half_open_probes (1).
+	Breaker resilience.BreakerConfig `yaml:"breaker"`
 }
 
 // DefaultConfig returns a config with the given targets, each built with
@@ -125,7 +125,7 @@ func DefaultTarget(name, address string) TargetConfig {
 		RetryCodes:              []string{"UNAVAILABLE"},
 		RetryThrottleMaxTokens:  10,
 		RetryThrottleTokenRatio: 0.1,
-		BreakerConfig:           resilience.DefaultBreakerConfig(),
+		Breaker:                 resilience.DefaultBreakerConfig(),
 	}
 }
 
@@ -229,7 +229,9 @@ func (t *TargetConfig) validate() []error {
 	}
 
 	errs = append(errs, t.validateRetry()...)
-	errs = append(errs, t.BreakerConfig.Validate()...) //nolint:staticcheck // QF1008: the embedded name says whose Validate this is, next to validateRetry
+	for _, err := range t.Breaker.Validate() {
+		errs = append(errs, fmt.Errorf("breaker: %w", err))
+	}
 
 	return errs
 }

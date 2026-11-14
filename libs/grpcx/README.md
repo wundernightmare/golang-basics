@@ -142,11 +142,12 @@ targets:
     retry_methods: []                  # empty = every method; else pkg.Service or pkg.Service/Method
     retry_throttle_max_tokens: 10      # ≤ 1000; 0 = no throttling
     retry_throttle_token_ratio: 0.1
-    breaker_failure_ratio: 0.5         # (0, 1]; 0 = no breaker
-    breaker_min_requests: 20
-    breaker_window: 10s
-    breaker_open_timeout: 30s
-    breaker_half_open_probes: 1
+    breaker:
+      failure_ratio: 0.5         # (0, 1]; 0 = no breaker
+      min_requests: 20
+      window: 10s
+      open_timeout: 30s
+      half_open_probes: 1
 ```
 
 **In a service config.** A service does not call `LoadConfig`: it embeds

@@ -71,8 +71,8 @@ for the life of the process. A failed body is
 not retried (the response was already handed over), and
 `http_client_requests_total` keeps the outcome known at the headers (`2xx`).
 
-**Half-open** — when open for `breaker_open_timeout`, the breaker admits exactly
-`breaker_half_open_probes` probes; all must succeed to close it, any failure
+**Half-open** — when open for `breaker.open_timeout`, the breaker admits exactly
+`breaker.half_open_probes` probes; all must succeed to close it, any failure
 re-opens it. A probe rejected locally releases its slot; a request admitted
 before the breaker opened cannot decide a probe (results carry the generation
 they were admitted in).
@@ -121,11 +121,12 @@ targets:
     rate_burst: 0                # 0 = max(1, ceil(rate_limit))
     max_concurrent: 0            # bulkhead; 0 = off
     max_concurrent_wait: 0s      # 0 = reject at once when full
-    breaker_failure_ratio: 0.5   # (0, 1]; 0 = no breaker
-    breaker_min_requests: 20
-    breaker_window: 10s
-    breaker_open_timeout: 30s
-    breaker_half_open_probes: 1
+    breaker:
+      failure_ratio: 0.5   # (0, 1]; 0 = no breaker
+      min_requests: 20
+      window: 10s
+      open_timeout: 30s
+      half_open_probes: 1
     retry_max_attempts: 3        # total, first included; 0/1 = no retries
     retry_base_delay: 100ms
     retry_max_delay: 5s

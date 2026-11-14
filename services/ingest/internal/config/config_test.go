@@ -56,7 +56,7 @@ func TestLoadDefaults(t *testing.T) {
 	assert.Equal(t, 10, cfg.Ingest.KafkaBreaker.MinRequests)
 	assert.Equal(t, 2, cfg.Ingest.ArchiveBreaker.MinRequests, "an archive call is a whole batch")
 	assert.Equal(t, time.Minute, cfg.Ingest.ArchiveBreaker.Window)
-	assert.InDelta(t, 0.5, cfg.Ingest.ArchiveBreaker.FailureRatio, 0, "the tag default fills what the preset left")
+	assert.InDelta(t, 0.5, cfg.Ingest.ArchiveBreaker.FailureRatio, 0, "the preset is the whole policy")
 
 	assert.Equal(t, 5*time.Minute, cfg.Compact.Interval)
 	assert.Equal(t, 15*time.Minute, cfg.Compact.CloseDelay)

@@ -96,7 +96,7 @@ func runIngest(ctx, bootCtx context.Context, cfg config.Config, srv *httpx.Serve
 	srv.Health.Register("s3", store.ReadyCheck(), httpx.Optional())
 
 	// The breaker policies were validated with the configuration.
-	archiveBreaker := breakers.breaker(cfg.Ingest.ArchiveBreaker.Resilient(), sinkArchive, logger)
+	archiveBreaker := breakers.breaker(cfg.Ingest.ArchiveBreaker, sinkArchive, logger)
 
 	writerID, err := archive.NewWriterID()
 	if err != nil {
@@ -137,7 +137,7 @@ func runIngest(ctx, bootCtx context.Context, cfg config.Config, srv *httpx.Serve
 		// Closed last (deferred first): after the pipeline has drained.
 		defer producer.Close()
 
-		kafkaBreaker = breakers.breaker(cfg.Ingest.KafkaBreaker.Resilient(), sinkKafka, logger)
+		kafkaBreaker = breakers.breaker(cfg.Ingest.KafkaBreaker, sinkKafka, logger)
 
 		srv.Health.Register("kafka", producer.ReadyCheck(), httpx.Optional())
 		registry.MustRegister(producer.Collectors()...)

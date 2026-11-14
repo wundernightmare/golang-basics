@@ -86,7 +86,7 @@ func TestExport_TheServersVerdictIsAnAnswer(t *testing.T) {
 	err = conn.Invoke(t.Context(), "/integration.Nothing/Here", &emptypb.Empty{}, &emptypb.Empty{})
 	require.Equal(t, codes.Unimplemented, status.Code(err), "%v", err)
 
-	assert.Equal(t, resilience.StateClosed, breaker(t, client), "with breaker_min_requests 1 a single failure would have opened it")
+	assert.Equal(t, resilience.StateClosed, breaker(t, client), "with breaker.min_requests 1 a single failure would have opened it")
 	assert.InDelta(t, 0, retries(t, client), 0)
 	assert.InDelta(t, 1, calls(t, client, "resource_exhausted"), 0)
 	assert.InDelta(t, 1, calls(t, client, "unimplemented"), 0)

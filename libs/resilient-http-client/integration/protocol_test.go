@@ -244,7 +244,7 @@ func TestWire_ForgottenBodyDoesNotHoldTheTarget(t *testing.T) {
 			client := link.client(t, policy(func(tc *resilient.TargetConfig) {
 				tc.Timeout = 400 * time.Millisecond
 				tc.MaxConcurrent = 1
-				tc.BreakerFailureRatio = 0
+				tc.Breaker.FailureRatio = 0
 			}))
 
 			_, err := client.Send(api, get(t, base+"/files/blob")) //nolint:bodyclose // forgotten on purpose
@@ -276,7 +276,7 @@ func TestWire_ClosingABodyEarly(t *testing.T) {
 			t.Parallel()
 
 			base := link.base(srv)
-			client := link.client(t, policy(func(tc *resilient.TargetConfig) { tc.BreakerMinRequests = 1 }))
+			client := link.client(t, policy(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }))
 			before := whoami(t, client, base)
 
 			resp, err := client.Send(api, get(t, base+"/files/blob"))
@@ -288,7 +288,7 @@ func TestWire_ClosingABodyEarly(t *testing.T) {
 			assert.Equal(t, strings.Repeat("0123456789abcdef", 64), string(head))
 			require.NoError(t, resp.Body.Close())
 
-			assert.Equal(t, resilient.StateClosed, breakerState(t, client), "with breaker_min_requests 1, one failure would have opened it")
+			assert.Equal(t, resilient.StateClosed, breakerState(t, client), "with breaker.min_requests 1, one failure would have opened it")
 
 			after := whoami(t, client, base)
 			if link.multiplexed() {

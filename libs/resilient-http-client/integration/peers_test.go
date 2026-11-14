@@ -94,7 +94,7 @@ func TestNonHTTPPeer_Postgres(t *testing.T) {
 
 			client := newClient(t, policy(func(tc *resilient.TargetConfig) {
 				tc.RetryMaxAttempts = 3
-				tc.BreakerMinRequests = 3
+				tc.Breaker.MinRequests = 3
 				tc.Timeout = 2 * time.Second
 			}), nil)
 
