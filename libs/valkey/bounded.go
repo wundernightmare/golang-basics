@@ -2,6 +2,7 @@ package valkey
 
 import (
 	"context"
+	"errors"
 
 	valkeygo "github.com/valkey-io/valkey-go"
 )
@@ -28,14 +29,23 @@ const blockingPipeline = valkeygo.DefaultBlockingPipeline
 // instead, leaving when its context ends. Ordinary pipelined commands pass
 // straight through.
 //
-// Not covered: DoStream / DoMultiStream hold their connection until the
-// caller drains the returned stream, which this wrapper cannot observe; they
-// use the library's second pool with the same size and the same flaw.
+// DoStream / DoMultiStream are refused ([ErrStreamUnsupported]): they hold
+// a connection of the library's second pool — same size, same flaw — until
+// the caller drains the returned stream, which is a struct this wrapper can
+// neither wrap nor observe, so it could not tell when to free the slot.
+// Passing them through would leave a second, leaking PoolSize next to the
+// one enforced here.
 type bounded struct {
 	valkeygo.Client
 
 	slots chan struct{}
 }
+
+// ErrStreamUnsupported is the error of every stream returned by DoStream /
+// DoMultiStream of [Cache.Client]: a streaming call would hold a connection
+// outside the PoolSize bound. Read the value with an ordinary command, or
+// build a separate valkey-go client for streaming.
+var ErrStreamUnsupported = errors.New("valkey: DoStream / DoMultiStream are not available through this client (they would escape pool_size)")
 
 func newBounded(client valkeygo.Client, size int) *bounded {
 	return &bounded{Client: client, slots: make(chan struct{}, size)}
@@ -124,4 +134,14 @@ func (b *bounded) Dedicate() (valkeygo.DedicatedClient, func()) {
 		cancel()
 		b.release()
 	}
+}
+
+// DoStream is refused: see [ErrStreamUnsupported].
+func (b *bounded) DoStream(context.Context, valkeygo.Completed) valkeygo.ValkeyResultStream {
+	return valkeygo.NewErrorResultStream(ErrStreamUnsupported)
+}
+
+// DoMultiStream is refused: see [ErrStreamUnsupported].
+func (b *bounded) DoMultiStream(context.Context, ...valkeygo.Completed) valkeygo.MultiValkeyResultStream {
+	return valkeygo.NewErrorResultStream(ErrStreamUnsupported)
 }

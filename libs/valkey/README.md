@@ -101,8 +101,11 @@ waits for a dedicated connection raises the pool's limit by one for good, so
 the limit dissolves under the overload it exists for — in the test, two
 connections allowed, seven opened after ten such callers. A test asserts that
 defect against the bare library, and will fail when an upgrade fixes it. The
-streaming calls (`DoStream`, `DoMultiStream`) are not covered: they use a
-second library pool of the same size.
+streaming calls (`DoStream`, `DoMultiStream`) would hold connections of a
+second library pool with the same flaw until the caller drains the stream —
+something a wrapper cannot observe — so `Cache.Client()` refuses them: the
+returned stream carries `ErrStreamUnsupported`. Nothing reachable through the
+client is outside the bound.
 
 `conn_write_timeout` is not `op_timeout`: the second bounds what one caller
 waits, the first how long the client keeps sending into a connection whose

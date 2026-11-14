@@ -1,11 +1,13 @@
 package valkey_test
 
 import (
+	"io"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	valkeygo "github.com/valkey-io/valkey-go"
 
 	"github.com/tracehubmmp/golang-basics/libs/valkey"
 )
@@ -135,4 +137,25 @@ func TestInvalidConnectionSettingsAreRejected(t *testing.T) {
 		_, err := cfg.ClientOption()
 		require.NoError(t, err, "%+v", cfg)
 	}
+}
+
+// A streaming call would hold a connection of the library's second pool,
+// outside PoolSize, for as long as the caller keeps the stream: the client
+// refuses it without reaching the library (the nil client below would panic).
+func TestStreamingCallsAreRefused(t *testing.T) {
+	t.Parallel()
+
+	client := valkey.NewBounded(nil, 1)
+
+	one := client.DoStream(t.Context(), valkeygo.Completed{})
+	require.ErrorIs(t, one.Error(), valkey.ErrStreamUnsupported)
+	require.False(t, one.HasNext())
+
+	n, err := one.WriteTo(io.Discard)
+	require.ErrorIs(t, err, valkey.ErrStreamUnsupported)
+	require.Zero(t, n)
+
+	many := client.DoMultiStream(t.Context(), valkeygo.Completed{}, valkeygo.Completed{})
+	require.ErrorIs(t, many.Error(), valkey.ErrStreamUnsupported)
+	require.False(t, many.HasNext())
 }

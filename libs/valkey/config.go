@@ -72,8 +72,9 @@ type Config struct {
 	// library's own default is 1024 — in effect no bound, and enough to
 	// exhaust a server's maxclients from a few replicas — and its bound
 	// leaks under overload; this package enforces its own (see bounded.go).
-	// The streaming calls (DoStream, DoMultiStream) are outside it: they use
-	// a second library pool of the same size.
+	// The streaming calls (DoStream, DoMultiStream) would take connections
+	// of a second library pool outside this bound, so the client refuses
+	// them (ErrStreamUnsupported).
 	PoolSize int `env:"VALKEY_POOL_SIZE" envDefault:"32" yaml:"pool_size"`
 	// PoolMinIdle is how many idle dedicated connections survive
 	// PoolIdleTimeout; PoolIdleTimeout closes the rest (0: an opened
