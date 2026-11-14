@@ -29,10 +29,12 @@ type Key [sha256.Size]byte
 func KeyOf(s string) Key { return sha256.Sum256([]byte(s)) }
 
 // l1MaxEntry is the largest key+envelope L1 stores: its ring buffers are made
-// of 64 KiB chunks, an entry must fit one, and 4 bytes of it are the lengths.
+// of 64 KiB chunks, an entry with its 4 bytes of lengths must be smaller than
+// one (fastcache: `4+len(k)+len(v) >= chunkSize` is dropped), hence 5.
 // A larger entry is silently dropped by the store, so it is refused (and
 // counted) here instead and served from L2.
-const l1MaxEntry = 64<<10 - 4
+// TestLargestEntryL1AcceptsIsHeld checks the number against the store.
+const l1MaxEntry = 64<<10 - 5
 
 // Cache is a two-level read cache: an off-heap, fixed-size L1 in the process
 // in front of a shared L2 ([Remote]), in front of the source of truth

@@ -18,6 +18,11 @@
 #
 # -count=1: the per-mutant timeout is derived from the initial coverage run,
 # so a cached run would time every mutant out.
+#
+# -short: the oracle is the unit layer. A mutant costs one run of the suite,
+# so the container-backed tests of a module (libs/tiercache: Valkey,
+# Toxiproxy) would turn minutes into hours — and a mutant only they kill is
+# logic the unit tests do not pin down, which is the gap this run is for.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,7 +45,7 @@ while IFS='=' read -r path target; do
 done <<<"$replaces"
 
 export GOWORK=off
-export GOFLAGS="-count=1 -modfile=$tmp/go.mod"
+export GOFLAGS="-count=1 -short -modfile=$tmp/go.mod"
 
 mkdir "$tmp/probe"
 cp -R "$dir/." "$tmp/probe/"

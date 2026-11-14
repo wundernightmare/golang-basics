@@ -1,0 +1,56 @@
+# gremlins — mutation testing of the decisions httpx makes per request and
+# per config: validation and defaults, the request budget, what the span and
+# the access log say, problems, redaction, log sampling, rate limiting,
+# health staleness.
+#
+#   just mutate libs/httpx
+#
+# Run it through scripts/mutate.sh (`just mutate` and CI do), never bare: see
+# the script for why a bare `gremlins unleash` reports every mutant killed.
+# The oracle is the unit layer (`-short`): a mutant only a container-backed
+# test would kill is logic the unit tests do not pin down.
+#
+# Thresholds fail the run (exit 11) when the suite lets too many mutants live.
+# Efficacy = killed / (killed + lived); mutant coverage = mutants any test
+# reaches. Ratchet them up when the numbers improve, never down without a
+# reason in the commit message.
+#
+# Excluded on purpose — process wiring, timers and I/O, where a mutant mostly
+# hangs the suite (TIMED OUT) or changes nothing a unit test can see:
+# the server lifecycle (httpx.go), the memory limiter and cgroup reader
+# (runtime.go), diagnostics dumps and the flight recorder, build info,
+# metric registration, pprof routes.
+#
+# Reading a run:
+#   - NOT COVERED here is a gremlins limitation, not untested code: Go's
+#     cover profile has no block for a `case` expression or a const.
+#   - Known survivors, all equivalent or cosmetic — anything else is a gap:
+#       config.go      `<= 0` / `< 0` on a field withDefaults already replaced
+#                      when zero (zero never reaches the check)
+#       logformat.go   the sensitivity cache and its cap (speed only);
+#                      built-in keys and struct/map detection, which end in
+#                      the same output for every value the tests can build
+#       logging.go     len(attrs) > 0              (adding no attributes is a no-op)
+#       loglevel.go    gen++                       (compared for equality only)
+#       middleware.go  configured < asked          (equal: the same budget either way)
+#                      routeOf: the method strip   (the host strip removes it as well)
+#       problem.go     map capacity hints; RecordError(nil) is a no-op
+#       sampling.go    n <= initial                (n == initial also passes the modulo)
+#                      level+128 in slot()         (which slot, not whether it is sampled)
+#       subjects.go    `<` in sort                 (subjects are unique)
+unleash:
+  workers: 4
+  timeout-coefficient: 8
+  output-statuses: lt # print only LIVED and TIMED OUT — the ones that matter
+  exclude-files:
+    - "diagnostics\\.go$"
+    - "flight\\.go$"
+    - "httpx\\.go$"
+    - "runtime\\.go$"
+    - "version\\.go$"
+    - "metrics\\.go$"
+    - "debug\\.go$"
+    - "doc\\.go$"
+  threshold:
+    efficacy: 88
+    mutant-coverage: 90

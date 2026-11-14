@@ -84,7 +84,7 @@ all — reads go to the loader. `DisableInvalidation` runs on TTLs alone.
 | Where | off the Go heap (`mmap`): invisible to the garbage collector and to `GOGC` |
 | Resident size | grows to the capacity and stays: the store never returns memory to the OS — budget the full capacity |
 | On top (heap) | the store's index, about 16 bytes per live entry |
-| Entry limit | key + envelope under 64 KiB; larger values are served from L2 and counted in `tiercache_l1_oversize_total` |
+| Entry limit | key + envelope under 64 KiB (65 531 bytes: what one chunk of the store holds, checked by a test against the store itself); larger values are served from L2 and counted in `tiercache_l1_oversize_total` |
 
 A service with a tight budget shares one cache between its logical caches
 (telling keys apart in what they hash) rather than paying 32 MiB for each.
@@ -126,5 +126,6 @@ Listed in [docs/METRICS.md](../../docs/METRICS.md); every series carries
 | Integration | `integration_test.go` | the same cache on a real Valkey: TTLs, `SET NX` / `IFEQ`, tombstones, Pub/Sub, values from 0 bytes to 4 MiB |
 | Chaos | `chaos_test.go` | Valkey down, frozen, slow, black-holed, resetting, cutting replies mid-value: every read answers correctly within a bound, and L2 is picked up again |
 | Soak | `chaos_test.go` | two processes reading and invalidating under flapping faults: no failed read, no foreign or uncommitted value, convergence afterwards |
+| Mutation | `.gremlins.yaml`, nightly | whether the unit tests notice a deadline or a size limit off by one (`just mutate libs/tiercache` from the repo root) |
 
 Integration, chaos and soak need Docker and skip under `-short`.

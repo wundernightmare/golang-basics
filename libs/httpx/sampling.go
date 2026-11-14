@@ -82,10 +82,15 @@ func (h *samplingHandler) Handle(ctx context.Context, r slog.Record) error {
 
 	c := &h.counters[h.slot(r)]
 
-	now := r.Time.UnixNano()
-	if now == 0 {
-		now = time.Now().UnixNano()
+	// A record without a time (slog allows it) is counted at the wall clock:
+	// the zero Time has no meaningful UnixNano, and a window keyed on it
+	// would never expire.
+	when := r.Time
+	if when.IsZero() {
+		when = time.Now()
 	}
+
+	now := when.UnixNano()
 
 	n := c.inc(now, h.tick)
 	if n <= h.initial || (n-h.initial)%h.thereafter == 0 {

@@ -137,6 +137,24 @@ func TestConfigValidate(t *testing.T) {
 		{"open admin on ::1", func(c *httpx.Config) { c.AdminAddr = "[::1]:9080" }, ""},
 		{"open admin, insecure acknowledged", func(c *httpx.Config) { c.AdminAddr, c.AdminInsecure = ":9080", true }, ""},
 		{"guarded admin anywhere", func(c *httpx.Config) { c.AdminAddr, c.AdminToken = ":9080", secret.New("s3cret") }, ""},
+		// The edge of each rule: the last value it accepts.
+		{"a floor without a request timeout", func(c *httpx.Config) { c.RequestTimeoutMin = time.Second }, ""},
+		{"floor equal to the request timeout", func(c *httpx.Config) { c.RequestTimeout, c.RequestTimeoutMin = time.Second, time.Second }, ""},
+		{"floor above the request timeout", func(c *httpx.Config) { c.RequestTimeout, c.RequestTimeoutMin = time.Second, 2*time.Second }, "HTTP_REQUEST_TIMEOUT_MIN"},
+		{"memory limit ratio of one", func(c *httpx.Config) { c.RuntimeMemoryLimitRatio = 1 }, ""},
+		{"memory limit ratio above one", func(c *httpx.Config) { c.RuntimeMemoryLimitRatio = 1.01 }, "RUNTIME_MEMORY_LIMIT_RATIO"},
+		{"memory threshold of one", func(c *httpx.Config) { c.DiagMemoryThreshold = 1 }, ""},
+		{"memory threshold above one", func(c *httpx.Config) { c.DiagMemoryThreshold = 1.01 }, "DIAG_MEMORY_THRESHOLD"},
+		{"one spool file, one crash byte", func(c *httpx.Config) { c.DiagSpoolMaxFiles, c.DiagCrashMaxBytes = 1, 1 }, ""},
+		{"negative spool size", func(c *httpx.Config) { c.DiagSpoolMaxFiles = -1 }, "DIAG_SPOOL_MAX_FILES"},
+		{"negative crash size", func(c *httpx.Config) { c.DiagCrashMaxBytes = -1 }, "DIAG_SPOOL_MAX_FILES"},
+		{"flight recorder with no slow-request trigger and no cooldown", func(c *httpx.Config) { c.DiagFlightRecorder = true }, ""},
+		{"flight recorder, negative trigger", func(c *httpx.Config) { c.DiagFlightRecorder, c.DiagFlightSlowRequest = true, -1 }, "DIAG_FLIGHT_"},
+		{"flight recorder off: its keys are not read", func(c *httpx.Config) { c.DiagFlightCooldown = -1 }, ""},
+		{"zero rates and bursts", func(c *httpx.Config) {
+			c.RateLimit, c.RateLimitPerClient, c.RateBurst, c.RateBurstPerClient = 0, 0, 0, 0
+		}, ""},
+		{"negative client table", func(c *httpx.Config) { c.RateClientsMax = -1 }, "HTTP_RATE_"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -177,6 +195,21 @@ func TestConfigValidate_ReportsEveryProblemAndAppliesDefaults(t *testing.T) {
 	assert.Equal(t, "info", cfg.LogLevel)
 	assert.Equal(t, "json", cfg.LogFormat)
 	assert.NotEmpty(t, cfg.Service)
+	assert.Equal(t, 30*time.Second, cfg.RuntimeMemoryLimitRefresh)
+	assert.Equal(t, 10*time.Minute, cfg.DiagMemoryCooldown)
+	assert.Equal(t, 10*time.Second, cfg.DiagFlightMinAge)
+	assert.Equal(t, int64(8<<20), cfg.DiagFlightMaxBytes)
+
+	// A default fills a zero field only: what the service set is kept.
+	cfg = httpx.Config{
+		Addr: ":0", RuntimeMemoryLimitRefresh: 7 * time.Second, DiagMemoryCooldown: 7 * time.Second,
+		DiagFlightMinAge: 7 * time.Second, DiagFlightMaxBytes: 7,
+	}
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, 7*time.Second, cfg.RuntimeMemoryLimitRefresh)
+	assert.Equal(t, 7*time.Second, cfg.DiagMemoryCooldown)
+	assert.Equal(t, 7*time.Second, cfg.DiagFlightMinAge)
+	assert.Equal(t, int64(7), cfg.DiagFlightMaxBytes)
 }
 
 func TestConfig_LogConfigProjection(t *testing.T) {

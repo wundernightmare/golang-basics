@@ -66,7 +66,7 @@ default; the key that turns it on is named.
 | Real dependencies in tests, not mocks: Postgres, Valkey, Kafka, S3, Toxiproxy; libraries without Docker keep such suites in a nested module | `libs/testx/containers`, `<lib>/integration` | CI `integration` matrix |
 | Deterministic concurrency tests on virtual time (`testing/synctest`) | `libs/tiercache`, `libs/httpx` (rate limit, debug subjects) | those tests |
 | Fuzzing in CI | every parser of external bytes has a `Fuzz*` target; nightly `fuzz` job | `scripts/fuzz.sh` |
-| Mutation testing of decision logic | `.gremlins.yaml` in the HTTP client, `grpcx`, `resilience` | nightly `mutation` job |
+| Mutation testing of decision logic | `.gremlins.yaml` in the HTTP client, `grpcx`, `resilience`, `httpx`, `tiercache`, `secret` | nightly `mutation` job |
 
 ## Deliberately not here
 
