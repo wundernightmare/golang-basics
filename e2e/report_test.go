@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ozontech/testo"
@@ -96,9 +97,11 @@ func resultsDir() string {
 // attachOutput adds a child's captured output to the report, pass or fail:
 // the log of a green run is what a red one is compared against.
 func attachOutput(t T, name, output string) {
-	// The media type is given, not guessed: guessing makes the plugin write
-	// to os.TempDir and rename into the results directory, which fails when
-	// /tmp is another filesystem (tmpfs) — testo-allure 1.5.0.
+	// UPSTREAM-WORKAROUND(testo-allure): the media type is given, not
+	// guessed. Guessing makes the plugin write to os.TempDir and rename into
+	// the results directory, which fails when /tmp is another filesystem
+	// (tmpfs) — and the attachment is dropped in silence (testo-allure
+	// 1.5.0; TestUpstreamAttachmentWithoutATypeIsLostAcrossFilesystems).
 	t.Attach(name+" output", allure.Bytes(output).As(allure.TextPlain))
 }
 
@@ -122,6 +125,11 @@ func TestEveryTestIsAScenario(t *testing.T) {
 			for _, decl := range parsed.Decls {
 				fn, ok := decl.(*ast.FuncDecl)
 				if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") || fn.Name.Name == "TestMain" {
+					continue
+				}
+
+				// A test of the reporter itself, with a run of its own.
+				if strings.HasPrefix(fn.Name.Name, "TestUpstream") {
 					continue
 				}
 
@@ -154,4 +162,54 @@ func isOneScenarioCall(body *ast.BlockStmt) bool {
 	callee, ok := call.Fun.(*ast.Ident)
 
 	return ok && callee.Name == "scenario"
+}
+
+// UPSTREAM-WORKAROUND(testo-allure): the defect attachOutput works around,
+// asserted against the plugin itself. An attachment without a media type is
+// written to os.TempDir and renamed into the results directory; across
+// filesystems the rename fails, and the plugin drops the attachment without
+// failing the test. When this test fails after an upgrade, the defect is
+// gone: attachOutput may stop naming its type, and this test can go
+// (docs/UPSTREAM-WORKAROUNDS.md).
+//
+// It is the one test that is not a scenario: it examines the reporter, with
+// a run and a results directory of its own, and has no place in the report
+// of the services (TestEveryTestIsAScenario exempts the TestUpstream prefix).
+func TestUpstreamAttachmentWithoutATypeIsLostAcrossFilesystems(t *testing.T) {
+	const otherFilesystem = "/dev/shm" // tmpfs on Linux
+
+	// Next to the real results, i.e. on the checkout's filesystem.
+	require.NoError(t, os.MkdirAll(filepath.Dir(resultsDir()), 0o750))
+
+	results, err := os.MkdirTemp(filepath.Dir(resultsDir()), "upstream-check-") //nolint:usetesting // t.TempDir is under os.TempDir — the other filesystem this test needs to be away from
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(results) })
+
+	if !differentDevices(results, otherFilesystem) {
+		t.Skipf("%s and %s are one filesystem here: the rename cannot fail", results, otherFilesystem)
+	}
+
+	t.Setenv("TMPDIR", otherFilesystem)
+
+	testo.RunTest(t, func(inner T) {
+		inner.Attach("typed", allure.Bytes("kept").As(allure.TextPlain))
+		inner.Attach("untyped", allure.Bytes("lost"))
+	}, allure.WithOutputDir(results))
+
+	attachments, err := filepath.Glob(filepath.Join(results, "*-attachment*"))
+	require.NoError(t, err)
+	require.Len(t, attachments, 1,
+		"testo-allure now keeps an attachment without a media type across filesystems: "+
+			"drop the workaround in attachOutput and this test")
+}
+
+// differentDevices reports whether the two paths exist on different
+// filesystems.
+func differentDevices(a, b string) bool {
+	var sa, sb syscall.Stat_t
+	if syscall.Stat(a, &sa) != nil || syscall.Stat(b, &sb) != nil {
+		return false
+	}
+
+	return sa.Dev != sb.Dev
 }

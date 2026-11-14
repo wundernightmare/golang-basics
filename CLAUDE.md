@@ -272,6 +272,11 @@ README; this file is only the high-signal, easy-to-miss bits.
   copy that does not build counts every mutant as killed. When a mutant lives, first ask
   whether the code has an unkillable branch (rewrite with `min`/`max`, inject
   the clock) before adding a test. Nightly/manual in CI, not per PR.
+- **A workaround for a dependency's defect is marked and listed**:
+  `UPSTREAM-WORKAROUND(<dependency>)` in the comment (with the version it was
+  seen in), a row in `docs/UPSTREAM-WORKAROUNDS.md`, and — where one can be
+  written — a `TestUpstream…` test that asserts the defect and fails when an
+  upgrade fixes it. Removing the workaround removes all three.
 - **Chaos before trusting resilience code**: a code path written for a
   failing dependency (optional readiness, the outbox relay, cache
   fall-through, a timeout) gets a chaos test with `containers.Proxied` /
