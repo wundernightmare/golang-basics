@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ozontech/testo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,88 +26,88 @@ const consumedMetric = "consumer_events_total"
 //
 // Not parallel with its own sub-tests: they share the two processes and run
 // in order, the shutdown check last.
-//
-//nolint:tparallel,paralleltest // ordered sub-tests over shared processes
 func TestTasksPipeline(t *testing.T) {
-	t.Parallel()
-	dbURL, valkeyURL, brokers := dataEnv(t)
+	scenario(t, "Tasks pipeline", func(t T) {
+		t.Parallel()
+		dbURL, valkeyURL, brokers := dataEnv(t)
 
-	// A topic and group of our own: concurrent or earlier runs against the
-	// same broker cannot feed (or drain) this run's consumer. The topic does
-	// not exist yet: both clients ask the broker to create it (docker/deps.yml
-	// allows it; the libs default to off).
-	run := time.Now().UTC().Format("20060102t150405.000000000")
-	run = strings.ReplaceAll(run, ".", "")
-	topic := "e2e.tasks.events." + run
+		// A topic and group of our own: concurrent or earlier runs against the
+		// same broker cannot feed (or drain) this run's consumer. The topic does
+		// not exist yet: both clients ask the broker to create it (docker/deps.yml
+		// allows it; the libs default to off).
+		run := time.Now().UTC().Format("20060102t150405.000000000")
+		run = strings.ReplaceAll(run, ".", "")
+		topic := "e2e.tasks.events." + run
 
-	consumer := start(t, spec{name: "consumer", prefix: "CONSUMER_", env: map[string]string{
-		"KAFKA_BROKERS":                   brokers,
-		"KAFKA_TOPIC":                     topic,
-		"KAFKA_TOPICS":                    topic,
-		"KAFKA_GROUP":                     "e2e-" + run,
-		"KAFKA_STATISTICS_INTERVAL_MS":    "1000",
-		"KAFKA_ALLOW_AUTO_TOPIC_CREATION": "true",
-	}})
-	tasks := start(t, spec{name: "tasks", prefix: "TASKS_", api: true, env: map[string]string{
-		"DATABASE_URL":                    dbURL,
-		"VALKEY_URL":                      valkeyURL,
-		"KAFKA_BROKERS":                   brokers,
-		"KAFKA_TOPIC":                     topic,
-		"KAFKA_ALLOW_AUTO_TOPIC_CREATION": "true",
-	}})
+		consumer := start(t, spec{name: "consumer", prefix: "CONSUMER_", env: map[string]string{
+			"KAFKA_BROKERS":                   brokers,
+			"KAFKA_TOPIC":                     topic,
+			"KAFKA_TOPICS":                    topic,
+			"KAFKA_GROUP":                     "e2e-" + run,
+			"KAFKA_STATISTICS_INTERVAL_MS":    "1000",
+			"KAFKA_ALLOW_AUTO_TOPIC_CREATION": "true",
+		}})
+		tasks := start(t, spec{name: "tasks", prefix: "TASKS_", api: true, env: map[string]string{
+			"DATABASE_URL":                    dbURL,
+			"VALKEY_URL":                      valkeyURL,
+			"KAFKA_BROKERS":                   brokers,
+			"KAFKA_TOPIC":                     topic,
+			"KAFKA_ALLOW_AUTO_TOPIC_CREATION": "true",
+		}})
 
-	t.Run("version carries the build stamp", func(t *testing.T) {
-		assertBuildStamp(t, tasks)
-		assertBuildStamp(t, consumer)
-	})
-
-	t.Run("admin config requires the token", func(t *testing.T) {
-		assertAdminGuarded(t, tasks)
-		assertAdminGuarded(t, consumer)
-	})
-
-	t.Run("created task reaches the consumer", func(t *testing.T) {
-		before := consumer.metric(t, consumedMetric)
-
-		title := "e2e " + run
-		code, body, err := do(http.MethodPost, tasks.apiURL+"/tasks", "",
-			strings.NewReader(fmt.Sprintf(`{"title":%q}`, title)))
-		require.NoError(t, err)
-		require.Equal(t, http.StatusCreated, code, "POST /tasks: %s", body)
-
-		var created struct {
-			ID    json.RawMessage `json:"id"`
-			Title string          `json:"title"`
-		}
-		require.NoError(t, json.Unmarshal(body, &created), "%s", body)
-		require.NotEmpty(t, created.ID, "POST /tasks returned no id: %s", body)
-		id := strings.Trim(string(created.ID), `"`)
-
-		code, body, err = tasks.get(tasks.apiURL+"/tasks/"+id, "")
-		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, code, "GET /tasks/%s: %s", id, body)
-		assert.Contains(t, string(body), title)
-
-		// Asynchronous twice over: the outbox relay publishes, the consumer
-		// polls. Poll the counter, never sleep.
-		eventually(t, 30*time.Second, consumedMetric+" never advanced", func(c *assert.CollectT) {
-			assert.Greater(c, consumer.metric(t, consumedMetric), before)
+		testo.Run(t, "version carries the build stamp", func(t T) {
+			assertBuildStamp(t, tasks)
+			assertBuildStamp(t, consumer)
 		})
-	})
 
-	// After the pipeline ran, every series the alerts and dashboard read has
-	// been produced at least once (a labelled counter only appears on use).
-	t.Run("alerts and dashboard read exported metrics", func(t *testing.T) {
-		eventually(t, 15*time.Second, "kafka client gauges never exported", func(c *assert.CollectT) {
-			assert.True(c, exportedMetrics(t, consumer)["kafka_client_brokers_up"])
+		testo.Run(t, "admin config requires the token", func(t T) {
+			assertAdminGuarded(t, tasks)
+			assertAdminGuarded(t, consumer)
 		})
-		assertMetricsExist(t, tasks, consumer)
-	})
 
-	t.Run("graceful shutdown", func(t *testing.T) {
-		for _, s := range []*service{tasks, consumer} {
-			require.True(t, s.terminate(10*time.Second), "%s did not exit within 10s of SIGTERM", s.name)
-			assertCleanExit(t, s)
-		}
+		testo.Run(t, "created task reaches the consumer", func(t T) {
+			before := consumer.metric(t, consumedMetric)
+
+			title := "e2e " + run
+			code, body, err := do(http.MethodPost, tasks.apiURL+"/tasks", "",
+				strings.NewReader(fmt.Sprintf(`{"title":%q}`, title)))
+			require.NoError(t, err)
+			require.Equal(t, http.StatusCreated, code, "POST /tasks: %s", body)
+
+			var created struct {
+				ID    json.RawMessage `json:"id"`
+				Title string          `json:"title"`
+			}
+			require.NoError(t, json.Unmarshal(body, &created), "%s", body)
+			require.NotEmpty(t, created.ID, "POST /tasks returned no id: %s", body)
+			id := strings.Trim(string(created.ID), `"`)
+
+			code, body, err = tasks.get(tasks.apiURL+"/tasks/"+id, "")
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, code, "GET /tasks/%s: %s", id, body)
+			assert.Contains(t, string(body), title)
+
+			// Asynchronous twice over: the outbox relay publishes, the consumer
+			// polls. Poll the counter, never sleep.
+			eventually(t, 30*time.Second, consumedMetric+" never advanced", func(c *assert.CollectT) {
+				assert.Greater(c, consumer.metric(t, consumedMetric), before)
+			})
+		})
+
+		// After the pipeline ran, every series the alerts and dashboard read has
+		// been produced at least once (a labelled counter only appears on use).
+		testo.Run(t, "alerts and dashboard read exported metrics", func(t T) {
+			eventually(t, 15*time.Second, "kafka client gauges never exported", func(c *assert.CollectT) {
+				assert.True(c, exportedMetrics(t, consumer)["kafka_client_brokers_up"])
+			})
+			assertMetricsExist(t, tasks, consumer)
+		})
+
+		testo.Run(t, "graceful shutdown", func(t T) {
+			for _, s := range []*service{tasks, consumer} {
+				require.True(t, s.terminate(10*time.Second), "%s did not exit within 10s of SIGTERM", s.name)
+				assertCleanExit(t, s)
+			}
+		})
 	})
 }

@@ -84,7 +84,7 @@ func promQLNames(expr string) []string {
 
 // referencedMetrics lists every metric name the alert rules and the dashboard
 // read, with the file that reads it.
-func referencedMetrics(t *testing.T) map[string]string {
+func referencedMetrics(t testing.TB) map[string]string {
 	t.Helper()
 
 	refs := map[string]string{}
@@ -126,7 +126,7 @@ func referencedMetrics(t *testing.T) map[string]string {
 // dashboardExprs returns every PromQL expression ("expr", panel queries and
 // template variables' "query"/"definition" aside) of every dashboard file,
 // by file name.
-func dashboardExprs(t *testing.T) map[string][]string {
+func dashboardExprs(t testing.TB) map[string][]string {
 	t.Helper()
 
 	files, err := filepath.Glob(filepath.Join(dashboardsDir, "*.json"))
@@ -178,54 +178,58 @@ func dashboardExprs(t *testing.T) map[string][]string {
 //
 // Static (no binaries needed), so it never skips.
 func TestDashboards_Lint(t *testing.T) {
-	t.Parallel()
+	scenario(t, "Observability artefacts", func(t T) {
+		t.Parallel()
 
-	fixedWindow := regexp.MustCompile(`\[\d+[smhdwy]\]`)
-	jobMatcher := regexp.MustCompile(`\bjob\s*(=|!=|=~|!~)`)
+		fixedWindow := regexp.MustCompile(`\[\d+[smhdwy]\]`)
+		jobMatcher := regexp.MustCompile(`\bjob\s*(=|!=|=~|!~)`)
 
-	var problems []string
+		var problems []string
 
-	for file, exprs := range dashboardExprs(t) {
-		for _, expr := range exprs {
-			if fixedWindow.MatchString(expr) {
-				problems = append(problems, file+": fixed window, use $__rate_interval: "+expr)
-			}
-
-			if jobMatcher.MatchString(expr) {
-				problems = append(problems, file+": selects on job, use service: "+expr)
-			}
-
-			for _, n := range promQLNames(expr) {
-				if _, broker := brokerMetrics[n]; broker {
-					continue
+		for file, exprs := range dashboardExprs(t) {
+			for _, expr := range exprs {
+				if fixedWindow.MatchString(expr) {
+					problems = append(problems, file+": fixed window, use $__rate_interval: "+expr)
 				}
 
-				sel := regexp.MustCompile(`\b` + regexp.QuoteMeta(n) + `\b(\{[^}]*\})?`)
-				for _, m := range sel.FindAllStringSubmatch(expr, -1) {
-					if !strings.Contains(m[1], `service=~"$service"`) || !strings.Contains(m[1], `instance=~"$instance"`) {
-						problems = append(problems, file+": "+n+" without the $service/$instance filter: "+expr)
+				if jobMatcher.MatchString(expr) {
+					problems = append(problems, file+": selects on job, use service: "+expr)
+				}
+
+				for _, n := range promQLNames(expr) {
+					if _, broker := brokerMetrics[n]; broker {
+						continue
+					}
+
+					sel := regexp.MustCompile(`\b` + regexp.QuoteMeta(n) + `\b(\{[^}]*\})?`)
+					for _, m := range sel.FindAllStringSubmatch(expr, -1) {
+						if !strings.Contains(m[1], `service=~"$service"`) || !strings.Contains(m[1], `instance=~"$instance"`) {
+							problems = append(problems, file+": "+n+" without the $service/$instance filter: "+expr)
+						}
 					}
 				}
 			}
 		}
-	}
 
-	sort.Strings(problems)
-	require.Empty(t, problems)
+		sort.Strings(problems)
+		require.Empty(t, problems)
+	})
 }
 
 func TestPromQLNames(t *testing.T) {
-	t.Parallel()
+	scenario(t, "Observability artefacts", func(t T) {
+		t.Parallel()
 
-	require.Equal(t, []string{"go_gc_gomemlimit_bytes"}, promQLNames(`go_gc_gomemlimit_bytes{service=~"$service"} < 1e18`))
-	require.Equal(t, []string{"http_request_duration_seconds_bucket"},
-		promQLNames(`histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{x="y"}[$__rate_interval])))`))
-	require.Equal(t, []string{"process_start_time_seconds"}, promQLNames(`time() - process_start_time_seconds`))
+		require.Equal(t, []string{"go_gc_gomemlimit_bytes"}, promQLNames(`go_gc_gomemlimit_bytes{service=~"$service"} < 1e18`))
+		require.Equal(t, []string{"http_request_duration_seconds_bucket"},
+			promQLNames(`histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{x="y"}[$__rate_interval])))`))
+		require.Equal(t, []string{"process_start_time_seconds"}, promQLNames(`time() - process_start_time_seconds`))
+	})
 }
 
 // exportedMetrics is the set of sample names (histogram _bucket/_sum/_count
 // included) on the admin /metrics of the given services.
-func exportedMetrics(t *testing.T, services ...*service) map[string]bool {
+func exportedMetrics(t testing.TB, services ...*service) map[string]bool {
 	t.Helper()
 
 	out := map[string]bool{}
@@ -259,7 +263,7 @@ func exportedMetrics(t *testing.T, services ...*service) map[string]bool {
 // assertMetricsExist fails for every name the rules or dashboards reference
 // that none of the services exports, the broker's own (brokerMetrics) and the
 // error-only counters (errorOnlyMetrics) aside.
-func assertMetricsExist(t *testing.T, services ...*service) {
+func assertMetricsExist(t testing.TB, services ...*service) {
 	t.Helper()
 	have := exportedMetrics(t, services...)
 	refs := referencedMetrics(t)

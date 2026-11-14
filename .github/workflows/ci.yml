@@ -315,6 +315,10 @@ jobs:
           E2E_KAFKA_BROKERS: 127.0.0.1:9092
         run: |
           export E2E_BIN_DIR="$GITHUB_WORKSPACE/.build" E2E_COVER_DIR="$GITHUB_WORKSPACE/.cover/e2e"
+          # The suite reports to Allure natively (e2e/report_test.go); the
+          # directory carries the JUnit file's name, which is how
+          # scripts/allure-collect.sh knows what it replaces.
+          export ALLURE_RESULTS_DIR="$GITHUB_WORKSPACE/.reports/allure-native/e2e-$KAFKA_PROVIDER"
           mkdir -p "$E2E_COVER_DIR" "$GITHUB_WORKSPACE/.reports/junit"
           gotestsum --format testname --junitfile "$GITHUB_WORKSPACE/.reports/junit/e2e-$KAFKA_PROVIDER.xml" -- \
             -tags e2e -count=1 ./...
@@ -330,6 +334,13 @@ jobs:
         with:
           name: junit-e2e-${{ matrix.provider }}
           path: .reports/junit
+          retention-days: 7
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: allure-native-e2e-${{ matrix.provider }}
+          path: .reports/allure-native
           retention-days: 7
           if-no-files-found: ignore
       - name: deps logs on failure
@@ -441,8 +452,9 @@ jobs:
             coverage-breakdown.json
           retention-days: 7
 
-  # One Allure HTML report from every suite's JUnit XML (unit + integration +
-  # e2e + schemathesis) — Allure reads JUnit natively. allure-commandline is
+  # One Allure HTML report: the JUnit XML of the unit and integration layers
+  # and of schemathesis (Allure reads JUnit natively) plus the e2e suite's own
+  # Allure results (testo: steps, attachments). allure-commandline is
   # an npm package (root package.json) running on a JRE: the one non-contracts
   # job with Node, and only to render the report.
   allure-report:
@@ -455,8 +467,15 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: junit-*
-          path: .reports/allure-results
+          path: .reports/junit
           merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: allure-native-*
+          path: .reports/allure-native
+          merge-multiple: true
+      # JUnit + the e2e suite's native results, without counting e2e twice.
+      - run: scripts/allure-collect.sh .reports/allure-results
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
