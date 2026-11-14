@@ -20,7 +20,10 @@ import (
 
 // One Valkey per test binary for the integration and chaos suites; the leak
 // check behind it covers the unit tests too.
-func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }
+func TestMain(m *testing.M) {
+	fullPropertyChecks()
+	os.Exit(containers.Main(m))
+}
 
 // The unit tests run in synctest bubbles: time is virtual, so TTLs of
 // minutes cost nothing, and synctest.Wait() is "every goroutine the cache

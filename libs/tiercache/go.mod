@@ -20,6 +20,7 @@ require (
 	github.com/tracehubmmp/golang-basics/libs/valkey v0.0.0-00010101000000-000000000000
 	golang.org/x/sync v0.25.0
 	google.golang.org/protobuf v1.36.12
+	pgregory.net/rapid v1.3.0
 )
 
 require (
