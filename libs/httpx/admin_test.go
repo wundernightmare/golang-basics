@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -68,35 +69,45 @@ func TestLogLevel_PutChangesWhatTheLoggerEmits(t *testing.T) {
 func TestLogLevel_RevertsAfterTTL(t *testing.T) {
 	t.Parallel()
 
-	srv, buf := loggedServer(t, httpx.Config{})
-	code, _ := admin(t, srv, http.MethodPut, "/admin/log-level?level=debug&ttl=20ms")
-	require.Equal(t, http.StatusOK, code)
+	// Virtual time: "still debug right after the change" and "back to info
+	// once the ttl is over" do not depend on how busy the machine is.
+	synctest.Test(t, func(t *testing.T) {
+		const ttl = 20 * time.Millisecond
 
-	level, expires := srv.LogLevel.Level()
-	assert.Equal(t, slog.LevelDebug, level)
-	assert.False(t, expires.IsZero())
+		srv, buf := loggedServer(t, httpx.Config{})
+		code, _ := admin(t, srv, http.MethodPut, "/admin/log-level?level=debug&ttl="+ttl.String())
+		require.Equal(t, http.StatusOK, code)
 
-	require.Eventually(t, func() bool {
-		l, _ := srv.LogLevel.Level()
-		return l == slog.LevelInfo
-	}, 2*time.Second, 5*time.Millisecond, "the level must revert on its own")
+		level, expires := srv.LogLevel.Level()
+		assert.Equal(t, slog.LevelDebug, level)
+		assert.Equal(t, time.Now().Add(ttl), expires)
 
-	_, expires = srv.LogLevel.Level()
-	assert.True(t, expires.IsZero())
-	srv.Logger().Debug("late")
-	assert.Nil(t, buf.Find(t, map[string]any{"msg": "late"}))
+		time.Sleep(ttl)
+		synctest.Wait()
+
+		level, expires = srv.LogLevel.Level()
+		assert.Equal(t, slog.LevelInfo, level, "the level must revert on its own")
+		assert.True(t, expires.IsZero())
+		srv.Logger().Debug("late")
+		assert.Nil(t, buf.Find(t, map[string]any{"msg": "late"}))
+	})
 }
 
 func TestLogLevel_NewerChangeIsNotRevertedByAnOlderTimer(t *testing.T) {
 	t.Parallel()
 
-	srv, _ := loggedServer(t, httpx.Config{})
-	srv.LogLevel.Set(slog.LevelDebug, 20*time.Millisecond)
-	srv.LogLevel.Set(slog.LevelWarn, time.Hour)
-	time.Sleep(60 * time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		srv, _ := loggedServer(t, httpx.Config{})
+		srv.LogLevel.Set(slog.LevelDebug, 20*time.Millisecond)
+		srv.LogLevel.Set(slog.LevelWarn, time.Hour)
+		time.Sleep(60 * time.Millisecond)
+		synctest.Wait()
 
-	level, _ := srv.LogLevel.Level()
-	assert.Equal(t, slog.LevelWarn, level, "the first change's timer must not undo the second")
+		level, _ := srv.LogLevel.Level()
+		assert.Equal(t, slog.LevelWarn, level, "the first change's timer must not undo the second")
+
+		srv.LogLevel.Set(slog.LevelInfo, 0) // no timer left behind in the bubble
+	})
 }
 
 func TestLogLevel_TTLIsCappedAndDefaulted(t *testing.T) {

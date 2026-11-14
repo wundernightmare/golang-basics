@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -27,65 +28,67 @@ import (
 func TestSend_ForgottenBodyIsReleasedWhenTheAttemptEnds(t *testing.T) {
 	t.Parallel()
 
-	srv := hangAfterHead(t)
-	client := newClient(t, target(func(tc *resilient.TargetConfig) {
-		tc.Timeout = 60 * time.Millisecond
-		tc.MaxConcurrent = 1
-		tc.Breaker.FailureRatio = 0 // the breaker is another test's subject
-	}))
+	synctest.Test(t, func(t *testing.T) {
+		client := newClient(t, target(func(tc *resilient.TargetConfig) {
+			tc.Timeout = 60 * time.Millisecond
+			tc.MaxConcurrent = 1
+			tc.Breaker.FailureRatio = 0 // the breaker is another test's subject
+		}), resilient.WithHTTPClient(hangAfterHead(t)))
 
-	forgotten, err := client.Send("api", get(t, t.Context(), srv.URL))
-	require.NoError(t, err)
-	assert.InDelta(t, 1, metric(t, client, "http_client_bulkhead_in_flight", nil), 0)
+		forgotten, err := client.Send("api", get(t, t.Context(), hung))
+		require.NoError(t, err)
+		assert.InDelta(t, 1, metric(t, client, "http_client_bulkhead_in_flight", nil), 0)
 
-	require.Eventually(t, func() bool {
-		return metric(t, client, "http_client_bulkhead_in_flight", nil) == 0
-	}, 5*time.Second, 5*time.Millisecond, "the slot comes back at the attempt timeout")
+		require.Eventually(t, func() bool {
+			return metric(t, client, "http_client_bulkhead_in_flight", nil) == 0
+		}, 5*time.Second, 5*time.Millisecond, "the slot comes back at the attempt timeout")
 
-	_, err = io.ReadAll(forgotten.Body)
-	require.ErrorIs(t, err, resilient.KindTimeout, "what is left of the body is a typed timeout")
+		_, err = io.ReadAll(forgotten.Body)
+		require.ErrorIs(t, err, resilient.KindTimeout, "what is left of the body is a typed timeout")
 
-	// The slot is usable, and a late Close does not release it a second time.
-	next, err := client.Send("api", get(t, t.Context(), srv.URL))
-	require.NoError(t, err)
-	require.NoError(t, forgotten.Body.Close())
-	assert.InDelta(t, 1, metric(t, client, "http_client_bulkhead_in_flight", nil), 0, "the late Close released nothing")
-	require.NoError(t, next.Body.Close())
-	assert.InDelta(t, 0, metric(t, client, "http_client_bulkhead_in_flight", nil), 0)
+		// The slot is usable, and a late Close does not release it a second time.
+		next, err := client.Send("api", get(t, t.Context(), hung))
+		require.NoError(t, err)
+		require.NoError(t, forgotten.Body.Close())
+		assert.InDelta(t, 1, metric(t, client, "http_client_bulkhead_in_flight", nil), 0, "the late Close released nothing")
+		require.NoError(t, next.Body.Close())
+		assert.InDelta(t, 0, metric(t, client, "http_client_bulkhead_in_flight", nil), 0)
 
-	// And Shutdown is not held up by the forgotten body.
-	another, err := client.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // forgotten on purpose
-	require.NoError(t, err)
+		// And Shutdown is not held up by the forgotten body.
+		another, err := client.Send("api", get(t, t.Context(), hung)) //nolint:bodyclose // forgotten on purpose
+		require.NoError(t, err)
 
-	_ = another
+		_ = another
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-	require.NoError(t, client.Shutdown(ctx))
+		require.NoError(t, client.Shutdown(ctx))
+	})
 }
 
 // The caller's context ending releases a forgotten body the same way.
 func TestSend_ForgottenBodyIsReleasedWhenTheCallerCancels(t *testing.T) {
 	t.Parallel()
 
-	srv := hangAfterHead(t)
-	client := newClient(t, target(func(tc *resilient.TargetConfig) {
-		tc.Timeout = 0 // no attempt timeout: only the caller bounds it
-		tc.MaxConcurrent = 1
-	}))
+	synctest.Test(t, func(t *testing.T) {
+		client := newClient(t, target(func(tc *resilient.TargetConfig) {
+			tc.Timeout = 0 // no attempt timeout: only the caller bounds it
+			tc.MaxConcurrent = 1
+		}), resilient.WithHTTPClient(hangAfterHead(t)))
 
-	ctx, cancel := context.WithCancel(t.Context())
+		ctx, cancel := context.WithCancel(t.Context())
 
-	_, err := client.Send("api", get(t, ctx, srv.URL)) //nolint:bodyclose // forgotten on purpose
-	require.NoError(t, err)
+		_, err := client.Send("api", get(t, ctx, hung)) //nolint:bodyclose // forgotten on purpose
+		require.NoError(t, err)
 
-	cancel()
+		cancel()
 
-	require.Eventually(t, func() bool {
-		return metric(t, client, "http_client_bulkhead_in_flight", nil) == 0
-	}, 5*time.Second, 5*time.Millisecond)
-	assert.Equal(t, resilient.StateClosed, mustState(t, client), "a cancellation tells the breaker nothing")
+		require.Eventually(t, func() bool {
+			return metric(t, client, "http_client_bulkhead_in_flight", nil) == 0
+		}, 5*time.Second, 5*time.Millisecond)
+		assert.Equal(t, resilient.StateClosed, mustState(t, client), "a cancellation tells the breaker nothing")
+	})
 }
 
 func mustState(t *testing.T, client *resilient.Client) resilient.BreakerState {

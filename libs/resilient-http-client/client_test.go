@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -514,52 +515,117 @@ func TestSend_CallerDeadlineIsABreakerFailure(t *testing.T) {
 	assert.InDelta(t, 2, metric(t, c, "http_client_requests_total", map[string]string{"outcome": "canceled"}), 0)
 }
 
-// hangAfterHead answers 200, flushes the first bytes of the body and then
-// hangs until the test ends.
-func hangAfterHead(t *testing.T) *httptest.Server {
+// hung is the base URL of the server [hangAfterHead] serves in memory.
+const hung = "http://hung.test"
+
+// pipes is a listener whose connections are net.Pipe pairs: no socket, so
+// every goroutine on either side blocks durably and a synctest bubble can
+// tell when to move its clock.
+type pipes struct {
+	conns chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+}
+
+func (p *pipes) Accept() (net.Conn, error) {
+	select {
+	case conn := <-p.conns:
+		return conn, nil
+	case <-p.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (p *pipes) Close() error {
+	p.once.Do(func() { close(p.done) })
+
+	return nil
+}
+
+func (*pipes) Addr() net.Addr { return &net.UnixAddr{Name: "pipe", Net: "pipe"} }
+
+func (p *pipes) dial(ctx context.Context, _, _ string) (net.Conn, error) {
+	client, server := net.Pipe()
+
+	select {
+	case p.conns <- server:
+		return client, nil
+	case <-p.done:
+		return nil, net.ErrClosed
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// hangAfterHead returns an http.Client whose every request is answered 200
+// with the first bytes of the body flushed (path /hang: with nothing at all)
+// and then hangs until the test ends. It is served in memory, for a test in
+// a synctest bubble: an attempt timeout there is virtual time, so "the
+// headers arrive, then the timeout fires" does not depend on how busy the
+// machine is. Call it inside the bubble.
+func hangAfterHead(t *testing.T) *http.Client {
 	t.Helper()
 
-	release := make(chan struct{})
-	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, "head")
-		_ = http.NewResponseController(w).Flush()
+	listener := &pipes{conns: make(chan net.Conn), done: make(chan struct{})}
+	srv := &http.Server{
+		ReadHeaderTimeout: time.Minute,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/hang" {
+				_, _ = io.WriteString(w, "head")
+				_ = http.NewResponseController(w).Flush()
+			}
 
-		select {
-		case <-release:
-		case <-r.Context().Done():
-		}
+			<-r.Context().Done()
+		}),
+	}
+
+	served := make(chan struct{})
+
+	go func() {
+		defer close(served)
+
+		_ = srv.Serve(listener)
+	}()
+
+	transport := &http.Transport{DialContext: listener.dial}
+
+	t.Cleanup(func() {
+		transport.CloseIdleConnections()
+
+		_ = srv.Close()
+
+		<-served
 	})
 
-	t.Cleanup(func() { close(release) })
-
-	return srv
+	return &http.Client{Transport: transport}
 }
 
 func TestSend_BodyTimeoutIsATypedBreakerFailure(t *testing.T) {
 	t.Parallel()
 
-	srv := hangAfterHead(t)
-	client := newClient(t, target(func(tc *resilient.TargetConfig) {
-		tc.Timeout = 30 * time.Millisecond
-		tc.Breaker.MinRequests = 2
-	}))
+	synctest.Test(t, func(t *testing.T) {
+		client := newClient(t, target(func(tc *resilient.TargetConfig) {
+			tc.Timeout = 30 * time.Millisecond
+			tc.Breaker.MinRequests = 2
+		}), resilient.WithHTTPClient(hangAfterHead(t)))
 
-	for range 2 {
-		resp, err := client.SendWithRetry("api", get(t, t.Context(), srv.URL))
-		require.NoError(t, err, "the headers arrived in time")
+		for range 2 {
+			resp, err := client.SendWithRetry("api", get(t, t.Context(), hung))
+			require.NoError(t, err, "the headers arrived in time")
 
-		_, err = io.ReadAll(resp.Body)
-		require.NoError(t, resp.Body.Close())
+			_, err = io.ReadAll(resp.Body)
+			require.NoError(t, resp.Body.Close())
 
-		var oe *resilient.OutboundError
-		require.ErrorAs(t, err, &oe, "a body read failure is an OutboundError too")
-		assert.Equal(t, resilient.KindTimeout, oe.Kind)
-		assert.Equal(t, "api", oe.Target)
-		require.ErrorIs(t, err, context.DeadlineExceeded)
-	}
+			var oe *resilient.OutboundError
+			require.ErrorAs(t, err, &oe, "a body read failure is an OutboundError too")
+			assert.Equal(t, resilient.KindTimeout, oe.Kind)
+			assert.Equal(t, "api", oe.Target)
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+		}
 
-	st, _ := client.BreakerState("api")
-	assert.Equal(t, resilient.StateOpen, st, "a dependency that hangs mid-body is failing")
+		st, _ := client.BreakerState("api")
+		assert.Equal(t, resilient.StateOpen, st, "a dependency that hangs mid-body is failing")
+	})
 }
 
 func TestSend_BodyCutShortIsAConnectionFailure(t *testing.T) {
@@ -593,22 +659,29 @@ func TestSend_BodyCutShortIsAConnectionFailure(t *testing.T) {
 func TestSend_UnreadBodyReportsToBreakerAtAttemptTimeout(t *testing.T) {
 	t.Parallel()
 
-	srv := hangAfterHead(t)
-	c := newClient(t, target(func(tc *resilient.TargetConfig) {
-		tc.Timeout = 30 * time.Millisecond
-		tc.Breaker.MinRequests = 2
-	}))
+	synctest.Test(t, func(t *testing.T) {
+		const timeout = 30 * time.Millisecond
 
-	for range 2 {
-		resp, err := c.Send("api", get(t, t.Context(), srv.URL))
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = resp.Body.Close() })
-	}
+		client := newClient(t, target(func(tc *resilient.TargetConfig) {
+			tc.Timeout = timeout
+			tc.Breaker.MinRequests = 2
+		}), resilient.WithHTTPClient(hangAfterHead(t)))
 
-	require.Eventually(t, func() bool {
-		st, _ := c.BreakerState("api")
-		return st == resilient.StateOpen
-	}, 5*time.Second, 5*time.Millisecond)
+		for range 2 {
+			resp, err := client.Send("api", get(t, t.Context(), hung))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = resp.Body.Close() })
+		}
+
+		st, _ := client.BreakerState("api")
+		require.Equal(t, resilient.StateClosed, st, "nothing is reported before the timeout")
+
+		time.Sleep(timeout)
+		synctest.Wait()
+
+		st, _ = client.BreakerState("api")
+		assert.Equal(t, resilient.StateOpen, st)
+	})
 }
 
 // A body read to the end, or closed early by the caller, is a success.
@@ -1030,47 +1103,34 @@ func TestSend_LogsWithoutQueryString(t *testing.T) {
 func TestSend_WarnsOnBodyFailureRequestFailureAndRejection(t *testing.T) {
 	t.Parallel()
 
-	release := make(chan struct{})
-	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/body" {
-			_, _ = io.WriteString(w, "head")
-			_ = http.NewResponseController(w).Flush()
-		}
+	synctest.Test(t, func(t *testing.T) {
+		buf := &testx.LogBuffer{}
+		client := newClient(t, target(func(tc *resilient.TargetConfig) {
+			tc.Timeout = 30 * time.Millisecond
+			tc.Breaker.MinRequests = 2
+		}), resilient.WithHTTPClient(hangAfterHead(t)), resilient.WithLogger(slog.New(slog.NewJSONHandler(buf, nil))))
 
-		select {
-		case <-release:
-		case <-r.Context().Done():
+		resp, err := client.Send("api", get(t, t.Context(), hung+"/body"))
+		require.NoError(t, err)
+
+		_, err = io.ReadAll(resp.Body)
+		require.ErrorIs(t, err, resilient.KindTimeout)
+		require.NoError(t, resp.Body.Close())
+
+		_, err = client.Send("api", get(t, t.Context(), hung+"/hang")) //nolint:bodyclose // error
+		require.ErrorIs(t, err, resilient.KindTimeout)
+
+		_, err = client.Send("api", get(t, t.Context(), hung+"/hang")) //nolint:bodyclose // error
+		require.ErrorIs(t, err, resilient.KindCircuitOpen)
+
+		for _, want := range []map[string]any{
+			{"level": "WARN", "msg": "resilient: response body failed", "reason": "timeout", "url": hung + "/body"},
+			{"level": "WARN", "msg": "resilient: request failed", "reason": "timeout", "url": hung + "/hang"},
+			{"level": "WARN", "msg": "resilient: request rejected", "reason": "circuit_open", "url": hung + "/hang"},
+		} {
+			assert.NotNil(t, buf.Find(t, want), "%v\n%s", want, buf.String())
 		}
 	})
-
-	t.Cleanup(func() { close(release) })
-
-	buf := &testx.LogBuffer{}
-	client := newClient(t, target(func(tc *resilient.TargetConfig) {
-		tc.Timeout = 30 * time.Millisecond
-		tc.Breaker.MinRequests = 2
-	}), resilient.WithLogger(slog.New(slog.NewJSONHandler(buf, nil))))
-
-	resp, err := client.Send("api", get(t, t.Context(), srv.URL+"/body"))
-	require.NoError(t, err)
-
-	_, err = io.ReadAll(resp.Body)
-	require.ErrorIs(t, err, resilient.KindTimeout)
-	require.NoError(t, resp.Body.Close())
-
-	_, err = client.Send("api", get(t, t.Context(), srv.URL+"/hang")) //nolint:bodyclose // error
-	require.ErrorIs(t, err, resilient.KindTimeout)
-
-	_, err = client.Send("api", get(t, t.Context(), srv.URL+"/hang")) //nolint:bodyclose // error
-	require.ErrorIs(t, err, resilient.KindCircuitOpen)
-
-	for _, want := range []map[string]any{
-		{"level": "WARN", "msg": "resilient: response body failed", "reason": "timeout", "url": srv.URL + "/body"},
-		{"level": "WARN", "msg": "resilient: request failed", "reason": "timeout", "url": srv.URL + "/hang"},
-		{"level": "WARN", "msg": "resilient: request rejected", "reason": "circuit_open", "url": srv.URL + "/hang"},
-	} {
-		assert.NotNil(t, buf.Find(t, want), "%v\n%s", want, buf.String())
-	}
 }
 
 func TestShutdown_WaitsForInFlightThenRejects(t *testing.T) {

@@ -191,6 +191,14 @@ func run(t testing.TB, back backends, extra map[string]string) *service {
 
 	t.Cleanup(func() { _ = svc.stop() })
 
+	// Registered last, so it runs first: a failed test shows what the service
+	// itself logged, which no assertion message carries.
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("the service's log:\n%s", svc.log.String())
+		}
+	})
+
 	return svc
 }
 
@@ -207,6 +215,11 @@ func (s *service) stop() error {
 		return nil
 	}
 }
+
+// poster sends the batches. Its timeout is far beyond any wait the service is
+// configured with here: an answer that never comes fails the test at the
+// request that hung, instead of holding it until the binary's own timeout.
+var poster = &http.Client{Timeout: 30 * time.Second}
 
 type answer struct {
 	status int
@@ -233,9 +246,9 @@ func (s *service) post(ids ...string) answer {
 
 	start := time.Now()
 
-	res, err := http.DefaultClient.Do(req)
+	res, err := poster.Do(req)
 	if err != nil {
-		return answer{err: err, took: time.Since(start)}
+		return answer{err: err, body: err.Error(), took: time.Since(start)}
 	}
 
 	defer func() { _ = res.Body.Close() }()
