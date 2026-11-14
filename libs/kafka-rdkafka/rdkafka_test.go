@@ -101,6 +101,11 @@ func TestSASLSSL(t *testing.T) {
 	kafkatest.SASLSSL(t)
 }
 
+func TestTrustStore(t *testing.T) {
+	t.Parallel()
+	kafkatest.TrustStore(t)
+}
+
 func TestProvider(t *testing.T) {
 	t.Parallel()
 
