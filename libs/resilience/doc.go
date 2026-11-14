@@ -6,7 +6,9 @@
 //     generation-tagged tickets (a late result never decides a newer state)
 //     and an "ignored" outcome that releases a half-open probe slot;
 //   - [RetryBudget]: retries capped at a fraction of the requests in a
-//     sliding window.
+//     sliding window;
+//   - [Backoff]: the exponential, equal-jitter delay of whatever retries on
+//     its own clock (the Kafka consumer, the tasks outbox relay).
 //
 // Pure logic: no I/O, no metrics, no logging, an injected clock. What a
 // failure is (an HTTP status, a gRPC code, a timeout) is the client's call.

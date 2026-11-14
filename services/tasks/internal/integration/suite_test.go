@@ -126,7 +126,7 @@ func wire(t testing.TB, backends deps) *wired {
 		committed = relay.Wake
 	}
 
-	st := store.New(db.Pool(), store.WithPropagator(propagator))
+	st := store.New(db, store.WithPropagator(propagator))
 	api.Register(srv, api.Deps{Store: st, Cache: taskCache, Logger: log, Committed: committed})
 
 	runCtx, stop := context.WithCancel(ctx)

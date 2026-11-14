@@ -10,6 +10,9 @@
 # Efficacy = killed / (killed + lived); mutant coverage = mutants any test
 # reaches. Ratchet them up when the numbers improve, never down without a
 # reason in the commit message.
+# Known survivor, equivalent — anything else is a gap:
+#   backoff.go  delay < maxDelay in the doubling loop  (at the cap one more
+#               doubling is undone by the min that follows)
 unleash:
   workers: 4
   timeout-coefficient: 8

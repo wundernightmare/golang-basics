@@ -9,6 +9,7 @@ logic: no I/O, no metrics, no logging, an injected clock.
 | --- | --- |
 | `Breaker` | closed / open / half-open over a sliding failure ratio; CAS transitions, lock-free admission |
 | `RetryBudget` | retries capped at `min_retries + ratio × requests` over a sliding window |
+| `Backoff` | the delay before retry N: exponential from an initial value, capped, with equal jitter (in `[d/2, d]`) — the schedule of the Kafka consumer and of the tasks outbox relay |
 
 ```go
 b := resilience.NewBreaker(resilience.DefaultBreakerConfig(), time.Now, onChange) // nil when FailureRatio is 0

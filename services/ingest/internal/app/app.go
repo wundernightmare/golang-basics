@@ -7,6 +7,7 @@ package app
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -36,12 +37,7 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, onServer f
 		return err
 	}
 
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		_ = tel.Shutdown(ctx)
-	}()
+	defer tel.Stop()
 
 	srv, err := httpx.NewServer(cfg.Config, logger, httpx.WithConfig(cfg),
 		httpx.WithTracerProvider(tel.TracerProvider), httpx.WithPropagator(tel.Propagator))
@@ -100,7 +96,7 @@ func runIngest(ctx, bootCtx context.Context, cfg config.Config, srv *httpx.Serve
 	srv.Health.Register("s3", store.ReadyCheck(), httpx.Optional())
 
 	// The breaker policies were validated with the configuration.
-	archiveBreaker := resilience.NewBreaker(cfg.Ingest.ArchiveBreaker.Resilient(), time.Now, breakers.observe(sinkArchive, logger))
+	archiveBreaker := breakers.breaker(cfg.Ingest.ArchiveBreaker.Resilient(), sinkArchive, logger)
 
 	writerID, err := archive.NewWriterID()
 	if err != nil {
@@ -141,7 +137,7 @@ func runIngest(ctx, bootCtx context.Context, cfg config.Config, srv *httpx.Serve
 		// Closed last (deferred first): after the pipeline has drained.
 		defer producer.Close()
 
-		kafkaBreaker = resilience.NewBreaker(cfg.Ingest.KafkaBreaker.Resilient(), time.Now, breakers.observe(sinkKafka, logger))
+		kafkaBreaker = breakers.breaker(cfg.Ingest.KafkaBreaker.Resilient(), sinkKafka, logger)
 
 		srv.Health.Register("kafka", producer.ReadyCheck(), httpx.Optional())
 		registry.MustRegister(producer.Collectors()...)
@@ -184,31 +180,13 @@ func runIngest(ctx, bootCtx context.Context, cfg config.Config, srv *httpx.Serve
 // acknowledged event without a home; it is bounded by drainTimeout and
 // reported.
 func serveIngest(ctx context.Context, srv *httpx.Server, writer *archive.Writer, pipe *pipeline.Pipeline, drainTimeout time.Duration, log *slog.Logger) error {
-	group, gctx := errgroup.WithContext(ctx)
-	// The writer outlives the signal until the server has drained.
-	workers, stopWorkers := context.WithCancel(context.WithoutCancel(ctx))
-	defer stopWorkers()
-
-	writerDone := make(chan struct{})
-
-	group.Go(func() error {
-		defer stopWorkers()
-		return srv.Run(gctx)
-	})
-	group.Go(func() error {
-		defer close(writerDone)
-		return writer.Run(workers)
-	})
-
-	err := group.Wait()
+	// The writer outlives the signal until the server has drained, and a
+	// panic in it stops the service in order (httpx.Server.RunWith). When
+	// this returns the writer has returned too: its last batch is flushed.
+	err := srv.RunWith(ctx, httpx.Worker{Name: "archive-writer", Run: writer.Run})
 
 	drainCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer cancel()
-
-	select {
-	case <-writerDone:
-	case <-drainCtx.Done():
-	}
 
 	if unsettled := pipe.Drain(drainCtx); unsettled > 0 {
 		log.WarnContext(drainCtx, "shutdown: second copies still in flight after DRAIN_TIMEOUT — these events are in one sink only",
@@ -251,7 +229,9 @@ func runCompact(ctx context.Context, cfg config.Config, srv *httpx.Server, store
 		// With RUN_ONCE the pass ending ends the process; otherwise Run
 		// returns only on the signal, and stopping the server is a no-op.
 		defer stop()
-		return compactor.Run(gctx)
+		// Guarded: a panic in a pass is an error — the server stops in
+		// order and the process exits non-zero — not a crash.
+		return srv.Guard("compactor", gctx, compactor.Run)()
 	})
 
 	return g.Wait()
@@ -284,17 +264,30 @@ func newBreakerMetrics(reg prometheus.Registerer) *breakerMetrics {
 	return m
 }
 
-// observe is a sink breaker's transition hook: the gauge, the counter and a
-// log line that is never sampled away — a sink going down or coming back is
-// the event an operator reads the log for.
-func (m *breakerMetrics) observe(sink string, log *slog.Logger) func(from, to resilience.State) {
+// breaker builds a sink's circuit breaker with its transition hook: the
+// gauge, the counter and a log line that is never sampled away — a sink
+// going down or coming back is the event an operator reads the log for.
+func (m *breakerMetrics) breaker(cfg resilience.BreakerConfig, sink string, log *slog.Logger) *resilience.Breaker {
+	var (
+		mu      sync.Mutex
+		breaker *resilience.Breaker
+	)
+
 	m.state.WithLabelValues(sink).Set(float64(resilience.StateClosed))
 
-	return func(from, to resilience.State) {
-		m.state.WithLabelValues(sink).Set(float64(to))
+	breaker = resilience.NewBreaker(cfg, time.Now, func(from, to resilience.State) {
 		m.transitions.WithLabelValues(sink, to.String()).Inc()
+		// The current state, not `to`, and read under the lock: the
+		// breaker notifies concurrently and possibly out of order, but
+		// whichever notification sets the gauge last has read a state at
+		// least as new as every earlier writer's.
+		mu.Lock()
+		m.state.WithLabelValues(sink).Set(float64(breaker.State()))
+		mu.Unlock()
 		log.Warn("sink circuit breaker changed state", "sink", sink, "from", from.String(), "to", to.String())
-	}
+	})
+
+	return breaker
 }
 
 // reportIntegrations says whether this process publishes to Kafka: a log

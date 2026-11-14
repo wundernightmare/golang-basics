@@ -28,13 +28,13 @@ require (
 	github.com/tracehubmmp/golang-basics/libs/kafka-rdkafka v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/otelx v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/pgx v0.0.0-00010101000000-000000000000
+	github.com/tracehubmmp/golang-basics/libs/resilience v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/containers v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/contract v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/valkey v0.0.0-00010101000000-000000000000
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
-	golang.org/x/sync v0.25.0
 )
 
 require (
@@ -121,6 +121,7 @@ require (
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
@@ -140,3 +141,5 @@ replace github.com/tracehubmmp/golang-basics/libs/testx/containers => ../../libs
 replace github.com/tracehubmmp/golang-basics/libs/testx/contract => ../../libs/testx/contract
 
 replace github.com/tracehubmmp/golang-basics/libs/secret => ../../libs/secret
+
+replace github.com/tracehubmmp/golang-basics/libs/resilience => ../../libs/resilience
