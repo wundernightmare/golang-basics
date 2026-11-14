@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
@@ -64,12 +63,7 @@ func run(cfg config.Config) error {
 		logger.Error("tracing init failed", "err", err)
 		return err
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		_ = tel.Shutdown(ctx)
-	}()
+	defer tel.Stop()
 
 	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancelBoot()
@@ -175,29 +169,18 @@ func run(cfg config.Config) error {
 }
 
 // serve runs the HTTP server, the outbox relay (watching only, without Kafka) and the
-// idempotency-key janitor until ctx is cancelled or one of them fails. Shutdown order: the
-// server drains first (no new writes), then the relay and the janitor stop —
-// the relay finishing its batch so what the broker acknowledged is not sent
-// twice — and only then does run() close the producer and the pool.
+// idempotency-key janitor until ctx is cancelled or one of them fails. Shutdown
+// order (httpx.Server.RunWith): the server drains first (no new writes), then
+// the relay and the janitor stop — the relay finishing its batch so what the
+// broker acknowledged is not sent twice — and only then does run() close the
+// producer and the pool.
 func serve(ctx context.Context, srv *httpx.Server, relay *outbox.Relay, st *store.Store, cfg config.Config, log *slog.Logger) error {
-	// A worker returning an error cancels gctx, which stops the server too.
-	group, gctx := errgroup.WithContext(ctx)
-	// The workers outlive the signal until the server has drained.
-	workers, stopWorkers := context.WithCancel(context.WithoutCancel(ctx))
-	defer stopWorkers()
-
-	group.Go(func() error {
-		defer stopWorkers()
-		return srv.Run(gctx)
-	})
-	// Guarded: a panic in a worker becomes an error, which stops the service
-	// in order — the server drains — instead of the runtime killing it.
-	group.Go(srv.Guard("outbox-relay", workers, relay.Run))
-	group.Go(srv.Guard("idempotency-janitor", workers, func(ctx context.Context) error {
-		return st.RunJanitor(ctx, cfg.Idempotency.TTL, cfg.Idempotency.PurgeInterval, log)
-	}))
-
-	return group.Wait()
+	return srv.RunWith(ctx,
+		httpx.Worker{Name: "outbox-relay", Run: relay.Run},
+		httpx.Worker{Name: "idempotency-janitor", Run: func(ctx context.Context) error {
+			return st.RunJanitor(ctx, cfg.Idempotency.TTL, cfg.Idempotency.PurgeInterval, log)
+		}},
+	)
 }
 
 // reportIntegrations says which optional integrations this process runs with:

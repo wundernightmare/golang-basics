@@ -148,6 +148,19 @@ func TestInit_DisabledInstallsPropagatorsOnly(t *testing.T) {
 	assert.NotNil(t, buf.Find(t, map[string]any{"msg": "tracing disabled (propagation only)"}))
 	assert.Equal(t, otel.GetTextMapPropagator(), tel.Propagator, "the returned propagator is the installed one")
 	require.NoError(t, tel.Shutdown(context.Background()))
+
+	// Stop is Shutdown for a defer: safe to call, again and after Shutdown.
+	tel.Stop()
+
+	stopped := false
+
+	Telemetry{Shutdown: func(ctx context.Context) error {
+		_, hasDeadline := ctx.Deadline()
+		stopped = hasDeadline
+
+		return nil
+	}}.Stop()
+	assert.True(t, stopped, "Stop shuts down under a deadline of its own")
 }
 
 //nolint:paralleltest // serial: otelx.Init installs the OpenTelemetry globals; this test checks exactly that
