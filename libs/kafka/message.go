@@ -2,8 +2,7 @@ package kafka
 
 import (
 	"context"
-	"errors"
-	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- retry-backoff jitter is not security-sensitive; a CSPRNG (crypto/rand) is unnecessary here.
+	"errors" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- retry-backoff jitter is not security-sensitive; a CSPRNG (crypto/rand) is unnecessary here.
 	"time"
 )
 
@@ -100,25 +99,6 @@ func Permanent(err error) error {
 func IsPermanent(err error) bool {
 	var p *permanentError
 	return errors.As(err, &p)
-}
-
-// backoff returns the delay before retry number n (0-based): initial·2ⁿ
-// capped at maxDelay, with "equal jitter" (half fixed, half random) so a
-// fleet of consumers retrying the same outage does not retry in lockstep.
-func backoff(n int, initial, maxDelay time.Duration) time.Duration {
-	d := initial
-	for i := 0; i < n && d < maxDelay; i++ {
-		d *= 2
-	}
-
-	d = min(d, maxDelay)
-
-	half := d / 2
-	if half <= 0 {
-		return d
-	}
-
-	return half + rand.N(half+1) //nolint:gosec // jitter, not a secret
 }
 
 // sleep waits for d or until ctx is done, reporting whether it slept fully.

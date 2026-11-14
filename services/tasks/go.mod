@@ -28,6 +28,7 @@ require (
 	github.com/tracehubmmp/golang-basics/libs/kafka-rdkafka v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/otelx v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/pgx v0.0.0-00010101000000-000000000000
+	github.com/tracehubmmp/golang-basics/libs/resilience v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/containers v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx/contract v0.0.0
@@ -140,3 +141,5 @@ replace github.com/tracehubmmp/golang-basics/libs/testx/containers => ../../libs
 replace github.com/tracehubmmp/golang-basics/libs/testx/contract => ../../libs/testx/contract
 
 replace github.com/tracehubmmp/golang-basics/libs/secret => ../../libs/secret
+
+replace github.com/tracehubmmp/golang-basics/libs/resilience => ../../libs/resilience

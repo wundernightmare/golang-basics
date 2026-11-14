@@ -147,7 +147,7 @@ func run(cfg config.Config) error {
 		committed = relay.Wake
 	}
 
-	st := store.New(db.Pool(), store.WithPropagator(tel.Propagator))
+	st := store.New(db, store.WithPropagator(tel.Propagator))
 	api.Register(srv, api.Deps{
 		Store:     st,
 		Cache:     taskCache,
