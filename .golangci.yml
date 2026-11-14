@@ -91,6 +91,7 @@ linters:
         - t testing.TB
         - t *testing.T
         - t T                    # e2e: testo's T with the Allure plugin (e2e/report_test.go)
+        - t *rapid.T             # property tests: rapid's T, the same role as testing.T
         - b *testing.B
         - f *testing.F
         - m *testing.M

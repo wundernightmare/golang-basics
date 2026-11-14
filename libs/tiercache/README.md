@@ -126,6 +126,7 @@ Listed in [docs/METRICS.md](../../docs/METRICS.md); every series carries
 | Integration | `integration_test.go` | the same cache on a real Valkey: TTLs, `SET NX` / `IFEQ`, tombstones, Pub/Sub, values from 0 bytes to 4 MiB |
 | Chaos | `chaos_test.go` | Valkey down, frozen, slow, black-holed, resetting, cutting replies mid-value: every read answers correctly within a bound, and L2 is picked up again |
 | Soak | `chaos_test.go` | two processes reading and invalidating under flapping faults: no failed read, no foreign or uncommitted value, convergence afterwards |
+| Property | `property_test.go`, `internal_test.go` | for any history of commits, invalidations, passing time and reads across two processes: a read never fails, never returns another key's value or an uncommitted version, never one older than the last invalidation or than the hard TTL allows; the codec and the envelope round-trip any value (rapid, virtual time) |
 | Mutation | `.gremlins.yaml`, nightly | whether the unit tests notice a deadline or a size limit off by one (`just mutate libs/tiercache` from the repo root) |
 
 Integration, chaos and soak need Docker and skip under `-short`.

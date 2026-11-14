@@ -244,6 +244,12 @@ README; this file is only the high-signal, easy-to-miss bits.
   chaos) and `libs/testx/contract` (OpenAPI / JSON Schema validation). Tests
   isolate with `testx.Unique` (a schema, a key prefix, a topic), never a
   fresh container. A depguard rule keeps all of them out of non-test code.
+- **Rules over sequences are property tests** (rapid; `libs/resilience`,
+  `libs/tiercache`): a state machine, a model to compare against, an invariant
+  of any history — not for what one table of examples says as well. They are
+  unit tests (`-short`, virtual time via `inBubble{t}` under synctest) and keep
+  rapid's full check count there. A property is only worth its name once a
+  deliberately broken implementation fails it: try that before committing one.
 - **One layer per behaviour** (README "Tests" table): unit for logic and
   wiring, contract for the telemetry signals, integration for the libs against
   real dependencies and the tasks vertical, e2e only for what a real process
