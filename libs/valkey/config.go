@@ -49,9 +49,11 @@ type Config struct {
 	DB          int           `env:"VALKEY_DB" envDefault:"0" yaml:"db"`
 	DialTimeout time.Duration `env:"VALKEY_DIAL_TIMEOUT" envDefault:"5s" yaml:"dial_timeout"`
 	// OpTimeout bounds every command (get/set/del). Without it a cache that
-	// refuses connections makes valkey-go retry forever, and a request whose
-	// context has no deadline hangs with it — found by the chaos suite. A
-	// cache is optional: past this, the caller treats it as a miss.
+	// does not answer holds a request whose context has no deadline for as
+	// long as the connection takes to notice — found by the chaos suite. A
+	// cache is optional: past this, the caller treats it as a miss. Commands
+	// are not retried by the client (see clientOption): one attempt, then
+	// the error.
 	OpTimeout time.Duration `env:"VALKEY_OP_TIMEOUT" envDefault:"500ms" yaml:"op_timeout"`
 
 	// valkey-go does not hand out one connection per command. Ordinary
@@ -215,6 +217,15 @@ func (c Config) clientOption() (valkeygo.ClientOption, error) {
 	opt.BlockingPipeline = blockingPipeline
 	opt.BlockingPoolMinSize = c.PoolMinIdle
 	opt.BlockingPoolCleanup = c.PoolIdleTimeout
+	// The library's own retry of read-only commands is off. After a
+	// connection error it sends the same command object again on a new
+	// connection and, on success, recycles it — while the writer of the old
+	// connection may still be reading it (valkey-go ≤ 1.0.79, singleClient.Do:
+	// a data race, seen as garbage written to a dying socket at best).
+	// TestReadsUnderConnectionFaultsDoNotRace reproduces it when this line is
+	// removed. Nothing is lost that the callers rely on: a failed read is a
+	// miss for Aside and for tiercache, bounded by OpTimeout either way.
+	opt.DisableRetry = true
 	opt.ConnWriteTimeout = c.ConnWriteTimeout
 	opt.ConnLifetime = c.ConnLifetime
 

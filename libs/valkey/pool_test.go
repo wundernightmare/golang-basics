@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -370,4 +371,53 @@ func TestUpstreamPoolLimitLeaksOnACancelledWaiter(t *testing.T) {
 	wg.Wait()
 	assert.Greater(t, peak, 1+poolSize,
 		"valkey-go no longer leaks its pool limit on a cancelled waiter: remove bounded.go and this test")
+}
+
+// Reads keep failing and succeeding while connections are reset and replies
+// cut short — and nothing in the client races. With valkey-go's own retry on
+// (≤ 1.0.79) this test fails under -race within seconds: a retried command is
+// recycled while the writer of the connection that failed still reads it.
+// The assertion is the race detector's; CI runs this layer with -race.
+//
+//nolint:paralleltest // serial: chaos via the shared Toxiproxy proxy
+func TestReadsUnderConnectionFaultsDoNotRace(t *testing.T) {
+	proxy := containers.Proxied(t, "valkey")
+	cache, _ := namedCache(t, "valkey://"+proxy.Addr, valkey.Config{OpTimeout: 200 * time.Millisecond})
+	key := testx.Unique("faults")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var (
+		wg       sync.WaitGroup
+		answered atomic.Int64
+	)
+
+	for range 256 {
+		wg.Go(func() {
+			for ctx.Err() == nil {
+				if _, _, err := cache.Get(context.Background(), key); err == nil {
+					answered.Add(1)
+				}
+			}
+		})
+	}
+
+	for ctx.Err() == nil {
+		proxy.Toxic("reset_peer", "downstream", map[string]any{"timeout": 0})
+		time.Sleep(5 * time.Millisecond)
+		proxy.Reset()
+		time.Sleep(15 * time.Millisecond)
+		proxy.Toxic("limit_data", "downstream", map[string]any{"bytes": 700})
+		time.Sleep(15 * time.Millisecond)
+		proxy.Reset()
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	wg.Wait()
+	proxy.Reset()
+
+	assert.Positive(t, answered.Load(), "between the faults reads go through")
+	assert.Eventually(t, func() bool { _, _, err := cache.Get(context.Background(), key); return err == nil },
+		5*time.Second, 50*time.Millisecond, "and the client recovers once they stop")
 }

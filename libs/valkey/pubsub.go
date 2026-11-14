@@ -45,8 +45,8 @@ func (c *Cache) Publish(ctx context.Context, channel, message string) error {
 // is done, and returns ctx's error then (or the error that ended the
 // subscription for good).
 //
-// Pub/Sub is at most once, and the client reconnects and resubscribes on its
-// own, so messages published while the connection was down are lost without
+// Pub/Sub is at most once, and Subscribe reconnects and resubscribes on its
+// own (after 50ms, doubling to 1s, for as long as ctx lives), so messages published while the connection was down are lost without
 // any error here. onSubscribed is the signal for that: it runs every time the
 // subscription is (re-)established — the first time included — and whatever
 // the subscriber derived from earlier messages must be treated as incomplete
@@ -59,12 +59,43 @@ func (c *Cache) Subscribe(ctx context.Context, channel string, onMessage func(me
 		}
 	})
 
-	err := c.client.Receive(ctx, c.client.B().Subscribe().Channel(channel).Build(), func(msg valkeygo.PubSubMessage) {
-		onMessage(msg.Message)
-	})
-	if err != nil {
-		return fmt.Errorf("valkey: subscribe %q: %w", channel, err)
+	// The resubscription is this loop, not the library's retry (off: see
+	// clientOption). Each attempt builds its own command, so nothing is
+	// shared with a connection that failed.
+	for attempt := 0; ; attempt++ {
+		err := c.client.Receive(ctx, c.client.B().Subscribe().Channel(channel).Build(), func(msg valkeygo.PubSubMessage) {
+			onMessage(msg.Message)
+		})
+		if err == nil {
+			return nil
+		}
+
+		// For good: the caller is done, the cache was closed, or the server
+		// answered and said no (ACL, a wrong mode) — asking again changes
+		// nothing.
+		if _, refused := valkeygo.IsValkeyErr(err); refused || ctx.Err() != nil || c.closed.Load() {
+			return fmt.Errorf("valkey: subscribe %q: %w", channel, err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("valkey: subscribe %q: %w", channel, ctx.Err())
+		case <-time.After(resubscribeDelay(attempt)):
+		}
+	}
+}
+
+// resubscribeDelay is the pause before attempt+1: 50ms doubling to one
+// second — quick after a blip, unhurried against a server that stays down.
+func resubscribeDelay(attempt int) time.Duration {
+	const (
+		first = 50 * time.Millisecond
+		limit = time.Second
+	)
+
+	if attempt >= 5 { // 50ms << 5 is already past the limit
+		return limit
 	}
 
-	return nil
+	return min(first<<attempt, limit)
 }

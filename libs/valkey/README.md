@@ -107,6 +107,13 @@ something a wrapper cannot observe — so `Cache.Client()` refuses them: the
 returned stream carries `ErrStreamUnsupported`. Nothing reachable through the
 client is outside the bound.
 
+The client does not retry a command. valkey-go would retry read-only ones
+after a connection error, but in ≤ 1.0.79 that retry recycles the command
+while the failed connection's writer may still read it — a data race
+(`TestReadsUnderConnectionFaultsDoNotRace` shows it under `-race` when the
+retry is on). So a read that hits a broken connection returns its error
+once; `Aside` and `tiercache` treat that as a miss.
+
 `conn_write_timeout` is not `op_timeout`: the second bounds what one caller
 waits, the first how long the client keeps sending into a connection whose
 peer stopped answering (a dropped route — nothing closes the socket). All of
