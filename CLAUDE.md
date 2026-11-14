@@ -308,6 +308,12 @@ README; this file is only the high-signal, easy-to-miss bits.
 - **Container-backed tests need `DOCKER_HOST` on OrbStack/rootless Docker**
   (`unix://$HOME/.orbstack/run/docker.sock`); they skip when Docker is
   unreachable and fail when `CI` is set.
+- **Test containers are disposable, and are treated so** (`libs/testx/containers`):
+  Postgres and the S3 store keep their data on tmpfs, and every container is
+  removed without a graceful stop. Both were measured (a store test waited
+  mostly for fsync through the overlay filesystem; Kafka ignored SIGTERM for
+  10s per package) — keep them when adding a fixture. `just test-integration`
+  runs the modules `JOBS` at a time (default 4).
 - **Metrics come from the libs.** `pgx`, `valkey`, `kafka` expose `Collectors()`;
   a service registers them on `srv.Metrics.Registry`. Route-level labels use the
   route template (`route="/tasks/{id}"`), never the raw path; methods outside
