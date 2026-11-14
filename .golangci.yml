@@ -90,6 +90,7 @@ linters:
         - r *http.Request
         - t testing.TB
         - t *testing.T
+        - t T                    # e2e: testo's T with the Allure plugin (e2e/report_test.go)
         - b *testing.B
         - f *testing.F
         - m *testing.M
@@ -138,6 +139,16 @@ linters:
               desc: assertions belong in _test.go files
             - pkg: github.com/testcontainers
               desc: containers belong in _test.go files (via libs/testx/containers)
+        # testo (and its Allure plugin) is the e2e suite's reporter, nothing
+        # else's: the unit and integration layers stay plain `go test`.
+        testo-is-e2e-only:
+          files:
+            - "!**/e2e/**"
+          deny:
+            - pkg: github.com/ozontech/testo
+              desc: testo is confined to the e2e module (e2e/report_test.go says why)
+            - pkg: github.com/ozontech/testo-allure
+              desc: testo is confined to the e2e module (e2e/report_test.go says why)
     revive:
       # Explicit rule list on purpose: enable-all-rules brings back
       # line-length-limit and add-constant (see lll / mnd above).

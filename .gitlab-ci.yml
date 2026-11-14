@@ -431,6 +431,9 @@ e2e:
         timeout 120 bash -c "until (: > /dev/tcp/${hp%%:*}/${hp##*:}) 2>/dev/null; do sleep 1; done" \
           || { echo "dependency $hp not reachable after 120s" >&2; exit 1; }
       done
+    # Native Allure results next to the JUnit file, under the same name
+    # (scripts/allure-collect.sh replaces one with the other).
+    - export ALLURE_RESULTS_DIR="$CI_PROJECT_DIR/.reports/allure-native/e2e"
     - cd e2e && gotestsum --format testname --junitfile "$CI_PROJECT_DIR/.reports/junit/e2e.xml" -- -tags e2e -count=1 ./...
   artifacts:
     when: always
@@ -438,6 +441,7 @@ e2e:
     paths:
       - .cover/e2e/
       - .reports/junit/
+      - .reports/allure-native/
     reports:
       junit: .reports/junit/e2e.xml
 
@@ -457,12 +461,14 @@ e2e-franz:
         timeout 120 bash -c "until (: > /dev/tcp/${hp%%:*}/${hp##*:}) 2>/dev/null; do sleep 1; done" \
           || { echo "dependency $hp not reachable after 120s" >&2; exit 1; }
       done
+    - export ALLURE_RESULTS_DIR="$CI_PROJECT_DIR/.reports/allure-native/e2e-franz"
     - cd e2e && gotestsum --format testname --junitfile "$CI_PROJECT_DIR/.reports/junit/e2e-franz.xml" -- -tags e2e -count=1 ./...
   artifacts:
     when: always
     expire_in: 1 week
     paths:
       - .reports/junit/
+      - .reports/allure-native/
     reports:
       junit: .reports/junit/e2e-franz.xml
 
@@ -578,8 +584,9 @@ allure-report:
     - *node-tarball
     - pnpm install --frozen-lockfile
   script:
-    - test -d .reports/junit || { echo "no JUnit results"; exit 0; }
-    - rm -rf .reports/allure-results && mkdir -p .reports/allure-results && cp .reports/junit/*.xml .reports/allure-results/
+    - test -d .reports/junit || test -d .reports/allure-native || { echo "no test results"; exit 0; }
+    # JUnit + the e2e suite's native results, without counting e2e twice.
+    - bash scripts/allure-collect.sh .reports/allure-results
     # categories.json + executor.json from the tracked file and the CI_* variables.
     - bash scripts/allure-meta.sh .reports/allure-results
     - pnpm exec allure generate --clean --single-file -o allure-report .reports/allure-results

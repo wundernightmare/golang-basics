@@ -196,7 +196,7 @@ them out as matrices, GitLab loops over them in one job per stage.
 | `e2e` | `-cover` binaries into `.build/`, deps up (`docker compose … up --wait` on GitHub, `services:` on GitLab — a dependency that never gets healthy fails the job), `go test -tags e2e`, counters → `.cover/e2e` |
 | `schemathesis` | generated requests against ping + tasks, JUnit |
 | `coverage` | covdata merge of unit + integration + e2e, gated by `.testcoverage.yml`; a PR may not lower it vs master |
-| `allure-report` | one HTML report from every JUnit file (`allure generate`, JRE) |
+| `allure-report` | one HTML report from every JUnit file and the e2e suite's native Allure results (`allure generate`, JRE) |
 | appsec | waivers, gitleaks, semgrep, osv-scanner, govulncheck, hadolint |
 | docker | every service through `docker/service.Dockerfile`, syft SBOM, grype `--fail-on high` |
 | nightly | `stress` (`-count=3 -race`), `fuzz`, `bench` (benchstat vs master), `mutation` (modules with `.gremlins.yaml`) |
@@ -314,9 +314,13 @@ runs that file in a real collector and asserts each policy.
 ## Tests
 
 Tests are plain `go test`: `func TestX(t *testing.T)`, testify, `t.Run`
-sub-tests, table tests, `t.Parallel()` where nothing swaps a global. No test
-framework and no per-test report plugin — the Allure report is built from the
-JUnit XML that `gotestsum` writes. Every layer feeds one merged coverage
+sub-tests, table tests, `t.Parallel()` where nothing swaps a global. The unit
+and integration layers use no test framework and no report plugin — their part
+of the Allure report is built from the JUnit XML that `gotestsum` writes. The
+e2e suite is the one exception: it reports natively through
+[testo](https://github.com/ozontech/testo) and its Allure plugin, because a
+scenario over several real processes needs steps and each process's output as
+an attachment ([e2e/README.md](e2e/README.md#report)). Every layer feeds one merged coverage
 number, and every behaviour is checked at exactly one layer.
 
 ### Layers and what each one owns
@@ -358,12 +362,17 @@ testcontainers in non-test files.
 export DOCKER_HOST=unix://$HOME/.orbstack/run/docker.sock   # OrbStack / rootless Docker
 just test                     # every Go layer (integration needs Docker)
 cd e2e && go test -tags e2e -count=1 ./...   # e2e against .build/ binaries (see "E2E tests (Go)")
-just allure-report            # one HTML report from every layer's JUnit XML
+just allure-report            # one HTML report: every layer's JUnit XML + the e2e suite's native results
 ```
 
-### Allure (via JUnit)
+### Allure (JUnit, and native for e2e)
 
-Every layer runs under [gotestsum](https://github.com/gotestyourself/gotestsum)
+The e2e suite writes Allure's own result files (testo + testo-allure: steps,
+timings, attachments) into `.reports/allure-native/<run>`;
+`scripts/allure-collect.sh` puts them together with the JUnit files below and
+leaves out the e2e JUnit file they replace, so nothing is counted twice.
+
+Every other layer runs under [gotestsum](https://github.com/gotestyourself/gotestsum)
 with `--junitfile <results-dir>/<layer>-<module>.xml`; Allure 2 reads JUnit XML
 natively, so `allure generate <results-dir>` needs no Go-side plugin. A test's
 identity in the report is its package and name (`TestTasksPipeline/created_task_reaches_the_consumer`),

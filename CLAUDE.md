@@ -229,8 +229,15 @@ README; this file is only the high-signal, easy-to-miss bits.
   module's `telemetry_test.go`; do not assert it against a mock.
 - **Tests are plain `go test` + testify.** `func TestX(t *testing.T)`,
   `t.Run` sub-tests, table tests, `t.Parallel()` where nothing swaps globals
-  (`testx.Recorder` does). No test framework, no per-test Allure plugin: the
-  report is `gotestsum --junitfile` → `allure generate`. Helpers come from
+  (`testx.Recorder` does). No test framework, no per-test Allure plugin in
+  the unit and integration layers: their report is `gotestsum --junitfile` →
+  `allure generate`. **The e2e suite alone uses testo + testo-allure**
+  (`e2e/report_test.go`; depguard keeps both out of every other module):
+  every Test function there is one `scenario(t, feature, func(t T) {…})`,
+  sub-tests are `testo.Run`, and nothing a later line needs may sit inside a
+  step — a step is a sub-test, so `-run` with a sub-test pattern skips it.
+  `scripts/allure-collect.sh` merges its native results with the JUnit files
+  and drops the e2e JUnit they replace. Helpers come from
   three `_test`-only modules — `libs/testx` (Recorder, LogBuffer, Metric,
   LintMetrics, Unique), `libs/testx/containers` (`Postgres/Valkey/Kafka/S3`, one
   per test binary via `TestMain` → `containers.Main`; `Proxied`/`Pause` for
