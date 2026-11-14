@@ -50,12 +50,16 @@ repo). Where the Go implementation lives is in the last column.
 | `http_client_request_duration_seconds` | histogram | `target, method` |
 | `http_client_retries_total` | counter | `target` |
 | `http_client_circuit_breaker_state` | gauge | `target` (0 closed, 1 open, 2 half-open) |
+| `http_client_retry_budget_exhausted_total` | counter | `target` — retries refused because the retry budget was spent |
+| `http_client_circuit_breaker_transitions_total` | counter | `target, from, to` (`closed`, `open`, `half_open`) |
 
-Go only (features the Node client does not have):
-`http_client_retry_budget_exhausted_total{target}`,
-`http_client_circuit_breaker_transitions_total{target,from,to}`,
+Go only (a feature the Node client does not have):
 `http_client_bulkhead_in_flight{target}`,
-`http_client_bulkhead_rejected_total{target}`.
+`http_client_bulkhead_rejected_total{target}` (and with them the outcomes
+`bulkhead_full` and `redirect`). Node only: the outcome `deadline_exceeded`
+(the caller's budget ran out before an answer). Go counts one request per
+**attempt**, Node one per **call** — the outcome of the last attempt, the
+duration of them all; the repeats are in `http_client_retries_total`.
 
 ## gRPC client — `libs/grpcx` (registered by the service that uses it)
 
@@ -65,11 +69,11 @@ Go only (features the Node client does not have):
 | `grpc_client_request_duration_seconds` | histogram | `target, method` |
 | `grpc_client_retries_total` | counter | `target` |
 | `grpc_client_circuit_breaker_state` | gauge | `target` (0 closed, 1 open, 2 half-open) |
+| `grpc_client_circuit_breaker_transitions_total` | counter | `target, from, to` (`closed`, `open`, `half_open`) |
 
 One per **call**, not per attempt: gRPC retries below the instrumented layer,
 and a stream is one call, counted when it ends. `method` is the full gRPC
-method (`/pkg.Service/Method`) — from generated code, so bounded. Go only:
-`grpc_client_circuit_breaker_transitions_total{target,from,to}`.
+method (`/pkg.Service/Method`) — from generated code, so bounded.
 
 ## Postgres — `libs/pgx` (client side only)
 
@@ -111,7 +115,7 @@ are producer sends with `client="consumer"` and the DLQ topic as `topic`
 (`enable_consumer_group_metrics: [group, partition, consumer_lag]`,
 docker/deps.yml).
 
-## S3 — `libs/s3` (client side only)
+## S3 — `libs/s3`, `@base/s3` in Node (client side only)
 
 | Metric | Type | Labels |
 | --- | --- | --- |
@@ -130,18 +134,22 @@ part). A missing key on `get` / `head` is an answer, not an error.
 | `outbox_dead` | gauge |
 | `outbox_oldest_age_seconds` | gauge (0 when empty) |
 
-## Cache — `libs/valkey` (Go's read cache)
+## Cache — `libs/valkey`, `CacheAside` of `@base/cache` in Node
 
 | Metric | Type | Labels |
 | --- | --- | --- |
 | `cache_lookups_total` | counter | `result` = `hit` \| `miss` \| `error` |
-| `cache_command_duration_seconds` | histogram | `operation` = `get` \| `set` \| `del` \| `publish` |
-| `cache_command_errors_total` | counter | `operation` |
+| `cache_command_duration_seconds` | histogram (Go) | `operation` = `get` \| `set` \| `del` \| `publish` |
+| `cache_command_errors_total` | counter (Go) | `operation` |
 
-## Two-level cache — `libs/tiercache` (off-heap L1 in front of the cache above)
+Node reports the connection instead of the commands:
+`valkey_client_connected`, `valkey_client_errors_total`,
+`valkey_client_reconnects_total`.
 
-Every series carries `cache` = the cache's configured name. Its L2 commands
-are the `cache_*` series above.
+## Two-level cache — `libs/tiercache`, `TierCache` of `@base/cache` in Node (an in-process L1 in front of the cache above)
+
+Every series carries `cache` = the cache's configured name. In Go its L2
+commands are the `cache_*` series above.
 
 | Metric | Type | Labels |
 | --- | --- | --- |
@@ -150,7 +158,7 @@ are the `cache_*` series above.
 | `tiercache_invalidations_total` | counter | `cache`, `scope` = `key` \| `all` (L1 emptied after the subscription reconnected) |
 | `tiercache_l2_bypassed_total` | counter | `cache` — lookups that skipped L2 while its breaker was open |
 | `tiercache_l1_oversize_total` | counter | `cache` — entries too large for L1 (served from L2) |
-| `tiercache_l1_bytes` | gauge | `cache` — off-heap bytes held, bounded by the configured capacity |
+| `tiercache_l1_bytes` | gauge | `cache` — bytes L1 holds, bounded by the configured capacity: off-heap memory in Go, the encoded size of the entries (kept decoded on the heap) in Node |
 
 ## Health, build, runtime
 
@@ -161,12 +169,18 @@ are the `cache_*` series above.
 | `health_check_duration_seconds` | histogram (Go) | `check` |
 | `build_info` | gauge (1) | `version, revision` — no `service` (the scrape adds it), no runtime version (`go_info` has it) |
 | `app_integration_enabled` | gauge (1/0) | `integration` |
-| `log_dropped_total` | counter (Go) | `level` |
+| `log_dropped_total` | counter | `level` — records the log sampler dropped |
 
 Go runtime and process: the client_golang defaults (`go_*`, `process_*`:
 CPU, RSS, open / max file descriptors, start time) plus
 `go_sched_latencies_seconds` (histogram: how long a runnable goroutine waited
 for a thread — Go's counterpart of Node's event-loop delay).
+
+Node runtime and process: the same `process_*` names plus `nodejs_*` (heap
+used / total / limit, external memory, event-loop delay and utilization, GC
+by kind) and `nodejs_container_memory_limit_bytes` — the cgroup limit the
+V8 heap limit is checked against at boot (Go moves its own soft limit
+instead: [RUNTIME.md](RUNTIME.md)).
 
 ## Service-specific
 
