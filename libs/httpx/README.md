@@ -427,5 +427,6 @@ checkout); the injected values cover Docker builds, whose context has no `.git`.
 just test     # go test ./...
 just lint     # golangci-lint run
 just cov      # coverage summary
+just mutate libs/httpx   # from the repo root: mutation testing; scope, thresholds and known survivors in .gremlins.yaml
 go test -run XXX -fuzz FuzzRedact -fuzztime 30s   # FuzzProblemJSON, FuzzLoadYAML, FuzzRedact
 ```

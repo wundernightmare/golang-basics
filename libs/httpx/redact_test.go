@@ -188,3 +188,41 @@ func TestRedact_PassesScalarsAndNilThrough(t *testing.T) {
 
 	assert.Equal(t, "1m30s", httpx.Redact(90*time.Second))
 }
+
+// The shapes at the edge of each rule: nothing to render, nothing to hide,
+// a name that is not a string, a URL with nothing to mask.
+func TestRedact_Edges(t *testing.T) {
+	t.Parallel()
+
+	type Named struct {
+		Region string `yaml:"region"`
+	}
+
+	type cfg struct {
+		NilList  []string       `yaml:"nil_list"`
+		Pair     [2]string      `yaml:"pair"`
+		EmptyKey []byte         `secret:"true" yaml:"empty_key"`
+		Key      []byte         `secret:"true" yaml:"key"`
+		ByNumber map[int]string `yaml:"by_number"`
+		Plain    string         `yaml:"plain_url"`
+		Named    `yaml:"named"`
+	}
+
+	redacted, _ := redactJSON(t, cfg{
+		Pair:     [2]string{"a", "b"},
+		EmptyKey: []byte{},
+		Key:      []byte("k"),
+		ByNumber: map[int]string{1: "one"},
+		Plain:    "https://example.com/a b",
+		Region:   "eu",
+	})
+
+	assert.Nil(t, redacted["nil_list"], "a nil list stays null")
+	assert.Equal(t, []any{"a", "b"}, redacted["pair"], "an array is a list")
+	assert.Empty(t, redacted["empty_key"], "an empty secret blob is visibly unset")
+	assert.Equal(t, "[redacted]", redacted["key"])
+	assert.Equal(t, map[string]any{"1": "one"}, redacted["by_number"], "a key that is not a string is printed")
+	assert.Equal(t, "https://example.com/a b", redacted["plain_url"], "a URL with nothing to mask is not rewritten")
+	assert.Equal(t, map[string]any{"region": "eu"}, redacted["named"], "an embedded struct with a name of its own is not inlined")
+	assert.NotContains(t, redacted, "region")
+}
