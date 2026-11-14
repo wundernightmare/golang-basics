@@ -265,8 +265,9 @@ README; this file is only the high-signal, easy-to-miss bits.
   `^libs/…` exclude and override in `.testcoverage.yml` matches nothing.
 - **Mutation testing is scoped**: `just mutate <module>` runs gremlins on the
   modules with a `.gremlins.yaml` (`libs/resilient-http-client`, `libs/grpcx`,
-  `libs/resilience`; each file says what it excludes) with thresholds that
-  fail the run. Always through `scripts/mutate.sh`, never a bare `gremlins
+  `libs/resilience`, `libs/httpx`, `libs/tiercache`, `libs/secret`; each file
+  says what it excludes and which survivors are known equivalents) with
+  thresholds that fail the run. The oracle is the unit layer (`-short`). Always through `scripts/mutate.sh`, never a bare `gremlins
   unleash`: gremlins tests a copy of the module outside the workspace, and a
   copy that does not build counts every mutant as killed. When a mutant lives, first ask
   whether the code has an unkillable branch (rewrite with `min`/`max`, inject

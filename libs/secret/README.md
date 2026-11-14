@@ -115,3 +115,7 @@ rendering does (`go test -fuzz FuzzString`).
 `caarlos0/env` and mapstructure: those libraries are that suite's
 dependencies, and this module's `go.mod` stays at the standard library (plus
 testify).
+
+`just mutate libs/secret` (from the repo root, nightly in CI) mutates the
+package and expects every mutant to be noticed: a surviving one would be a
+way for a value to leak that no test sees.

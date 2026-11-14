@@ -1,11 +1,14 @@
 package tiercache
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -107,3 +110,112 @@ type byteCodec struct{}
 
 func (byteCodec) Append(dst, value []byte) ([]byte, error) { return append(dst, value...), nil }
 func (byteCodec) Decode(src []byte) ([]byte, error)        { return append([]byte(nil), src...), nil }
+
+func newByteCache(t *testing.T, log *slog.Logger, tune func(*Config)) *Cache[[]byte] {
+	t.Helper()
+
+	cfg := Config{Name: "internal", HardTTL: time.Minute}
+	if tune != nil {
+		tune(&cfg)
+	}
+
+	cache, err := New(cfg, byteCodec{}, func(context.Context, Key) ([]byte, error) { return nil, nil }, nil, log)
+	require.NoError(t, err)
+	t.Cleanup(cache.Close)
+
+	return cache
+}
+
+// The deadlines are compared to the millisecond: a value is stale from its
+// soft deadline on, and gone from its hard one on — not a millisecond later.
+func TestDeadlinesAreExactToTheMillisecond(t *testing.T) {
+	t.Parallel()
+
+	cache := newByteCache(t, nil, nil)
+
+	env := append(appendHeader(nil, 1000, 2000), "v"...)
+
+	for _, tc := range []struct {
+		nowMs     int64
+		stale, ok bool
+	}{
+		{nowMs: 999, stale: false, ok: true},
+		{nowMs: 1000, stale: true, ok: true},
+		{nowMs: 1999, stale: true, ok: true},
+		{nowMs: 2000, ok: false},
+	} {
+		value, stale, ok := cache.usable(env, tc.nowMs)
+		require.Equal(t, tc.ok, ok, "at %d ms", tc.nowMs)
+
+		if ok {
+			assert.Equal(t, tc.stale, stale, "at %d ms", tc.nowMs)
+			assert.Equal(t, "v", string(value))
+		}
+	}
+}
+
+// The largest deadline the envelope accepts is the last one it can hold.
+func TestEnvelopeAcceptsItsLargestDeadline(t *testing.T) {
+	t.Parallel()
+
+	_, hard, _, ok := parseEnvelope(appendHeader(nil, 1, 1<<62))
+	require.True(t, ok)
+	assert.Equal(t, int64(1<<62), hard)
+
+	_, hard, _, ok = parseEnvelope(appendHeader(nil, 1, 1<<62+1))
+	assert.False(t, ok)
+	assert.Zero(t, hard)
+}
+
+// l1MaxEntry is a promise about the store underneath: an entry of exactly
+// that size is held, and one byte more is refused and counted — never
+// dropped in silence.
+func TestLargestEntryL1AcceptsIsHeld(t *testing.T) {
+	t.Parallel()
+
+	cache := newByteCache(t, nil, nil)
+	key := KeyOf("largest")
+
+	cache.fill(cache.epoch.Load(), key, make([]byte, l1MaxEntry-len(key)))
+	assert.True(t, cache.local.Has(key[:]), "an entry of l1MaxEntry bytes is in L1")
+	assert.Zero(t, testutil.ToFloat64(cache.metrics.oversize))
+
+	over := KeyOf("one byte over")
+	cache.fill(cache.epoch.Load(), over, make([]byte, l1MaxEntry-len(over)+1))
+	assert.False(t, cache.local.Has(over[:]))
+	assert.InDelta(t, 1, testutil.ToFloat64(cache.metrics.oversize), 0)
+}
+
+// StaleIfError = 0 turns the fallback off, whatever the levels still hold.
+func TestWithoutStaleIfErrorNothingExpiredIsServed(t *testing.T) {
+	t.Parallel()
+
+	cache := newByteCache(t, nil, nil)
+	inAnHour := time.Now().Add(time.Hour).UnixMilli()
+
+	_, ok := cache.staleFallback(KeyOf("k"), []byte("v"), inAnHour, true)
+	assert.False(t, ok)
+
+	graced := newByteCache(t, nil, func(cfg *Config) { cfg.StaleIfError = time.Minute })
+	value, ok := graced.staleFallback(KeyOf("k"), []byte("v"), inAnHour, true)
+	require.True(t, ok)
+	assert.Equal(t, "v", string(value))
+}
+
+// The rate-limited warning is logged — once a second at most.
+func TestWarningIsLoggedAndRateLimited(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+
+	cache := newByteCache(t, slog.New(slog.NewTextHandler(&out, nil)), nil)
+
+	cache.warn(t.Context(), "first")
+	require.Equal(t, 1, bytes.Count(out.Bytes(), []byte("\n")), "the first warning is logged")
+
+	for range 100 {
+		cache.warn(t.Context(), "again")
+	}
+
+	assert.LessOrEqual(t, bytes.Count(out.Bytes(), []byte("\n")), 2, "a hundred more within the second add at most the next second's one")
+}

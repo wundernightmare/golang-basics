@@ -333,7 +333,7 @@ number, and every behaviour is checked at exactly one layer.
 | **Chaos** | `services/tasks/internal/integration/chaos_test.go` (`containers.Proxied`, `containers.Pause`); `libs/pgx/tx_chaos_test.go`; `libs/grpcx/integration/chaos_test.go` (the same faults under gRPC, plus keepalive, a short outage with and without `wait_for_ready`, a dead address behind a balancer); `libs/resilient-http-client/integration/chaos_test.go` (TCP cut, reset and black-holed during the TLS handshake, mid-body, on an idle connection; a lost acknowledgement) | what the design promises when a dependency fails, slows down or hangs: cache bypassed, outbox catches up, readiness degrades only for the critical dependency, probes stay fast, everything recovers | happy-path behaviour (integration) |
 | **E2E** | `e2e/` (Go, real binaries, `-tags e2e`) | what only a real process shows: it boots from env, is ready on its admin listener, `/version` carries the build stamp, the admin surface is token-guarded, SIGTERM exits 0 with "servers stopped cleanly", and tasks → outbox → Kafka → consumer across processes | per-route behaviour, error bodies (unit), the CRUD flow (integration) |
 | **Generative** | `just schemathesis <svc>` | "bad input → 4xx problem", no 5xx, every response in the contract's shape | business semantics (unit), effects on dependencies (integration) |
-| **Mutation** | `libs/resilient-http-client`, `libs/grpcx`, `libs/resilience` (`just mutate <module>`) | whether the tests of the decision logic notice a wrong comparison or operator | — |
+| **Mutation** | `libs/resilient-http-client`, `libs/grpcx`, `libs/resilience`, `libs/httpx`, `libs/tiercache`, `libs/secret` (`just mutate <module>`) | whether the tests of the decision logic notice a wrong comparison or operator | — |
 | **Load** | `benchmarks/` (k6) | latency / error thresholds under load; reports on the load stand, outside Allure | — |
 
 Put a behaviour's test at the lowest layer that can observe it, and only
@@ -532,7 +532,14 @@ small, pure, decision-heavy code:
 just mutate                             # libs/resilient-http-client (default): client.go, backoff.go, validate.go
 just mutate libs/resilience             # breaker.go, window.go, budget.go
 just mutate libs/grpcx                  # config, service config, what the breaker is told
+just mutate libs/httpx                  # config, request budget, span and access log, problems, redaction, sampling
+just mutate libs/tiercache              # envelope, deadlines, what L1 accepts, the credential codec
+just mutate libs/secret                 # what a secret prints, marshals and compares
 ```
+
+The mutants are judged by the **unit layer** (`-short`): one mutant costs one
+run of the suite, and a mutant only a container-backed test would kill is
+logic the unit tests do not pin down — the gap the run is there to show.
 
 Scope and thresholds live in each module's `.gremlins.yaml`
 ([the HTTP client's](libs/resilient-http-client/.gremlins.yaml));

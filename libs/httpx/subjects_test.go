@@ -2,6 +2,7 @@ package httpx_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -136,4 +137,37 @@ func TestDebugSubject_BoundedAndCheapWhenUnused(t *testing.T) {
 	assert.Equal(t, ctx, srv.DebugSubject(ctx, ""))
 	assert.False(t, httpx.DebugLogging(srv.DebugSubject(ctx, "nobody")))
 	assert.True(t, httpx.DebugLogging(srv.DebugSubject(ctx, "tenant-aa")))
+}
+
+func TestDebugSubjects_ListIsSortedAndATTLMustBePositive(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := loggedServer(t, httpx.Config{Addr: ":0", AdminAddr: "127.0.0.1:0"})
+	admin := func(method, target string) *httptest.ResponseRecorder {
+		return do(srv.Admin(), httptest.NewRequest(method, target, http.NoBody))
+	}
+
+	for _, ttl := range []string{"0s", "-1m", "soon"} {
+		require.Equal(t, http.StatusBadRequest, admin(http.MethodPut, "/admin/debug-subjects/acme?ttl="+ttl).Code, ttl)
+	}
+
+	for _, subject := range []string{"m", "z", "a", "k", "b"} {
+		require.Equal(t, http.StatusOK, admin(http.MethodPut, "/admin/debug-subjects/"+subject+"?ttl=1ns").Code, "the shortest ttl")
+		require.Equal(t, http.StatusOK, admin(http.MethodPut, "/admin/debug-subjects/"+subject+"?ttl=1h").Code)
+	}
+
+	var listed struct {
+		Subjects []struct {
+			Subject string `json:"subject"`
+		} `json:"subjects"`
+	}
+
+	require.NoError(t, json.Unmarshal(admin(http.MethodGet, "/admin/debug-subjects").Body.Bytes(), &listed))
+
+	var names []string
+	for _, entry := range listed.Subjects {
+		names = append(names, entry.Subject)
+	}
+
+	assert.Equal(t, []string{"a", "b", "k", "m", "z"}, names)
 }

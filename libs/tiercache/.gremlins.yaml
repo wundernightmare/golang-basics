@@ -1,0 +1,38 @@
+# gremlins — mutation testing of the two-level cache: the envelope, the
+# deadlines (fresh / stale / expired / stale-if-error), what L1 accepts, the
+# credential codec.
+#
+#   just mutate libs/tiercache
+#
+# Run it through scripts/mutate.sh (`just mutate` and CI do), never bare: see
+# the script for why a bare `gremlins unleash` reports every mutant killed.
+# The oracle is the unit layer (`-short`): a mutant only a container-backed
+# test would kill is logic the unit tests do not pin down.
+#
+# Thresholds fail the run (exit 11) when the suite lets too many mutants live.
+# Efficacy = killed / (killed + lived); mutant coverage = mutants any test
+# reaches. Ratchet them up when the numbers improve, never down without a
+# reason in the commit message.
+#
+# Reading a run:
+#   - NOT COVERED here is a gremlins limitation, not untested code: Go's
+#     cover profile has no block for a `case` expression or a const.
+#   - Known survivors, all equivalent — anything else is a gap:
+#       cache.go       cap(*buf) <= 2*l1MaxEntry   (which buffers are pooled: speed only)
+#                      nowMs < heldHard, < heldSoftMs, hardMs > limitMs
+#                                                  (resolve / staleFallback read the wall clock:
+#                                                   the equal millisecond is not reachable; the
+#                                                   same comparisons are exact in usable(), which
+#                                                   takes the time and is tested to the millisecond)
+#                      to == StateOpen             (which breaker transition is logged)
+#       credential.go  tagLen / skip / valueLen < 0  (protowire never returns 0 for a
+#                                                   non-empty input)
+unleash:
+  workers: 4
+  timeout-coefficient: 8
+  output-statuses: lt # print only LIVED and TIMED OUT — the ones that matter
+  exclude-files:
+    - "doc\\.go$"
+  threshold:
+    efficacy: 88
+    mutant-coverage: 80
