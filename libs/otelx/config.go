@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+
+	"github.com/wundernightmare/golang-basics/libs/otelx/retro"
 )
 
 // Config is the tracing configuration, populated from the environment with a
@@ -27,6 +29,8 @@ import (
 //	TASKS_OTEL_EXPORTER_OTLP_TIMEOUT          per-export request timeout                 (default "10s")
 //	TASKS_OTEL_TRACES_SAMPLER_RATIO           head sampling ratio (0,1]; negative = never sample (default 1.0)
 //	TASKS_OTEL_TRACES_TRUST_REMOTE_PARENT     honour a caller's sampled flag             (default true)
+//	TASKS_OTEL_RETRO_BUFFER_MIB               retroactive buffer, MiB; negative = off    (default 16)
+//	TASKS_OTEL_RETRO_TRIGGERS_PER_SECOND      traces a warn/error line may export a second (default 50)
 //	TASKS_OTEL_BSP_SCHEDULE_DELAY             batch flush interval                       (default "5s")
 //	TASKS_OTEL_BSP_MAX_QUEUE_SIZE             spans buffered before dropping             (default 2048)
 //	TASKS_OTEL_BSP_MAX_EXPORT_BATCH_SIZE      spans per export request                   (default 512)
@@ -52,6 +56,11 @@ type Config struct {
 
 	SamplerRatio      float64 `env:"OTEL_TRACES_SAMPLER_RATIO" envDefault:"1.0" yaml:"sampler_ratio"`
 	TrustRemoteParent bool    `env:"OTEL_TRACES_TRUST_REMOTE_PARENT" envDefault:"true" yaml:"trust_remote_parent"`
+
+	// Retro is the retroactive sampling buffer (libs/otelx/retro): the spans
+	// of unsampled traces wait in it, and a warn / error log line exports
+	// its trace. On by default; BufferMiB < 0 turns it off.
+	Retro retro.Config `envPrefix:"OTEL_RETRO_" yaml:"retro"`
 
 	BatchTimeout       time.Duration `env:"OTEL_BSP_SCHEDULE_DELAY" envDefault:"5s" yaml:"batch_timeout"`
 	MaxQueueSize       int           `env:"OTEL_BSP_MAX_QUEUE_SIZE" envDefault:"2048" yaml:"max_queue_size"`

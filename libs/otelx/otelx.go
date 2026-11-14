@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -22,6 +23,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/wundernightmare/golang-basics/libs/httpx"
+	"github.com/wundernightmare/golang-basics/libs/otelx/retro"
 	"github.com/wundernightmare/golang-basics/libs/secret"
 )
 
@@ -43,6 +46,21 @@ type Telemetry struct {
 	Propagator propagation.TextMapPropagator
 	// Shutdown flushes and stops the provider; it must be called on shutdown.
 	Shutdown ShutdownFunc
+	// Retro is the retroactive sampling buffer: nil when tracing is disabled
+	// or the buffer is off (OTEL_RETRO_BUFFER_MIB < 0). A bus between
+	// services would call its Trigger and OnLocalTrigger.
+	Retro *retro.Processor
+}
+
+// Collectors returns the Prometheus collectors of the tracing pipeline — the
+// trace_retro_* families of the retroactive buffer — for the service's
+// registry; none when there is no buffer.
+func (t *Telemetry) Collectors() []prometheus.Collector {
+	if t == nil || t.Retro == nil {
+		return nil
+	}
+
+	return t.Retro.Collectors()
 }
 
 // shutdownBudget is how long [Telemetry.Stop] gives the last spans to leave.
@@ -112,21 +130,19 @@ func Init(ctx context.Context, cfg Config, log *slog.Logger) (*Telemetry, error)
 		return nil, err
 	}
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter,
-			sdktrace.WithBatchTimeout(cfg.BatchTimeout),
-			sdktrace.WithMaxQueueSize(cfg.MaxQueueSize),
-			sdktrace.WithMaxExportBatchSize(cfg.MaxExportBatchSize),
-			sdktrace.WithExportTimeout(cfg.ExportTimeout),
-		),
-		sdktrace.WithResource(res),
-		sdktrace.WithSampler(newSampler(cfg)),
-	)
+	tp, buffer := newProvider(cfg, exporter, res)
 	otel.SetTracerProvider(tp)
+
+	if buffer != nil {
+		// A warn or error line of an unsampled trace exports it; a logger
+		// that is not httpx's has no such lines, and nothing is bound.
+		httpx.BindTraceTrigger(log, buffer)
+	}
 
 	log.InfoContext(ctx, "tracing enabled",
 		"endpoint", cfg.Endpoint, "insecure", cfg.Insecure, "sampler_ratio", cfg.SamplerRatio,
-		"trust_remote_parent", cfg.TrustRemoteParent, "service", cfg.ServiceName, "version", cfg.Version)
+		"trust_remote_parent", cfg.TrustRemoteParent, "service", cfg.ServiceName, "version", cfg.Version,
+		"retro_buffer_mib", max(cfg.Retro.BufferMiB, 0))
 
 	shutdown := func(ctx context.Context) error {
 		if err := tp.Shutdown(ctx); err != nil {
@@ -137,30 +153,31 @@ func Init(ctx context.Context, cfg Config, log *slog.Logger) (*Telemetry, error)
 		return nil
 	}
 
-	return &Telemetry{TracerProvider: tp, Propagator: prop, Shutdown: shutdown}, nil
+	return &Telemetry{TracerProvider: tp, Propagator: prop, Shutdown: shutdown, Retro: buffer}, nil
 }
 
-// newSampler is parent-based ratio head sampling: a root span is sampled
-// with probability cfg.SamplerRatio (never when it is negative), a child
-// follows its parent. With TrustRemoteParent off, a remote parent that says
-// "sampled" is treated like a root — the local ratio decides — so a client
-// cannot force 100% sampling on an internet-facing edge.
-func newSampler(cfg Config) sdktrace.Sampler {
-	var root sdktrace.Sampler
+// newProvider assembles the SDK provider: the batch processor in front of
+// exporter — behind the retroactive buffer when cfg asks for one — and the
+// sampler that feeds it.
+func newProvider(cfg Config, exporter sdktrace.SpanExporter, res *resource.Resource) (*sdktrace.TracerProvider, *retro.Processor) {
+	processor := sdktrace.NewBatchSpanProcessor(exporter,
+		sdktrace.WithBatchTimeout(cfg.BatchTimeout),
+		sdktrace.WithMaxQueueSize(cfg.MaxQueueSize),
+		sdktrace.WithMaxExportBatchSize(cfg.MaxExportBatchSize),
+		sdktrace.WithExportTimeout(cfg.ExportTimeout),
+	)
 
-	switch {
-	case cfg.SamplerRatio < 0:
-		root = sdktrace.NeverSample()
-	default:
-		root = sdktrace.TraceIDRatioBased(cfg.SamplerRatio)
+	var buffer *retro.Processor
+	if cfg.Retro.Enabled() {
+		buffer = retro.New(processor, cfg.Retro)
+		processor = buffer
 	}
 
-	var opts []sdktrace.ParentBasedSamplerOption
-	if !cfg.TrustRemoteParent {
-		opts = append(opts, sdktrace.WithRemoteParentSampled(root))
-	}
-
-	return sdktrace.ParentBased(root, opts...)
+	return sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(processor),
+		sdktrace.WithResource(res),
+		sdktrace.WithSampler(newSampler(cfg, buffer != nil)),
+	), buffer
 }
 
 // newExporter builds the OTLP/HTTP trace exporter. HTTP rather than gRPC on

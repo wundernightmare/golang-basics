@@ -27,6 +27,10 @@ type LogLevel struct {
 	gen     uint64 // bumped on every Set/Reset so a stale timer never reverts a newer change
 	expires time.Time
 	timer   *time.Timer
+
+	// triggers rides along: it is the other thing every logger derived from
+	// one NewLogger shares (see BindTraceTrigger).
+	triggers traceTriggers
 }
 
 func newLogLevel(base slog.Level) *LogLevel {

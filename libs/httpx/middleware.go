@@ -319,6 +319,12 @@ func tracing(tp trace.TracerProvider, prop propagation.TextMapPropagator) Middle
 func tracingHandler(tracer trace.Tracer, prop propagation.TextMapPropagator, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		// A request debugged on purpose (a valid debug token) is traced
+		// whatever the ratio, and marked for the services behind this one.
+		if DebugLogging(ctx) {
+			ctx = ForceTrace(ctx)
+		}
+
 		method := methodLabel(r.Method)
 
 		attrs := []attribute.KeyValue{
@@ -346,6 +352,9 @@ func tracingHandler(tracer trace.Tracer, prop propagation.TextMapPropagator, nex
 
 		ctx, span := tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(attrs...))
 		defer span.End()
+
+		// A debug trace started upstream: log this request from debug up.
+		ctx = FollowDebugTrace(ctx)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 

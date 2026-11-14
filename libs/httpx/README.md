@@ -215,7 +215,12 @@ puts a tenant or a user under investigation; the service says who a request
 is for — `ctx = srv.DebugSubject(ctx, tenantID)`, in its authenticator — and
 that subject's requests are logged at debug level, unsampled, and their span
 carries `debug.subject`, which the tail-sampling collector keeps
-(`docker/observability/otel-collector.yml`). Everyone else is untouched. `ttl` is
+(`docker/observability/otel-collector.yml`). A request the head sampler did
+not sample is exported all the same through the retroactive buffer of
+[`libs/otelx`](../otelx#retroactive-sampling-the-trace-of-a-failure-the-ratio-dropped)
+— the spans of this service; the subject is known only after the request's
+span started, so the services behind still see "not sampled". Everyone else
+is untouched. `ttl` is
 required and capped at `LOG_LEVEL_MAX_TTL`; the list is per process (add the
 subject on each replica) and holds at most a hundred.
 
@@ -238,6 +243,22 @@ passes — whatever the level, never sampled — and the response carries
 `X-Debug-Logging: on`. A wrong or missing token is ignored silently (the API
 port is public; it must not become an oracle). `httpx.WithDebugLogging(ctx)`
 is the same switch for a worker debugging one message.
+
+Such a request is also a **debug trace**: it is sampled whatever
+`OTEL_TRACES_SAMPLER_RATIO` says (`httpx.ForceTrace`, honoured by the sampler
+of `libs/otelx`) and its `tracestate` carries the mark `dbg=1`. The sampled
+flag makes every service behind this one export its spans; the mark makes
+them log that request — or that Kafka record — from debug up
+(`httpx.FollowDebugTrace`, called by the server and by the Kafka consumer
+right after they start their span). The mark cannot be sent from outside:
+a service with `OTEL_TRACES_TRUST_REMOTE_PARENT=false` drops a remote
+`tracestate`.
+
+**`trace_id` is a link.** A log line carries `trace_id` when its trace is
+exported — sampled, or triggered by a warn / error line through the
+retroactive buffer — and `trace_unsampled_id` otherwise (ECS: `trace.id` /
+`trace.unsampled_id`). Search by either to find the lines of a request;
+only the first opens a trace.
 
 **The effective config.** `GET /admin/config` shows what the process runs
 with — after YAML, env and defaults — through `httpx.Redact`:

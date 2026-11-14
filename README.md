@@ -308,7 +308,10 @@ that share to 100 %, so the request you just made is in Jaeger; set
 [`libs/otelx`](libs/otelx#sampling-head-in-the-service-tail-in-the-collector):
 services head-sample at 1.0 (`*_OTEL_TRACES_SAMPLER_RATIO`, the default),
 because the collector cannot keep what it was never sent; and one collector
-must see all spans of a trace. [`libs/otelx/integration`](libs/otelx/integration)
+must see all spans of a trace. Where the ratio has to be lower, the
+retroactive buffer of `libs/otelx` (on by default, 16 MiB) still exports the
+trace of a request that logged a warning or an error, and a request with the
+debug token is traced through every service whatever the ratio. [`libs/otelx/integration`](libs/otelx/integration)
 runs that file in a real collector and asserts each policy.
 
 ## Tests
@@ -334,7 +337,7 @@ number, and every behaviour is checked at exactly one layer.
 | **E2E** | `e2e/` (Go, real binaries, `-tags e2e`) | what only a real process shows: it boots from env, is ready on its admin listener, `/version` carries the build stamp, the admin surface is token-guarded, SIGTERM exits 0 with "servers stopped cleanly", and tasks → outbox → Kafka → consumer across processes | per-route behaviour, error bodies (unit), the CRUD flow (integration) |
 | **Generative** | `just schemathesis <svc>` | "bad input → 4xx problem", no 5xx, every response in the contract's shape | business semantics (unit), effects on dependencies (integration) |
 | **Property** | `libs/resilience` (`property_internal_test.go`), `libs/tiercache` (`property_test.go`) — [rapid](https://pgregory.net/rapid), part of the unit layer | a rule for every sequence of calls, not one example: the breaker as a state machine, the sliding window against a model, what a cache reader may be given across commits, invalidations and TTLs (virtual time); a failure is shrunk to the shortest sequence and prints how to replay it | — |
-| **Mutation** | `libs/resilient-http-client`, `libs/grpcx`, `libs/resilience`, `libs/httpx`, `libs/tiercache`, `libs/secret` (`just mutate <module>`) | whether the tests of the decision logic notice a wrong comparison or operator | — |
+| **Mutation** | `libs/resilient-http-client`, `libs/grpcx`, `libs/resilience`, `libs/httpx`, `libs/tiercache`, `libs/secret`, `libs/otelx` (`just mutate <module>`) | whether the tests of the decision logic notice a wrong comparison or operator | — |
 | **Load** | `benchmarks/` (k6) | latency / error thresholds under load; reports on the load stand, outside Allure | — |
 
 Put a behaviour's test at the lowest layer that can observe it, and only

@@ -95,6 +95,7 @@ func run(cfg config.Config) error {
 	// must not pull every replica out of the load balancer at once.
 	srv.Health.Register("postgres", db.ReadyCheck())
 	srv.Metrics.Registry.MustRegister(db.Collectors()...)
+	srv.Metrics.Registry.MustRegister(tel.Collectors()...) // trace_retro_*: the retroactive sampling buffer
 	reportIntegrations(cfg, logger, srv.Metrics.Registry)
 
 	var taskCache api.Cache = cache.None{}
