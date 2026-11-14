@@ -36,6 +36,20 @@ code, a timeout — is the client's decision, not this package's.
 `BreakerConfig` carries the yaml keys (`breaker_*`) and their validation, so
 both clients' target configs read the same.
 
+## Tests
+
+Examples (`breaker_test.go`, `budget_test.go`) fix one path each, with a fake
+clock. `property_internal_test.go` states the rules for every path
+([rapid](https://pgregory.net/rapid) draws the sequences and shrinks a
+failing one): the breaker as a state machine — legal transitions only,
+nothing admitted while open, the half-open probe slots, late results
+changing nothing; the sliding window against a model that keeps every event;
+the retry budget granting exactly what its rule allows. Mutation testing
+(`.gremlins.yaml`) checks that the two together notice a wrong comparison.
+
+A failed property prints the sequence and a `-rapid.failfile` to replay it;
+`-rapid.checks=5000` searches longer.
+
 ## Develop
 
 ```sh

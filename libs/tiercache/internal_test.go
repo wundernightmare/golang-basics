@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"pgregory.net/rapid"
 
 	"github.com/tracehubmmp/golang-basics/libs/resilience"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
@@ -218,4 +219,41 @@ func TestWarningIsLoggedAndRateLimited(t *testing.T) {
 	}
 
 	assert.LessOrEqual(t, bytes.Count(out.Bytes(), []byte("\n")), 2, "a hundred more within the second add at most the next second's one")
+}
+
+// The envelope carries any pair of deadlines it accepts and any payload:
+// what was written is what is read, and the deadlines decide the answer of
+// usable at every instant — fresh before the soft one, stale from it on,
+// gone from the hard one on.
+func TestEnvelopeRoundTripsAnyDeadlinesAndPayload(t *testing.T) {
+	t.Parallel()
+
+	cache := newByteCache(t, nil, nil)
+
+	rapid.Check(t, func(t *rapid.T) {
+		hard := rapid.Int64Range(0, 1<<62).Draw(t, "hard")
+		soft := rapid.Int64Range(0, hard).Draw(t, "soft")
+		payload := rapid.SliceOfN(rapid.Byte(), 0, 512).Draw(t, "payload")
+		now := rapid.OneOf(
+			rapid.Just(soft), rapid.Just(soft-1), rapid.Just(hard), rapid.Just(hard-1),
+			rapid.Int64Range(0, 1<<62),
+		).Draw(t, "now")
+
+		env := append(appendHeader(nil, soft, hard), payload...)
+
+		gotSoft, gotHard, gotPayload, ok := parseEnvelope(env)
+		if !ok || gotSoft != soft || gotHard != hard || !bytes.Equal(gotPayload, payload) {
+			t.Fatalf("parsed (%d, %d, %d bytes, %t) from an envelope of (%d, %d, %d bytes)",
+				gotSoft, gotHard, len(gotPayload), ok, soft, hard, len(payload))
+		}
+
+		value, stale, usable := cache.usable(env, now)
+		if usable != (now < hard) {
+			t.Fatalf("at %d with the hard deadline at %d: usable=%t", now, hard, usable)
+		}
+
+		if usable && (stale != (now >= soft) || !bytes.Equal(value, payload)) {
+			t.Fatalf("at %d with the soft deadline at %d: stale=%t, %d bytes of %d", now, soft, stale, len(value), len(payload))
+		}
+	})
 }
