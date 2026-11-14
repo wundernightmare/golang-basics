@@ -51,7 +51,7 @@ default; the key that turns it on is named.
 | Rule | Where | Proof |
 | --- | --- | --- |
 | Config validated at start, fail fast; unknown YAML keys are errors; `--check-config`, `--config-reference` | `httpx.LoadYAML`, `Boot`, each lib's `Validate` | `libs/httpx/boot_test.go`, `config_test.go` |
-| Connection pools sized explicitly | `libs/pgx` (`DB_MAX_CONNS`, `DB_MIN_CONNS`, lifetimes), the HTTP client's pool keys | `libs/pgx`; behind PgBouncer: `libs/pgx/pgbouncer_test.go` |
+| Connection pools sized explicitly | `libs/pgx` (`DB_MAX_CONNS`, `DB_MIN_CONNS`, lifetimes), `libs/valkey` (`VALKEY_PIPELINE_CONNS`, `VALKEY_POOL_SIZE`, lifetimes; the bound is enforced in `bounded.go` because the library's leaks), the HTTP client's pool keys | `libs/pgx`; behind PgBouncer: `libs/pgx/pgbouncer_test.go`; `libs/valkey/pool_test.go` (what the server sees) |
 | Server-side guard rails on every database session, verified at boot | `libs/pgx` (`DB_STATEMENT_TIMEOUT`, …, `ErrGuardRailOff`) | `libs/pgx/pgx_test.go`, `pgbouncer_test.go` |
 | Version, revision and build time from ldflags: start-up log, `build_info`, `/version` | `scripts/build-service.sh`, `libs/httpx/version.go` | `e2e/` |
 
