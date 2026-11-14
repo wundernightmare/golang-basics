@@ -100,7 +100,9 @@ by the replicas and keep it under the server's `maxclients`.
 waits for a dedicated connection raises the pool's limit by one for good, so
 the limit dissolves under the overload it exists for — in the test, two
 connections allowed, seven opened after ten such callers. A test asserts that
-defect against the bare library, and will fail when an upgrade fixes it. The
+defect against the bare library, and will fail when an upgrade fixes it. Both
+workarounds of this package — this one and the retry below — are listed in
+[docs/UPSTREAM-WORKAROUNDS.md](../../docs/UPSTREAM-WORKAROUNDS.md). The
 streaming calls (`DoStream`, `DoMultiStream`) would hold connections of a
 second library pool with the same flaw until the caller drains the stream —
 something a wrapper cannot observe — so `Cache.Client()` refuses them: the

@@ -21,6 +21,7 @@ Only what a real process shows — everything else is owned by a lower layer
 | `TestFIPSBuild` | builds ping itself through `scripts/build-service.sh` with `FIPS=1` and without: `/version` and the start-up line report `fips140` true / false (docs/RUNTIME.md "FIPS 140-3") |
 | `TestFIPSBuildRefusesRdkafka` | the build script refuses `FIPS=1` for a service that would link librdkafka (exit 2, no binary) |
 | `TestEveryTestIsAScenario` | every Test function of the suite goes through `scenario`, i.e. is in the Allure report ([Report](#report)) |
+| `TestUpstreamAttachmentWithoutATypeIsLostAcrossFilesystems` | the testo-allure defect `attachOutput` works around is still there ([Report](#report)) |
 
 ## Harness (`harness_test.go`)
 
@@ -117,5 +118,9 @@ Three things to know:
   fails on one.
 
 testo-allure 1.5.0 writes an attachment without a media type through
-`os.TempDir` and a rename, which fails when `/tmp` is another filesystem;
-attachments here always name their type (`attachOutput`).
+`os.TempDir` and a rename, which fails when `/tmp` is another filesystem — and
+drops the attachment without an error; attachments here always name their
+type (`attachOutput`). `TestUpstreamAttachmentWithoutATypeIsLostAcrossFilesystems`
+asserts the defect and fails once an upgrade fixes it
+([docs/UPSTREAM-WORKAROUNDS.md](../docs/UPSTREAM-WORKAROUNDS.md)); it is the
+one test that is not a scenario — it examines the reporter itself.

@@ -12,6 +12,8 @@ import (
 // explicitly so the guard below and the library agree on it).
 const blockingPipeline = valkeygo.DefaultBlockingPipeline
 
+// UPSTREAM-WORKAROUND(valkey-go): the whole type (docs/UPSTREAM-WORKAROUNDS.md).
+//
 // bounded makes Config.PoolSize a bound that holds. The library's own pool
 // counter does not: a caller whose context ends while it waits for a
 // dedicated connection — or that arrives with a context already ended — is
