@@ -371,7 +371,7 @@ jobs:
   # One coverage number for the whole pyramid: the unit, integration and e2e
   # layers are covdata-merged (counters summed per block) and gated by
   # .testcoverage.yml — the same as `just cov-check`. A pull request may not
-  # lower it against master's last breakdown.
+  # lower it against master's last breakdown by more than diff.threshold there.
   coverage:
     needs: [versions, lint-test, integration, e2e]
     if: ${{ !cancelled() && needs.lint-test.result == 'success' && needs.e2e.result == 'success' && (needs.integration.result == 'success' || needs.integration.result == 'skipped') }}
@@ -414,10 +414,12 @@ jobs:
           go install "github.com/vladopajic/go-test-coverage/v2@v${GOTESTCOV_VERSION}"
           scripts/cover.sh merge | tee coverage-layers.txt
           # The no-regression diff is a pull-request gate; a push to master is
-          # the new base, measured against the absolute thresholds only.
+          # the new base, measured against the absolute thresholds only. The
+          # tolerance is diff.threshold in .testcoverage.yml, one number for
+          # both pipelines.
           diff_args=()
           if [ "$EVENT_NAME" = "pull_request" ] && [ -s coverage-breakdown-base.json ]; then
-            diff_args=(--diff-base-breakdown-file-name coverage-breakdown-base.json --diff-threshold 0)
+            diff_args=(--diff-base-breakdown-file-name coverage-breakdown-base.json)
           elif [ "$EVENT_NAME" = "pull_request" ]; then
             echo "no base breakdown for master yet — absolute thresholds only"
           fi

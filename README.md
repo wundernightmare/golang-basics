@@ -398,8 +398,11 @@ than gate a partial profile.
 
 Two gates, both on the merged profile: the floors above, and **no
 regression** — the `coverage` job keeps master's per-package breakdown
-(`coverage-breakdown.json`) and compares a pull request to it with
-`--diff-threshold 0`. `main.go` and wiring are covered by e2e, the libs by
+(`coverage-breakdown.json`) and compares a pull request's merged total to it.
+The allowed drop is `diff.threshold` in `.testcoverage.yml` (0.05 points, about
+three statements): the profile is not deterministic — a few error branches are
+reached only when a chaos test's connection cut lands on them — so zero
+tolerance fails unrelated pull requests. `main.go` and wiring are covered by e2e, the libs by
 unit + integration, the service internals by all three — which is the point of
 merging.
 

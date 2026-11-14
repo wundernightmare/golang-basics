@@ -280,7 +280,10 @@ README; this file is only the high-signal, easy-to-miss bits.
 - **Load tests (k6) stay outside Allure**: they run on the load stand and
   report there; do not wire k6 summaries into the test report.
 - **Coverage must not regress**: the `coverage` job diffs a PR's breakdown
-  against master's (`--diff-threshold 0`). Every layer is collected with
+  against master's; the total may drop by at most `diff.threshold` in
+  `.testcoverage.yml` (0.05 points — the measured run-to-run noise of
+  chaos-covered error branches, not room for untested code). Do not re-run the
+  job to get past it and do not widen it without a measurement. Every layer is collected with
   `-covermode=atomic` (covdata cannot merge mixed modes; `-race` implies
   atomic) — keep that flag on any new `go test -cover` / `go build -cover`.
 - **No retries to hide flakes**: `-shuffle=on`, `TZ=UTC`, no retry flags
