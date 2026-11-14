@@ -165,7 +165,7 @@ func (c *Client) dial(tc *TargetConfig, applied *options) (*target, error) {
 func (c *Client) newPolicy(tc *TargetConfig) *policy {
 	name := tc.Name
 	p := &policy{name: name, m: c.m}
-	p.breaker = resilience.NewBreaker(tc.BreakerConfig, time.Now, func(from, to resilience.State) {
+	p.breaker = resilience.NewBreaker(tc.Breaker, time.Now, func(from, to resilience.State) {
 		c.m.transitions.WithLabelValues(name, from.String(), to.String()).Inc()
 		// The current state, not `to`, and read under the lock: concurrent
 		// notifications may run out of order, but whichever sets the gauge

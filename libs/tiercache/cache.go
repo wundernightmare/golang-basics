@@ -111,9 +111,9 @@ func New[T any](cfg Config, codec Codec[T], load Loader[T], remote Remote, log *
 		stop:       stop,
 	}
 
-	cache.breaker = resilience.NewBreaker(cfg.breaker(), time.Now, func(_, to resilience.State) {
+	cache.breaker = resilience.NewBreaker(cfg.Breaker, time.Now, func(_, to resilience.State) {
 		if to == resilience.StateOpen {
-			cache.warn(life, "tiercache: L2 is failing, skipping it", "cache", cfg.Name, "for", cfg.BreakerOpenTimeout.String())
+			cache.warn(life, "tiercache: L2 is failing, skipping it", "cache", cfg.Name, "for", cfg.Breaker.OpenTimeout.String())
 		}
 	})
 

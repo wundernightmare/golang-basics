@@ -21,9 +21,9 @@ b.Record(grant, resilience.OutcomeFailure) // exactly once per granted ticket
 ```
 
 **Breaker semantics.** Closed counts requests and failures in
-`breaker_window`; with at least `breaker_min_requests` and failures ≥
-`breaker_failure_ratio`, it opens. After `breaker_open_timeout` it admits
-exactly `breaker_half_open_probes` probes: all must succeed to close it, any
+`breaker.window`; with at least `breaker.min_requests` and failures ≥
+`breaker.failure_ratio`, it opens. After `breaker.open_timeout` it admits
+exactly `breaker.half_open_probes` probes: all must succeed to close it, any
 failure re-opens it. Three outcomes: `OutcomeSuccess`, `OutcomeFailure`, and
 `OutcomeIgnored` — the request says nothing about the dependency (the caller
 cancelled, a local limit rejected it) and, for a probe, gives its slot back.
@@ -34,8 +34,12 @@ A nil `*Breaker` / `*RetryBudget` admits everything: "disabled" needs no
 branch at the call site. What counts as a failure — an HTTP status, a gRPC
 code, a timeout — is the client's decision, not this package's.
 
-`BreakerConfig` carries the yaml keys (`breaker_*`) and their validation, so
-both clients' target configs read the same.
+`BreakerConfig` is the one way to configure a breaker. Whatever has one has
+a field of that type — `Breaker resilience.BreakerConfig` under
+`envPrefix:"BREAKER_"` / `yaml:"breaker"` — so the HTTP client, the gRPC
+client, the cache and the ingest sinks all read the same five keys under
+their own name (`breaker.failure_ratio`, `…_BREAKER_FAILURE_RATIO`). The
+tags carry no defaults: each owner sets its own policy before loading.
 
 ## Tests
 

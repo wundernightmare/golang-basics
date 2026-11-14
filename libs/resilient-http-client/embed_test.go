@@ -51,7 +51,8 @@ targets:
   - name: billing
     timeout: 2s
     rate_limit: 2.5
-    breaker_failure_ratio: 0
+    breaker:
+      failure_ratio: 0
   - name: search
 `
 
@@ -67,7 +68,8 @@ http_client:
     - name: billing
       timeout: 2s
       rate_limit: 2.5
-      breaker_failure_ratio: 0
+      breaker:
+        failure_ratio: 0
     - name: search
 `, map[string]string{"SVC_ADMIN_ADDR": ":7001"})
 	require.NoError(t, err)

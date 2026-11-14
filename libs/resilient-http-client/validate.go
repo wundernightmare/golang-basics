@@ -62,7 +62,9 @@ func (t *TargetConfig) validate() []error {
 		bad("max_concurrent must not be negative")
 	}
 
-	errs = append(errs, t.breaker().Validate()...)
+	for _, err := range t.Breaker.Validate() {
+		bad("breaker: " + err.Error())
+	}
 
 	if t.RetryMaxAttempts < 0 {
 		bad("retry_max_attempts must not be negative")

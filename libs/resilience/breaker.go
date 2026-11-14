@@ -72,24 +72,32 @@ type snapshot struct {
 	openedAt  time.Time
 }
 
-// BreakerConfig is a circuit breaker's policy. Its yaml keys are the ones
-// every client's target config uses, so a config can inline it.
+// BreakerConfig is a circuit breaker's policy, and the one way to configure
+// one: whatever has a breaker has a field of this type — conventionally
+//
+//	Breaker resilience.BreakerConfig `envPrefix:"BREAKER_" yaml:"breaker"`
+//
+// — so every breaker in a deployment reads the same keys under its owner's
+// name (breaker.failure_ratio, …_BREAKER_FAILURE_RATIO). There are no
+// defaults in the tags: what a good policy is depends on the call rate, and
+// each owner sets its own before loading ([DefaultBreakerConfig] is the
+// outbound clients').
 type BreakerConfig struct {
 	// FailureRatio trips the breaker when failures / requests in the window
 	// reach it, in (0, 1]; 0 = no breaker.
-	FailureRatio float64 `yaml:"breaker_failure_ratio"`
+	FailureRatio float64 `env:"FAILURE_RATIO" yaml:"failure_ratio"`
 	// MinRequests is the least requests in the window before the ratio is
 	// evaluated (≥ 1 with a breaker).
-	MinRequests int `yaml:"breaker_min_requests"`
+	MinRequests int `env:"MIN_REQUESTS" yaml:"min_requests"`
 	// Window is the sliding window the ratio is measured over (> 0 with a
 	// breaker).
-	Window time.Duration `yaml:"breaker_window"`
+	Window time.Duration `env:"WINDOW" yaml:"window"`
 	// OpenTimeout is how long the breaker stays open before admitting probes
 	// (> 0 with a breaker).
-	OpenTimeout time.Duration `yaml:"breaker_open_timeout"`
+	OpenTimeout time.Duration `env:"OPEN_TIMEOUT" yaml:"open_timeout"`
 	// HalfOpenProbes is how many probes half-open admits; all must succeed
 	// to close it, any failure re-opens it (≥ 1 with a breaker).
-	HalfOpenProbes int `yaml:"breaker_half_open_probes"`
+	HalfOpenProbes int `env:"HALF_OPEN_PROBES" yaml:"half_open_probes"`
 }
 
 // DefaultBreakerConfig trips at half the requests failing, of at least 20 in
@@ -104,11 +112,11 @@ func DefaultBreakerConfig() BreakerConfig {
 	}
 }
 
-// Validate reports every problem in c, by its yaml key; nil when there is
-// none. With FailureRatio 0 (no breaker) the other fields are free.
+// Validate reports every problem in c, by its yaml key within the breaker's
+// block (the owner prefixes its own name); nil when there is none. With FailureRatio 0 (no breaker) the other fields are free.
 func (c BreakerConfig) Validate() []error {
 	if c.FailureRatio < 0 || c.FailureRatio > 1 {
-		return []error{errors.New("breaker_failure_ratio must be in [0, 1]")}
+		return []error{errors.New("failure_ratio must be in [0, 1]")}
 	}
 
 	if c.FailureRatio == 0 {
@@ -118,15 +126,15 @@ func (c BreakerConfig) Validate() []error {
 	var errs []error
 
 	if c.MinRequests < 1 {
-		errs = append(errs, errors.New("breaker_min_requests must be ≥ 1"))
+		errs = append(errs, errors.New("min_requests must be ≥ 1"))
 	}
 
 	if c.Window <= 0 || c.OpenTimeout <= 0 {
-		errs = append(errs, errors.New("breaker_window and breaker_open_timeout must be > 0"))
+		errs = append(errs, errors.New("window and open_timeout must be > 0"))
 	}
 
 	if c.HalfOpenProbes < 1 {
-		errs = append(errs, errors.New("breaker_half_open_probes must be ≥ 1"))
+		errs = append(errs, errors.New("half_open_probes must be ≥ 1"))
 	}
 
 	return errs

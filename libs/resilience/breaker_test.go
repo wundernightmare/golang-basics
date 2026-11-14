@@ -420,12 +420,12 @@ func TestBreakerConfig_Validate(t *testing.T) {
 		mut  func(*BreakerConfig)
 		msg  string
 	}{
-		{"ratio low", func(c *BreakerConfig) { c.FailureRatio = -0.1 }, "breaker_failure_ratio"},
-		{"ratio high", func(c *BreakerConfig) { c.FailureRatio = 1.01 }, "breaker_failure_ratio"},
-		{"min requests", func(c *BreakerConfig) { c.MinRequests = 0 }, "breaker_min_requests"},
-		{"window", func(c *BreakerConfig) { c.Window = 0 }, "breaker_window"},
-		{"open timeout", func(c *BreakerConfig) { c.OpenTimeout = 0 }, "breaker_window"},
-		{"probes", func(c *BreakerConfig) { c.HalfOpenProbes = 0 }, "breaker_half_open_probes"},
+		{"ratio low", func(c *BreakerConfig) { c.FailureRatio = -0.1 }, "failure_ratio"},
+		{"ratio high", func(c *BreakerConfig) { c.FailureRatio = 1.01 }, "failure_ratio"},
+		{"min requests", func(c *BreakerConfig) { c.MinRequests = 0 }, "min_requests"},
+		{"window", func(c *BreakerConfig) { c.Window = 0 }, "window"},
+		{"open timeout", func(c *BreakerConfig) { c.OpenTimeout = 0 }, "window"},
+		{"probes", func(c *BreakerConfig) { c.HalfOpenProbes = 0 }, "half_open_probes"},
 	} {
 		cfg := DefaultBreakerConfig()
 		tc.mut(&cfg)

@@ -31,7 +31,7 @@
 // body is read to the end or closed. It also counts the caller's own deadline
 // passing while the request is with the dependency. It ignores the caller
 // cancelling, local rejections (rate limit, bulkhead, open breaker, shutdown)
-// and 4xx — including 429, which is retried but says the dependency is up. Half-open admits breaker_half_open_probes probes, each
+// and 4xx — including 429, which is retried but says the dependency is up. Half-open admits breaker.half_open_probes probes, each
 // identified by the generation it was admitted in; results from earlier
 // generations never decide a probe.
 //
