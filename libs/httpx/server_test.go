@@ -275,12 +275,18 @@ func TestRun_DrainsThenForcesClose(t *testing.T) {
 
 	require.Eventually(t, func() bool { return srv.ListenAddr() != "" && srv.AdminListenAddr() != "" }, 2*time.Second, 5*time.Millisecond)
 
-	// Readiness is open once Run has bound and evaluated the checks.
-	resp, err := http.Get("http://" + srv.AdminListenAddr() + "/readyz")
-	require.NoError(t, err)
+	// Readiness opens once Run has bound and evaluated the checks — a moment
+	// after the listeners are up, not at the same instant.
+	require.Eventually(t, func() bool {
+		resp, err := http.Get("http://" + srv.AdminListenAddr() + "/readyz")
+		if err != nil {
+			return false
+		}
 
-	_ = resp.Body.Close()
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+		_ = resp.Body.Close()
+
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 5*time.Millisecond, "readiness opens")
 
 	go func() {
 		resp, err := http.Get("http://" + srv.ListenAddr() + "/slow")
