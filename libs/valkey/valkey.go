@@ -11,12 +11,6 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// Defaults applied when a hand-built Config leaves a field zero.
-const (
-	defaultOpTimeout   = 500 * time.Millisecond
-	defaultDialTimeout = 5 * time.Second
-)
-
 // Cache wraps a valkey-go client with the conveniences a service needs: string
 // get/set with TTL, a readiness probe, cache-aside loading ([Aside]) and
 // delete-safe invalidation ([Cache.Tombstone]). It is safe for concurrent
@@ -46,13 +40,7 @@ func New(cfg Config, log *slog.Logger, opts ...Option) (*Cache, error) {
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	if cfg.DialTimeout <= 0 {
-		cfg.DialTimeout = defaultDialTimeout
-	}
-
-	if cfg.OpTimeout <= 0 {
-		cfg.OpTimeout = defaultOpTimeout
-	}
+	cfg = cfg.withDefaults()
 
 	opt, err := cfg.clientOption()
 	if err != nil {
@@ -79,9 +67,10 @@ func New(cfg Config, log *slog.Logger, opts ...Option) (*Cache, error) {
 	}
 
 	// The resolved address (the URL's, when one is set), not the discrete field.
-	log.Info("valkey cache ready", "addr", opt.InitAddress, "db", opt.SelectDB, "op_timeout", cfg.OpTimeout.String())
+	log.Info("valkey cache ready", "addr", opt.InitAddress, "db", opt.SelectDB, "op_timeout", cfg.OpTimeout.String(),
+		"pipeline_conns", cfg.PipelineConns, "pool_size", cfg.PoolSize, "conn_lifetime", cfg.ConnLifetime.String())
 
-	return &Cache{client: client, log: log, metrics: newMetrics(), opTimeout: cfg.OpTimeout}, nil
+	return &Cache{client: newBounded(client, cfg.PoolSize), log: log, metrics: newMetrics(), opTimeout: cfg.OpTimeout}, nil
 }
 
 // do runs one command under the per-command deadline and records its latency
@@ -102,7 +91,10 @@ func (c *Cache) do(ctx context.Context, op string, cmd valkeygo.Completed) valke
 }
 
 // Client exposes the underlying valkey-go client for commands this wrapper does
-// not surface. Commands sent through it are traced but not measured.
+// not surface. Commands sent through it are traced but not measured. What
+// takes a dedicated connection (a blocking command, a pipeline of 2000
+// commands or more, Dedicated / Dedicate) is held to Config.PoolSize: a
+// caller beyond it waits, and gets its context's error if that ends first.
 func (c *Cache) Client() valkeygo.Client { return c.client }
 
 // Get returns the value at key. The boolean is false on a cache miss (a missing

@@ -148,6 +148,7 @@ works here under its documented key: `TASKS_HTTP_*` / `TASKS_ADMIN_*` /
 | `TASKS_DB_STATEMENT_TIMEOUT`          | `postgres.statement_timeout` | `30s` (also `DB_LOCK_TIMEOUT` 5s, `DB_IDLE_IN_TX_TIMEOUT` 60s) |
 | `TASKS_DB_PASSWORD_FILE`              | `postgres.password_file`     | *(empty)* — a mounted secret, read once; wins over the password in the URL / `DB_PASSWORD` |
 | `TASKS_VALKEY_URL`                    | `valkey.url`                 | *(empty: no cache, unless `TASKS_VALKEY_ADDR` is set)* |
+| `TASKS_VALKEY_POOL_SIZE`              | `valkey.pool_size`           | `32` dedicated connections; also `VALKEY_PIPELINE_CONNS` 4, `VALKEY_CONN_LIFETIME` 1h — see [libs/valkey](../../libs/valkey/README.md#connections) |
 | `TASKS_KAFKA_BROKERS`                 | `kafka.brokers`              | *(empty: no relay — events wait in the outbox)* |
 | `TASKS_KAFKA_TOPIC`                   | `kafka.topic`                | `tasks.events` — where every event goes |
 | `TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION` | `kafka.allow_auto_topic_creation` | `false` (pre-provision the topic) |
