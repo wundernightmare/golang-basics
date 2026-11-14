@@ -524,7 +524,7 @@ schemathesis:
 # One coverage number for the whole pyramid: unit + integration + e2e (the Go
 # harness' GOCOVERDIR) covdata-merged and gated by .testcoverage.yml
 # (`just cov-check`). A merge request may not lower it against the default
-# branch's last breakdown.
+# branch's last breakdown by more than diff.threshold in .testcoverage.yml.
 coverage:
   extends: [.go, .rules-go]
   stage: report
@@ -551,7 +551,7 @@ coverage:
     - scripts/cover.sh merge
     - |
       if [ -s coverage-breakdown-base.json ] && [ "$CI_COMMIT_BRANCH" != "$CI_DEFAULT_BRANCH" ]; then
-        scripts/cover.sh gate --diff-base-breakdown-file-name coverage-breakdown-base.json --diff-threshold 0
+        scripts/cover.sh gate --diff-base-breakdown-file-name coverage-breakdown-base.json
       else
         scripts/cover.sh gate
       fi

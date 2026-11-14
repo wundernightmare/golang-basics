@@ -63,7 +63,7 @@ that topic on both sides.
 
 ```sh
 # from the workspace root: build the binaries (cover-instrumented, like CI)
-for s in ping heartbeat tasks consumer; do COVER=1 scripts/build-service.sh $s .build/$s; done
+for s in ping heartbeat tasks consumer ingest; do COVER=1 scripts/build-service.sh $s .build/$s; done
 
 cd e2e
 go test -tags e2e -count=1 ./...                  # ping + heartbeat (tasks/consumer skip)
