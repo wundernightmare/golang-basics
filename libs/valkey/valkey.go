@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	valkeygo "github.com/valkey-io/valkey-go"
@@ -24,6 +25,7 @@ type Cache struct {
 	log       *slog.Logger
 	metrics   *metrics
 	opTimeout time.Duration
+	closed    atomic.Bool // Close was called: a subscription must not come back
 	flight    singleflight.Group
 }
 
@@ -187,4 +189,7 @@ func (c *Cache) ReadyCheck() func(ctx context.Context) error {
 }
 
 // Close releases the client's connection pool.
-func (c *Cache) Close() { c.client.Close() }
+func (c *Cache) Close() {
+	c.closed.Store(true)
+	c.client.Close()
+}

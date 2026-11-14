@@ -66,6 +66,7 @@ func TestConfigTranslatesToClientOptions(t *testing.T) {
 	assert.Equal(t, time.Minute, opt.BlockingPoolCleanup)
 	assert.Equal(t, 3*time.Second, opt.ConnWriteTimeout)
 	assert.Equal(t, 20*time.Minute, opt.ConnLifetime)
+	assert.True(t, opt.DisableRetry, "the library's retry races with its own connection writer")
 
 	// The URL form gets the same settings, and they win over the URL's own
 	// parameters: one place decides the timeouts.
@@ -158,4 +159,17 @@ func TestStreamingCallsAreRefused(t *testing.T) {
 	many := client.DoMultiStream(t.Context(), valkeygo.Completed{}, valkeygo.Completed{})
 	require.ErrorIs(t, many.Error(), valkey.ErrStreamUnsupported)
 	require.False(t, many.HasNext())
+}
+
+func TestResubscribeDelayDoublesToOneSecond(t *testing.T) {
+	t.Parallel()
+
+	for attempt, want := range []time.Duration{
+		50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond,
+		800 * time.Millisecond, time.Second, time.Second,
+	} {
+		assert.Equal(t, want, valkey.ResubscribeDelay(attempt), "attempt %d", attempt)
+	}
+
+	assert.Equal(t, time.Second, valkey.ResubscribeDelay(1_000), "no overflow however long the server stays down")
 }
