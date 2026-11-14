@@ -26,16 +26,18 @@ var ecsKeys = map[string]string{ //nolint:gochecknoglobals // read-only lookup t
 	slog.MessageKey: "message",
 	"service":       "service.name",
 	"trace_id":      "trace.id",
-	"span_id":       "span.id",
-	"request_id":    "http.request.id",
-	"method":        "http.request.method",
-	"status":        "http.response.status_code",
-	"path":          "url.path",
-	"client":        "client.address",
-	"error":         "error.message",
-	"err":           "error.message",
-	"stack":         "error.stack_trace",
-	"panic":         "error.type",
+	// The id of a trace that was not sampled: not a link (see ctxHandler).
+	"trace_unsampled_id": "trace.unsampled_id",
+	"span_id":            "span.id",
+	"request_id":         "http.request.id",
+	"method":             "http.request.method",
+	"status":             "http.response.status_code",
+	"path":               "url.path",
+	"client":             "client.address",
+	"error":              "error.message",
+	"err":                "error.message",
+	"stack":              "error.stack_trace",
+	"panic":              "error.type",
 }
 
 // maxCachedKeys bounds the per-key sensitivity cache: attribute keys are a

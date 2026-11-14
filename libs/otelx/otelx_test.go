@@ -359,49 +359,6 @@ func TestNewResource_UnsetNameFallsBackToTheEnvironment(t *testing.T) {
 	assert.False(t, ok, "no empty service.version")
 }
 
-func TestNewSampler(t *testing.T) {
-	t.Parallel()
-
-	traceID := trace.TraceID{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	remote := func(sampled bool) context.Context {
-		flags := trace.TraceFlags(0)
-		if sampled {
-			flags = trace.FlagsSampled
-		}
-
-		return trace.ContextWithRemoteSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
-			TraceID: traceID, SpanID: trace.SpanID{1}, TraceFlags: flags, Remote: true,
-		}))
-	}
-	decide := func(s sdktrace.Sampler, ctx context.Context) sdktrace.SamplingDecision {
-		return s.ShouldSample(sdktrace.SamplingParameters{ParentContext: ctx, TraceID: traceID, Name: "x"}).Decision
-	}
-
-	const sampled, dropped = sdktrace.RecordAndSample, sdktrace.Drop
-
-	for _, tc := range []struct {
-		name                          string
-		cfg                           Config
-		root, remoteSampled, remoteNo sdktrace.SamplingDecision
-	}{
-		{"ratio 1, trusting", Config{SamplerRatio: 1, TrustRemoteParent: true}, sampled, sampled, dropped},
-		{"never, trusting: a sampled caller keeps its trace", Config{SamplerRatio: -1, TrustRemoteParent: true}, dropped, sampled, dropped},
-		{"never, not trusting: the caller cannot force sampling", Config{SamplerRatio: -1, TrustRemoteParent: false}, dropped, dropped, dropped},
-		{"ratio 1, not trusting: the local ratio decides", Config{SamplerRatio: 1, TrustRemoteParent: false}, sampled, sampled, dropped},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			s := newSampler(tc.cfg)
-			assert.Equal(t, tc.root, decide(s, context.Background()), "root span")
-			assert.Equal(t, tc.remoteSampled, decide(s, remote(true)), "remote sampled parent")
-			assert.Equal(t, tc.remoteNo, decide(s, remote(false)), "remote unsampled parent")
-		})
-	}
-
-	assert.Contains(t, newSampler(Config{SamplerRatio: 0.5, TrustRemoteParent: true}).Description(), "TraceIDRatioBased{0.5}")
-}
-
 // Init's propagator is the W3C pair: a traceparent survives a round trip.
 //
 //nolint:paralleltest // serial: otelx.Init installs the OpenTelemetry globals; this test checks exactly that

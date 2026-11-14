@@ -363,7 +363,9 @@ func (c *Consumer) invoke(ctx context.Context, msg Message, handler Handler, att
 	rctx, cancel := context.WithTimeout(rctx, c.cfg.HandlerTimeout)
 	defer cancel()
 
-	rctx = httpx.WithRequestID(rctx, reqID)
+	// A record of a debug trace is logged from debug up, as the request
+	// that produced it was.
+	rctx = httpx.WithRequestID(httpx.FollowDebugTrace(rctx), reqID)
 
 	start := time.Now()
 

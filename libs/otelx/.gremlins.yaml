@@ -1,0 +1,40 @@
+# gremlins — mutation testing of what in libs/otelx is logic rather than
+# wiring: the head sampler (sampler.go) and the retroactive sampling buffer
+# (retro/: the rings, the codec, the processor). A survivor there is a span
+# lost, exported twice or read back wrong.
+#
+#   just mutate libs/otelx
+#
+# Run it through scripts/mutate.sh (`just mutate` and CI do), never bare: see
+# the script for why a bare `gremlins unleash` reports every mutant killed.
+# The oracle is the unit layer (`-short`).
+#
+# Excluded: otelx.go and config.go — the exporter, the resource and the
+# provider are assembled there, and what proves them is the contract test
+# and libs/otelx/integration (a real collector), not a unit assertion per
+# line.
+#
+# Known survivors, all equivalent:
+#   - sampler.go, `SamplerRatio >= 0`: a ratio of exactly 0 gives a ratio
+#     sampler that samples nothing, which is what "never" gives.
+#   - retro/arena.go, the two bounds checks of shard.header: either one
+#     mutated leaves the other to refuse the same record — they are there for
+#     a ring that is no longer made of records.
+#   - retro/codec.go, the reader's bounds (take, count, number, string): the
+#     mutants refuse a read of exactly the bytes left, and no record ends in
+#     such a read — the last four fields are varints.
+#
+# Thresholds fail the run (exit 11) when the suite lets too many mutants live.
+# Ratchet them up when the numbers improve, never down without a reason in
+# the commit message.
+unleash:
+  workers: 4
+  timeout-coefficient: 8
+  output-statuses: lt # print only LIVED and TIMED OUT — the ones that matter
+  exclude-files:
+    - "doc\\.go$"
+    - "^otelx\\.go$"
+    - "^config\\.go$"
+  threshold:
+    efficacy: 90
+    mutant-coverage: 90

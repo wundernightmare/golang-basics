@@ -256,7 +256,22 @@ func produceConsume(t *testing.T, harness Harness) {
 		{Key: kafka.HeaderTraceparent, Value: []byte(carrier.Get("traceparent"))},
 	}}))
 	relay.End()
-	assert.Equal(t, float64(n+1), testx.Metric(t, preg, "kafka_producer_records_total", map[string]string{"client": "producer", "topic": topic, "result": "ok"}))
+
+	// A debug trace: the request that produced the record was traced on
+	// purpose, and its mark travels in tracestate.
+	marked, err := trace.TraceState{}.Insert(httpx.DebugTraceStateKey, httpx.DebugTraceStateValue)
+	require.NoError(t, err)
+
+	debugCtx := trace.ContextWithRemoteSpanContext(t.Context(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{0: 0xdb, 15: 1}, SpanID: trace.SpanID{7: 1}, TraceFlags: trace.FlagsSampled, TraceState: marked,
+	}))
+	require.NoError(t, prod.Send(debugCtx, kafka.Message{Key: []byte("k-debug"), Value: []byte("v"), Headers: []kafka.Header{
+		{Key: kafka.HeaderEventID, Value: []byte("evt-debug")},
+	}}))
+
+	const sent = n + 2
+
+	assert.Equal(t, float64(sent), testx.Metric(t, preg, "kafka_producer_records_total", map[string]string{"client": "producer", "topic": topic, "result": "ok"}))
 	assert.Equal(t, 1.0, testx.Metric(t, preg, "kafka_client_info", map[string]string{"client": "producer", "provider": kafka.Provider()}))
 	require.Eventually(t, func() bool {
 		return testx.Metric(t, preg, "kafka_producer_queue_max_bytes", nil) == float64(64<<20) &&
@@ -271,7 +286,7 @@ func produceConsume(t *testing.T, harness Harness) {
 		got.add(ctx, m)
 		return nil
 	}, traced...)
-	require.Eventually(t, func() bool { return got.len() == n+1 }, 30*time.Second, 50*time.Millisecond)
+	require.Eventually(t, func() bool { return got.len() == sent }, 30*time.Second, 50*time.Millisecond)
 
 	got.mu.Lock()
 	for i, msg := range got.msgs {
@@ -283,16 +298,24 @@ func produceConsume(t *testing.T, harness Harness) {
 		assert.True(t, hasDeadline, "every attempt has a deadline")
 		assert.Equal(t, 1, msg.Attempt)
 
-		sc := trace.SpanContextFromContext(ctx)
-		require.True(t, sc.IsValid())
+		spanCtx := trace.SpanContextFromContext(ctx)
+		require.True(t, spanCtx.IsValid())
+
+		assert.Equal(t, string(msg.Key) == "k-debug", httpx.DebugLogging(ctx),
+			"a record of a debug trace, and no other, is handled with debug logging on")
+
+		if string(msg.Key) == "k-debug" {
+			assert.True(t, httpx.IsDebugTrace(spanCtx), "the mark came through the broker")
+			continue
+		}
 
 		if string(msg.Key) == "k-outbox" {
-			assert.Equal(t, stored.SpanContext().TraceID(), sc.TraceID(), "the stored traceparent wins over the relay's span")
+			assert.Equal(t, stored.SpanContext().TraceID(), spanCtx.TraceID(), "the stored traceparent wins over the relay's span")
 			continue
 		}
 
 		assert.Equal(t, fmt.Sprintf("v-%d", i), string(msg.Value), "in order within the partition")
-		assert.Equal(t, parentTrace, sc.TraceID(), "the consumer continues the producer's trace")
+		assert.Equal(t, parentTrace, spanCtx.TraceID(), "the consumer continues the producer's trace")
 		assert.Equal(t, "task.created", header(msg, kafka.HeaderEventType))
 	}
 	got.mu.Unlock()
@@ -305,8 +328,8 @@ func produceConsume(t *testing.T, harness Harness) {
 
 	run.cancel()
 	require.NoError(t, run.wait(t))
-	assert.Equal(t, float64(n+1), testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}))
-	assert.Equal(t, float64(n+1), testx.Metric(t, run.reg, "kafka_consumer_handler_duration_seconds", map[string]string{"topic": topic}))
+	assert.Equal(t, float64(sent), testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}))
+	assert.Equal(t, float64(sent), testx.Metric(t, run.reg, "kafka_consumer_handler_duration_seconds", map[string]string{"topic": topic}))
 	assert.Equal(t, -1.0, testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "failed"}), "no failure series")
 	assert.Equal(t, 0.0, testx.Metric(t, run.reg, "kafka_consumer_commit_errors_total", nil))
 	testx.LintMetrics(t, run.reg)

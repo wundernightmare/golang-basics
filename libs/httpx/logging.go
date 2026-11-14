@@ -69,7 +69,7 @@ func NewLogger(cfg LogConfig) *slog.Logger {
 		h = slog.NewJSONHandler(w, opts)
 	}
 
-	h = &ctxHandler{inner: h}
+	h = &ctxHandler{inner: h, triggers: &level.triggers}
 	if cfg.SampleInitial > 0 {
 		h = newSamplingHandler(h, cfg.SampleInitial, cfg.SampleThereafter, cfg.SampleTick)
 	}
@@ -114,8 +114,9 @@ func parseLevel(level string) slog.Level {
 // path stays allocation-free); once a group is open the operations are
 // replayed per record on top of the context attributes instead.
 type ctxHandler struct {
-	inner slog.Handler // with every pre-group WithAttrs applied
-	ops   []handlerOp  // WithAttrs / WithGroup calls after the first group, in order
+	inner    slog.Handler   // with every pre-group WithAttrs applied
+	ops      []handlerOp    // WithAttrs / WithGroup calls after the first group, in order
+	triggers *traceTriggers // retroactive sampling, when bound
 }
 
 type handlerOp struct {
@@ -129,9 +130,19 @@ func (h *ctxHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 func (h *ctxHandler) Handle(ctx context.Context, r slog.Record) error {
 	var attrs []slog.Attr
+
 	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		// trace_id is a link: a log viewer opens the trace from it. An
+		// unsampled trace has an id and no trace, so its lines carry the id
+		// under another name — still found together, never a dead link —
+		// unless this very line (a warn, an error) makes the trace exported.
+		key := "trace_id"
+		if !sc.IsSampled() && !h.triggers.exported(sc.TraceID(), r.Level) {
+			key = "trace_unsampled_id"
+		}
+
 		attrs = append(attrs,
-			slog.String("trace_id", sc.TraceID().String()),
+			slog.String(key, sc.TraceID().String()),
 			slog.String("span_id", sc.SpanID().String()),
 		)
 	}
@@ -167,12 +178,12 @@ func (h *ctxHandler) Handle(ctx context.Context, r slog.Record) error {
 
 func (h *ctxHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	if len(h.ops) == 0 {
-		return &ctxHandler{inner: h.inner.WithAttrs(attrs)}
+		return &ctxHandler{inner: h.inner.WithAttrs(attrs), triggers: h.triggers}
 	}
 
 	ops := append(append([]handlerOp(nil), h.ops...), handlerOp{attrs: attrs})
 
-	return &ctxHandler{inner: h.inner, ops: ops}
+	return &ctxHandler{inner: h.inner, ops: ops, triggers: h.triggers}
 }
 
 func (h *ctxHandler) WithGroup(name string) slog.Handler {
@@ -182,7 +193,7 @@ func (h *ctxHandler) WithGroup(name string) slog.Handler {
 
 	ops := append(append([]handlerOp(nil), h.ops...), handlerOp{group: name})
 
-	return &ctxHandler{inner: h.inner, ops: ops}
+	return &ctxHandler{inner: h.inner, ops: ops, triggers: h.triggers}
 }
 
 // SignalContext returns a context that is cancelled on SIGINT or SIGTERM,

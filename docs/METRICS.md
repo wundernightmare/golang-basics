@@ -170,6 +170,12 @@ commands are the `cache_*` series above.
 | `build_info` | gauge (1) | `version, revision` — no `service` (the scrape adds it), no runtime version (`go_info` has it) |
 | `app_integration_enabled` | gauge (1/0) | `integration` |
 | `log_dropped_total` | counter | `level` — records the log sampler dropped |
+| `trace_retro_buffer_bytes` | gauge | — bytes of the retroactive sampling buffer in use (`libs/otelx/retro`; Go only) |
+| `trace_retro_buffer_capacity_bytes` | gauge | — bytes it was allocated with: its limit |
+| `trace_retro_buffer_spans` | gauge | — unsampled spans waiting for a trigger |
+| `trace_retro_buffer_horizon_seconds` | gauge | — time between the oldest and the newest span kept: how far back a trigger reaches |
+| `trace_retro_spans_total` | counter | `outcome` (kept, exported, evicted, unencodable, undecodable) |
+| `trace_retro_triggers_total` | counter | `outcome` (accepted, repeated, rate_limited) |
 
 Go runtime and process: the client_golang defaults (`go_*`, `process_*`:
 CPU, RSS, open / max file descriptors, start time) plus

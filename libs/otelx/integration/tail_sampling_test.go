@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -20,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/libs/otelx"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 )
@@ -44,6 +46,14 @@ type service struct {
 func newService(t *testing.T, endpoint, name string, headRatio float64) *service {
 	t.Helper()
 
+	return newLoggingService(t, endpoint, name, headRatio, nil)
+}
+
+// newLoggingService is newService with the service's logger, which is what
+// binds the retroactive buffer to its warn and error lines.
+func newLoggingService(t *testing.T, endpoint, name string, headRatio float64, log *slog.Logger) *service {
+	t.Helper()
+
 	tel, err := otelx.Init(context.Background(), otelx.Config{
 		Enabled:      true,
 		ServiceName:  name,
@@ -51,7 +61,7 @@ func newService(t *testing.T, endpoint, name string, headRatio float64) *service
 		Insecure:     true, // the suite's collector is plaintext, as the local stack's is
 		SamplerRatio: headRatio,
 		BatchTimeout: 100 * time.Millisecond,
-	}, nil)
+	}, log)
 	require.NoError(t, err)
 
 	closed := false
@@ -312,4 +322,47 @@ func TestHeadSamplingDecidesWhatTailSamplingSees(t *testing.T) {
 	}
 
 	assert.Len(t, got, 1)
+}
+
+// The retroactive buffer through the real exporter: at head sampling "never"
+// a trace is not exported — until a warn line is written inside it. Then the
+// span that had ended (decoded from the arena) and the ones still open reach
+// the store as one trace; a trace without such a line still does not.
+//
+//nolint:paralleltest // serial: otelx.Init installs the OpenTelemetry globals
+func TestAWarnLineBringsAnUnsampledTraceToTheStore(t *testing.T) {
+	backend := jaeger(t)
+	endpoint := collector(t, "100") // the collector keeps whatever arrives: this is about what is sent
+	name := testx.Unique("retro")
+
+	log := httpx.NewLogger(httpx.LogConfig{Service: name, Level: "info", Writer: io.Discard})
+	svc := newLoggingService(t, endpoint, name, -1, log)
+
+	handle := func(warn bool) string {
+		ctx, consume := svc.tracer.Start(context.Background(), "process tasks.events")
+		_, decode := svc.tracer.Start(ctx, "decode")
+		decode.End()
+
+		ctx, store := svc.tracer.Start(ctx, "store", trace.WithAttributes(attribute.String("db.system.name", "postgresql")))
+		if warn {
+			log.WarnContext(ctx, "slow store")
+		} else {
+			log.InfoContext(ctx, "stored")
+		}
+
+		store.End()
+		consume.End()
+
+		return consume.SpanContext().TraceID().String()
+	}
+
+	quiet := handle(false)
+	slow := handle(true)
+
+	svc.close()
+
+	got := settled(t, backend, name, []string{slow})
+
+	assert.Equal(t, 3, got[slow], "decode from the buffer, store and the root at their end")
+	assert.NotContains(t, got, quiet, "a trace nobody complained about stays unsampled")
 }
