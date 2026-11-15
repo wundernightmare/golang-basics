@@ -50,7 +50,7 @@ func validKey(key string) bool { return key != "" && len(key) <= MaxKeyLen }
 // for concurrent use; build one with [New] and [Cache.Close] it.
 type Cache[T any] struct {
 	cfg     Config
-	local   store
+	local   Store
 	remote  Remote // nil: L1 and the loader only
 	codec   Codec[T]
 	load    Loader[T]
@@ -87,25 +87,30 @@ type Cache[T any] struct {
 	wg   sync.WaitGroup
 }
 
-// New builds a cache. remote may be nil (see [Remote]); log may be nil. With
+// New builds a cache on the L1 store makes (offheap.New, onheap.New — see
+// [Store]). remote may be nil (see [Remote]); log may be nil. With
 // a remote and invalidation enabled it starts the subscription goroutine,
 // which [Cache.Close] stops. The remote stays the caller's to close.
-func New[T any](cfg Config, codec Codec[T], load Loader[T], remote Remote, log *slog.Logger) (*Cache[T], error) {
+func New[T any](cfg Config, store StoreFactory, codec Codec[T], load Loader[T], remote Remote, log *slog.Logger) (*Cache[T], error) {
 	cfg.applyDefaults()
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 
-	if codec == nil || load == nil {
-		return nil, errors.New("tiercache: codec and loader are required")
+	if store == nil || codec == nil || load == nil {
+		return nil, errors.New("tiercache: store, codec and loader are required")
 	}
 
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	local := newStore(cfg.MaxBytes)
+	local := store(cfg.MaxBytes)
+	if local == nil {
+		return nil, errors.New("tiercache: the store factory returned no store")
+	}
+
 	life, stop := context.WithCancel(context.Background()) //nolint:gosec // G118: stop is kept in the Cache and called by Close
 
 	cache := &Cache[T]{
@@ -149,7 +154,7 @@ func (c *Cache[T]) Close() {
 
 	c.stop()
 	c.wg.Wait()
-	c.local.reset()
+	c.local.Reset()
 }
 
 // Get returns the value for key.
@@ -177,7 +182,7 @@ func (c *Cache[T]) Get(ctx context.Context, key string) (T, error) {
 	nowMs := time.Now().UnixMilli()
 
 	buf := c.buffers.Get().(*[]byte) //nolint:forcetypeassert // the pool only ever holds *[]byte
-	env, found := c.local.get((*buf)[:0], keyBytes(key))
+	env, found := c.local.Get((*buf)[:0], key)
 	*buf = env
 
 	if found {
@@ -204,7 +209,7 @@ func (c *Cache[T]) Get(ctx context.Context, key string) (T, error) {
 // L1 has grown it: such a buffer is left to the garbage collector rather
 // than kept for good.
 func (c *Cache[T]) release(buf *[]byte) {
-	if cap(*buf) <= 2*c.local.maxEntry() { // twice: append may over-allocate for the largest entry L1 holds
+	if cap(*buf) <= 2*c.local.MaxEntry() { // twice: append may over-allocate for the largest entry L1 holds
 		c.buffers.Put(buf)
 	}
 }
@@ -427,7 +432,7 @@ func (c *Cache[T]) staleFallback(key string, heldPayload []byte, heldHardMs int6
 		}
 	}
 
-	env, found := c.local.get(nil, keyBytes(key))
+	env, found := c.local.Get(nil, key)
 	if !found {
 		return zero, false
 	}
@@ -442,9 +447,13 @@ func (c *Cache[T]) staleFallback(key string, heldPayload []byte, heldHardMs int6
 }
 
 // fill writes an envelope to L1 unless an invalidation arrived since epoch.
+// One too large for L1 is not offered to it, and takes the key's previous
+// envelope out: the value is served from L2 from now on, not an older one
+// from L1 until its deadline.
 func (c *Cache[T]) fill(epoch uint64, key string, env []byte) {
-	if len(key)+len(env) > c.local.maxEntry() {
+	if len(key)+len(env) > c.local.MaxEntry() {
 		c.metrics.oversize.Inc()
+		c.local.Delete(key)
 
 		return
 	}
@@ -453,7 +462,7 @@ func (c *Cache[T]) fill(epoch uint64, key string, env []byte) {
 	defer c.fillMu.RUnlock()
 
 	if c.epoch.Load() == epoch {
-		c.local.set(keyBytes(key), env)
+		c.local.Set(key, env)
 	}
 }
 
@@ -462,7 +471,7 @@ func (c *Cache[T]) invalidateLocal(key string) {
 	defer c.fillMu.Unlock()
 
 	c.epoch.Add(1)
-	c.local.del(keyBytes(key))
+	c.local.Delete(key)
 	c.flight.Load().Forget(key)
 	c.metrics.invalidatedKey.Inc()
 }
@@ -473,7 +482,7 @@ func (c *Cache[T]) reset() {
 	defer c.fillMu.Unlock()
 
 	c.epoch.Add(1)
-	c.local.reset()
+	c.local.Reset()
 	c.flight.Store(new(singleflight.Group))
 	c.metrics.invalidatedAll.Inc()
 }

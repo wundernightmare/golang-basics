@@ -48,21 +48,26 @@
 //
 // # Memory
 //
-// L1's capacity ([Config.MaxBytes]) is fixed at construction, and chooses
-// the store. From 32 MiB up it is github.com/VictoriaMetrics/fastcache: off
-// the Go heap, so neither the garbage collector nor the Go memory limit
-// counts it; sized in steps of 32 MiB; never returned to the OS (budget the
-// full capacity as resident); entries of 64 KiB and more are not held.
-// Below 32 MiB it is github.com/coocood/freecache: on the heap at exactly
-// the size asked for (512 KiB at least), counted by the memory limit, with
-// entries of up to 1/1024 of the capacity. Either keeps an index of 16 bytes
-// per entry on the heap on top. An entry too large for L1 is served from L2
-// and counted. Several logical caches can share one budget by sharing one
-// cache and telling their keys apart by a prefix.
+// L1 is a [Store], built by the [StoreFactory] given to [New] with the
+// capacity of the configuration ([Config.MaxBytes]), fixed from then on.
+// Two are provided, and the service names one. Package offheap
+// (github.com/VictoriaMetrics/fastcache) is off the Go heap, so neither the
+// garbage collector nor the Go memory limit counts it; sized in steps of
+// 32 MiB; never returned to the OS (budget the full capacity as resident);
+// entries of 64 KiB and more are not held. Package onheap
+// (github.com/coocood/freecache) is on the heap at exactly the size asked
+// for (512 KiB at least), counted by the memory limit, with entries of up to
+// 1/1024 of the capacity. Either keeps an index of 16 bytes per entry on the
+// heap on top. An entry too large for L1 is served from L2 and counted.
+// Several logical caches can share one budget by sharing one cache and
+// telling their keys apart by a prefix.
+//
+// A service may bring a store of its own: [Store] is the contract, and
+// package storetest the suite that checks a store against it.
 //
 // A service typically does:
 //
-//	creds, err := tiercache.New(cfg.Credentials, credential.Codec{}, store.Credential, remote, logger)
+//	creds, err := tiercache.New(cfg.Credentials, offheap.New, credential.Codec{}, store.Credential, remote, logger)
 //	if err != nil { … }
 //	defer creds.Close()
 //	srv.Metrics.Registry.MustRegister(creds.Collectors()...)

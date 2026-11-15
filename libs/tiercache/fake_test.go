@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,8 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/libs/tiercache"
 	"github.com/tracehubmmp/golang-basics/libs/tiercache/credential"
+	"github.com/tracehubmmp/golang-basics/libs/tiercache/offheap"
+	"github.com/tracehubmmp/golang-basics/libs/tiercache/onheap"
 )
 
 // fakeRemote is an in-memory tiercache.Remote with the semantics of
@@ -309,6 +312,32 @@ func record(key string, version, payload int) credential.Credential {
 	}
 }
 
+// suiteStoreEnv names the store the suite's caches are built on: unset is
+// offheap, "onheap" the other. TestTheSuiteHoldsOnTheHeapStore runs the
+// suite again with it set.
+const suiteStoreEnv = "TIERCACHE_TEST_STORE"
+
+func onTheHeap() bool { return os.Getenv(suiteStoreEnv) == "onheap" }
+
+func suiteStore() tiercache.StoreFactory {
+	if onTheHeap() {
+		return onheap.New
+	}
+
+	return offheap.New
+}
+
+// suiteBytes is the capacity of a cache whose test names none: the default,
+// or on the heap 16 MiB — entries of up to 16 KiB, which is what the suites
+// write when they mean "fits in L1".
+func suiteBytes() int {
+	if onTheHeap() {
+		return 16 << 20
+	}
+
+	return 0
+}
+
 type harness struct {
 	cache *tiercache.Cache[credential.Credential]
 	src   *source
@@ -333,10 +362,10 @@ func newHarness(t *testing.T, remote tiercache.Remote, src *source, tune func(*t
 	}
 
 	if cfg.MaxBytes == 0 {
-		cfg.MaxBytes = tiercache.SuiteL1Bytes()
+		cfg.MaxBytes = suiteBytes()
 	}
 
-	cache, err := tiercache.New(cfg, credential.Codec{}, src.load, remote, nil)
+	cache, err := tiercache.New(cfg, suiteStore(), credential.Codec{}, src.load, remote, nil)
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
 

@@ -15,7 +15,7 @@ type metrics struct {
 	collectors []prometheus.Collector
 }
 
-func newMetrics(name string, local store) *metrics {
+func newMetrics(name string, local Store) *metrics {
 	labels := prometheus.Labels{"cache": name}
 
 	reads := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -45,9 +45,9 @@ func newMetrics(name string, local store) *metrics {
 	})
 	size := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name:        "tiercache_l1_bytes",
-		Help:        "Bytes of memory L1 holds, bounded by its configured capacity: what the off-heap store has taken so far, or the whole of the heap store.",
+		Help:        "Bytes of memory L1 holds, bounded by its configured capacity (offheap: mapped so far; onheap: all of it, allocated at construction).",
 		ConstLabels: labels,
-	}, func() float64 { return float64(local.bytes()) })
+	}, func() float64 { return float64(local.Bytes()) })
 
 	return &metrics{
 		fresh:          reads.WithLabelValues("fresh"),

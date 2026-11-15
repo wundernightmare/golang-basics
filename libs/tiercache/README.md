@@ -1,10 +1,11 @@
 # tiercache
 
 A two-level read cache for values that are read far more often than they
-change: a fixed-size **L1** inside the process — off the heap
-([`fastcache`](https://github.com/VictoriaMetrics/fastcache)) from 32 MiB up,
-on it ([`freecache`](https://github.com/coocood/freecache)) below — in front
-of a shared **L2** (Valkey, through [`libs/valkey`](../valkey)), in front of the
+change: a fixed-size **L1** inside the process — a store the service
+chooses: [`offheap`](offheap)
+([`fastcache`](https://github.com/VictoriaMetrics/fastcache)),
+[`onheap`](onheap) ([`freecache`](https://github.com/coocood/freecache)), or
+its own — in front of a shared **L2** (Valkey, through [`libs/valkey`](../valkey)), in front of the
 source of truth (a loader).
 
 It is assembled from tested parts — the store, the client, singleflight, the
@@ -16,8 +17,8 @@ rules.
 ```go
 remote, err := valkey.New(cfg.Valkey, logger) // optional: see "Without Valkey"
 
-creds, err := tiercache.New(cfg.Credentials, credential.Codec{}, store.CredentialByKeyHash, remote, logger)
-users, err := tiercache.New(cfg.Users, user.Codec{}, store.UserByID, remote, logger)
+creds, err := tiercache.New(cfg.Credentials, offheap.New, credential.Codec{}, store.CredentialByKeyHash, remote, logger)
+users, err := tiercache.New(cfg.Users, onheap.New, user.Codec{}, store.UserByID, remote, logger)
 if err != nil { … }
 defer creds.Close()
 srv.Metrics.Registry.MustRegister(creds.Collectors()...)
@@ -115,13 +116,14 @@ all — reads go to the loader. `DisableInvalidation` runs on TTLs alone.
 
 | | |
 | --- | --- |
-`MaxBytes` is the capacity, fixed at construction, and it also chooses what
-L1 is made of:
+`MaxBytes` is the capacity, fixed at construction; the second argument of
+`New` is what L1 is made of. The service says it in code — nothing is chosen
+for it:
 
-| | `MaxBytes` ≥ 32 MiB | `MaxBytes` < 32 MiB |
+| | [`offheap.New`](offheap) | [`onheap.New`](onheap) |
 | --- | --- | --- |
-| Store | `fastcache` | `freecache` |
-| Capacity | in steps of 32 MiB: 33 MiB mean 64 | exactly what is asked, 512 KiB at least |
+| Library | `fastcache` | `freecache` |
+| Capacity | in steps of 32 MiB and never less: 1 MiB and 33 MiB mean 32 and 64 | exactly what is asked, 512 KiB at least |
 | Where | off the Go heap (`mmap`): invisible to the garbage collector, to `GOGC` and to the Go memory limit | on the Go heap, allocated in full at construction: the memory limit counts it, the collector does not scan it (no pointers) |
 | Resident size | grows to the capacity and stays: never returned to the OS — budget the full capacity | grows to the capacity as the rings are written |
 | On top (heap) | the index, about 16 bytes per live entry | the index: 1 MiB at construction, then 16 bytes per entry |
@@ -130,12 +132,50 @@ L1 is made of:
 | `tiercache_l1_bytes` | what it has taken so far | the capacity |
 
 An entry over the limit is served from L2 and counted in
-`tiercache_l1_oversize_total`; both limits are checked by a test against the
-stores themselves. Choose the heap store for a service whose container is
-small (a few MiB of cache, values of a few KiB), the off-heap one when the
-cache is large enough for the collector's accounting of it to matter.
+`tiercache_l1_oversize_total` (and takes its key's smaller predecessor out of
+L1); both limits are checked by a test against the libraries themselves.
+Choose `onheap` for a service whose container is small (a few MiB of cache,
+values of a few KiB), `offheap` when the cache is large enough for the
+collector's accounting of it to matter. A binary links only the store it
+imports.
 
-The Go memory limit does not see the off-heap memory. `libs/httpx` derives the limit
+### A store of your own
+
+L1 is an interface, `tiercache.Store`, and the second argument of `New` is
+any `func(maxBytes int) tiercache.Store`. What a cache relies on — and no
+more than that; eviction policy, layout and where the memory lives are the
+store's business:
+
+| | A store must |
+| --- | --- |
+| Concurrency | take any method from any number of goroutines; each call takes effect at one instant between its start and its return |
+| No failures, no waiting | do no I/O, return no error, block on nothing but its own short critical sections — `Get` is on the path of every read |
+| Keys and values | accept any key of 1 to 512 bytes and any value, an empty one included (found, not absent); neither needs to be text |
+| Forget, never misremember | report a key as not found whenever it likes (that is eviction) — but never report a value other than the one given to the latest `Set` of that key: not another key's, not a part of one, not an earlier one. After `Delete`, after `Reset`, and after a `Set` whether it kept the new value or not, the old one is gone for good |
+| Be of use | find, with no other call in between, an entry within `MaxEntry` that was just set |
+| Share nothing | keep no reference to the value given to `Set` or the buffer given to `Get`, and change neither beyond appending to that buffer |
+| Bounded memory | never report more `Bytes` than the capacity it was built with, as its provider documents it |
+
+[`storetest.Run`](storetest) checks each line against the store itself, under
+concurrency and at several capacities; `offheap` and `onheap` pass it, and a
+store of your own is not a store until it does:
+
+```go
+func TestStore(t *testing.T) {
+	storetest.Run(t, mystore.New, storetest.Capacity{Ask: 8 << 20, Bound: 8 << 20})
+}
+```
+
+The suite is itself checked: a thirty-line map behind a mutex passes it, and
+each of eight ways of breaking that map fails it
+(`storetest/storetest_test.go`).
+
+What the cache promises about memory and allocations — a fixed budget,
+nothing for the collector to scan, a fresh read that allocates only what the
+codec's `Decode` does — is measured on the two stores above. A store of
+your own brings its own answers to those.
+
+The Go memory limit does not see the memory of `offheap`. `libs/httpx` derives the limit
 from the container's (`RUNTIME_MEMORY_LIMIT_RATIO`, 0.85) and leaves the rest
 as headroom, and a full L1 is taken out of that headroom: 32 MiB of the
 38 MiB a 256 MiB container has. Subtract the capacity of every cache from
@@ -155,7 +195,7 @@ cache with an `envPrefix`.
 | Env | YAML | Default | |
 | --- | --- | --- | --- |
 | `TIERCACHE_NAME` | `name` | — | metric label, key prefix, channel; include the value's format version (`credentials:v1`) |
-| `TIERCACHE_MAX_BYTES` | `max_bytes` | 32 MiB | L1 capacity; below 32 MiB the heap store (see "Memory") |
+| `TIERCACHE_MAX_BYTES` | `max_bytes` | 32 MiB | L1 capacity, as the store reads it (see "Memory") |
 | `TIERCACHE_SOFT_TTL` / `_HARD_TTL` | `soft_ttl` / `hard_ttl` | `HARD_TTL` / — | refresh after / never serve after |
 | `TIERCACHE_STALE_IF_ERROR` | `stale_if_error` | `0` | grace past `HARD_TTL` while the loader fails |
 | `TIERCACHE_REFRESH_TIMEOUT` / `_CONCURRENCY` | `refresh_timeout` / `refresh_concurrency` | `5s` / `16` | background refresh bounds |
@@ -179,8 +219,8 @@ Listed in [docs/METRICS.md](../../docs/METRICS.md); every series carries
 | --- | --- | --- |
 | Unit | `internal_test.go`, `credential/` | envelope and codec (table, fuzz, byte-compatibility with `google.golang.org/protobuf`), config |
 | Unit, virtual time | `cache_test.go` | every read rule and race above against an in-memory L2 (`testing/synctest`: no sleeps), the allocation budget of a fresh read, the L1 capacity bound, what a key may be and where it travels |
-| Unit | `store_test.go` | both stores at four capacities: what is set is read back, the entry limit to the byte, the capacity bound, no value under another key |
-| Both stores | `store_test.go` (`TestTheSuiteHoldsOnTheHeapStore`) | the whole suite — this table, at the layer being run — once more on the heap store: the test binary runs itself with `TIERCACHE_TEST_L1_BYTES` set |
+| Store contract | `storetest/`, run by `offheap/` and `onheap/` | each line of the `Store` contract against each store at several capacities, under concurrency; the entry limits against the libraries; and the suite against eight deliberately broken stores |
+| Both stores | `cache_test.go` (`TestTheSuiteHoldsOnTheHeapStore`) | the whole cache suite — this table, at the layer being run — once more on `onheap`: the test binary runs itself with `TIERCACHE_TEST_STORE=onheap` |
 | Integration | `integration_test.go` | the same cache on a real Valkey: TTLs, `SET NX` / `IFEQ`, tombstones, Pub/Sub, values from 0 bytes to 4 MiB |
 | Chaos | `chaos_test.go` | Valkey down, frozen, slow, black-holed, resetting, cutting replies mid-value: every read answers correctly within a bound, and L2 is picked up again |
 | Soak | `chaos_test.go` | two processes reading and invalidating under flapping faults: no failed read, no foreign or uncommitted value, convergence afterwards |

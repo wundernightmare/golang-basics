@@ -18,7 +18,7 @@
 #   - NOT COVERED here is a gremlins limitation, not untested code: Go's
 #     cover profile has no block for a `case` expression or a const.
 #   - Known survivors, all equivalent — anything else is a gap:
-#       cache.go       cap(*buf) <= 2*maxEntry()   (which buffers are pooled: speed only)
+#       cache.go       cap(*buf) <= 2*MaxEntry()   (which buffers are pooled: speed only)
 #                      nowMs < heldHard, < heldSoftMs, hardMs > limitMs
 #                                                  (resolve / staleFallback read the wall clock:
 #                                                   the equal millisecond is not reachable; the
@@ -33,6 +33,7 @@ unleash:
   output-statuses: lt # print only LIVED and TIMED OUT — the ones that matter
   exclude-files:
     - "doc\\.go$"
+    - "^storetest/" # the store conformance suite: test code in a non-_test file
   threshold:
     efficacy: 88
     mutant-coverage: 80

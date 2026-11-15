@@ -1,111 +1,68 @@
 package tiercache
 
-import (
-	"unsafe"
-
-	"github.com/VictoriaMetrics/fastcache"
-	"github.com/coocood/freecache"
-)
-
-const (
-	// offHeapStep is the granularity (and the minimum) of the off-heap
-	// store: a capacity below it gets the heap store instead.
-	offHeapStep = 32 << 20
-	// heapMin is the least the heap store holds (freecache: minBufSize).
-	heapMin = 512 << 10
-
-	// offHeapMaxEntry is the largest key+envelope the off-heap store holds:
-	// its rings are made of 64 KiB chunks, and an entry with its 4 bytes of
-	// lengths must be smaller than one (fastcache: `4+len(k)+len(v) >=
-	// chunkSize` is dropped), hence 5.
-	offHeapMaxEntry = 64<<10 - 5
-	// The heap store holds a key+envelope of at most a quarter of one of
-	// its 256 segments, less the entry header (freecache: `len(key)+
-	// len(value) > len(seg.rb.data)/4 - ENTRY_HDR_SIZE` is refused).
-	heapSegments    = 256
-	heapEntryShare  = 4
-	heapEntryHeader = freecache.ENTRY_HDR_SIZE
-)
-
-// store is L1: a fixed amount of memory that holds what fits and forgets the
-// rest. A store never fails and never blocks on anything but its own locks;
-// an entry larger than maxEntry is the caller's to refuse — a store drops it
-// silently. TestLargestEntryL1AcceptsIsHeld checks maxEntry against each.
-type store interface {
-	// get appends the value at key to dst.
-	get(dst, key []byte) ([]byte, bool)
-	set(key, value []byte)
-	del(key []byte)
-	reset()
-	// maxEntry is the largest key+value the store holds.
-	maxEntry() int
-	// bytes is the memory the store holds now.
-	bytes() int
+// Store is L1: a bounded amount of memory in the process that holds the
+// entries it has room for and forgets the rest. Two are provided — offheap
+// and onheap, in the packages of those names — and a service may bring its
+// own; storetest.Run is the proof that one keeps this contract.
+//
+// The contract says what a [Cache] relies on, not how a store is built: what
+// it evicts and when, how it is laid out and where its memory lives are its
+// own business.
+//
+//   - Concurrency. Every method may be called from any number of goroutines
+//     at once, and takes effect at one instant between its call and its
+//     return.
+//
+//   - No failures, no waiting. A method does no I/O, returns no error and
+//     blocks on nothing but the store's own short critical sections: Get is
+//     on the path of every read of the cache.
+//
+//   - Keys and values. A key is a non-empty string of up to [MaxKeyLen]
+//     bytes, a value any bytes, none included; neither needs to be text. A
+//     value of no bytes is a value: it is found.
+//
+//   - A store forgets, and never misremembers. Get may report any key as not
+//     found, at any time — that is eviction. What it must never do is report
+//     a value other than the one given to the latest Set of that key: not
+//     another key's, not a part of one, and not an earlier one. In
+//     particular, once Delete or Reset has returned, and once a Set has
+//     returned whether it kept its value or not, the value that was there
+//     before is gone for good.
+//
+//   - A store is of use. With no other call in between, a Get that follows a
+//     Set of an entry within MaxEntry finds it.
+//
+//   - Nothing is shared. A store keeps no reference to the value given to
+//     Set nor to the buffer given to Get after the call returns, and changes
+//     neither beyond appending to that buffer; what Get returns is the
+//     caller's.
+//
+//   - Bounded memory. Bytes never exceeds the capacity the store was built
+//     with, as its provider documents it, however much is written.
+type Store interface {
+	// Get appends the value at key to dst and returns the result, or returns
+	// dst as it was and false.
+	Get(dst []byte, key string) (value []byte, found bool)
+	// Set makes value the value at key, or — when the store has no room for
+	// it — leaves key not found. An entry of len(key)+len(value) within
+	// MaxEntry is kept.
+	Set(key string, value []byte)
+	// Delete leaves key not found. Deleting a key that is not there is fine.
+	Delete(key string)
+	// Reset leaves every key not found. The store stays usable; a store that
+	// can hand memory back does it here.
+	Reset()
+	// MaxEntry is the largest len(key)+len(value) the store keeps: positive,
+	// and the same for as long as the store lives. A [Cache] does not offer
+	// it more — such an entry is served from L2 and counted.
+	MaxEntry() int
+	// Bytes is the memory the store holds for its entries now, for the
+	// tiercache_l1_bytes gauge: cheap enough to be read on every scrape.
+	Bytes() int
 }
 
-// newStore picks the store by capacity. From 32 MiB up it is the off-heap
-// one, which is sized in steps of 32 MiB and is not counted by the garbage
-// collector; below, a heap one of exactly the capacity asked for (512 KiB at
-// least), which the Go memory limit does count.
-func newStore(maxBytes int) store {
-	if maxBytes >= offHeapStep {
-		return offHeap{fastcache.New(maxBytes)}
-	}
-
-	maxBytes = max(maxBytes, heapMin)
-
-	return onHeap{cache: freecache.NewCache(maxBytes), capacity: maxBytes}
-}
-
-type offHeap struct{ cache *fastcache.Cache }
-
-func (s offHeap) get(dst, key []byte) ([]byte, bool) { return s.cache.HasGet(dst, key) }
-func (s offHeap) set(key, value []byte)              { s.cache.Set(key, value) }
-func (s offHeap) del(key []byte)                     { s.cache.Del(key) }
-func (s offHeap) reset()                             { s.cache.Reset() }
-func (offHeap) maxEntry() int                        { return offHeapMaxEntry }
-
-// bytes is what the store has taken from the system so far: it grows to the
-// capacity as entries arrive and is never given back.
-func (s offHeap) bytes() int {
-	var stats fastcache.Stats
-
-	s.cache.UpdateStats(&stats)
-
-	return int(stats.BytesSize) //nolint:gosec // G115: bounded by the capacity
-}
-
-type onHeap struct {
-	cache    *freecache.Cache
-	capacity int
-}
-
-func (s onHeap) get(dst, key []byte) ([]byte, bool) {
-	// The store copies into the buffer when the value fits its capacity and
-	// allocates otherwise; either way the result starts at its first byte.
-	value, err := s.cache.GetWithBuf(key, dst[:0])
-
-	return value, err == nil
-}
-
-// set stores without an expiry of the store's own: the envelope carries the
-// deadlines. The only error is an entry over maxEntry, which the caller has
-// refused already.
-func (s onHeap) set(key, value []byte) { _ = s.cache.Set(key, value, 0) }
-func (s onHeap) del(key []byte)        { s.cache.Del(key) }
-func (s onHeap) reset()                { s.cache.Clear() }
-
-func (s onHeap) maxEntry() int {
-	return s.capacity/heapSegments/heapEntryShare - heapEntryHeader
-}
-
-// bytes is the capacity: the rings are allocated in full at construction.
-func (s onHeap) bytes() int { return s.capacity }
-
-// keyBytes is key as the bytes a store reads: no store keeps or changes the
-// slice it is given (both copy the key into their ring), so the string's own
-// memory is lent instead of copied — a key of any length costs a read no
-// allocation.
-func keyBytes(key string) []byte {
-	return unsafe.Slice(unsafe.StringData(key), len(key)) //nolint:gosec // G103: read-only view of an immutable string, see above
-}
+// StoreFactory builds the [Store] of one cache: offheap.New, onheap.New, or
+// a service's own. maxBytes is [Config.MaxBytes], always positive; what a
+// store does with a capacity it cannot have exactly (a minimum, a step) is
+// for its provider to document.
+type StoreFactory func(maxBytes int) Store

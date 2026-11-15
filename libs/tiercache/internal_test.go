@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
@@ -97,13 +100,57 @@ func TestConfig(t *testing.T) {
 func TestMetricsAreLintClean(t *testing.T) {
 	t.Parallel()
 
-	cache, err := New(Config{Name: "lint", HardTTL: time.Minute}, byteCodec{}, func(context.Context, string) ([]byte, error) { return nil, nil }, nil, nil)
+	cache, err := New(Config{Name: "lint", HardTTL: time.Minute}, newMapStore, byteCodec{}, func(context.Context, string) ([]byte, error) { return nil, nil }, nil, nil)
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(cache.Collectors()...)
 	testx.LintMetrics(t, reg)
+}
+
+// mapStore is the L1 of the tests in this package, which are about the
+// envelope and the deadlines and need no more of a store than a map: the
+// real ones are in offheap and onheap, which cannot be imported from here
+// (they import this package).
+type mapStore struct {
+	mu      sync.Mutex
+	entries map[string][]byte
+}
+
+func newMapStore(int) Store { return &mapStore{entries: map[string][]byte{}} }
+
+func (*mapStore) MaxEntry() int { return 1 << 20 }
+func (*mapStore) Bytes() int    { return 0 }
+
+func (s *mapStore) Get(dst []byte, key string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	value, found := s.entries[key]
+
+	return append(dst, value...), found
+}
+
+func (s *mapStore) Set(key string, value []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.entries[key] = append([]byte(nil), value...)
+}
+
+func (s *mapStore) Delete(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.entries, key)
+}
+
+func (s *mapStore) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	clear(s.entries)
 }
 
 type byteCodec struct{}
@@ -119,11 +166,7 @@ func newByteCache(t *testing.T, log *slog.Logger, tune func(*Config)) *Cache[[]b
 		tune(&cfg)
 	}
 
-	if cfg.MaxBytes == 0 {
-		cfg.MaxBytes = SuiteL1Bytes()
-	}
-
-	cache, err := New(cfg, byteCodec{}, func(context.Context, string) ([]byte, error) { return nil, nil }, nil, log)
+	cache, err := New(cfg, newMapStore, byteCodec{}, func(context.Context, string) ([]byte, error) { return nil, nil }, nil, log)
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
 
@@ -169,6 +212,31 @@ func TestEnvelopeAcceptsItsLargestDeadline(t *testing.T) {
 	_, hard, _, ok = parseEnvelope(appendHeader(nil, 1, 1<<62+1))
 	assert.False(t, ok)
 	assert.Zero(t, hard)
+}
+
+// The cache offers L1 an entry of exactly its limit and nothing larger: one
+// byte more is counted and never reaches the store.
+func TestTheLargestEntryIsOfferedToL1AndNoLarger(t *testing.T) {
+	t.Parallel()
+
+	cache := newByteCache(t, nil, nil)
+	limit := cache.local.MaxEntry()
+
+	for _, key := range []string{"k", KeyOf("largest"), strings.Repeat("k", MaxKeyLen)} {
+		cache.fill(cache.epoch.Load(), key, make([]byte, limit-len(key)))
+
+		held, found := cache.local.Get(nil, key)
+		require.True(t, found, "an entry of MaxEntry bytes is in L1")
+		assert.Len(t, held, limit-len(key))
+	}
+
+	assert.Zero(t, testutil.ToFloat64(cache.metrics.oversize))
+
+	cache.fill(cache.epoch.Load(), "over", make([]byte, limit-len("over")+1))
+
+	_, found := cache.local.Get(nil, "over")
+	assert.False(t, found)
+	assert.InDelta(t, 1, testutil.ToFloat64(cache.metrics.oversize), 0)
 }
 
 // StaleIfError = 0 turns the fallback off, whatever the levels still hold.

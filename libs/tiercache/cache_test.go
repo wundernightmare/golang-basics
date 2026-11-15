@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,8 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/testx/containers"
 	"github.com/tracehubmmp/golang-basics/libs/tiercache"
 	"github.com/tracehubmmp/golang-basics/libs/tiercache/credential"
+	"github.com/tracehubmmp/golang-basics/libs/tiercache/offheap"
+	"github.com/tracehubmmp/golang-basics/libs/tiercache/onheap"
 )
 
 // One Valkey per test binary for the integration and chaos suites; the leak
@@ -555,6 +558,39 @@ func TestCorruptL2EntriesAreReplaced(t *testing.T) {
 	}
 }
 
+// A value that outgrows L1 takes its smaller predecessor out of it: the
+// reads that follow are served from L2, not the older value from L1 until
+// its deadline.
+func TestAValueThatOutgrowsL1LeavesIt(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		remote, src, key := newFakeRemote(), newSource(), "tenant:42"
+		src.set(key, 1)
+
+		rig := newHarness(t, remote, src, nil)
+
+		synctest.Wait()
+		require.Equal(t, "v1", rig.version(t, key))
+		require.Equal(t, "v1", rig.version(t, key))
+		require.InDelta(t, 1, rig.reads(t, "fresh"), 0, "the small value is in L1")
+
+		// The row grows past the entry limit; the stale read refreshes it.
+		src.set(key, 2)
+		src.payload = 70_000
+
+		time.Sleep(20 * time.Second)
+		require.Equal(t, "v1", rig.version(t, key))
+		synctest.Wait()
+
+		require.InDelta(t, 1, rig.metric(t, "tiercache_l1_oversize_total", nil), 0)
+
+		fromL2 := rig.reads(t, "l2")
+
+		assert.Equal(t, "v2", rig.version(t, key), "not v1 from L1, stale for the rest of its hard TTL")
+		assert.InDelta(t, fromL2+1, rig.reads(t, "l2"), 0)
+	})
+}
+
 func TestEntryTooLargeForL1IsServedFromL2(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -710,14 +746,71 @@ func TestNewRejectsWhatItCannotRunWith(t *testing.T) {
 	load := newSource().load
 	good := tiercache.Config{Name: "c", HardTTL: time.Minute}
 
-	_, err := tiercache.New(tiercache.Config{HardTTL: time.Minute}, credential.Codec{}, load, nil, nil)
+	_, err := tiercache.New(tiercache.Config{HardTTL: time.Minute}, offheap.New, credential.Codec{}, load, nil, nil)
 	require.ErrorContains(t, err, "Name")
 
-	_, err = tiercache.New[credential.Credential](good, nil, load, nil, nil)
-	require.ErrorContains(t, err, "codec and loader")
+	_, err = tiercache.New[credential.Credential](good, offheap.New, nil, load, nil, nil)
+	require.ErrorContains(t, err, "store, codec and loader")
 
-	_, err = tiercache.New(good, credential.Codec{}, nil, nil, nil)
-	require.ErrorContains(t, err, "codec and loader")
+	_, err = tiercache.New(good, offheap.New, credential.Codec{}, nil, nil, nil)
+	require.ErrorContains(t, err, "store, codec and loader")
+
+	_, err = tiercache.New(good, nil, credential.Codec{}, load, nil, nil)
+	require.ErrorContains(t, err, "store, codec and loader")
+
+	_, err = tiercache.New(good, func(int) tiercache.Store { return nil }, credential.Codec{}, load, nil, nil)
+	require.ErrorContains(t, err, "returned no store")
+}
+
+// The factory is handed the capacity of the configuration — the default
+// when it names none — and its store is the cache's L1.
+func TestTheStoreIsBuiltWithTheConfiguredCapacity(t *testing.T) {
+	t.Parallel()
+
+	for configured, want := range map[int]int{0: tiercache.DefaultMaxBytes, -1: tiercache.DefaultMaxBytes, 4 << 20: 4 << 20} {
+		asked := 0
+
+		cache, err := tiercache.New(tiercache.Config{Name: "c", HardTTL: time.Minute, MaxBytes: configured},
+			func(maxBytes int) tiercache.Store {
+				asked = maxBytes
+
+				return onheap.New(maxBytes)
+			}, credential.Codec{}, newSource().load, nil, nil)
+		require.NoError(t, err)
+		cache.Close()
+
+		assert.Equal(t, want, asked, "configured: %d", configured)
+	}
+
+	assert.Equal(t, 32<<20, tiercache.DefaultMaxBytes)
+}
+
+// Every test builds its caches on the off-heap store unless it says
+// otherwise. This runs them all once more on the heap store — the same
+// binary, with the suite's store set — so a rule of the cache that holds on
+// one store and not on the other fails here. (What a store itself owes is
+// storetest's, run by each provider.)
+//
+//nolint:paralleltest // serial: a second suite beside this one would have both wait on each other's Valkey and CPU
+func TestTheSuiteHoldsOnTheHeapStore(t *testing.T) {
+	if onTheHeap() {
+		t.Skip("this is the second run")
+	}
+
+	args := []string{"-test.count=1", "-test.shuffle=on"}
+	if testing.Short() {
+		args = append(args, "-test.short")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Minute)
+	defer cancel()
+
+	child := exec.CommandContext(ctx, os.Args[0], args...)
+
+	child.Env = append(os.Environ(), suiteStoreEnv+"=onheap")
+
+	out, err := child.CombinedOutput()
+	require.NoError(t, err, "on the heap store:\n%s", out)
 }
 
 // The budget of the hot path: a fresh read allocates what Decode returns —
@@ -743,7 +836,7 @@ func TestFreshReadAllocatesOnlyTheDecodedValue(t *testing.T) {
 	})
 	assert.InDelta(t, 3, allocs, 0, "one per string field")
 
-	counters, err := tiercache.New(tiercache.Config{Name: "allocs", HardTTL: time.Minute}, fixedCodec{},
+	counters, err := tiercache.New(tiercache.Config{Name: "allocs", HardTTL: time.Minute, MaxBytes: suiteBytes()}, suiteStore(), fixedCodec{},
 		func(context.Context, string) (uint64, error) { return 42, nil }, nil, nil)
 	require.NoError(t, err)
 	t.Cleanup(counters.Close)
@@ -967,7 +1060,7 @@ func BenchmarkGetFresh(b *testing.B) {
 	src, key := newSource(), tiercache.KeyOf("a")
 	src.set(key, 1)
 
-	cache, err := tiercache.New(tiercache.Config{Name: "bench", HardTTL: time.Hour}, credential.Codec{}, src.load, nil, nil)
+	cache, err := tiercache.New(tiercache.Config{Name: "bench", HardTTL: time.Hour, MaxBytes: suiteBytes()}, suiteStore(), credential.Codec{}, src.load, nil, nil)
 	require.NoError(b, err)
 	b.Cleanup(cache.Close)
 
