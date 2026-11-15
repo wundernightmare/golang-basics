@@ -18,8 +18,12 @@ import (
 // use; construct one with [New] and share it.
 //
 // Every command runs under an OpenTelemetry client span (child of the span in
-// the calling context) via valkeyotel, is bounded by Config.OpTimeout, and is
-// measured — register [Cache.Collectors] to export the metrics.
+// the calling context) via valkeyotel. The commands of Get, Set, SetNX,
+// Replace, Del and Publish are also bounded by Config.OpTimeout and measured
+// — register [Cache.Collectors] to export the metrics. The rest is not: the
+// PING of [Cache.ReadyCheck] has a timeout of its own, a subscription
+// ([Cache.Subscribe]) lives as long as its context, and what goes through
+// [Cache.Client] is the caller's to bound.
 type Cache struct {
 	client    valkeygo.Client
 	log       *slog.Logger
@@ -74,6 +78,13 @@ func New(cfg Config, log *slog.Logger, opts ...Option) (*Cache, error) {
 
 	return &Cache{client: newBounded(client, cfg.PoolSize), log: log, metrics: newMetrics(), opTimeout: cfg.OpTimeout}, nil
 }
+
+// readyCheckTimeout bounds the PING of [Cache.ReadyCheck] whatever the
+// caller's context allows. Under libs/httpx it is the tighter of two bounds
+// for as long as HEALTH_CHECK_TIMEOUT is above it (its default is): the check
+// then fails with its own "valkey unreachable", not with httpx's "check did
+// not return".
+const readyCheckTimeout = 2 * time.Second
 
 // do runs one command under the per-command deadline and records its latency
 // and (a nil reply — a missing key — is an answer, not an error) its failure.
@@ -174,10 +185,10 @@ func (c *Cache) Del(ctx context.Context, keys ...string) error {
 }
 
 // ReadyCheck returns a readiness probe (a libs/httpx CheckFunc) that PINGs the
-// cache with a short timeout.
+// cache under a fixed timeout of its own (readyCheckTimeout).
 func (c *Cache) ReadyCheck() func(ctx context.Context) error {
 	return func(ctx context.Context) error {
-		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, readyCheckTimeout)
 		defer cancel()
 
 		if err := c.client.Do(ctx, c.client.B().Ping().Build()).Error(); err != nil {

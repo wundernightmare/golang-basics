@@ -15,18 +15,18 @@ const (
 	headerSize      = 1 + 8 + 8
 )
 
-// appendHeader appends the envelope header to dst.
 func appendHeader(dst []byte, softMs, hardMs int64) []byte {
 	dst = append(dst, envelopeVersion)
-	dst = binary.BigEndian.AppendUint64(dst, uint64(softMs)) //nolint:gosec // a Unix-millisecond deadline is never negative
-	dst = binary.BigEndian.AppendUint64(dst, uint64(hardMs)) //nolint:gosec // (same)
+	dst = binary.BigEndian.AppendUint64(dst, uint64(softMs)) //nolint:gosec // G115: a Unix-millisecond deadline is never negative
+	dst = binary.BigEndian.AppendUint64(dst, uint64(hardMs)) //nolint:gosec // G115: a Unix-millisecond deadline is never negative
 
 	return dst
 }
 
 // parseEnvelope splits an envelope. ok is false for anything this version did
-// not write — too short, another format version, deadlines out of order — and
-// the caller treats that as a miss: bytes from a cache are never trusted.
+// not write — too short, another format version, deadlines out of order or
+// beyond 1<<62, so that both are int64 without a change of sign — and the
+// caller treats that as a miss: bytes from a cache are never trusted.
 func parseEnvelope(env []byte) (softMs, hardMs int64, payload []byte, ok bool) {
 	if len(env) < headerSize || env[0] != envelopeVersion {
 		return 0, 0, nil, false
@@ -39,5 +39,5 @@ func parseEnvelope(env []byte) (softMs, hardMs int64, payload []byte, ok bool) {
 		return 0, 0, nil, false
 	}
 
-	return int64(soft), int64(hard), env[headerSize:], true //nolint:gosec // bounded by the check above
+	return int64(soft), int64(hard), env[headerSize:], true //nolint:gosec // G115: soft ≤ hard ≤ 1<<62, checked above
 }

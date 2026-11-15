@@ -82,7 +82,7 @@ func TestSend_ANameThatDoesNotResolveIsAConnectionFailure(t *testing.T) {
 
 			c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }), resolving(t, dns))
 
-			_, err := c.Send("api", get(t, t.Context(), "http://"+dnsName+":80")) //nolint:bodyclose // error
+			_, err := c.Send("api", get(t, t.Context(), "http://"+dnsName+":80"))
 			require.ErrorIs(t, err, resilient.KindConnection)
 			assert.True(t, resilient.Retryable(err))
 
@@ -114,7 +114,7 @@ func TestSend_ASilentNameServerIsBoundedByTheAttemptTimeout(t *testing.T) {
 	}), resolving(t, dns))
 
 	start := time.Now()
-	_, err := c.Send("api", get(t, t.Context(), "http://"+dnsName+":80")) //nolint:bodyclose // error
+	_, err := c.Send("api", get(t, t.Context(), "http://"+dnsName+":80"))
 	took := time.Since(start)
 
 	require.ErrorIs(t, err, resilient.KindTimeout)

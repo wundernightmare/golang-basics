@@ -39,7 +39,7 @@ const fetchWarnEvery = time.Minute
 // dead-lettering, drain — is the same whichever provider is linked (see
 // [Driver]); the provider only polls, commits and reports group changes.
 // Register [Consumer.Collectors] for throughput, retries, dead-lettering,
-// commits and rebalances (the group's lag is the broker's to export).
+// commits and rebalances (not the group's lag: README "Observability").
 //
 // A Consumer is single-use: [Consumer.Run] closes it when it returns.
 type Consumer struct {
@@ -49,9 +49,12 @@ type Consumer struct {
 	metrics *consumerMetrics
 	tel     telemetry
 
+	// mu guards pending and owned: the loop marks and commits, the driver's
+	// rebalance callbacks prune both, and a driver may run those on a
+	// goroutine of its client (see [Driver.NewConsumer]).
 	mu      sync.Mutex
-	pending map[TopicPartition]int64 // processed, not yet committed: the latest offset per partition
-	owned   map[TopicPartition]struct{}
+	pending map[TopicPartition]int64    // processed, not yet committed: the latest offset per partition
+	owned   map[TopicPartition]struct{} // assigned to this member now: nothing else is processed or committed
 
 	running       atomic.Bool
 	closeOnce     sync.Once
@@ -108,7 +111,7 @@ func NewConsumer(ctx context.Context, cfg Config, log *slog.Logger, opts ...Opti
 	warnPlaintextSASL(ctx, cfg, log)
 
 	dlq := cfg.DeadLetterTopic
-	if cfg.deadLetterTopic("x") == "" {
+	if cfg.deadLetterTopic("x") == "" { // "" only when the DLQ is disabled, whatever the source topic
 		dlq = "disabled"
 	}
 

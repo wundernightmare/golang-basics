@@ -17,6 +17,7 @@ import (
 	"runtime/trace"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -106,7 +107,8 @@ type diagnostics struct {
 	nextSpool  time.Time
 
 	flight         *trace.FlightRecorder // nil: no flight recorder (flight.go)
-	flightRequests chan string           // snapshot requests for the watcher; nil when off
+	flightOn       atomic.Bool           // a recorder runs and the watcher reads flightRequests; read by request goroutines
+	flightRequests chan string           // snapshot requests for the watcher; nil when DIAG_FLIGHT_RECORDER is off
 	lastFlight     time.Time
 }
 
@@ -205,7 +207,7 @@ func (d *diagnostics) armCrashCapture(ctx context.Context) {
 
 	name := fmt.Sprintf("%s%s-%d%s", crashPendingPrefix, d.started.UTC().Format(dumpStamp), os.Getpid(), crashPendingSuffix)
 
-	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600) //nolint:gosec // the directory is the operator's configuration
+	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600) //nolint:gosec // G304: the directory is the operator's configuration
 	if err != nil {
 		d.log.WarnContext(ctx, "diagnostics: cannot create the crash file, crash capture is off", "dir", dir, "error", err.Error())
 		return
@@ -253,7 +255,7 @@ type crashReport struct {
 // build fields describe the binary that found it; after a rollout that
 // crashes, that is normally the one that crashed.
 func (d *diagnostics) wrapCrash(path string, info fs.FileInfo) (artifact, error) {
-	file, err := os.Open(path) //nolint:gosec // a file this package created in the configured directory
+	file, err := os.Open(path) //nolint:gosec // G304: a file this package created in the configured directory
 	if err != nil {
 		return artifact{}, fmt.Errorf("open: %w", err)
 	}
@@ -353,7 +355,7 @@ func (d *diagnostics) memoryArtifacts(at time.Time, usage, limit int64) []artifa
 
 	runtime.ReadMemStats(&stats)
 
-	held := int64(stats.Sys - stats.HeapReleased) //nolint:gosec // far below MaxInt64
+	held := int64(stats.Sys - stats.HeapReleased) //nolint:gosec // G115: bytes of process memory, far below MaxInt64
 
 	out := make([]artifact, 0, 3) //nolint:mnd // the report and two profiles
 
@@ -446,8 +448,9 @@ func (d *diagnostics) deliver(ctx context.Context, art artifact) {
 
 // flushSpool ships what is waiting in the dump directory: crash files of
 // earlier runs (an empty one is a run that was killed, not one that crashed)
-// and artifacts whose upload failed. A file leaves the directory only after
-// its upload succeeded.
+// and artifacts whose upload failed. An uploaded file is removed only after
+// its upload succeeded; what else leaves the directory is an empty crash
+// file (spooled) and whatever is over DIAG_SPOOL_MAX_FILES (trimSpool).
 func (d *diagnostics) flushSpool(ctx context.Context) {
 	d.nextSpool = d.now().Add(d.cfg.DiagSpoolRetry)
 
@@ -536,7 +539,7 @@ func (d *diagnostics) spooled(path, name string, info fs.FileInfo) (artifact, bo
 		return artifact{}, false
 	}
 
-	body, err := os.ReadFile(path) //nolint:gosec // a file this package wrote in the configured directory
+	body, err := os.ReadFile(path) //nolint:gosec // G304: a file this package wrote in the configured directory
 	if err != nil {
 		return artifact{}, false
 	}

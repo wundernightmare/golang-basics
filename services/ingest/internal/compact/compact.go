@@ -389,7 +389,7 @@ func runID(objects []s3.Object) string {
 
 	for _, obj := range objects {
 		digest.Write([]byte(obj.Key))
-		digest.Write([]byte{0})
+		digest.Write([]byte{0}) // a separator: where one key ends is part of the set
 	}
 
 	return hex.EncodeToString(digest.Sum(nil))[:12]

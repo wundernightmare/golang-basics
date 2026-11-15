@@ -25,7 +25,8 @@
 //
 // L1 is the always-on level. A nil [Remote], an unreachable or a slow one
 // never fails a read: every L2 call has its own deadline, a circuit breaker
-// skips L2 after consecutive failures, and the loader answers instead. What
+// skips L2 once the configured share of its recent calls failed
+// ([Config.Breaker]), and the loader answers instead. What
 // is lost is sharing between processes and invalidation — bounded by the TTL.
 //
 // # Invalidation

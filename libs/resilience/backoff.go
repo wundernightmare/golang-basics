@@ -29,5 +29,5 @@ func Backoff(attempt int, initial, maxDelay time.Duration) time.Duration {
 		return delay
 	}
 
-	return half + rand.N(half+1) //nolint:gosec // jitter, not a secret
+	return half + rand.N(half+1) //nolint:gosec // G404: jitter, predictability is harmless
 }

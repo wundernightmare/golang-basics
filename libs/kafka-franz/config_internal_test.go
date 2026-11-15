@@ -9,7 +9,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"math"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,9 +20,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/wundernightmare/golang-basics/libs/kafka"
+	"github.com/wundernightmare/golang-basics/libs/kafka/kafkatest"
 	"github.com/wundernightmare/golang-basics/libs/secret"
 )
 
@@ -283,4 +288,71 @@ func TestDriver_ClientsFailOnBadSecurity(t *testing.T) {
 	require.Error(t, err)
 	_, err = Driver{}.NewConsumer(cfg, nil, kafka.Rebalance{})
 	require.Error(t, err)
+}
+
+// A broker error is the kind libs/kafka's README "Errors" gives it — the
+// table both providers are held to — and franz-go's own errors, which carry
+// no Kafka code, are the kind their meaning has.
+func TestSendError_Taxonomy(t *testing.T) {
+	t.Parallel()
+
+	kindOf := func(err error) string {
+		var se *kafka.SendError
+		require.ErrorAs(t, sendError(err), &se)
+		assert.Equal(t, se.Kind != kafka.KindRejected, se.Retryable)
+
+		return se.Kind
+	}
+
+	for code, want := range kafkatest.BrokerSendErrorKinds() {
+		protocolErr := kerr.ErrorForCode(code)
+		require.Error(t, protocolErr, "code %d", code)
+		assert.Equal(t, want, kindOf(protocolErr), protocolErr.Error())
+	}
+
+	assert.Len(t, sendErrorKinds, len(kafkatest.BrokerSendErrorKinds()), "no broker code is mapped here and missing from the shared table")
+	assert.Equal(t, kafka.KindUnknown, kindOf(kerr.OffsetOutOfRange), "a code the table does not name")
+
+	assert.Equal(t, kafka.KindQueueFull, kindOf(kgo.ErrMaxBuffered))
+	assert.Equal(t, kafka.KindUnavailable, kindOf(kgo.ErrRecordTimeout))
+	assert.Equal(t, kafka.KindUnavailable, kindOf(kgo.ErrRecordRetries))
+	assert.Equal(t, kafka.KindUnavailable, kindOf(kgo.ErrClientClosed))
+	assert.Equal(t, kafka.KindUnavailable, kindOf(&net.OpError{Op: "dial", Err: errors.New("connection refused")}),
+		"a connection error has no Kafka code")
+	assert.Equal(t, kafka.KindUnknown, kindOf(errors.New("anything else")))
+	assert.NoError(t, sendError(nil))
+}
+
+// The read bound follows the fetch size, has a floor, and stops at the most
+// franz-go accepts; a fetch size above that is a config error with the key's
+// name, not a client that fails to build.
+func TestBrokerMaxReadBytes(t *testing.T) {
+	t.Parallel()
+
+	for fetch, want := range map[int]int32{
+		4 << 20:                    minBrokerReadBytes,
+		32 << 20:                   32<<20 + fetchFraming,
+		maxBrokerReadBytes - 1<<10: maxBrokerReadBytes,
+		maxBrokerReadBytes:         maxBrokerReadBytes,
+	} {
+		assert.Equal(t, want, brokerMaxReadBytes(kafka.Config{ConsumerFetchMaxBytes: fetch}), "fetch.max.bytes %d", fetch)
+	}
+
+	cfg := kafka.Config{
+		Brokers: []string{"localhost:1"}, ProducerQueueMaxKBytes: math.MaxInt32/1024 + 1,
+		ConsumerFetchMaxBytes: maxBrokerReadBytes,
+	}
+	require.NoError(t, cfg.Validate())
+	opts, err := commonOpts(cfg, newStats(cfg))
+	require.NoError(t, err)
+	cl, err := kgo.NewClient(opts...)
+	require.NoError(t, err, "franz-go accepts the largest fetch size Validate lets through")
+	cl.Close()
+
+	cfg.ConsumerFetchMaxBytes = maxBrokerReadBytes + 1
+	require.ErrorContains(t, cfg.Validate(), "KAFKA_CONSUMER_FETCH_MAX_BYTES (1073741825) is above 1073741824")
+
+	cfg.ConsumerFetchMaxBytes = math.MaxInt32
+	cfg.MessageMaxBytes = math.MaxInt32
+	require.ErrorContains(t, cfg.Validate(), "KAFKA_CONSUMER_FETCH_MAX_BYTES")
 }

@@ -8,9 +8,8 @@
 // librdkafka properties (KAFKA_*_EXTRA_PROPERTIES) have no franz-go
 // equivalent and are a config error here. Client metrics come from franz-go
 // hooks (connections, request errors), reported while
-// KAFKA_STATISTICS_INTERVAL_MS is not 0; consumer-group lag is the broker's
-// to export. See libs/kafka's README for when to pick it over
-// libs/kafka-rdkafka.
+// KAFKA_STATISTICS_INTERVAL_MS is positive (negative = off). See libs/kafka's
+// README for when to pick it over libs/kafka-rdkafka.
 package franz
 
 import (
@@ -19,7 +18,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -108,13 +106,10 @@ func (p *producer) Send(ctx context.Context, msg kafka.Message) error {
 	}
 }
 
-// Ping implements kafka.ProducerClient.
 func (p *producer) Ping(ctx context.Context) error { return ping(ctx, p.cl) }
 
-// Stats implements kafka.ProducerClient.
 func (p *producer) Stats() kafka.ClientStats { return p.stats.producer() }
 
-// Close implements kafka.ProducerClient.
 func (p *producer) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), flushOnClose)
 	defer cancel()
@@ -139,8 +134,9 @@ func ping(ctx context.Context, cl *kgo.Client) error {
 	}
 }
 
-// sendErrorKinds maps Kafka protocol errors onto the libs/kafka kinds (the
-// same codes as the librdkafka provider and Node's KAFKA_SEND_ERRORS).
+// sendErrorKinds maps Kafka protocol errors onto the libs/kafka kinds. The
+// table of record is libs/kafka's README "Errors"; a broker code is the same
+// kind in the librdkafka provider's map.
 var sendErrorKinds = map[*kerr.Error]string{ //nolint:gochecknoglobals // read-only lookup table (Go has no const maps)
 	kerr.RequestTimedOut:              kafka.KindUnavailable,
 	kerr.LeaderNotAvailable:           kafka.KindUnavailable,
@@ -167,6 +163,8 @@ var sendErrorKinds = map[*kerr.Error]string{ //nolint:gochecknoglobals // read-o
 	kerr.InvalidTopicException: kafka.KindRejected,
 }
 
+// sendError maps a produce error onto the registry: a protocol error by
+// its code, franz-go's own sentinels by what they say.
 func sendError(err error) error {
 	if err == nil {
 		return nil
@@ -187,6 +185,8 @@ func sendError(err error) error {
 		kind = kafka.KindUnavailable
 	}
 
+	// A net.Error carries no Kafka code: a connection that failed or timed
+	// out is the brokers being unavailable, as librdkafka's _TRANSPORT is.
 	var ne net.Error
 	if kind == kafka.KindUnknown && errors.As(err, &ne) {
 		kind = kafka.KindUnavailable
@@ -232,13 +232,13 @@ type consumer struct {
 	rb    kafka.Rebalance
 	stats *stats
 
-	mu    sync.Mutex
-	owned map[kafka.TopicPartition]struct{}
-
 	closed atomic.Bool
 }
 
-// Poll implements kafka.ConsumerClient.
+// Poll implements kafka.ConsumerClient. No record of a revoked partition is
+// in the batch: with BlockRebalanceOnPoll (config.go) franz-go runs no
+// rebalance callback from the moment PollRecords returns until
+// AllowRebalance.
 func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, error) {
 	fetches := c.cl.PollRecords(ctx, maxRecords)
 	if fetches.IsClientClosed() {
@@ -248,6 +248,8 @@ func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, e
 	var errs []error
 
 	fetches.EachError(func(topic string, partition int32, err error) {
+		// A poll cut short by ctx or by Close comes back as a fetch error:
+		// that is the loop stopping, not a broker failing.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, kgo.ErrClientClosed) {
 			return
 		}
@@ -307,16 +309,15 @@ func (c *consumer) Commit(ctx context.Context, offsets []kafka.Offset) error {
 	return cerr
 }
 
-// AllowRebalance implements kafka.ConsumerClient.
+// AllowRebalance implements kafka.ConsumerClient: it releases the group
+// change BlockRebalanceOnPoll has held back since Poll returned.
 func (c *consumer) AllowRebalance() { c.cl.AllowRebalance() }
 
 // DeadLetter implements kafka.ConsumerClient: the same client produces.
 func (c *consumer) DeadLetter() kafka.ProducerClient { return &producer{cl: c.cl, stats: c.stats} }
 
-// Ping implements kafka.ConsumerClient.
 func (c *consumer) Ping(ctx context.Context) error { return ping(ctx, c.cl) }
 
-// Stats implements kafka.ConsumerClient.
 func (c *consumer) Stats() kafka.ClientStats { return c.stats.consumer() }
 
 // Close implements kafka.ConsumerClient: leave the group, committing what
@@ -341,38 +342,16 @@ func toPartitions(m map[string][]int32) []kafka.TopicPartition {
 	return out
 }
 
+// The group callbacks hand franz-go's report to the loop's. franz-go runs
+// them on its own goroutine, not the loop's.
 func (c *consumer) onAssigned(ctx context.Context, _ *kgo.Client, m map[string][]int32) {
-	parts := toPartitions(m)
-
-	c.mu.Lock()
-	if c.owned == nil {
-		c.owned = map[kafka.TopicPartition]struct{}{}
-	}
-
-	for _, p := range parts {
-		c.owned[p] = struct{}{}
-	}
-	c.mu.Unlock()
-	c.rb.Assigned(ctx, parts)
+	c.rb.Assigned(ctx, toPartitions(m))
 }
 
 func (c *consumer) onRevoked(ctx context.Context, _ *kgo.Client, m map[string][]int32) {
-	parts := toPartitions(m)
-	c.rb.Revoked(ctx, parts)
-	c.forget(parts)
+	c.rb.Revoked(ctx, toPartitions(m))
 }
 
 func (c *consumer) onLost(ctx context.Context, _ *kgo.Client, m map[string][]int32) {
-	parts := toPartitions(m)
-	c.rb.Lost(ctx, parts)
-	c.forget(parts)
-}
-
-func (c *consumer) forget(parts []kafka.TopicPartition) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	for _, p := range parts {
-		delete(c.owned, p)
-	}
+	c.rb.Lost(ctx, toPartitions(m))
 }

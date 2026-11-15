@@ -5,7 +5,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// instrumentationName names this library's tracer.
 const instrumentationName = "github.com/wundernightmare/golang-basics/libs/s3"
 
 // Option configures [New].

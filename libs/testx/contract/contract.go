@@ -31,7 +31,9 @@ func workspaceRoot(tb testing.TB) string {
 	_, file, _, ok := runtime.Caller(0)
 	require.True(tb, ok)
 
-	root := filepath.Dir(file) // libs/testx/contract
+	root := filepath.Dir(file) // libs/testx/contract: go.work is three levels up
+	// Bounded: without a go.work above, filepath.Dir stays at "/" and an
+	// open loop would never reach the Fatal below.
 	for range 6 {
 		if _, err := os.Stat(filepath.Join(root, "go.work")); err == nil {
 			return root

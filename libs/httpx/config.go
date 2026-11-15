@@ -21,10 +21,10 @@ import (
 //
 // Two listeners: the API listener (Addr) carries the service's own routes and
 // nothing else; the admin listener (AdminAddr) carries everything operational
-// — /healthz, /livez, /readyz, /metrics, /version, /admin/config,
-// /admin/log-level and /debug/pprof — so an ingress that only routes to the
-// API port never exposes them. A pure worker sets Addr to "" and gets only the
-// admin listener.
+// — the probes, /metrics, /version, /admin/* and /debug/pprof; the table of
+// routes is on newAdminMux (admin.go) and in the README — so an ingress that
+// only routes to the API port never exposes them. A pure worker sets Addr to
+// "" and gets only the admin listener.
 //
 // Keys (with the "PING_" prefix as an example):
 //
@@ -162,8 +162,12 @@ type Config struct {
 }
 
 // keepsZero reports whether [Config.withDefaults] leaves the field alone:
-// its zero is a setting of its own — no API listener, no deadline, no
-// sampling, no delay — so a hand-built Config that leaves it zero means it.
+// its zero is a setting of its own — no listener, no deadline and no floor
+// for it, no drain delay, no slow-request warning, no log sampling, no
+// flight-recorder cooldown — so a hand-built Config that leaves it zero means
+// it. LogSampleThereafter is kept at zero too, though its zero is not a
+// setting: it is read only when LogSampleInitial turns sampling on, and
+// newSamplingHandler then replaces a zero with its own fallback.
 func keepsZero(field string) bool {
 	switch field {
 	case "Addr", "AdminAddr",

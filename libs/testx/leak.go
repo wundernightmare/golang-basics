@@ -14,9 +14,9 @@ import (
 //
 //	func TestMain(m *testing.M) { os.Exit(testx.Main(m)) }
 //
-// opts add goleak ignores for goroutines that are not the code's to stop
-// (containers.Main passes the Docker client's). A run that already failed is
-// reported as is — a leak check on a failed run only adds noise.
+// opts add goleak ignores for goroutines that are not the code's to stop. A
+// run that already failed is reported as is — a leak check on a failed run
+// only adds noise.
 func Main(m *testing.M, opts ...goleak.Option) int {
 	code := m.Run()
 	if code != 0 {

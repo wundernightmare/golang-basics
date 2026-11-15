@@ -76,8 +76,10 @@ var (
 	ErrNoSink = errors.New("pipeline: no sink accepted the batch")
 )
 
-// Reasons Kafka is not offered an event (the `reason` label of
-// ingest_kafka_skipped_events_total).
+// Why Kafka was not offered an event; each ends up in the [ErrNoSink] a
+// caller sees when the archive fails too. The circuit-open and busy cases are
+// also counted (ingest_kafka_skipped_events_total, see publish); "not
+// configured" is not.
 var (
 	errKafkaDisabled = errors.New("kafka: not configured")
 	errKafkaOpen     = errors.New("kafka: unavailable (circuit open)")

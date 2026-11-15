@@ -46,8 +46,10 @@ const queueFullRetry = 20 * time.Millisecond
 // flushOnClose bounds how long Close waits for queued records.
 const flushOnClose = 5 * time.Second
 
-// sendErrorKinds maps librdkafka codes onto the libs/kafka kinds (the same
-// codes as Node's KAFKA_SEND_ERRORS).
+// sendErrorKinds maps librdkafka codes onto the libs/kafka kinds. The table
+// of record is libs/kafka's README "Errors"; a broker code (the non-negative
+// ones) is the same kind in the franz-go provider's map, the negative ones
+// are librdkafka's own.
 var sendErrorKinds = map[ckafka.ErrorCode]string{ //nolint:gochecknoglobals // read-only lookup table (Go has no const maps)
 	ckafka.ErrQueueFull: kafka.KindQueueFull,
 
@@ -71,6 +73,10 @@ var sendErrorKinds = map[ckafka.ErrorCode]string{ //nolint:gochecknoglobals // r
 	ckafka.ErrClusterAuthorizationFailed: kafka.KindNotProvisioned,
 	ckafka.ErrAuthentication:             kafka.KindNotProvisioned,
 	ckafka.ErrSaslAuthenticationFailed:   kafka.KindNotProvisioned,
+	ckafka.ErrIllegalSaslState:           kafka.KindNotProvisioned,
+	ckafka.ErrUnsupportedSaslMechanism:   kafka.KindNotProvisioned,
+
+	ckafka.ErrTransactionalIDAuthorizationFailed: kafka.KindNotProvisioned,
 
 	ckafka.ErrFatal: kafka.KindFatal,
 
@@ -304,7 +310,6 @@ func (p *producer) produce(m *ckafka.Message, delivery chan ckafka.Event) error 
 	return p.cl.Produce(m, delivery)
 }
 
-// Ping implements kafka.ProducerClient.
 func (p *producer) Ping(ctx context.Context) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -316,7 +321,6 @@ func (p *producer) Ping(ctx context.Context) error {
 	return ping(ctx, p.cl)
 }
 
-// Stats implements kafka.ProducerClient.
 func (p *producer) Stats() kafka.ClientStats { return p.stats.clientStats(p.cfg) }
 
 // Close implements kafka.ProducerClient: no call is inside the client once
@@ -431,7 +435,7 @@ func (c *consumer) rebalance(cl *ckafka.Consumer, ev ckafka.Event) error {
 			c.rb.Revoked(ctx, parts)
 		}
 
-		if c.revoked != nil {
+		if c.revoked != nil { // nil outside Poll: Close's revoke has no polled batch to filter
 			for _, p := range parts {
 				c.revoked[p] = struct{}{}
 			}
@@ -442,7 +446,8 @@ func (c *consumer) rebalance(cl *ckafka.Consumer, ev ckafka.Event) error {
 }
 
 // Poll implements kafka.ConsumerClient: wait (in short slices, to notice
-// ctx) for a first record, then take whatever is already queued up to max.
+// ctx) for a first record, then take whatever is already queued up to
+// maxRecords.
 func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, error) {
 	c.mu.Lock()
 	closing := c.closing
@@ -625,7 +630,6 @@ func (c *consumer) Ping(ctx context.Context) error {
 	return ping(ctx, c.cl)
 }
 
-// Stats implements kafka.ConsumerClient.
 func (c *consumer) Stats() kafka.ClientStats { return c.stats.clientStats(c.cfg) }
 
 // Close implements kafka.ConsumerClient: no new Ping starts, the calls

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wundernightmare/golang-basics/libs/kafka"
+	"github.com/wundernightmare/golang-basics/libs/kafka/kafkatest"
 )
 
 func defaulted(t *testing.T, cfg kafka.Config) kafka.Config {
@@ -21,8 +22,8 @@ func defaulted(t *testing.T, cfg kafka.Config) kafka.Config {
 	return cfg
 }
 
-// Every buffer is bounded by a named key, never left to librdkafka's
-// defaults (1 GiB send queue, 64 MiB prefetch per partition).
+// Every buffer is bounded by a named key, not left to librdkafka's defaults
+// (config.go says what those are, at the properties that replace them).
 func TestProperties_EveryBufferIsNamed(t *testing.T) {
 	t.Parallel()
 
@@ -109,6 +110,31 @@ func TestSendError_Taxonomy(t *testing.T) {
 	}
 
 	assert.NoError(t, sendError(nil))
+}
+
+// A broker error is the kind libs/kafka's README "Errors" gives it: the
+// table both providers are held to, so the same broker answer is the same
+// kind whichever client is linked.
+func TestSendError_BrokerCodesMatchTheSharedTable(t *testing.T) {
+	t.Parallel()
+
+	table := kafkatest.BrokerSendErrorKinds()
+
+	for code, want := range table {
+		rdCode := ckafka.ErrorCode(code)
+
+		var se *kafka.SendError
+		require.ErrorAs(t, sendError(ckafka.NewError(rdCode, "x", false)), &se)
+		assert.Equal(t, want, se.Kind, rdCode.String())
+	}
+
+	for rdCode, kind := range sendErrorKinds {
+		if rdCode < 0 {
+			continue // librdkafka's own (local) errors: no broker code
+		}
+
+		assert.Equal(t, kind, table[int16(rdCode)], "%s is mapped here and missing from the shared table", rdCode)
+	}
 }
 
 func TestParseStats(t *testing.T) {

@@ -130,6 +130,13 @@ func New(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) (*DB
 	return &DB{pool: pool, log: log, metrics: metrics}, nil
 }
 
+// readyCheckTimeout bounds the ping of [DB.ReadyCheck] whatever the caller's
+// context allows. Under libs/httpx it is the tighter of two bounds for as
+// long as HEALTH_CHECK_TIMEOUT is above it (its default is): the check then
+// fails with its own "postgres unreachable", not with httpx's "check did not
+// return".
+const readyCheckTimeout = 2 * time.Second
+
 // ErrGuardRailOff is returned by [New] when a session timeout the config asks
 // for is switched off on the connection the server handed out.
 var ErrGuardRailOff = errors.New("pgx: a configured session timeout is not in effect")
@@ -172,11 +179,12 @@ func verifyGuardRails(ctx context.Context, pool *pgxpool.Pool, cfg Config, log *
 func (db *DB) Pool() *pgxpool.Pool { return db.pool }
 
 // ReadyCheck returns a readiness probe (a libs/httpx CheckFunc) that pings the
-// database with a short timeout. Register it on a server's [httpx.Health] so
-// /readyz turns 503 the moment the database becomes unreachable.
+// database under a fixed timeout of its own (readyCheckTimeout). Register it
+// on a server's [httpx.Health] so /readyz turns 503 once a refresh of the
+// checks finds the database unreachable.
 func (db *DB) ReadyCheck() func(ctx context.Context) error {
 	return func(ctx context.Context) error {
-		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, readyCheckTimeout)
 		defer cancel()
 
 		if err := db.pool.Ping(ctx); err != nil {

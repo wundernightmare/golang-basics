@@ -20,9 +20,32 @@ import (
 // one response holds the cluster metadata, which grows with the topic count.
 const minBrokerReadBytes = 16 << 20
 
+// fetchFraming is the room a fetch response gets on top of
+// KAFKA_CONSUMER_FETCH_MAX_BYTES in BrokerMaxReadBytes.
+const fetchFraming = 1 << 20
+
+// maxBrokerReadBytes is the largest BrokerMaxReadBytes franz-go accepts
+// (its option validation, kgo/config.go); a fetch may not be larger than the
+// read bound, so it is the largest KAFKA_CONSUMER_FETCH_MAX_BYTES as well.
+const maxBrokerReadBytes = 1 << 30
+
+// brokerMaxReadBytes is one fetch plus framing, at least minBrokerReadBytes
+// and at most maxBrokerReadBytes: a fetch size within fetchFraming of that
+// limit keeps a bound franz-go accepts.
+func brokerMaxReadBytes(cfg kafka.Config) int32 {
+	n := max(int64(cfg.ConsumerFetchMaxBytes)+fetchFraming, minBrokerReadBytes)
+
+	return int32(min(n, maxBrokerReadBytes))
+}
+
 // validate rejects what franz-go cannot express.
 func validate(cfg kafka.Config) []error {
 	var errs []error
+
+	if cfg.ConsumerFetchMaxBytes > maxBrokerReadBytes {
+		errs = append(errs, fmt.Errorf("KAFKA_CONSUMER_FETCH_MAX_BYTES (%d) is above %d, the most franz-go reads from a broker in one response",
+			cfg.ConsumerFetchMaxBytes, maxBrokerReadBytes))
+	}
 
 	for name, props := range map[string]kafka.Properties{
 		"KAFKA_EXTRA_PROPERTIES":          cfg.ExtraProperties,
@@ -48,14 +71,14 @@ func commonOpts(cfg kafka.Config, hooks kgo.Hook) ([]kgo.Opt, error) {
 		kgo.DialTimeout(cfg.DialTimeout),
 		// The largest response the client accepts — and so allocates — from
 		// a broker: one fetch (KAFKA_CONSUMER_FETCH_MAX_BYTES) plus framing,
-		// never below what a large cluster's metadata needs. franz-go's own
+		// not below what a large cluster's metadata needs. franz-go's own
 		// default is 100 MiB.
-		kgo.BrokerMaxReadBytes(int32(max(cfg.ConsumerFetchMaxBytes+1<<20, minBrokerReadBytes))), //nolint:gosec // bounded by Validate
+		kgo.BrokerMaxReadBytes(brokerMaxReadBytes(cfg)),
 		kgo.WithHooks(hooks),
 		// Set on every client, consumers or not: franz-go checks the read
 		// bound against them.
-		kgo.FetchMaxBytes(int32(cfg.ConsumerFetchMaxBytes)),                   //nolint:gosec // bounded by Validate
-		kgo.FetchMaxPartitionBytes(int32(cfg.ConsumerPartitionFetchMaxBytes)), //nolint:gosec // bounded by Validate
+		kgo.FetchMaxBytes(int32(cfg.ConsumerFetchMaxBytes)),                   //nolint:gosec // G115: kafka.Config.Validate refuses a value above math.MaxInt32 (validateBuffers)
+		kgo.FetchMaxPartitionBytes(int32(cfg.ConsumerPartitionFetchMaxBytes)), //nolint:gosec // G115: kafka.Config.Validate refuses a value above math.MaxInt32 (validateBuffers)
 	}
 	if cfg.AllowAutoTopicCreation {
 		// Ask the broker to create a missing topic (it still decides, via
@@ -99,7 +122,7 @@ func producerOpts(cfg kafka.Config) []kgo.Opt {
 		kgo.RecordDeliveryTimeout(cfg.PublishTimeout),
 		kgo.MaxBufferedRecords(cfg.ProducerQueueMaxMessages),
 		kgo.MaxBufferedBytes(cfg.ProducerQueueMaxKBytes * 1024),
-		kgo.ProducerBatchMaxBytes(int32(cfg.MessageMaxBytes)), //nolint:gosec // bounded by Validate
+		kgo.ProducerBatchMaxBytes(int32(cfg.MessageMaxBytes)), //nolint:gosec // G115: kafka.Config.Validate refuses a value above math.MaxInt32 (validateBuffers)
 	}
 }
 
@@ -163,10 +186,9 @@ func balancer(strategy string) kgo.GroupBalancer {
 
 // tlsConfig maps the SSL keys to a *tls.Config, or nil without TLS. The CA
 // file is the trust store, as it is in librdkafka (without one: the system
-// roots); ServerName is left to franz-go, which
-// sets it per broker from the dialed host. Endpoint identification "none"
-// keeps verifying the chain against the CA — only the host name check is
-// skipped, as in librdkafka.
+// roots); ServerName is left to franz-go, which sets it per broker from the
+// dialed host. Endpoint identification "none" keeps verifying the chain
+// against the CA — only the host name check is skipped, as in librdkafka.
 func tlsConfig(cfg kafka.Config) (*tls.Config, error) {
 	if cfg.SecurityProtocol != "ssl" && cfg.SecurityProtocol != "sasl_ssl" {
 		return nil, nil //nolint:nilnil // nil config means "plaintext", not an error
@@ -213,7 +235,8 @@ func tlsConfig(cfg kafka.Config) (*tls.Config, error) {
 }
 
 // saslMechanism maps the SASL keys to a franz-go mechanism, or nil without
-// SASL. A password file is read here, once per client built.
+// SASL. The password comes from [kafka.Config.SASLSecret], which says when a
+// password file is read.
 func saslMechanism(cfg kafka.Config) (sasl.Mechanism, error) {
 	if cfg.SecurityProtocol != "sasl_plaintext" && cfg.SecurityProtocol != "sasl_ssl" {
 		return nil, nil //nolint:nilnil // nil mechanism means "no SASL", not an error

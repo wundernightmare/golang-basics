@@ -166,7 +166,7 @@ func TestWire_StatusErrorsAndRetries(t *testing.T) {
 				tc.RetryMaxDelay = 2 * time.Second // room for the server's Retry-After
 			}))
 
-			_, err := client.SendWithRetry(api, get(t, base+"/status/404")) //nolint:bodyclose // error
+			_, err := client.SendWithRetry(api, get(t, base+"/status/404"))
 			require.ErrorIs(t, err, resilient.KindStatus)
 
 			var outbound *resilient.OutboundError
@@ -176,17 +176,17 @@ func TestWire_StatusErrorsAndRetries(t *testing.T) {
 			assert.Equal(t, "status 404", string(outbound.Body))
 			assert.InDelta(t, 1, requests(t, client, "4xx"), 0, "a 404 is an answer: not retried")
 
-			_, err = client.SendWithRetry(api, get(t, base+"/status/502")) //nolint:bodyclose // error
+			_, err = client.SendWithRetry(api, get(t, base+"/status/502"))
 			require.ErrorIs(t, err, resilient.KindStatus)
 			assert.InDelta(t, 3, requests(t, client, "5xx"), 0, "a 502 is retried up to retry_max_attempts")
 
-			_, err = client.SendWithRetry(api, get(t, base+"/status/501")) //nolint:bodyclose // error
+			_, err = client.SendWithRetry(api, get(t, base+"/status/501"))
 			require.ErrorIs(t, err, resilient.KindStatus)
 			assert.InDelta(t, 4, requests(t, client, "5xx"), 0, "a 501 will not get better: sent once")
 
 			// The server names its own delay; the client waits it out, once per retry.
 			start := time.Now()
-			_, err = client.SendWithRetry(api, get(t, base+"/busy")) //nolint:bodyclose // error
+			_, err = client.SendWithRetry(api, get(t, base+"/busy"))
 			require.ErrorAs(t, err, &outbound)
 			assert.Equal(t, http.StatusServiceUnavailable, outbound.StatusCode)
 			assert.Equal(t, time.Second, outbound.RetryAfter)
@@ -213,7 +213,7 @@ func TestWire_AttemptTimeoutOnASlowServer(t *testing.T) {
 			before := whoami(t, client, base)
 
 			start := time.Now()
-			_, err := client.Send(api, poll(t, t.Context(), base+"/panda", empty, 0, time.Second)) //nolint:bodyclose // error
+			_, err := client.Send(api, poll(t, t.Context(), base+"/panda", empty, 0, time.Second))
 			require.ErrorIs(t, err, resilient.KindTimeout)
 			assert.InDelta(t, 300, time.Since(start).Milliseconds(), 250, "cut at the target's timeout, not at the server's pace")
 			assert.True(t, resilient.Retryable(err))
@@ -247,11 +247,11 @@ func TestWire_ForgottenBodyDoesNotHoldTheTarget(t *testing.T) {
 				tc.Breaker.FailureRatio = 0
 			}))
 
-			_, err := client.Send(api, get(t, base+"/files/blob")) //nolint:bodyclose // forgotten on purpose
+			_, err := client.Send(api, get(t, base+"/files/blob")) // forgotten on purpose
 			require.NoError(t, err)
 			assert.InDelta(t, 1, metric(t, client, "http_client_bulkhead_in_flight", nil), 0)
 
-			_, err = client.Send(api, get(t, base+"/whoami")) //nolint:bodyclose // error
+			_, err = client.Send(api, get(t, base+"/whoami"))
 			require.ErrorIs(t, err, resilient.KindBulkheadFull, "the only slot is taken while the attempt lasts")
 
 			require.Eventually(t, func() bool {
@@ -331,7 +331,7 @@ func TestWire_ProducesToRedpandaThroughEveryProtocol(t *testing.T) {
 	bad := produce(t, t.Context(), "http://"+redpanda(t).Proxy, into, "x")
 	bad.Header.Set("Accept", "text/plain")
 
-	_, err := client.Send(api, bad) //nolint:bodyclose // error
+	_, err := client.Send(api, bad)
 	require.ErrorIs(t, err, resilient.KindStatus)
 
 	var outbound *resilient.OutboundError

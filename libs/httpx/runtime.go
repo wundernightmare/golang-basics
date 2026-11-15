@@ -27,7 +27,10 @@ import (
 //     cgroup every RUNTIME_MEMORY_LIMIT_REFRESH (an in-place resize changes
 //     the limit without a restart). A GOMEMLIMIT in the environment wins: the
 //     operator said what they want.
-//   - RUNTIME_TRACEBACK is applied before anything else.
+//   - RUNTIME_TRACEBACK is the first thing tuneRuntime applies, ahead of the
+//     memory limit. [Server.Run] calls tuneRuntime after it has bound the
+//     listeners: a crash earlier than that prints at the GOTRACEBACK of the
+//     environment (docs/RUNTIME.md).
 
 const (
 	// cgroup v1 reports "no limit" as a page-rounded MaxInt64; nothing real

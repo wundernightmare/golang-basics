@@ -23,7 +23,7 @@ var ErrNoCertificate = errors.New("holds no PEM certificate")
 func ReadFile(path string) (String, error) {
 	raw, err := os.ReadFile(path) //nolint:gosec // G304: the path is operator-supplied configuration, not user input
 	if err != nil {
-		return String{}, err //nolint:wrapcheck // an *os.PathError already says "open <path>: <cause>"; the caller adds the key
+		return String{}, err // unwrapped: an *os.PathError already says "open <path>: <cause>"; the caller adds the key
 	}
 
 	value := strings.TrimRight(string(raw), "\r\n")
@@ -46,7 +46,7 @@ func ReadFile(path string) (String, error) {
 func CertPool(path string) (*x509.CertPool, error) {
 	pem, err := os.ReadFile(path) //nolint:gosec // G304: the path is operator-supplied configuration, not user input
 	if err != nil {
-		return nil, err //nolint:wrapcheck // an *os.PathError already says "open <path>: <cause>"; the caller adds the key
+		return nil, err // unwrapped, as in ReadFile: the *os.PathError names the path, the caller adds the key
 	}
 
 	pool := x509.NewCertPool()

@@ -71,6 +71,7 @@ func TestConfigValidate(t *testing.T) {
 		"endpoint without host":  {func(c *s3.Config) { c.Endpoint = "s3.internal" }, "must be a URL"},
 		"endpoint scheme":        {func(c *s3.Config) { c.Endpoint = "ftp://s3.internal" }, "scheme must be https"},
 		"missing CA file":        {func(c *s3.Config) { c.CAFile = missingCA }, "S3_CA_FILE"},
+		"CA file is a directory": {func(c *s3.Config) { c.CAFile = filepath.Dir(missingCA) }, "S3_CA_FILE: " + filepath.Dir(missingCA) + " is a directory"},
 		"negative timeout":       {func(c *s3.Config) { c.OpTimeout = -time.Second }, "must be positive"},
 		"no attempts":            {func(c *s3.Config) { c.MaxAttempts = -1 }, "S3_MAX_ATTEMPTS"},
 		"no connections":         {func(c *s3.Config) { c.MaxConnsPerHost = -1 }, "S3_MAX_CONNS_PER_HOST"},

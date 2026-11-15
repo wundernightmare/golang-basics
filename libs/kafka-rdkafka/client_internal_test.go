@@ -77,8 +77,8 @@ func trackClients(t *testing.T) func() []*ckafka.Producer {
 }
 
 // A fatal report that arrives once Close has begun creates no client: one
-// made then would never be closed (its threads keep reconnecting) — and the
-// old code also raced Close's WaitGroup.Wait with the new client's Add.
+// made then would never be closed (its threads keep reconnecting), and its
+// WaitGroup.Add would race Close's Wait.
 //
 //nolint:paralleltest // serial: trackClients swaps the package-level testHookNewClient test seam
 func TestProducer_NoReplacementAfterClose(t *testing.T) {
@@ -296,8 +296,8 @@ func TestNewConsumer_Errors(t *testing.T) {
 	require.Error(t, err)
 }
 
-// Repeats within the fold window are counted, not logged; the next line
-// after the window carries the count. Unparseable statistics are ignored.
+// Repeats within the fold window are logged once — a FAIL line as a
+// warning. Unparseable statistics are ignored.
 func TestPumpLogs_FoldsRepeats(t *testing.T) {
 	t.Parallel()
 

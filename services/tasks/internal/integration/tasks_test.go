@@ -33,7 +33,6 @@ func TestEndToEnd(t *testing.T) {
 	app := wire(t, backends)
 	recorder := app.traces
 
-	// Create.
 	resp := app.do(t, http.MethodPost, "/tasks", `{"title":"ship it"}`)
 	require.Equal(t, http.StatusCreated, resp.status, string(resp.body))
 
@@ -43,7 +42,7 @@ func TestEndToEnd(t *testing.T) {
 	assert.Equal(t, int64(1), task.Version)
 	assert.Equal(t, `"1"`, resp.header.Get("ETag"))
 
-	// Read: warmed on create.
+	// The first read is a hit: create warmed the cache.
 	resp = app.do(t, http.MethodGet, "/tasks/"+task.Id, "")
 	require.Equal(t, http.StatusOK, resp.status)
 	assert.Equal(t, "hit", resp.header.Get("X-Cache"))
@@ -60,11 +59,10 @@ func TestEndToEnd(t *testing.T) {
 	assert.True(t, got.Done, "the update is visible at once: the old cache entry was invalidated")
 	assert.Equal(t, "miss", resp.header.Get("X-Cache"), "tombstoned: served from Postgres")
 
-	// Stale write.
+	// A write with the version from before the update is refused.
 	resp = app.do(t, http.MethodPatch, "/tasks/"+task.Id, `{"title":"lost"}`, "If-Match", `"1"`)
 	require.Equal(t, http.StatusPreconditionFailed, resp.status)
 
-	// List.
 	resp = app.do(t, http.MethodGet, "/tasks?limit=10", "")
 	require.Equal(t, http.StatusOK, resp.status)
 

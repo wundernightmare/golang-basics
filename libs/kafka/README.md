@@ -116,8 +116,8 @@ the same under `kafka:` in snake case (`kafka.security_protocol`). Every key
 is written to the client **explicitly** — no setting is left to whatever the
 client library's default happens to be in the version you link. `<service>
 --config-reference` prints them all with their defaults. Zero means "unset"
-(the default fills it), so the DLQ is disabled with `none` and "no retries" /
-"no statistics" is a negative number.
+(the default fills it), so the DLQ is disabled with `none` (`-` is read the
+same way) and "no retries" / "no statistics" is a negative number.
 
 **Connection**
 
@@ -180,7 +180,7 @@ share is not above the whole fetch.
 | `KAFKA_CONSUMER_MAX_POLL_RECORDS` | records per batch (loop) | `PollRecords(max)` | `100` |
 | `KAFKA_CONSUMER_HANDLER_TIMEOUT` | per attempt (loop) | same | `30s` |
 | `KAFKA_CONSUMER_MAX_RETRIES`, `_RETRY_BACKOFF`, `_RETRY_BACKOFF_MAX` | loop | same | `5`, `200ms`, `30s` |
-| `KAFKA_DEAD_LETTER_TOPIC` | loop | same | `{topic}.dlq`; `none` = stop instead |
+| `KAFKA_DEAD_LETTER_TOPIC` | loop | same | `{topic}.dlq`; `none` (or `-`) = stop instead |
 | `KAFKA_CONSUMER_DRAIN_TIMEOUT` | loop | same | `10s` |
 
 **Anything else (librdkafka only)**
@@ -239,6 +239,12 @@ bound is therefore a named key, always written.
   batch → ≈ 4 MiB + 16 MiB × brokers with the defaults. `BrokerMaxReadBytes`
   has a 16 MiB floor because the same bound applies to metadata responses,
   which grow with the cluster's topic count.
+
+`MESSAGE_MAX_BYTES`, `CONSUMER_FETCH_MAX_BYTES` and
+`CONSUMER_PARTITION_FETCH_MAX_BYTES` travel in the Kafka protocol as int32:
+a value above 2147483647 is a config error. franz-go reads at most 1 GiB
+from a broker in one response, so with that provider
+`CONSUMER_FETCH_MAX_BYTES` above 1073741824 is a config error too.
 
 Rules of thumb: raise `PRODUCER_QUEUE_MAX_KBYTES` for bursty producers (it is
 how long you survive a broker outage at your send rate), raise the consumer
@@ -392,13 +398,15 @@ passes) — retryable: it goes through once the topic exists.
 ## Errors
 
 Every `Send` error is a `*kafka.SendError{Kind, Retryable, Code}` — the same
-kinds as nodejs-basics' `KAFKA_SEND_ERRORS`, mapped from each client's codes:
+kinds as nodejs-basics' `KAFKA_SEND_ERRORS`, mapped from each client's codes.
+This table is the one both providers' maps are held to (a broker code is the
+same kind in each; a code neither map names is `unknown`):
 
 | Kind | Retryable | librdkafka / Kafka codes |
 | --- | --- | --- |
 | `queue_full` | yes | local queue full (`_QUEUE_FULL`; franz-go `ErrMaxBuffered`) — waited out within the timeout first |
 | `unavailable` | yes | message / request timed out, transport, all brokers down, no leader, not enough replicas, storage, throttled |
-| `not_provisioned` | yes | unknown topic / partition, topic / cluster authorization, authentication |
+| `not_provisioned` | yes | unknown topic / partition; topic, cluster or transactional-id authorization; SASL authentication failed, illegal SASL state, unsupported SASL mechanism |
 | `fatal` | yes | the producer's idempotence state is lost — librdkafka's client is replaced underneath |
 | `rejected` | **no** | message too large, record list too large, invalid / corrupt record, policy violation, invalid topic |
 | `unknown` | yes | anything else: kept rather than lost |
@@ -444,10 +452,11 @@ is linked, and the same as nodejs-basics. No partition label anywhere.
 
 The consumer's `topic` is a topic named in `KAFKA_TOPICS`; one matched by a
 `^regex` subscription is labelled `other`, so the series follow the config,
-not whatever the cluster grows. The client gauges refresh every
-`KAFKA_STATISTICS_INTERVAL_MS` and disappear when the client stops reporting
-(three missed periods), so a stuck client never shows its last healthy
-numbers.
+not whatever the cluster grows. The client gauges are off for both providers
+with a negative `KAFKA_STATISTICS_INTERVAL_MS`. With librdkafka they refresh
+every interval and disappear when the client stops reporting (three missed
+periods, at least a minute), so a stuck client does not show its last healthy
+numbers; with franz-go they are read from the client at scrape time.
 
 **Consumer-group lag is the broker's metric, not ours.** The broker knows
 every group's committed offset and every partition's end, once, also while

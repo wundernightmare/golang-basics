@@ -113,7 +113,8 @@ func DefaultBreakerConfig() BreakerConfig {
 }
 
 // Validate reports every problem in c, by its yaml key within the breaker's
-// block (the owner prefixes its own name); nil when there is none. With FailureRatio 0 (no breaker) the other fields are free.
+// block (the owner prefixes its own name); nil when there is none. With
+// FailureRatio 0 (no breaker) the other fields are free.
 func (c BreakerConfig) Validate() []error {
 	if c.FailureRatio < 0 || c.FailureRatio > 1 {
 		return []error{errors.New("failure_ratio must be in [0, 1]")}
@@ -166,7 +167,10 @@ type Breaker struct {
 // NewBreaker builds a breaker from cfg, which must pass
 // [BreakerConfig.Validate]; nil (admit everything) when cfg.FailureRatio is
 // 0. now is the clock (time.Now); onChange, if not nil, is called after every
-// state transition — concurrently, possibly out of order.
+// state transition — concurrently, possibly out of order. An owner that
+// mirrors the state somewhere (a gauge) therefore writes [Breaker.State],
+// read under a lock of its own, rather than to: whichever writes last has
+// then read a state at least as new as every earlier writer's.
 func NewBreaker(cfg BreakerConfig, now func() time.Time, onChange func(from, to State)) *Breaker {
 	if cfg.FailureRatio <= 0 {
 		return nil

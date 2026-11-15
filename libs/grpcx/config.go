@@ -105,8 +105,8 @@ type TargetConfig struct {
 	Breaker resilience.BreakerConfig `yaml:"breaker"`
 }
 
-// DefaultConfig returns a config with the given targets, each built with
-// [DefaultTarget].
+// DefaultConfig returns a config with the given targets, as they are: build
+// each with [DefaultTarget] to give it the defaults.
 func DefaultConfig(targets ...TargetConfig) Config {
 	return Config{Targets: targets}
 }
@@ -145,13 +145,17 @@ func LoadConfig(data []byte) (Config, error) {
 }
 
 // UnmarshalYAML decodes a target over [DefaultTarget], so omitted keys keep
-// their defaults. yaml.Node.Decode forgets KnownFields, hence the re-encode.
+// their defaults.
+//
+// UPSTREAM-WORKAROUND(go.yaml.in/yaml/v3 v3.0.6): the re-encode — see
+// TargetConfig.UnmarshalYAML of libs/resilient-http-client
+// (docs/UPSTREAM-WORKAROUNDS.md).
 func (t *TargetConfig) UnmarshalYAML(n *yaml.Node) error {
 	type plain TargetConfig
 
 	raw, err := yaml.Marshal(n)
 	if err != nil {
-		return err //nolint:wrapcheck // a yaml error about the node, as is
+		return err
 	}
 
 	v := plain(DefaultTarget("", ""))
@@ -168,7 +172,7 @@ func strictDecode(data []byte, v any) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
-	return dec.Decode(v) //nolint:wrapcheck // wrapped by the callers
+	return dec.Decode(v)
 }
 
 // Validate reports every problem in c at once (joined), or nil.

@@ -168,7 +168,12 @@ func LoadConfig(data []byte) (Config, error) {
 }
 
 // UnmarshalYAML decodes a target over [DefaultTarget], so omitted keys keep
-// their defaults. yaml.Node.Decode forgets KnownFields, hence the re-encode.
+// their defaults.
+//
+// UPSTREAM-WORKAROUND(go.yaml.in/yaml/v3 v3.0.6): a decoder's KnownFields
+// does not reach yaml.Node.Decode, which would take a misspelt key of a
+// target in silence; the node is re-encoded and decoded strictly instead
+// (docs/UPSTREAM-WORKAROUNDS.md).
 func (t *TargetConfig) UnmarshalYAML(n *yaml.Node) error {
 	type plain TargetConfig
 

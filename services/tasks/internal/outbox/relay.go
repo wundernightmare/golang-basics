@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- poll-backoff jitter is not security-sensitive; a CSPRNG (crypto/rand) is unnecessary here.
+	"log/slog"
 	"strings"
 	"time"
 
@@ -35,13 +35,15 @@ type Config struct {
 	MaxBackoff   time.Duration // cap on the retry delay after a failed batch (default 30s)
 	MaxAttempts  int           // rejections after which a row is dead: kept, no longer sent (default 10)
 	// RejectBackoff is the delay before a rejected row is tried again,
-	// doubled per rejection and capped at an hour (default 1s): the
+	// doubled per rejection and capped (maxRejectDelay) (default 1s): the
 	// OUTBOX_MAX_ATTEMPTS tries of a row the broker refuses are spread over
 	// minutes, not burnt in seconds by the next passes.
 	RejectBackoff time.Duration
 }
 
-// maxRejectDelay caps the delay between two tries of a rejected row.
+// maxRejectDelay caps the delay between two tries of a rejected row. The
+// number lives here and in the README's configuration table; other comments
+// point to this constant.
 const maxRejectDelay = time.Hour
 
 func (c *Config) withDefaults() {
@@ -177,7 +179,7 @@ func (r *Relay) Run(ctx context.Context) error {
 				"err", err, "failures", failures, "retry_in", wait.String())
 		case taken == r.cfg.BatchSize: // published or stepped aside: either way more may be due
 			failures = 0
-			wait = 0 // more is waiting
+			wait = 0
 		default:
 			failures = 0
 			wait = r.cfg.PollInterval
@@ -260,7 +262,7 @@ const batchBudget = 30 * time.Second
 //     counted: no outage can make a row dead.
 //   - a rejection (too large, malformed — the record itself is the problem):
 //     rejections + 1, last_error, and next_attempt_at (RejectBackoff doubled
-//     per rejection, capped at an hour); the batch goes on without it. After
+//     per rejection, capped at maxRejectDelay); the batch goes on without it. After
 //     MaxAttempts rejections the row is dead: left in the table, skipped by
 //     every pass. A rejected row gives up its order relative to later events
 //     of its task.
@@ -435,7 +437,9 @@ const statsSQL = `SELECT count(*) FILTER (WHERE rejections < $1),
        coalesce(extract(epoch FROM now() - min(created_at) FILTER (WHERE rejections < $1)), 0)::float8
   FROM outbox`
 
-// refreshGauges updates outbox_pending, outbox_dead and outbox_oldest_age_seconds.
+// refreshGauges sets the backlog gauges from statsSQL. A failed query leaves
+// them at their last values and is logged at debug only; the query is detached
+// from ctx's cancellation and bounded by its own timeout.
 func (r *Relay) refreshGauges(ctx context.Context) {
 	qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()

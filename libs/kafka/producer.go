@@ -155,12 +155,17 @@ func (p *Producer) ReadyCheck() func(ctx context.Context) error {
 	return readyCheck(p.cl)
 }
 
+// readyTimeout bounds one readiness probe by itself, whatever deadline the
+// caller's ctx carries. It is the default of libs/httpx's
+// HEALTH_CHECK_TIMEOUT, which bounds the same probe from outside.
+const readyTimeout = 3 * time.Second
+
 func readyCheck(cl interface {
 	Ping(ctx context.Context) error
 },
 ) func(ctx context.Context) error {
 	return func(ctx context.Context) error {
-		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, readyTimeout)
 		defer cancel()
 
 		if err := cl.Ping(ctx); err != nil {

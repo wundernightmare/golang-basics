@@ -28,7 +28,7 @@ cover="${COVER_DIR:-$root/.cover}"
 # Instrument every workspace package, not just the module under test, so a
 # service's tests also count the lib code they exercise.
 pkgs="github.com/wundernightmare/golang-basics/..."
-modules="$(awk '/^use \(/{f=1;next} /^\)/{f=0} f{sub(/^[ \t]*\.\//,""); print}' "$root/go.work")"
+modules="$("$root/scripts/touched-modules.sh" --all)"
 
 layer_dir() { mkdir -p "$cover/$1"; echo "$cover/$1"; }
 # go-test-coverage from PATH (CI installs it into bin/) or through mise (local).

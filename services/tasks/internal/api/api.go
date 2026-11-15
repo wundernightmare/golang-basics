@@ -83,11 +83,14 @@ func Register(srv *httpx.Server, deps Deps) {
 
 // Header names beyond the standard ones.
 const (
-	HeaderIdempotencyKey    = "Idempotency-Key"
-	HeaderIdempotentReplay  = "Idempotent-Replayed"
-	HeaderCache             = "X-Cache"
-	maxIdempotencyKeyLength = 255
+	HeaderIdempotencyKey   = "Idempotency-Key"
+	HeaderIdempotentReplay = "Idempotent-Replayed"
+	HeaderCache            = "X-Cache"
 )
+
+// maxIdempotencyKeyLength bounds Idempotency-Key as the contract does
+// (maxLength of the header in api/tsp/tasks.tsp).
+const maxIdempotencyKeyLength = 255
 
 // toWire converts the internal model to the contract's Task.
 func toWire(t domain.Task) tasksapi.Task {
@@ -388,12 +391,12 @@ func (h *handlers) invalidate(ctx context.Context, id string) {
 	}
 }
 
-// ifMatch parses an optional If-Match: a single strong entity tag ("3") or
-// "*". It returns the version to require, or nil for none ("*" requires only
-// that the task exists, which update/delete check anyway).
 // maxIfMatchLength bounds If-Match as the contract does: 18 digits in quotes.
 const maxIfMatchLength = 20
 
+// ifMatch parses an optional If-Match: a single strong entity tag ("3") or
+// "*". It returns the version to require, or nil for none ("*" requires only
+// that the task exists, which update/delete check anyway).
 func ifMatch(r *http.Request) (*int64, error) {
 	raw := strings.TrimSpace(r.Header.Get("If-Match"))
 	if _, sent := r.Header["If-Match"]; !sent || raw == "*" {

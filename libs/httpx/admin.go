@@ -175,12 +175,11 @@ func (s *Server) deleteLogLevel(w http.ResponseWriter, r *http.Request) {
 }
 
 // requireBearer guards an admin handler with `Authorization: Bearer <token>`.
-// Both sides are hashed before the constant-time compare so neither the
-// length nor the content of the token leaks through timing; the scheme name
-// is matched case-insensitively as RFC 9110 says. An empty token disables
-// the guard. Rejections are logged at warn: on the admin listener they are
-// either an operator with a stale token or something that should not be
-// there at all.
+// The token is compared in constant time over digests (see tokenDigest); the
+// scheme name is matched case-insensitively as RFC 9110 says. An empty token
+// disables the guard. Rejections are logged at warn: on the admin listener
+// they are either an operator with a stale token or something that should
+// not be there at all.
 func requireBearer(token string, log *slog.Logger) func(http.Handler) http.Handler {
 	if token == "" {
 		return func(next http.Handler) http.Handler { return next }

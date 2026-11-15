@@ -84,7 +84,7 @@ func TestHandle_DispatchesOnEventType(t *testing.T) {
 	require.NoError(t, w.Handle(ctx, msg(t, worker.TaskDeleted, "e3", nil)))
 	// No header: the payload's event_type decides.
 	require.NoError(t, w.Handle(ctx, msg(t, "", "", map[string]any{"event_id": "e4", "event_type": "task.deleted", "task_id": "t"})))
-	// Neither: the pre-outbox producer's task.created.
+	// Neither: read as task.created.
 	require.NoError(t, w.Handle(ctx, msg(t, "", "", map[string]any{"id": "t", "title": "x", "created_at": "2026-01-01T00:00:00Z"})))
 	// The header wins over the payload.
 	require.NoError(t, w.Handle(ctx, msg(t, worker.TaskUpdated, "e6", map[string]any{"event_id": "e6", "event_type": "task.deleted"})))

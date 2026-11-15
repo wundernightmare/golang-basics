@@ -55,7 +55,7 @@ func TestSend_ForgottenBodyIsReleasedWhenTheAttemptEnds(t *testing.T) {
 		assert.InDelta(t, 0, metric(t, client, "http_client_bulkhead_in_flight", nil), 0)
 
 		// And Shutdown is not held up by the forgotten body.
-		another, err := client.Send("api", get(t, t.Context(), hung)) //nolint:bodyclose // forgotten on purpose
+		another, err := client.Send("api", get(t, t.Context(), hung)) // forgotten on purpose
 		require.NoError(t, err)
 
 		_ = another
@@ -79,7 +79,7 @@ func TestSend_ForgottenBodyIsReleasedWhenTheCallerCancels(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(t.Context())
 
-		_, err := client.Send("api", get(t, ctx, hung)) //nolint:bodyclose // forgotten on purpose
+		_, err := client.Send("api", get(t, ctx, hung)) // forgotten on purpose
 		require.NoError(t, err)
 
 		cancel()
@@ -109,7 +109,7 @@ func TestSend_CancelledBeforeTheFirstAttemptSendsNothing(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	_, err := client.SendWithRetry("api", get(t, ctx, srv.URL)) //nolint:bodyclose // error
+	_, err := client.SendWithRetry("api", get(t, ctx, srv.URL))
 	require.ErrorIs(t, err, resilient.KindCanceled)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Zero(t, hits.Load())
@@ -132,7 +132,7 @@ func TestSendWithRetry_CancelledDuringBackoffReturnsAtOnce(t *testing.T) {
 	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.RetryMaxDelay = 5 * time.Second }))
 
 	start := time.Now()
-	_, err := client.SendWithRetry("api", get(t, ctx, srv.URL)) //nolint:bodyclose // error
+	_, err := client.SendWithRetry("api", get(t, ctx, srv.URL))
 	require.ErrorIs(t, err, resilient.KindCanceled)
 	assert.Less(t, time.Since(start), 700*time.Millisecond, "it did not sit out the Retry-After")
 	assert.Equal(t, int32(1), hits.Load())
@@ -168,7 +168,7 @@ func TestSend_CancelledWhileWaitingForALocalLimit(t *testing.T) {
 		defer cancelShort()
 
 		start := time.Now()
-		_, err = client.Send("api", get(t, short, srv.URL)) //nolint:bodyclose // error
+		_, err = client.Send("api", get(t, short, srv.URL))
 		require.ErrorIs(t, err, resilient.KindRateLimited)
 		assert.Less(t, time.Since(start), 40*time.Millisecond, "it did not wait for a token it could not get in time")
 
@@ -176,7 +176,7 @@ func TestSend_CancelledWhileWaitingForALocalLimit(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		time.AfterFunc(50*time.Millisecond, cancel)
 
-		_, err = client.Send("api", get(t, ctx, srv.URL)) //nolint:bodyclose // error
+		_, err = client.Send("api", get(t, ctx, srv.URL))
 		require.ErrorIs(t, err, resilient.KindCanceled)
 		require.NotErrorIs(t, err, resilient.KindRateLimited)
 		assert.Equal(t, before, hits.Load(), "nothing was sent")
@@ -197,7 +197,7 @@ func TestSend_CancelledWhileWaitingForALocalLimit(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		time.AfterFunc(50*time.Millisecond, cancel)
 
-		_, err = client.Send("api", get(t, ctx, srv.URL)) //nolint:bodyclose // error
+		_, err = client.Send("api", get(t, ctx, srv.URL))
 		require.ErrorIs(t, err, resilient.KindCanceled)
 		assert.LessOrEqual(t, metric(t, client, "http_client_bulkhead_rejected_total", nil), 0.0, "the bulkhead did not reject it: the caller left")
 		require.NoError(t, held.Body.Close())
@@ -217,7 +217,7 @@ func TestSend_BulkheadWithoutAWaitRejectsAtOnceAndAWaitTakesAFreedSlot(t *testin
 		require.NoError(t, err)
 
 		start := time.Now()
-		_, err = client.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+		_, err = client.Send("api", get(t, t.Context(), srv.URL))
 		require.ErrorIs(t, err, resilient.KindBulkheadFull)
 		assert.Less(t, time.Since(start), time.Second, "max_concurrent_wait 0 is no wait at all")
 		require.NoError(t, held.Body.Close())
@@ -262,7 +262,7 @@ func TestSendWithRetry_BodyThatFailsToReplayIsInvalid(t *testing.T) {
 		return nil, errNoReplay
 	}
 
-	_, err = client.SendWithRetry("api", req) //nolint:bodyclose // error
+	_, err = client.SendWithRetry("api", req)
 	require.ErrorIs(t, err, resilient.KindInvalid)
 	require.ErrorIs(t, err, errNoReplay)
 	assert.Equal(t, int32(1), hits.Load(), "only the first attempt went out")
@@ -290,7 +290,7 @@ func TestSend_RefusesHTTPSToHTTPRedirect(t *testing.T) {
 	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }),
 		resilient.WithHTTPClient(srv.Client()))
 
-	_, err := client.SendWithRetry("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+	_, err := client.SendWithRetry("api", get(t, t.Context(), srv.URL))
 	require.ErrorIs(t, err, resilient.KindRedirect)
 	require.ErrorContains(t, err, "https→http")
 	assert.Zero(t, plaintextHits.Load())
@@ -337,7 +337,7 @@ func TestSendWithRetry_DoesNotRetryARejectedCertificate(t *testing.T) {
 
 	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 })) // trusts the system roots, not httptest's
 
-	_, err := client.SendWithRetry("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+	_, err := client.SendWithRetry("api", get(t, t.Context(), srv.URL))
 	require.ErrorIs(t, err, resilient.KindConnection)
 
 	var verification *tls.CertificateVerificationError

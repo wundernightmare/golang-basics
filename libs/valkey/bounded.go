@@ -12,13 +12,14 @@ import (
 // explicitly so the guard below and the library agree on it).
 const blockingPipeline = valkeygo.DefaultBlockingPipeline
 
-// UPSTREAM-WORKAROUND(valkey-go): the whole type (docs/UPSTREAM-WORKAROUNDS.md).
+// UPSTREAM-WORKAROUND(valkey-go ≤ 1.0.79): the whole type
+// (docs/UPSTREAM-WORKAROUNDS.md).
 //
 // bounded makes Config.PoolSize a bound that holds. The library's own pool
 // counter does not: a caller whose context ends while it waits for a
 // dedicated connection — or that arrives with a context already ended — is
 // handed a placeholder that was never counted, and returning it decrements
-// the pool's size all the same (valkey-go ≤ 1.0.79, pool.Acquire / Store).
+// the pool's size all the same (pool.Acquire / Store).
 // Every such caller raises the effective limit by one for the life of the
 // client, so under the very overload the limit exists for — callers timing
 // out in the queue — it stops limiting.

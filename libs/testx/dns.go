@@ -162,6 +162,8 @@ func (d *DNS) serve() {
 			continue
 		}
 
+		// A copy: a query held while the server is silent outlives buf,
+		// which the next read overwrites.
 		d.answer(append([]byte(nil), buf[:n]...), from, true)
 	}
 }

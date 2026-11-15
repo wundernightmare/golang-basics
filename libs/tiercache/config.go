@@ -25,6 +25,7 @@ import (
 //	TIERCACHE_BREAKER_MIN_REQUESTS  [breaker.min_requests]  L2 calls in the window before it counts (default 10)
 //	TIERCACHE_BREAKER_WINDOW        [breaker.window]        window the ratio is measured over       (default 10s)
 //	TIERCACHE_BREAKER_OPEN_TIMEOUT  [breaker.open_timeout]  how long L2 is skipped once open        (default 5s)
+//	TIERCACHE_BREAKER_HALF_OPEN_PROBES [breaker.half_open_probes] L2 calls that probe it afterwards (default 1)
 //	TIERCACHE_DISABLE_INVALIDATION [disable_invalidation] no Pub/Sub subscription                   (default false)
 type Config struct {
 	// Name identifies the cache: the `cache` metric label, the L2 key prefix
@@ -58,7 +59,9 @@ type Config struct {
 	// breaker.min_requests L2 calls within breaker.window failed, L2 is
 	// skipped for breaker.open_timeout; then breaker.half_open_probes calls
 	// probe it. Defaults: 0.5 of 10 in 10s, 5s, one probe — a cache wants L2
-	// back soon and has no use for several probes.
+	// back soon and has no use for several probes. A zero field takes its
+	// default here, breaker.failure_ratio included: unlike the breakers of
+	// the outbound clients, this one cannot be switched off with 0.
 	Breaker resilience.BreakerConfig `envPrefix:"TIERCACHE_BREAKER_" yaml:"breaker"`
 	// DisableInvalidation turns the Pub/Sub subscription off: entries then
 	// leave L1 by TTL only.

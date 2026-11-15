@@ -27,7 +27,7 @@ import (
 //	INGEST_S3_REGION              [region]              signing region                                 (default "us-east-1")
 //	INGEST_S3_ACCESS_KEY_ID       [access_key_id]       static credentials; "" = the AWS default chain (default "")
 //	INGEST_S3_SECRET_ACCESS_KEY   [secret_access_key]   …                                              (default "")
-//	INGEST_S3_USE_PATH_STYLE      [use_path_style]      endpoint/bucket/key instead of bucket.endpoint (default true)
+//	INGEST_S3_USE_PATH_STYLE      [use_path_style]      endpoint/bucket/key instead of bucket.endpoint (default true; a hand-built Config sets it)
 //	INGEST_S3_INSECURE            [insecure]            allow an http:// endpoint                      (default false)
 //	INGEST_S3_CA_FILE             [ca_file]             PEM bundle that signs the endpoint's cert      (default "": system roots)
 //	INGEST_S3_AUTO_CREATE_BUCKET  [auto_create_bucket]  create the bucket at boot when it is missing   (default false)
@@ -37,7 +37,8 @@ import (
 //
 //	INGEST_S3_DIAL_TIMEOUT        [dial_timeout]        TCP + TLS connect                              (default "5s")
 //	INGEST_S3_OP_TIMEOUT          [op_timeout]          one put/head/list page/delete, retries included (default "10s")
-//	INGEST_S3_TRANSFER_TIMEOUT    [transfer_timeout]    one get (body included) or one multipart part  (default "60s")
+//	INGEST_S3_TRANSFER_TIMEOUT    [transfer_timeout]    one get (body included), one multipart part, or
+//	                                                    the completion of a multipart upload           (default "60s")
 //	INGEST_S3_MAX_ATTEMPTS        [max_attempts]        tries per call inside its deadline (1 = none)  (default 3)
 //	INGEST_S3_RETRY_MAX_BACKOFF   [retry_max_backoff]   cap of the jittered backoff between tries      (default "2s")
 //
@@ -66,12 +67,15 @@ type Config struct {
 	AutoCreateBucket bool          `env:"S3_AUTO_CREATE_BUCKET" envDefault:"false" yaml:"auto_create_bucket"`
 
 	DialTimeout time.Duration `env:"S3_DIAL_TIMEOUT" envDefault:"5s" yaml:"dial_timeout"`
-	// OpTimeout bounds one small call — put, head, one list page, one delete
-	// batch — with the SDK's retries inside it. It is what an acknowledgement
-	// that waits on a put can take at worst.
+	// OpTimeout bounds one call that is not under TransferTimeout — put,
+	// head, one list page, one delete batch, the bucket checks, starting and
+	// aborting a multipart upload — with the SDK's retries inside it. It is
+	// what an acknowledgement that waits on a put can take at worst. A put is
+	// not always small: an [Upload] that never filled a part is stored by
+	// one put of up to UploadPartBytes.
 	OpTimeout time.Duration `env:"S3_OP_TIMEOUT" envDefault:"10s" yaml:"op_timeout"`
-	// TransferTimeout bounds a call that moves a large body: one get (the
-	// body is read inside it) and one multipart part.
+	// TransferTimeout bounds one get (the body is read inside it), one
+	// multipart part, and the call that completes a multipart upload.
 	TransferTimeout time.Duration `env:"S3_TRANSFER_TIMEOUT" envDefault:"60s" yaml:"transfer_timeout"`
 	MaxAttempts     int           `env:"S3_MAX_ATTEMPTS" envDefault:"3" yaml:"max_attempts"`
 	RetryMaxBackoff time.Duration `env:"S3_RETRY_MAX_BACKOFF" envDefault:"2s" yaml:"retry_max_backoff"`
@@ -83,7 +87,10 @@ type Config struct {
 }
 
 // Defaults applied by [Config.Validate] (and [New]) to zero fields, so a
-// hand-built Config needs only what differs.
+// hand-built Config needs only what differs — and UsePathStyle: false is a
+// setting of its own, so the "true" of its env tag reaches only a Config
+// loaded from the environment or YAML. A hand-built one for an
+// S3-compatible store sets it.
 const (
 	defaultRegion          = "us-east-1"
 	defaultDialTimeout     = 5 * time.Second
@@ -176,7 +183,7 @@ func (c *Config) Validate() error {
 	errs = append(errs, c.validateEndpoint()...)
 
 	if c.CAFile != "" {
-		if _, err := os.Stat(c.CAFile); err != nil {
+		if err := readableFile(c.CAFile); err != nil {
 			errs = append(errs, fmt.Errorf("S3_CA_FILE: %w", err))
 		}
 	}
@@ -203,6 +210,28 @@ func (c *Config) Validate() error {
 
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("s3 config: %w", err)
+	}
+
+	return nil
+}
+
+// readableFile reports why path cannot be read as a file — missing, no
+// permission, a directory — so a CA mount that is not there fails the boot
+// and --check-config with the key's name, not the first TLS handshake.
+func readableFile(path string) error {
+	f, err := os.Open(path) //nolint:gosec // G304: an operator-supplied config path, opened only to check it
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
+	if st.IsDir() {
+		return fmt.Errorf("%s is a directory", path)
 	}
 
 	return nil

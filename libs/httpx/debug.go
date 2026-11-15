@@ -7,7 +7,7 @@ import (
 
 // DebugTokenHeader is the request header that turns on debug logging for one
 // request when it carries the value of [Config].DebugToken.
-const DebugTokenHeader = "X-Debug-Token" //nolint:gosec // a header name, not a credential
+const DebugTokenHeader = "X-Debug-Token" //nolint:gosec // G101: a header name, not a credential
 
 // DebugLoggingHeader is set on the response when the debug token was
 // accepted, so the caller can tell "debug was on" from "token ignored".

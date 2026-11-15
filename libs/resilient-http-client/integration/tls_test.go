@@ -103,7 +103,7 @@ func TestTLS_ACertificateTheClientRejects(t *testing.T) {
 
 			client := tc.client(t)
 
-			_, err := client.SendWithRetry(api, get(t, tc.url)) //nolint:bodyclose // error
+			_, err := client.SendWithRetry(api, get(t, tc.url))
 			require.ErrorIs(t, err, resilient.KindConnection)
 			tc.check(t, err)
 			assert.False(t, resilient.Retryable(err))
@@ -130,7 +130,7 @@ func TestTLS_TheServerRefusesTheClient(t *testing.T) {
 		old.MaxVersion = tls.VersionTLS12
 		client := over(t, retrying, old)
 
-		_, err := client.SendWithRetry(api, get(t, "https://"+srv.TLS13+"/whoami")) //nolint:bodyclose // error
+		_, err := client.SendWithRetry(api, get(t, "https://"+srv.TLS13+"/whoami"))
 		require.ErrorIs(t, err, resilient.KindConnection)
 		require.ErrorContains(t, err, "protocol version")
 		assert.InDelta(t, 3, requests(t, client, "connection"), 0, "retried: an alert may be transient")
@@ -144,7 +144,7 @@ func TestTLS_TheServerRefusesTheClient(t *testing.T) {
 
 		anonymous := newClient(t, retrying, nil)
 
-		_, err := anonymous.SendWithRetry(api, get(t, "https://"+srv.MTLS+"/whoami")) //nolint:bodyclose // error
+		_, err := anonymous.SendWithRetry(api, get(t, "https://"+srv.MTLS+"/whoami"))
 		// With TLS 1.3 the server's verdict on the client certificate comes
 		// after the client's own handshake is done, so the refusal lands on
 		// whatever the client does first on the connection, and the message
@@ -168,7 +168,7 @@ func TestTLS_SchemeAndPortDisagree(t *testing.T) {
 
 	// HTTP to the TLS port: the server answers, in cleartext, that this is
 	// the wrong door. An answer is an answer — a 400, and a live dependency.
-	_, err := client.Send(api, get(t, "http://"+srv.TLS+"/whoami")) //nolint:bodyclose // error
+	_, err := client.Send(api, get(t, "http://"+srv.TLS+"/whoami"))
 	require.ErrorIs(t, err, resilient.KindStatus)
 
 	var outbound *resilient.OutboundError
@@ -179,7 +179,7 @@ func TestTLS_SchemeAndPortDisagree(t *testing.T) {
 	assert.Equal(t, resilient.StateClosed, breakerState(t, client))
 
 	// HTTPS to the cleartext port: there is no handshake to be had.
-	_, err = client.Send(api, get(t, "https://"+srv.Plain+"/whoami")) //nolint:bodyclose // error
+	_, err = client.Send(api, get(t, "https://"+srv.Plain+"/whoami"))
 	require.ErrorIs(t, err, resilient.KindConnection)
 	require.ErrorContains(t, err, "HTTP response to HTTPS client")
 	assert.Equal(t, resilient.StateOpen, breakerState(t, client), "with breaker.min_requests 1 this failure opens it")
@@ -200,17 +200,17 @@ func TestTLS_Redirects(t *testing.T) {
 	assert.Contains(t, read(t, resp), "proto=HTTP/2.0", "a same-host redirect is followed to its target")
 
 	start := time.Now()
-	_, err = client.Send(api, get(t, base+"/redirect/loop")) //nolint:bodyclose // error
+	_, err = client.Send(api, get(t, base+"/redirect/loop"))
 	require.ErrorIs(t, err, resilient.KindRedirect)
 	require.ErrorContains(t, err, "stopped after 3 redirects")
 	assert.Less(t, time.Since(start), 2*time.Second)
 
-	_, err = client.Send(api, get(t, base+"/redirect/cross")) //nolint:bodyclose // error
+	_, err = client.Send(api, get(t, base+"/redirect/cross"))
 	require.ErrorIs(t, err, resilient.KindRedirect)
 	require.ErrorContains(t, err, "cross-host redirect to elsewhere.invalid")
 	require.NotErrorIs(t, err, resilient.KindConnection, "refused before resolving the other host")
 
-	_, err = client.Send(api, get(t, base+"/redirect/downgrade")) //nolint:bodyclose // error
+	_, err = client.Send(api, get(t, base+"/redirect/downgrade"))
 	require.ErrorIs(t, err, resilient.KindRedirect)
 	require.ErrorContains(t, err, "https→http")
 
@@ -231,7 +231,7 @@ func TestH3_NobodyListening(t *testing.T) {
 
 	// The TLS 1.3 listener is TCP only: its port number is unused on UDP.
 	start := time.Now()
-	_, err := client.Send(api, get(t, "https://"+srv.TLS13+"/whoami")) //nolint:bodyclose // error
+	_, err := client.Send(api, get(t, "https://"+srv.TLS13+"/whoami"))
 
 	var outbound *resilient.OutboundError
 

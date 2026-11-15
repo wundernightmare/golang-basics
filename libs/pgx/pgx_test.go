@@ -45,9 +45,8 @@ func TestConfigDSN(t *testing.T) {
 }
 
 // The process-environment path of LoadConfig (LoadConfigFrom with nil);
-// everything else reads a map through LoadConfigFrom.
-//
-// Serial on purpose: exercises the process-environment path (t.Setenv cannot run in parallel).
+// everything else reads a map through LoadConfigFrom. Serial: t.Setenv
+// cannot run in a parallel test.
 func TestLoadConfig_ReadsTheProcessEnvironment(t *testing.T) {
 	t.Setenv("TASKS_DB_HOST", "db.from-env")
 

@@ -14,9 +14,10 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// LoadYAML populates dst from an optional YAML file, overlays environment
-// variables on top, and finally fills whatever is still unset from the
-// struct's envDefault tags. Precedence, highest first:
+// LoadYAML populates dst in three layers: every field still at its zero
+// value first takes its envDefault tag, an optional YAML file is read over
+// that, and the environment variables that are set go on top. Precedence,
+// highest first:
 //
 //	environment variable  >  YAML file value  >  envDefault tag  >  zero value
 //
@@ -59,7 +60,7 @@ func LoadYAMLFrom[T any](path, prefix string, environ map[string]string, dst *T)
 
 	// 2. The file, when there is one: yaml only touches the keys it finds.
 	if path != "" {
-		data, err := os.ReadFile(path) //nolint:gosec // path is operator-supplied config, not user input
+		data, err := os.ReadFile(path) //nolint:gosec // G304: path is operator-supplied config, not user input
 		if err != nil {
 			return fmt.Errorf("httpx: read yaml %q: %w", path, err)
 		}

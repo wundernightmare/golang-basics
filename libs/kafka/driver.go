@@ -37,8 +37,11 @@ type Driver interface {
 	// brokers: [NewProducer] pings them.
 	NewProducer(cfg Config, log *slog.Logger) (ProducerClient, error)
 	// NewConsumer builds a group member subscribed to cfg.Topics, with
-	// automatic commits off. rb is called on group changes, from within
-	// Poll or Close (never concurrently with the loop's own processing).
+	// automatic commits off. rb is called on group changes, on whatever
+	// goroutine the client reports them from. A driver must not call it
+	// while a polled batch is being processed: only before Poll returns the
+	// batch, after [ConsumerClient.AllowRebalance] released it, or from
+	// Close.
 	NewConsumer(cfg Config, log *slog.Logger, rb Rebalance) (ConsumerClient, error)
 }
 
@@ -107,7 +110,9 @@ type Rebalance struct {
 }
 
 // ClientStats is a driver's view of its client for the metrics. Valid is
-// false until the first snapshot, and when the last one is stale.
+// false while the driver has nothing current to report: client statistics
+// are off (KAFKA_STATISTICS_INTERVAL_MS negative), or — for a driver that
+// reports in snapshots — none has arrived yet or the last one is stale.
 type ClientStats struct {
 	Valid         bool
 	BrokersUp     int64 // brokers with a live connection

@@ -1,7 +1,9 @@
 #!/bin/sh
-# Module discovery — the one place module lists come from. go.work is the
-# source of truth; nothing else in the repo (justfile, CI, hooks) spells out
-# a module list.
+# Module discovery — where the justfile, CI, the hooks and the other shell
+# scripts get their module lists. go.work is the source of truth. Not through
+# this script: scripts/cover-files.go, a stdlib-only Go program, parses
+# go.work itself, and a script that works on a chosen set of services names
+# them (cover.sh e2e, host-services-spawn.sh, schemathesis.sh).
 #
 #   scripts/touched-modules.sh --all           every go.work module, in go.work order
 #   scripts/touched-modules.sh --integration   modules with Docker-backed suites:

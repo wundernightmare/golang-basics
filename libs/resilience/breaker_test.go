@@ -69,7 +69,7 @@ func testBreaker(t *testing.T, mut func(*BreakerConfig)) (*Breaker, *fakeClock, 
 	}
 }
 
-// admit is allow() that must succeed.
+// admit is b.Allow() that must succeed.
 func admit(t *testing.T, b *Breaker) Ticket {
 	t.Helper()
 

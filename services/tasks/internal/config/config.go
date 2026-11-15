@@ -79,7 +79,8 @@ type OutboxConfig struct {
 	// counted.
 	MaxAttempts int `env:"OUTBOX_MAX_ATTEMPTS" envDefault:"10" yaml:"max_attempts"`
 	// RejectBackoff is the wait before a rejected event is tried again,
-	// doubled per rejection (capped at an hour): ten tries span minutes.
+	// doubled per rejection up to a cap (outbox.maxRejectDelay): ten tries
+	// span minutes.
 	RejectBackoff time.Duration `env:"OUTBOX_REJECT_BACKOFF" envDefault:"1s" yaml:"reject_backoff"`
 }
 

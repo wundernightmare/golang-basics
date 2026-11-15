@@ -43,7 +43,6 @@ const (
 	stateTaken byte = 1
 )
 
-// header is the fixed part of a record.
 type header struct {
 	payload  int
 	state    byte
@@ -290,8 +289,8 @@ type usage struct {
 	accepted, repeated, refused uint64
 }
 
-// Bits of arena.window that count the triggers of the second; the bits above
-// them are the millisecond the second began at, since the arena was built.
+// Bits of arena.window that count the triggers of the second; what the bits
+// above them hold is said at the field.
 const (
 	windowCountBits = 24
 	windowCountMask = 1<<windowCountBits - 1

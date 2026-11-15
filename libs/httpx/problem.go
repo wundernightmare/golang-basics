@@ -136,18 +136,26 @@ func Internal(detail string, cause error) Problem {
 // recorded on the request's span: the client gets "could not persist task",
 // the operator gets the pgconn error.
 func WriteProblem(w http.ResponseWriter, r *http.Request, p Problem) {
-	if r != nil {
-		if p.Instance == "" && r.URL != nil {
-			p.Instance = r.URL.Path
-		}
-
-		p = withRequestIDExtension(p, RequestIDFromContext(r.Context()))
-		if p.status() >= http.StatusInternalServerError {
-			reportFailure(r.Context(), p)
-		}
+	if r != nil && p.status() >= http.StatusInternalServerError {
+		reportFailure(r.Context(), p)
 	}
 
 	writeProblem(w, r, p)
+}
+
+// fromRequest fills what the caller left empty: Instance (the path) and the
+// request_id extension, each on its own — a problem that names its Instance
+// still gets the id its log lines carry.
+func fromRequest(p Problem, r *http.Request) Problem {
+	if r == nil {
+		return p
+	}
+
+	if p.Instance == "" && r.URL != nil {
+		p.Instance = r.URL.Path
+	}
+
+	return withRequestIDExtension(p, RequestIDFromContext(r.Context()))
 }
 
 // WriteError answers with err in problem shape: a [Problem] (possibly
@@ -214,13 +222,10 @@ func withRequestIDExtension(p Problem, id string) Problem {
 	return p
 }
 
-// writeProblem encodes and writes p; the request is only used to attach the
-// request_id extension when it was not already filled in.
+// writeProblem encodes and writes p, completed from the request (see
+// fromRequest). It does not report a 5xx; that is [WriteProblem].
 func writeProblem(w http.ResponseWriter, r *http.Request, p Problem) {
-	if r != nil && p.Instance == "" && r.URL != nil {
-		p.Instance = r.URL.Path
-		p = withRequestIDExtension(p, RequestIDFromContext(r.Context()))
-	}
+	p = fromRequest(p, r)
 
 	body, err := json.Marshal(p)
 	if err != nil {
@@ -246,7 +251,7 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_, _ = w.Write(append(body, '\n')) // same bytes json.Encoder wrote before
+	_, _ = w.Write(append(body, '\n')) // newline-terminated, as a json.Encoder's output is
 }
 
 // DecodeJSON decodes the request body into v. It returns a [Problem]: 413

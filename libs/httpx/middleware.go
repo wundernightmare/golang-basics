@@ -76,7 +76,10 @@ func (i *reqInfo) status(ctx context.Context) int {
 }
 
 // statusClientClosedRequest is nginx's convention for "the client went away
-// before we answered" — an access-log status, never one sent on the wire.
+// before we answered" — a status for the access log, the metrics and the
+// span, not for a client: status reports it for a response that was never
+// written, and [WriteError] writes it only once the request context is
+// cancelled, which normally means the client has left.
 const statusClientClosedRequest = 499
 
 // routeLabel is the route the metrics and logs are keyed on.
@@ -153,7 +156,8 @@ func (w *responseWriter) Flush() {
 
 func (w *responseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// entry is the outermost middleware: it settles the request id, wraps the
+// entry is the first middleware of the chain NewServer builds (only the
+// optional flightTrigger wraps it): it settles the request id, wraps the
 // writer, attributes the client address, applies the per-request deadline
 // and puts all of it on the context before tracing, logging or the handler
 // run, so every one of them sees the same facts.
@@ -208,9 +212,11 @@ func (s *Server) entry(next http.Handler) http.Handler {
 const RequestTimeoutHeader = "X-Request-Timeout-Ms"
 
 // requestBudget is the deadline of one request: the configured timeout (≤ 0 =
-// none), shortened by a valid X-Request-Timeout-Ms but not below floor. A
-// value that is not 1 to 9 decimal digits, or is zero, is ignored, as if it
-// were absent.
+// none), shortened by a valid X-Request-Timeout-Ms but not below floor. On a
+// server without a configured timeout the header alone sets the deadline
+// (again not below floor): a caller may always ask for less time. A value
+// that is not 1 to 9 decimal digits, or is zero, is ignored, as if it were
+// absent.
 func requestBudget(configured, floor time.Duration, header string) time.Duration {
 	if header == "" || len(header) > 9 || strings.Trim(header, "0123456789") != "" {
 		return configured
@@ -237,6 +243,8 @@ func peerAddr(remote string) netip.Addr {
 
 	a, _ := netip.ParseAddr(host)
 
+	// Unmap: an IPv4 peer can arrive as ::ffff:a.b.c.d, which no IPv4 prefix
+	// of HTTP_TRUSTED_PROXIES contains (clientIP does the same per hop).
 	return a.Unmap()
 }
 
@@ -279,7 +287,7 @@ func (s *Server) clientIP(r *http.Request, peer netip.Addr, trusted bool) string
 }
 
 // debugToken is the middleware behind [Config].DebugToken: a request whose
-// X-Debug-Token equals token (constant-time compare) runs with a context
+// X-Debug-Token equals token (compared as tokenDigest says) runs with a context
 // marked by [WithDebugLogging] and gets X-Debug-Logging: on in the response.
 // A missing or wrong token is ignored silently — the API port is public, and
 // answering "wrong token" would make it an oracle and a log-flood vector.

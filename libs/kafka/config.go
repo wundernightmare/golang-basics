@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -54,9 +55,11 @@ import (
 //	TASKS_KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM https (verify the broker host name) | none (default https)
 //
 // Memory: every buffer a client keeps is bounded by a named key, always
-// written by the provider — never left to the client's defaults (librdkafka
-// would hold up to 1 GiB of unsent records while the brokers are away,
-// franz-go has no byte bound at all by default). See README "Memory".
+// written by the provider — never left to the client's defaults, which are
+// sized for throughput, not for a pod with a memory limit (README "Memory
+// and buffers" has each client's numbers). The byte sizes the Kafka protocol
+// carries as int32 — a record batch, a fetch, a partition's share of it —
+// may not exceed 2147483647.
 //
 //	TASKS_KAFKA_PRODUCER_QUEUE_MAX_KBYTES    unsent records, KiB                  (default 65536 = 64 MiB)
 //	TASKS_KAFKA_PRODUCER_QUEUE_MAX_MESSAGES  unsent records, count                (default 100000)
@@ -83,7 +86,7 @@ import (
 //	TASKS_KAFKA_CONSUMER_RETRY_BACKOFF     first retry delay, doubled per retry, jittered (default "200ms")
 //	TASKS_KAFKA_CONSUMER_RETRY_BACKOFF_MAX cap on one retry delay               (default "30s")
 //	TASKS_KAFKA_DEAD_LETTER_TOPIC          where exhausted records go; "{topic}" is the
-//	                                       source topic; "none" disables the DLQ (default "{topic}.dlq")
+//	                                       source topic; "none" (or "-") disables the DLQ (default "{topic}.dlq")
 //	TASKS_KAFKA_CONSUMER_DRAIN_TIMEOUT     budget to finish the in-flight batch on shutdown (default "10s")
 //
 // Any other librdkafka property (librdkafka provider only — franz-go has no
@@ -197,8 +200,14 @@ func (p *Properties) UnmarshalText(b []byte) error {
 
 // DeadLetterDisabled is the [Config.DeadLetterTopic] value that turns the
 // dead-letter topic off: a record that exhausts its retries then stops the
-// consumer instead of being parked (see [Consumer.Run]).
+// consumer instead of being parked (see [Consumer.Run]). "-" is read the same
+// way.
 const DeadLetterDisabled = "none"
+
+// deadLetterDisabledAlias is the second spelling of [DeadLetterDisabled]. It
+// has been accepted for as long as the key has existed, so it is public
+// behaviour: a deployment may carry it.
+const deadLetterDisabledAlias = "-"
 
 // Defaults applied by [Config.Validate] (and the constructors) to zero
 // fields of a hand-built Config. They mirror the envDefault tags.
@@ -534,6 +543,18 @@ func (c *Config) validateBuffers() []error {
 		}
 	}
 
+	// The Kafka protocol carries these three sizes as int32, so a client
+	// takes them as one: a larger value would wrap in the conversion.
+	for name, n := range map[string]int{
+		"KAFKA_MESSAGE_MAX_BYTES":                  c.MessageMaxBytes,
+		"KAFKA_CONSUMER_FETCH_MAX_BYTES":           c.ConsumerFetchMaxBytes,
+		"KAFKA_CONSUMER_PARTITION_FETCH_MAX_BYTES": c.ConsumerPartitionFetchMaxBytes,
+	} {
+		if n > math.MaxInt32 {
+			errs = append(errs, fmt.Errorf("%s (%d) is above %d, the largest size the Kafka protocol carries (int32)", name, n, math.MaxInt32))
+		}
+	}
+
 	if c.MessageMaxBytes > c.ProducerQueueMaxKBytes*1024 {
 		errs = append(errs, fmt.Errorf("KAFKA_MESSAGE_MAX_BYTES (%d) does not fit in KAFKA_PRODUCER_QUEUE_MAX_KBYTES (%d KiB)", c.MessageMaxBytes, c.ProducerQueueMaxKBytes))
 	}
@@ -555,7 +576,7 @@ func (c Config) maxRetries() int { return max(c.MaxRetries, 0) }
 // deadLetterTopic resolves the DLQ topic for a record consumed from source,
 // or "" when the DLQ is disabled.
 func (c Config) deadLetterTopic(source string) string {
-	if c.DeadLetterTopic == DeadLetterDisabled || c.DeadLetterTopic == "-" {
+	if c.DeadLetterTopic == DeadLetterDisabled || c.DeadLetterTopic == deadLetterDisabledAlias {
 		return ""
 	}
 
