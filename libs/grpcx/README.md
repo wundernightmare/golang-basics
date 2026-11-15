@@ -11,7 +11,7 @@ grpc-go has no answer for:
 
 | Concern | Implementation |
 | --- | --- |
-| Default deadline | gRPC service config `timeout` (a caller's shorter deadline wins) |
+| Default deadline | gRPC service config `timeout`, and the same value as the context deadline of every call — the service config does not exist until the name has resolved (a caller's shorter deadline wins) |
 | Retries | gRPC service config `retryPolicy`: listed status codes, exponential backoff ±20 % jitter, server pushback (`grpc-retry-pushback-ms`) |
 | Retry amplification | gRPC service config `retryThrottling` (token bucket per connection) |
 | Load balancing | `round_robin` (default) or `pick_first` |
@@ -107,6 +107,29 @@ buys: a connection that went silent (packets dropped, no FIN) otherwise holds
 a call until its deadline; with `keepalive_time: 10s` and
 `keepalive_timeout: 1s` the call fails as `Unavailable` after about eleven
 seconds.
+
+**DNS** — a `dns:///name:port` target is resolved by gRPC's resolver: when
+the channel is built, and again only when a connection fails. Tested against
+a real name server (`dns_test.go`):
+
+- A name that does not resolve (`NXDOMAIN`, `SERVFAIL`) fails a call with
+  `Unavailable` at once — a breaker failure. The resolver retries on its own,
+  backing off from one second, so a name that appears is found without a
+  call to trigger it; `wait_for_ready` holds a call until then.
+- A name server that does not answer: gRPC gives a lookup 30 seconds, and a
+  call made before the first answer waits for it. `timeout` bounds that wait
+  (`DeadlineExceeded`, a breaker failure) — it is set as the context deadline
+  of every call for exactly this case. With `timeout: 0` and no deadline of
+  the caller's, such a call waits the 30 seconds.
+- **A live connection never asks again**, and no timer does either. After a
+  record moves, calls keep going to the old address for as long as that
+  server keeps the connection. The new address is found when the connection
+  fails — and no sooner than 30 seconds after the previous answer (gRPC's
+  floor between two resolutions; `resolver/dns.SetMinResolutionInterval`,
+  process-wide, before the first channel). A server that goes away right
+  after a channel resolved it is `Unavailable` for up to that long. Retire a
+  server with a drain (`MaxConnectionAge` on the server sends GOAWAY, and the
+  client re-resolves) and keep the old address answering meanwhile.
 
 **Gateways** — when an HTTP proxy answers instead of the service, grpc-go
 maps its status: 502, 503, 504 and 429 become `Unavailable` (retried, a
@@ -204,7 +227,7 @@ outlier detection is the finer tool.
 
 | Layer | Where | Owns |
 | --- | --- | --- |
-| Unit | `*_test.go` here — an in-process gRPC server on loopback | the breaker's view of every status, streams, config and service-config rendering |
+| Unit | `*_test.go` here — an in-process gRPC server on loopback; `dns_test.go` with a real name server on loopback (`testx.DNS`) and gRPC's resolver | the breaker's view of every status, streams, config and service-config rendering; a name that does not resolve, a silent name server, a record that moves |
 | Mutation | `.gremlins.yaml`, nightly | whether those tests notice a flipped comparison |
 | Integration | [`integration/`](integration) — a module of its own, so testcontainers, Toxiproxy and the OTLP stubs stay out of this `go.mod` | a real server (Jaeger) over cleartext, TLS, TLS 1.3 and mutual TLS; a real stream; an HTTP gateway and a database on the other end; TCP faults at a named point; what retries, `wait_for_ready` and keepalive do on a real network |
 
