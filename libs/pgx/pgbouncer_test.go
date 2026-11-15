@@ -69,7 +69,6 @@ func bouncerINI(cfg bouncerConfig, upstreamPort string) string {
 tx = %[1]s pool_mode=transaction pool_size=4
 sess = %[1]s pool_mode=session pool_size=4
 tx_pair = %[1]s pool_mode=transaction pool_size=2
-sess_pair = %[1]s pool_mode=session pool_size=2
 tx_one = %[1]s pool_mode=transaction pool_size=1
 sess_one = %[1]s pool_mode=session pool_size=1
 

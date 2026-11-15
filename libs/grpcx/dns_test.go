@@ -87,7 +87,7 @@ func TestDial_ASilentNameServerIsBoundedByTheTargetTimeout(t *testing.T) {
 
 			_, err = stream.Recv()
 
-			return err //nolint:wrapcheck // the error under test
+			return err
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

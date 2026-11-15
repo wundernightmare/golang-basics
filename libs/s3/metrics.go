@@ -10,8 +10,10 @@ type metrics struct {
 func newMetrics() *metrics {
 	return &metrics{
 		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "s3_request_duration_seconds",
-			Help:    "S3 call latency in seconds by operation, the client's retries included.",
+			Name: "s3_request_duration_seconds",
+			Help: "S3 call latency in seconds by operation, the client's retries included.",
+			// The workspace's latency buckets (docs/METRICS.md), as Kafka's:
+			// the top one is the default S3_TRANSFER_TIMEOUT.
 			Buckets: []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60},
 		}, []string{"operation"}),
 		errors: prometheus.NewCounterVec(prometheus.CounterOpts{

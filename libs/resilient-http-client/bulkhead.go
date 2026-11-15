@@ -51,7 +51,6 @@ func (b *bulkhead) acquire(ctx context.Context) bool {
 	}
 }
 
-// release frees a slot taken by acquire.
 func (b *bulkhead) release() {
 	if b != nil {
 		<-b.slots

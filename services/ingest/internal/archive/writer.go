@@ -66,6 +66,9 @@ type Writer struct {
 	metrics  *writerMetrics
 	now      func() time.Time
 
+	// mu guards cur — and, while a batch is cur, that batch's fields — seq
+	// and closed. A batch taken out of cur belongs to its flush alone. wake,
+	// slots and flushes synchronise themselves.
 	mu      sync.Mutex
 	cur     *batch
 	seq     uint64
@@ -214,11 +217,16 @@ func (w *Writer) nudge() {
 	}
 }
 
+// idle is how long the flush loop sleeps when it has nothing to time: no
+// batch is open, or every flush slot is taken. Nothing waits for it to pass —
+// Add, Expedite and a finishing flush nudge the loop.
+const idle = time.Hour
+
 // Run flushes batches as they fall due until ctx is cancelled, then flushes
 // what is left and waits for every put in flight. It returns only when no
 // ticket is outstanding: each put is bounded by the store's own deadline.
 func (w *Writer) Run(ctx context.Context) error {
-	timer := time.NewTimer(time.Hour)
+	timer := time.NewTimer(idle)
 	defer timer.Stop()
 
 	for {
@@ -247,8 +255,6 @@ func (w *Writer) Run(ctx context.Context) error {
 // again. When every slot is busy the batch stays open: a finishing flush
 // nudges the loop.
 func (w *Writer) flushDue(force bool) time.Duration {
-	const idle = time.Hour
-
 	w.mu.Lock()
 
 	cur := w.cur

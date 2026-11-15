@@ -20,7 +20,8 @@ const (
 	ContentType = "application/zstd"
 )
 
-// Compression levels, by name (the SHARD compression config values).
+// Compression levels, by name (the values of ARCHIVE_COMPRESSION and
+// COMPACT_COMPRESSION).
 const (
 	LevelFastest = "fastest"
 	LevelDefault = "default"

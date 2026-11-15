@@ -21,7 +21,7 @@ import (
 // structured, sampled request logging with trace correlation, Prometheus
 // metrics, panic recovery, body limits, per-request deadlines, per-request
 // debug logging — and a second, admin listener for the operational surface
-// (health, metrics, version, config, runtime log level, pprof). Services call
+// (probes, metrics, build identity, runtime switches, pprof). Services call
 // [Server.Mux] to register their own routes, then [Server.Run] to serve both
 // listeners with graceful shutdown.
 type Server struct {
@@ -91,12 +91,14 @@ func WithConfig(v any) Option {
 // NewServer constructs a server from cfg and log; it validates cfg (see
 // [Config.Validate]) and returns the first problem instead of a server.
 //
-// The API chain applies, in order: request id + deadline → debug token (when
-// Config.DebugToken is set) → tracing → access log → metrics → [WithMiddleware]
-// extras → panic recovery → body limit → routing (404/405 as problem+json) →
-// the service's mux. The admin handler serves /healthz, /livez, /readyz,
-// /metrics, /version, /admin/config, /admin/log-level and /debug/pprof (see
-// newAdminMux).
+// The API chain applies, in order: flight-recorder trigger (when
+// Config.DiagFlightRecorder and DiagFlightSlowRequest are set) → request id +
+// deadline → debug token (when Config.DebugToken is set) → tracing → access
+// log → metrics → rate limit (when Config.RateLimit or RateLimitPerClient is
+// set) → [WithMiddleware] extras → panic recovery → body limit → routing
+// (404/405 as problem+json) → the service's mux. The admin handler serves the
+// probes, /metrics, /version, /admin/* and /debug/pprof; its table of routes
+// is on newAdminMux (admin.go).
 func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("httpx: config: %w", err)
@@ -187,8 +189,8 @@ func (s *Server) Mux() *http.ServeMux { return s.mux }
 // so tests can drive it with httptest without a listener.
 func (s *Server) Handler() http.Handler { return s.handler }
 
-// Admin exposes the admin handler (health, metrics, version, config, log
-// level, pprof), mainly so tests can drive it without a listener.
+// Admin exposes the admin handler (the routes of newAdminMux), mainly so
+// tests can drive it without a listener.
 func (s *Server) Admin() http.Handler { return s.admin }
 
 // Logger returns the server's structured logger.
@@ -274,7 +276,7 @@ func (s *Server) Run(ctx context.Context) error {
 			BaseContext:       func(net.Listener) context.Context { return baseCtx },
 		}
 
-		ln, err := net.Listen("tcp", s.cfg.AdminAddr) //nolint:noctx // as for the API listener above
+		ln, err := net.Listen("tcp", s.cfg.AdminAddr) //nolint:noctx // bind is immediate; a cancelled ctx must still bind and then shut down cleanly (Run returns nil)
 		if err != nil {
 			if apiLn != nil {
 				_ = apiLn.Close()

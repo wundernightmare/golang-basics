@@ -120,7 +120,7 @@ func TestChaosValkeyMisbehaves(t *testing.T) {
 			p.Toxic("slicer", "downstream", map[string]any{"average_size": 64, "size_variation": 32, "delay": 20_000})
 		},
 	} {
-		t.Run(name, func(t *testing.T) { //nolint:paralleltest // serial: (same)
+		t.Run(name, func(t *testing.T) { //nolint:paralleltest // serial: chaos via the shared Toxiproxy proxy
 			proxy := containers.Proxied(t, "valkey")
 			src := newSource()
 			src.payload = payload

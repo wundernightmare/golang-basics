@@ -7,9 +7,11 @@ S3-compatible stores (the tests and the local stack run
 
 What it adds to the SDK:
 
-- **Every call has its own deadline** — `S3_OP_TIMEOUT` for small calls,
-  `S3_TRANSFER_TIMEOUT` for a get or a multipart part — with the SDK's
-  retries (`S3_MAX_ATTEMPTS`) inside it. A request context is not a deadline.
+- **Every call has its own deadline** — `S3_TRANSFER_TIMEOUT` for a get, a
+  multipart part and the completion of a multipart upload, `S3_OP_TIMEOUT`
+  for every other call (an upload that never filled a part is one put, of up
+  to `S3_UPLOAD_PART_BYTES`) — with the SDK's retries (`S3_MAX_ATTEMPTS`)
+  inside it. A request context is not a deadline.
 - **No network at construction.** `New` only builds the client, so a store
   that is down does not stop a service that can work without it;
   `Ensure` checks (and optionally creates) the bucket, `ReadyCheck` plugs
@@ -50,7 +52,7 @@ service's YAML; `config.go` documents each.
 | `S3_ENDPOINT` | "" (AWS) | base URL of an S3-compatible store |
 | `S3_REGION` | `us-east-1` | signing region |
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | "" | static keys; unset = the AWS default chain (IRSA, instance role) |
-| `S3_USE_PATH_STYLE` | `true` | `endpoint/bucket/key` |
+| `S3_USE_PATH_STYLE` | `true` | `endpoint/bucket/key`; the default comes from the env tag, so a `s3.Config` built by hand has it `false` until set |
 | `S3_INSECURE` / `S3_CA_FILE` | `false` / "" | plaintext endpoint opt-in / private CA |
 | `S3_AUTO_CREATE_BUCKET` | `false` | create the bucket in `Ensure` (local, tests) |
 | `S3_OP_TIMEOUT` / `S3_TRANSFER_TIMEOUT` / `S3_DIAL_TIMEOUT` | 10s / 60s / 5s | per-call deadlines |

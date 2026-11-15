@@ -3,8 +3,10 @@ package httpx
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -87,6 +89,38 @@ func repeat(c byte, n int) string {
 	}
 
 	return string(out)
+}
+
+// writeProblem takes Instance and request_id from the request one by one: a
+// problem that names its own Instance still carries the id of its log lines,
+// and a request_id the caller set is kept.
+func TestWriteProblemFillsInstanceAndRequestIDSeparately(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(http.MethodGet, "/tasks/7", http.NoBody)
+	req = req.WithContext(WithRequestID(req.Context(), "req-1"))
+
+	written := func(p Problem) map[string]any {
+		rec := httptest.NewRecorder()
+		writeProblem(rec, req, p)
+
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+
+		return body
+	}
+
+	body := written(Problem{Status: http.StatusConflict, Instance: "/tasks/7/archive"})
+	assert.Equal(t, "/tasks/7/archive", body["instance"])
+	assert.Equal(t, "req-1", body["request_id"], "an Instance of its own does not cost the problem its request id")
+
+	body = written(Problem{Status: http.StatusConflict})
+	assert.Equal(t, "/tasks/7", body["instance"])
+	assert.Equal(t, "req-1", body["request_id"])
+
+	body = written(Problem{Status: http.StatusConflict, Extensions: map[string]any{"request_id": "callers"}})
+	assert.Equal(t, "/tasks/7", body["instance"])
+	assert.Equal(t, "callers", body["request_id"])
 }
 
 func TestProblemStatusEdges(t *testing.T) {

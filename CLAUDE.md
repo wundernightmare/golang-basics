@@ -199,8 +199,9 @@ README; this file is only the high-signal, easy-to-miss bits.
   port + 1000, workers have only this one). Never register ops routes on the
   API mux, and point probes / scrapes / e2e health waits at the admin port.
 - **Tracing is built into the httpx chain** (request id → debug token →
-  tracing → access log → metrics → your `WithMiddleware` extras → recovery →
-  body limit → routing; a 401/429 from your authenticator is still traced,
+  tracing → access log → metrics → the server's rate limit → your
+  `WithMiddleware` extras → recovery → body limit → routing; the order of
+  record is the `httpx.NewServer` doc; a 401/429 from your authenticator is still traced,
   logged and counted). Do not add a tracing middleware; `otelx.Init` installs
   the provider and propagators, httpx starts the server span. The otelx
   contract test (`telemetry_test.go`) guards that logs, span and metrics
@@ -220,8 +221,9 @@ README; this file is only the high-signal, easy-to-miss bits.
   a setting of its own is listed in `keepsZero`. Never a second copy of a
   default as a constant next to the tag.
 - **Service configs embed the lib configs** (`httpx.Config` inline,
-  `pgx.Config`/`valkey.Config`/`kafka.Config`/`otelx.Config` nested with an
-  `envPrefix`) and load through `httpx.LoadYAML`: env > YAML > `envDefault` tag.
+  `pgx.Config`/`valkey.Config`/`kafka.Config`/`otelx.Config` as named YAML
+  sections, with no `envPrefix` — their keys carry their own namespace) and
+  load through `httpx.LoadYAML`: env > YAML > `envDefault` tag.
   Never copy fields by hand into a lib Config — that is how tuning knobs get
   silently dropped. Unknown YAML keys are an error.
 - **Shutdown order is readiness off → `HTTP_SHUTDOWN_DELAY` → drain within
@@ -328,8 +330,8 @@ README; this file is only the high-signal, easy-to-miss bits.
   upgrade fixes it. Removing the workaround removes all three.
 - **Chaos before trusting resilience code**: a code path written for a
   failing dependency (optional readiness, the outbox relay, cache
-  fall-through, a timeout) gets a chaos test with `containers.Proxied` /
-  `containers.Pause`, and restores the dependency on cleanup.
+  fall-through, a timeout) gets a chaos test with `containers.Proxied`
+  (or `containers.Pause` for Kafka, which a proxy cannot front), and restores the dependency on cleanup.
   Every outbound call must carry its own deadline (`VALKEY_OP_TIMEOUT`,
   `KAFKA_PUBLISH_TIMEOUT`, the readiness check timeout) — a request context
   is not a deadline.
@@ -383,5 +385,13 @@ README; this file is only the high-signal, easy-to-miss bits.
   It covers Go's crypto only, so both build lines refuse it with the rdkafka
   provider — keep that refusal. `/version` reports `fips140` from
   `crypto/fips140.Enabled()`; never a `build_info` label.
-- Both binaries use the `run() error` + `os.Exit` pattern in `main` so deferred
+- **Comments answer "why"** (CONTRIBUTING "Comments"): the failure the code
+  prevents, the invariant, the trade-off — never what the name or the next
+  lines already say. One home per fact (a list, an order, a default is
+  written once and pointed to); a claim like "never" / "only" / "first" must
+  be checkable where it stands; a literal wait or size and every mutex gets
+  its reason; a `//nolint` reason is checkable and a suppression whose cause
+  is gone is deleted. Comments on configuration and exported API stay
+  detailed — the reader there has no code to read.
+- Every service binary uses the `run() error` + `os.Exit` pattern in `main` so deferred
   cleanup runs before exit (golangci-lint `gocritic:exitAfterDefer` enforces it).

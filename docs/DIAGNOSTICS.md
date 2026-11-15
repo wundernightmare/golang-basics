@@ -113,7 +113,7 @@ Keys of `httpx.Config` (with the service's prefix; YAML name = lower case):
 | `DIAG_KEY_PREFIX` | `diagnostics` | first segment of the object keys |
 | `DIAG_MEMORY_THRESHOLD` | `0.9` | share of the container's memory limit that triggers a capture; negative = never |
 | `DIAG_MEMORY_COOLDOWN` | `10m` | shortest time between two captures |
-| `DIAG_FLIGHT_RECORDER` | `false` | keep the last seconds of the execution trace in memory |
+| `DIAG_FLIGHT_RECORDER` | `false` | keep the last seconds of the execution trace in memory; like every capture here it needs a sink or `DIAG_DUMP_DIR`, and without one `srv.CaptureFlightTrace` returns false |
 | `DIAG_FLIGHT_MIN_AGE` | `10s` | how far back the window reaches |
 | `DIAG_FLIGHT_MAX_BYTES` | `8388608` | upper bound of the window in memory |
 | `DIAG_FLIGHT_SLOW_REQUEST` | `0s` | a request this slow triggers a snapshot; 0 = requests never do |

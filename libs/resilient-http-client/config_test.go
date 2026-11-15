@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.yaml.in/yaml/v3"
 )
 
 func TestLoadConfig_OverlaysDefaults(t *testing.T) {
@@ -134,4 +135,42 @@ func TestValidate(t *testing.T) {
 	err := defaults.Validate()
 	require.Error(t, err)
 	assert.Equal(t, 2, strings.Count(err.Error(), "\n")+1)
+}
+
+// viaNode decodes itself the short way: from the node it is handed.
+type viaNode struct {
+	Known string `yaml:"known"`
+}
+
+func (v *viaNode) UnmarshalYAML(n *yaml.Node) error {
+	type plain viaNode
+
+	return n.Decode((*plain)(v))
+}
+
+// The defect TargetConfig.UnmarshalYAML works around, asserted: a strict
+// decoder refuses an unknown key of a struct it decodes itself, and takes
+// the same key in silence once the struct decodes its own node. This test
+// fails when an upgrade of the library fixes that — the re-encode in both
+// outbound clients, the markers and the row in docs/UPSTREAM-WORKAROUNDS.md
+// go then.
+func TestUpstreamYAMLNodeDecodeIgnoresKnownFields(t *testing.T) {
+	t.Parallel()
+
+	const doc = "inner:\n  known: a\n  misspelt: b\n"
+
+	var direct struct {
+		Inner struct {
+			Known string `yaml:"known"`
+		} `yaml:"inner"`
+	}
+
+	require.ErrorContains(t, strictDecode([]byte(doc), &direct), "misspelt", "the control: KnownFields works on a plain struct")
+
+	var through struct {
+		Inner viaNode `yaml:"inner"`
+	}
+
+	require.NoError(t, strictDecode([]byte(doc), &through), "fixed upstream? then remove the workaround")
+	assert.Equal(t, "a", through.Inner.Known)
 }

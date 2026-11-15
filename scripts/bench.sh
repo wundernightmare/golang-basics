@@ -11,9 +11,8 @@ set -euo pipefail
 out="${1:?usage: bench.sh <out-file>}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : > "$out"
-# shellcheck disable=SC2013 # module dirs are single words
 
-for m in $(awk '/^use \(/{f=1;next} /^\)/{f=0} f{sub(/^[ \t]*\.\//,""); print}' "$root/go.work"); do
+for m in $("$root/scripts/touched-modules.sh" --all); do
   if (cd "$root/$m" && grep -rqE '^func Benchmark' --include='*_test.go' .); then
     echo "── bench $m"
     (cd "$root/$m" && go test -run='^$' -bench=. -benchmem -count="${BENCH_COUNT:-6}" ./... | tee -a "$out")

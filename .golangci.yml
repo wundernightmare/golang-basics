@@ -185,6 +185,12 @@ linters:
           - gochecknoglobals # TestMain-owned containers / fixtures: one per test binary by design
           - forcetypeassert  # a failed assertion panics the test: that is the failure, with a stack
           - prealloc         # allocation counts do not matter in a test
+      # The HTTP client's tests mostly make calls that must fail: the response
+      # is nil and there is no body to close. A body a test does leave open is
+      # a goroutine goleak reports.
+      - path: libs/resilient-http-client/.*_test\.go
+        linters:
+          - bodyclose
       # Test-only harness packages (non-_test files, imported only by tests —
       # depguard keeps them out of production): same relaxations as tests.
       - path: (libs/testx/|libs/kafka/kafkatest/|libs/tiercache/storetest/|internal/testsupport/)

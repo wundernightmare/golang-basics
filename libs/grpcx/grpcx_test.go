@@ -168,7 +168,7 @@ func dial(t *testing.T, tc grpcx.TargetConfig, opts ...grpcx.Option) (*grpcx.Cli
 func check(ctx context.Context, conn *grpc.ClientConn) error {
 	_, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
 
-	return err //nolint:wrapcheck // the error under test
+	return err
 }
 
 func metric(t *testing.T, c *grpcx.Client, name string, labels map[string]string) float64 {
@@ -552,14 +552,14 @@ func TestCall_CallerDeadlineIsABreakerFailureCancellationIsNot(t *testing.T) {
 }
 
 func watch(ctx context.Context, conn *grpc.ClientConn) (healthpb.Health_WatchClient, error) {
-	return healthpb.NewHealthClient(conn).Watch(ctx, &healthpb.HealthCheckRequest{}) //nolint:wrapcheck // the error under test
+	return healthpb.NewHealthClient(conn).Watch(ctx, &healthpb.HealthCheckRequest{})
 }
 
 func send(n int) func(healthpb.Health_WatchServer) error {
 	return func(stream healthpb.Health_WatchServer) error {
 		for range n {
 			if err := stream.Send(&healthpb.HealthCheckResponse{Status: healthpb.HealthCheckResponse_SERVING}); err != nil {
-				return err //nolint:wrapcheck // the stream's error, as is
+				return err
 			}
 		}
 

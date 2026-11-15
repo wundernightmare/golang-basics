@@ -56,9 +56,10 @@ func (l *LogLevel) Level() (slog.Level, time.Time) {
 
 // Set switches the logger to level. With ttl > 0 the level reverts to
 // [LogLevel.Base] once ttl elapses; ttl <= 0 keeps it until the next Set or
-// [LogLevel.Reset]. The admin endpoint never passes 0 — it caps every change
-// at Config.LogLevelMaxTTL — but a service may. Returns the level that was in
-// effect before.
+// [LogLevel.Reset]. PUT /admin/log-level never passes 0 — it caps every
+// change at Config.LogLevelMaxTTL — but a service may (and Reset, which
+// DELETE calls, does: the base level has nothing to revert to). Returns the
+// level that was in effect before.
 func (l *LogLevel) Set(level slog.Level, ttl time.Duration) (previous slog.Level) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -3,7 +3,8 @@
 #
 #   scripts/build-service.sh <service> [output-path]
 #
-# Static, trimmed, stripped binary with the build stamped into libs/httpx
+# Trimmed, stripped binary — static without cgo; KAFKA_PROVIDER below says
+# what the rdkafka provider links — with the build stamped into libs/httpx
 # (surfaces in build_info, /version, the OTel resource and the startup log):
 #
 #   VERSION     httpx.Version    default: `git describe --tags --always --dirty`, else "dev"
@@ -11,8 +12,8 @@
 #   BUILD_TIME  httpx.BuildTime  default: the HEAD commit time (RFC 3339, UTC) —
 #                                reproducible: the same commit stamps the same time
 #
-# KAFKA_PROVIDER picks the Kafka client a service with Kafka links (tasks,
-# consumer — the ones with internal/kafkaprovider; libs/kafka/README.md):
+# KAFKA_PROVIDER picks the Kafka client a service with Kafka links (the
+# services with internal/kafkaprovider; libs/kafka/README.md):
 #
 #   rdkafka (default)  librdkafka via confluent-kafka-go: CGO_ENABLED=1, the
 #                      bundled static librdkafka (the host's libc stays dynamic;

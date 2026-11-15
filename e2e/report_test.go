@@ -97,11 +97,11 @@ func resultsDir() string {
 // attachOutput adds a child's captured output to the report, pass or fail:
 // the log of a green run is what a red one is compared against.
 func attachOutput(t T, name, output string) {
-	// UPSTREAM-WORKAROUND(testo-allure): the media type is given, not
-	// guessed. Guessing makes the plugin write to os.TempDir and rename into
-	// the results directory, which fails when /tmp is another filesystem
-	// (tmpfs) — and the attachment is dropped in silence (testo-allure
-	// 1.5.0; TestUpstreamAttachmentWithoutATypeIsLostAcrossFilesystems).
+	// UPSTREAM-WORKAROUND(testo-allure 1.5.0): the media type is given, not
+	// guessed (docs/UPSTREAM-WORKAROUNDS.md). Guessing makes the plugin write
+	// to os.TempDir and rename into the results directory, which fails when
+	// /tmp is another filesystem (tmpfs) — and the attachment is dropped in
+	// silence (TestUpstreamAttachmentWithoutATypeIsLostAcrossFilesystems).
 	t.Attach(name+" output", allure.Bytes(output).As(allure.TextPlain))
 }
 
@@ -164,13 +164,13 @@ func isOneScenarioCall(body *ast.BlockStmt) bool {
 	return ok && callee.Name == "scenario"
 }
 
-// UPSTREAM-WORKAROUND(testo-allure): the defect attachOutput works around,
-// asserted against the plugin itself. An attachment without a media type is
-// written to os.TempDir and renamed into the results directory; across
-// filesystems the rename fails, and the plugin drops the attachment without
-// failing the test. When this test fails after an upgrade, the defect is
-// gone: attachOutput may stop naming its type, and this test can go
-// (docs/UPSTREAM-WORKAROUNDS.md).
+// UPSTREAM-WORKAROUND(testo-allure 1.5.0): the defect attachOutput works
+// around, asserted against the plugin itself (docs/UPSTREAM-WORKAROUNDS.md).
+// An attachment without a media type is written to os.TempDir and renamed
+// into the results directory; across filesystems the rename fails, and the
+// plugin drops the attachment without failing the test. When this test fails
+// after an upgrade, the defect is gone: attachOutput may stop naming its
+// type, and this test can go.
 //
 // It is the one test that is not a scenario: it examines the reporter, with
 // a run and a results directory of its own, and has no place in the report

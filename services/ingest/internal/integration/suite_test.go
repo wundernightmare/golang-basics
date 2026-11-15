@@ -68,9 +68,7 @@ func direct(t testing.TB) backends {
 }
 
 // ensureBucket creates the suite's bucket and waits until the store really
-// serves it. The service creates it too, but with one attempt at boot — and
-// RustFS reports /health before its S3 API is ready: for the first seconds a
-// signed call can still answer 503 (seen on CI runners).
+// serves it. The service creates it too, but with one attempt at boot.
 func ensureBucket(t testing.TB, backend containers.S3Store) {
 	t.Helper()
 
@@ -83,6 +81,7 @@ func ensureBucket(t testing.TB, backend containers.S3Store) {
 
 	defer store.Close()
 
+	// UPSTREAM-WORKAROUND(rustfs 1.0.5): /health answers before the S3 API does (docs/UPSTREAM-WORKAROUNDS.md)
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		assert.NoError(c, store.Ensure(context.Background()))
 	}, time.Minute, 250*time.Millisecond, "the bucket becomes reachable")

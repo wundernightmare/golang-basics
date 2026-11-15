@@ -38,6 +38,11 @@ const (
 	scopeClient = "client"
 )
 
+// retryAfterUnknown is the Retry-After of a refusal that has no bucket to
+// compute one from: the client table is full, or the limiter says it can
+// never grant the token.
+const retryAfterUnknown = time.Second
+
 func bucketDepth(limit float64, burst int) int {
 	if burst > 0 {
 		return burst
@@ -106,8 +111,8 @@ func (l *rateLimiter) client(key string, now time.Time) *rate.Limiter {
 // until there is, and takes nothing.
 func take(lim *rate.Limiter, now time.Time) (ok bool, wait time.Duration) {
 	reservation := lim.ReserveN(now, 1)
-	if !reservation.OK() {
-		return false, time.Second
+	if !reservation.OK() { // only for a request larger than the burst, and bucketDepth keeps the burst ≥ 1
+		return false, retryAfterUnknown
 	}
 
 	if wait = reservation.DelayFrom(now); wait > 0 {
@@ -128,7 +133,7 @@ func (l *rateLimiter) middleware(next http.Handler) http.Handler {
 		if l.perClient > 0 {
 			lim := l.client(ClientIPFromContext(r.Context()), now)
 			if lim == nil {
-				l.reject(w, r, scopeClient, time.Second)
+				l.reject(w, r, scopeClient, retryAfterUnknown)
 
 				return
 			}

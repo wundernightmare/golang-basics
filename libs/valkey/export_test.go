@@ -12,5 +12,5 @@ func (c Config) ClientOption() (valkeygo.ClientOption, error) { return c.clientO
 // NewBounded exposes the PoolSize guard to the tests.
 func NewBounded(client valkeygo.Client, size int) valkeygo.Client { return newBounded(client, size) }
 
-// ResubscribeDelay exposes the pause before a resubscription attempt.
+// ResubscribeDelay exposes the pause after a failed subscription attempt.
 func ResubscribeDelay(attempt int) time.Duration { return resubscribeDelay(attempt) }

@@ -164,7 +164,7 @@ func export(ctx context.Context, tb testing.TB, conn *grpc.ClientConn, n int, se
 
 	_, err := coltracepb.NewTraceServiceClient(conn).Export(ctx, spans(traceID(tb), n, service, 16))
 
-	return err //nolint:wrapcheck // the status under test
+	return err
 }
 
 var arrivedLine = regexp.MustCompile(`(?m)^otelcol_receiver_accepted_spans\{receiver="otlp/counted"[^}]*\} (\d+)$`)
@@ -257,21 +257,21 @@ func findTraces(ctx context.Context, tb testing.TB, conn *grpc.ClientConn, servi
 
 	stream, err := conn.NewStream(ctx, &grpc.StreamDesc{ServerStreams: true}, findTracesMethod, grpc.ForceCodecV2(rawCodec{}))
 	if err != nil {
-		return nil, err //nolint:wrapcheck // the status under test
+		return nil, err
 	}
 
 	if err := stream.SendMsg(&request); err != nil {
-		return nil, err //nolint:wrapcheck // the status under test
+		return nil, err
 	}
 
-	return stream, stream.CloseSend() //nolint:wrapcheck // the status under test
+	return stream, stream.CloseSend()
 }
 
 // next reads one message of a FindTraces stream and counts its spans.
 func next(stream grpc.ClientStream) (int, error) {
 	var frame []byte
 	if err := stream.RecvMsg(&frame); err != nil {
-		return 0, err //nolint:wrapcheck // io.EOF or the status under test
+		return 0, err
 	}
 
 	var data tracepb.TracesData

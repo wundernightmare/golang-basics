@@ -18,9 +18,9 @@ import (
 
 // oneShot is a client that leaves no connection behind. The default transport
 // keeps connections alive and may open one it never uses; a server that is
-// shutting down waits for such a connection (net/http gives a new one five
-// seconds), which is longer than the admin listener's drain budget — and
-// these tests assert that shutdown is clean.
+// shutting down waits for such a connection longer than the admin listener's
+// drain budget lasts (see Server.shutdown) — and these tests assert that
+// shutdown is clean.
 var oneShot = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 2 * time.Second}
 
 func readyz(adm string) int {
@@ -209,9 +209,10 @@ func TestRunWith_ServerFailureStopsTheWorkers(t *testing.T) {
 }
 
 // A connection that was opened on the admin listener and never used (a
-// client's spare one, a port check) is still there when the service stops:
-// net/http waits five seconds for it, the admin listener two. That is not a
-// failure of the service — Run closes it, says so, and returns cleanly.
+// client's spare one, a port check) is still there when the service stops,
+// and outlives the admin listener's drain budget (see Server.shutdown). That
+// is not a failure of the service — Run closes it, says so, and returns
+// cleanly.
 func TestRun_AnUnusedAdminConnectionDoesNotFailShutdown(t *testing.T) {
 	t.Parallel()
 

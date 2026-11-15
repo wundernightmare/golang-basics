@@ -110,8 +110,8 @@ L1 is the always-on level. Pass the untyped `nil` as the remote and the cache
 runs on L1 and the loader alone. With a remote that is unreachable, slow or
 cutting connections, no read fails either: every L2 command has its own
 deadline (`VALKEY_OP_TIMEOUT`), the circuit breaker of
-[`libs/resilience`](../resilience) skips L2 for `BreakerOpenTimeout` once
-`BreakerFailureRatio` of its recent calls failed, and the loader answers. What is
+[`libs/resilience`](../resilience) skips L2 for `breaker.open_timeout` once
+`breaker.failure_ratio` of its recent calls failed, and the loader answers. What is
 lost meanwhile is sharing between processes and invalidation, both bounded
 by the TTL; when the subscription comes back, L1 starts over.
 

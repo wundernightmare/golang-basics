@@ -130,9 +130,6 @@ func (s *Server) DebugSubject(ctx context.Context, subject string) context.Conte
 	}
 
 	trace.SpanFromContext(ctx).SetAttributes(attribute.String(DebugSubjectAttribute, subject))
-	// The subject is known after the span started, so its sampling decision
-	// is taken; what was not sampled is exported through the retroactive
-	// buffer when there is one.
 	triggerTrace(ctx, s.log)
 
 	return WithDebugLogging(ctx)

@@ -29,17 +29,17 @@
 // The breaker counts 5xx, attempt timeouts and connection errors — before the
 // response headers or while the body is read: an attempt lasts until its
 // body is read to the end or closed. It also counts the caller's own deadline
-// passing while the request is with the dependency. It ignores the caller
-// cancelling, local rejections (rate limit, bulkhead, open breaker, shutdown)
-// and 4xx — including 429, which is retried but says the dependency is up. Half-open admits breaker.half_open_probes probes, each
-// identified by the generation it was admitted in; results from earlier
-// generations never decide a probe.
+// passing while the request is with the dependency. A 4xx is an answer — a
+// success for the breaker — including 429, which is retried but says the
+// dependency is up. The caller cancelling and local rejections (rate limit,
+// bulkhead, open breaker, shutdown) tell it nothing. Half-open admits
+// breaker.half_open_probes probes, each identified by the generation it was
+// admitted in; results from earlier generations never decide a probe.
 //
 // # What it does not do
 //
 // No response cache, request coalescing, fallbacks, DNS cache or adaptive
-// concurrency: those were removed as incorrect or out of scope. There is no
-// hedging, no per-request policy override, and no retry of non-idempotent
-// requests without an Idempotency-Key. Redirects to another host are refused
-// unless allow_cross_host_redirects is set.
+// concurrency. There is no hedging, no per-request policy override, and no
+// retry of non-idempotent requests without an Idempotency-Key. Redirects to
+// another host are refused unless allow_cross_host_redirects is set.
 package resilient

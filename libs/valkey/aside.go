@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- TTL jitter is not security-sensitive; a CSPRNG (crypto/rand) is unnecessary here.
+	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- jitter, predictability is harmless
 	"time"
 )
 
@@ -50,7 +50,7 @@ func Jitter(ttl time.Duration) time.Duration {
 		return ttl
 	}
 
-	return ttl + time.Duration(rand.Int64N(2*spread+1)-spread) //nolint:gosec // jitter, not security
+	return ttl + time.Duration(rand.Int64N(2*spread+1)-spread) //nolint:gosec // G404: jitter, predictability is harmless
 }
 
 // Aside is the cache-aside (lazy-loading) pattern as a generic helper: it

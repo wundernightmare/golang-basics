@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/trace"
 	"strings"
 	"testing"
 	"time"
@@ -117,4 +118,48 @@ func TestFlightRecorder_OffByDefault(t *testing.T) {
 
 	_, err = NewServer(Config{Service: "svc", Addr: "127.0.0.1:0", DiagFlightRecorder: true, DiagFlightCooldown: -time.Second}, nil)
 	require.ErrorContains(t, err, "DIAG_FLIGHT_")
+}
+
+// A request for a snapshot is refused whenever nobody would ever take it:
+// before the diagnostics run, with the recorder switched on but neither a
+// sink nor a dump directory, when the runtime refused the recorder, and
+// after the stop. "true" from CaptureFlightTrace has to mean a watcher holds
+// the request.
+//
+//nolint:paralleltest // the runtime allows one flight recorder per process
+func TestFlightRecorder_ARequestNobodyWouldTakeIsRefused(t *testing.T) {
+	recording := Config{Service: "svc", Addr: "127.0.0.1:0", DiagFlightRecorder: true}
+
+	server := func(sink DumpSink) *Server {
+		srv, err := NewServer(recording, nil)
+		require.NoError(t, err)
+
+		if sink != nil {
+			srv.SetDumpSink(sink)
+		}
+
+		return srv
+	}
+
+	srv := server(nil)
+	assert.False(t, srv.CaptureFlightTrace("not started"), "before the diagnostics run")
+
+	stop := srv.diag.start(t.Context())
+	assert.False(t, srv.CaptureFlightTrace("nowhere to put it"), "no sink, no dump directory: no recorder")
+	stop()
+
+	taken := trace.NewFlightRecorder(trace.FlightRecorderConfig{})
+	require.NoError(t, taken.Start())
+
+	srv = server(&memSink{})
+	stop = srv.diag.start(t.Context())
+	assert.False(t, srv.CaptureFlightTrace("refused"), "the process already has a flight recorder")
+	stop()
+	taken.Stop()
+
+	srv = server(&memSink{})
+	stop = srv.diag.start(t.Context())
+	assert.True(t, srv.CaptureFlightTrace("recording"), "a running recorder takes the request")
+	stop()
+	assert.False(t, srv.CaptureFlightTrace("stopped"), "after the stop")
 }

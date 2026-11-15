@@ -18,7 +18,7 @@ import (
 //
 //	TASKS_OTEL_ENABLED                        turn tracing export on/off                 (default false)
 //	TASKS_OTEL_SERVICE_NAME                   resource service.name                      (default: the service sets it)
-//	TASKS_OTEL_SERVICE_VERSION                resource service.version                   (default: httpx.Version)
+//	TASKS_OTEL_SERVICE_VERSION                resource service.version                   (default: the service sets it)
 //	TASKS_OTEL_DEPLOYMENT_ENVIRONMENT         resource deployment.environment.name       (default "")
 //	TASKS_OTEL_EXPORTER_OTLP_ENDPOINT         collector host:port, OTLP over HTTP        (default "localhost:4318")
 //	TASKS_OTEL_EXPORTER_OTLP_INSECURE         plaintext HTTP to it instead of TLS        (default false)

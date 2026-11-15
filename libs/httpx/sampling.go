@@ -55,6 +55,13 @@ func (c *sampleCounter) inc(now, tick int64) uint64 {
 	return c.n
 }
 
+// newSamplingHandler takes its fallbacks for thereafter and tick here rather
+// than from the Config tags: a LogConfig can be built without a Config, and
+// Config itself keeps a zero LogSampleThereafter (see keepsZero). Neither
+// zero can be used as it is — Handle divides by thereafter, and with a zero
+// tick every record would open a new window and pass. 100 repeats the
+// LOG_SAMPLE_THEREAFTER tag default; one second is the window LogConfig
+// documents for SampleTick.
 func newSamplingHandler(next slog.Handler, initial, thereafter int, tick time.Duration) *samplingHandler {
 	if thereafter <= 0 {
 		thereafter = 100
@@ -66,8 +73,8 @@ func newSamplingHandler(next slog.Handler, initial, thereafter int, tick time.Du
 
 	return &samplingHandler{
 		Handler:    next,
-		initial:    uint64(initial),    //nolint:gosec // validated > 0 by the caller
-		thereafter: uint64(thereafter), // validated > 0 above
+		initial:    uint64(initial),    //nolint:gosec // G115: NewLogger builds this handler only for SampleInitial > 0
+		thereafter: uint64(thereafter), // > 0: a non-positive value was replaced above
 		tick:       int64(tick),
 		counters:   new([samplingSlots]sampleCounter),
 		dropped:    new([2]atomic.Uint64),
@@ -110,7 +117,7 @@ func (h *samplingHandler) slot(r slog.Record) uint64 {
 	f := fnv.New64a()
 	_, _ = f.Write([]byte(r.Message))
 
-	return (f.Sum64() ^ uint64(r.Level+128)) % samplingSlots //nolint:gosec // level offset keeps it non-negative
+	return (f.Sum64() ^ uint64(r.Level+128)) % samplingSlots //nolint:gosec // G115: +128 keeps the levels slog defines (-4…8) non-negative; any other value still only picks a slot
 }
 
 // Dropped returns the number of debug and info records dropped so far.

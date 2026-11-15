@@ -11,7 +11,8 @@ half failing tears the other down.
 
 - **Dispatch** on the `event_type` header — `task.created`, `task.updated`,
   `task.deleted` — falling back to an `event_type` field in the JSON payload,
-  and to `task.created` for a payload with neither (the pre-outbox producer).
+  and to `task.created` for a payload with neither. The tasks relay always
+  sends the header; nothing in this repository sends the fallbacks.
 - **Permanent failures** — an undecodable payload or an unknown type — are
   returned as `kafka.Permanent`: no retries, straight to the dead-letter
   topic (`consumer_events_rejected_total{reason}`).

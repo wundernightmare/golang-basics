@@ -69,7 +69,7 @@ Both are what [`libs/tiercache`](../tiercache) is built on.
 | `TASKS_VALKEY_URL` | `url` | — | `valkey://[:pw@]host:6379[/db]`; wins over the discrete fields. No default address: `Config.Configured()` is false until URL or ADDR is set |
 | `TASKS_VALKEY_ADDR` / `_PASSWORD` / `_DB` | `addr` / `password` / `db` | — / — / `0` | |
 | `TASKS_VALKEY_DIAL_TIMEOUT` | `dial_timeout` | `5s` | also bounds the boot PING |
-| `TASKS_VALKEY_OP_TIMEOUT` | `op_timeout` | `500ms` | every command; past it the caller treats the cache as a miss |
+| `TASKS_VALKEY_OP_TIMEOUT` | `op_timeout` | `500ms` | every command of the cache's own methods; past it the caller treats the cache as a miss |
 | `TASKS_VALKEY_PIPELINE_CONNS` | `pipeline_conns` | `4` | shared connections every ordinary command is pipelined over; a power of two, 1–256 |
 | `TASKS_VALKEY_POOL_SIZE` | `pool_size` | `32` | dedicated connections (blocking commands, pipelines ≥ 2000, `Dedicated`), at most |
 | `TASKS_VALKEY_POOL_MIN_IDLE` / `_POOL_IDLE_TIMEOUT` | `pool_min_idle` / `pool_idle_timeout` | `0` / `5m` | idle dedicated connections kept / closed after (`0`: never) |

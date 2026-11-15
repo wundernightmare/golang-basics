@@ -129,8 +129,10 @@ var knownKeywords = map[string]bool{ //nolint:gochecknoglobals // read-only look
 	"set": true, "show": true, "lock": true, "listen": true, "notify": true, "call": true,
 }
 
-// statementKeyword returns the lower-cased leading keyword of sql, skipping
-// whitespace and "--" comments, or "other".
+// statementKeyword returns the lower-cased leading keyword of sql, or "other".
+// Leading whitespace, "--" comments and opening parentheses are skipped, so
+// "(SELECT …) UNION …" is a "select"; a leading "/* … */" comment is not
+// parsed and makes the statement "other".
 func statementKeyword(sql string) string {
 	s := sql
 	for {

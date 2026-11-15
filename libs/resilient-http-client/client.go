@@ -170,9 +170,7 @@ func (c *Client) newPolicy(tc TargetConfig) *policy {
 
 	p.breaker = resilience.NewBreaker(tc.Breaker, time.Now, func(from, to BreakerState) {
 		c.m.transitions.WithLabelValues(tc.Name, from.String(), to.String()).Inc()
-		// The current state, not `to`, and read under the lock: concurrent
-		// notifications may run out of order, but whichever sets the gauge
-		// last has read a state at least as new as every earlier writer's.
+		// State(), not `to`, and under the lock: see resilience.NewBreaker.
 		p.stateMu.Lock()
 		c.m.breakerState.WithLabelValues(tc.Name).Set(float64(p.breaker.State()))
 		p.stateMu.Unlock()
@@ -181,7 +179,8 @@ func (c *Client) newPolicy(tc TargetConfig) *policy {
 	p.bulkhead = newBulkhead(&tc)
 	p.budget = resilience.NewRetryBudget(tc.RetryBudgetRatio, tc.RetryBudgetMinRetries, tc.RetryBudgetWindow, time.Now)
 
-	c.m.breakerState.WithLabelValues(tc.Name).Set(0)
+	// Set, so the series is there before the first transition.
+	c.m.breakerState.WithLabelValues(tc.Name).Set(float64(resilience.StateClosed))
 
 	if p.bulkhead != nil {
 		c.m.bulkheadInUse.WithLabelValues(tc.Name).Set(0)
@@ -230,11 +229,12 @@ func (c *Client) Send(target string, req *http.Request) (*http.Response, error) 
 // is sent once.
 //
 // It retries timeouts, connection errors (not a rejected server certificate)
-// and statuses 408, 425, 429 and 5xx but 501/505, up to the target's retry_max_attempts, waiting full-jitter
-// backoff or the response's Retry-After, whichever is longer. It stops
-// early when the caller's context would expire during the wait, when a
-// Retry-After exceeds retry_max_delay, or when the target's retry budget is
-// spent; the last error is returned then.
+// and statuses 408, 425, 429 and 5xx but 501/505, up to the target's
+// retry_max_attempts, waiting full-jitter backoff or the response's
+// Retry-After, whichever is longer. It stops early when the caller's context
+// would expire during the wait, when a Retry-After exceeds retry_max_delay,
+// or when the target's retry budget is spent; the last error is returned
+// then.
 func (c *Client) SendWithRetry(target string, req *http.Request) (*http.Response, error) {
 	return c.send(target, req, true)
 }
@@ -472,6 +472,8 @@ func classify(parent, attempt context.Context, err error) (Kind, resilience.Outc
 	var ne net.Error
 	switch {
 	case isRedirectError(err):
+		// The dependency answered — with a redirect this client refuses to
+		// follow, which is not a failure of the dependency.
 		return KindRedirect, resilience.OutcomeSuccess
 	case errors.Is(parent.Err(), context.DeadlineExceeded):
 		// The caller's own deadline: reported as a cancellation (the caller's
@@ -493,7 +495,8 @@ func (c *Client) count(p *policy, method, outcome string) {
 	c.m.requests.WithLabelValues(p.name, method, outcome).Inc()
 }
 
-// warn logs at warn level, at most about once a second per target.
+// warn logs at warn level: per target a burst of ten lines, then one a
+// second (logLimit, built in newPolicy).
 func (c *Client) warn(ctx context.Context, p *policy, msg string, args ...any) {
 	if p.logLimit.Allow() {
 		c.log.WarnContext(ctx, msg, append([]any{"target", p.name}, args...)...)
@@ -537,7 +540,7 @@ type responseBody struct {
 	p       *policy
 	url     string
 	parent  context.Context //nolint:containedctx // the body outlives the call that made it; it is the attempt
-	attempt context.Context //nolint:containedctx // as above
+	attempt context.Context //nolint:containedctx // the body ends with it: its end releases a body nobody closed
 	grant   resilience.Ticket
 
 	settled   sync.Once // the breaker hears once
@@ -598,7 +601,7 @@ func (b *responseBody) Read(buf []byte) (int, error) {
 		err = &OutboundError{Kind: kind, Target: b.p.name, Err: err}
 	}
 
-	return n, err //nolint:wrapcheck // io.EOF must stay io.EOF; a failure is already an OutboundError
+	return n, err // io.EOF must stay io.EOF; a failure is already an OutboundError
 }
 
 // Close closes the body and releases the attempt, once.
@@ -614,7 +617,7 @@ func (b *responseBody) Close() error {
 
 	b.finish()
 
-	return err //nolint:wrapcheck // the transport's error, as is
+	return err
 }
 
 // finish releases the attempt, once: from Close, or from the watch when the
@@ -636,7 +639,7 @@ type writableBody struct {
 }
 
 func (b *writableBody) Write(p []byte) (int, error) {
-	return b.w.Write(p) //nolint:wrapcheck // the connection's error, as is
+	return b.w.Write(p)
 }
 
 // enter counts a request in flight, or refuses it once shutdown began. The

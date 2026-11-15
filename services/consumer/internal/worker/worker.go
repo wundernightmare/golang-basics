@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -107,6 +108,11 @@ func (w *Worker) Run(ctx context.Context) error {
 // taskEvent is the part of a task event the worker reads: ids and the type.
 // It deliberately has no title or other user content, so none can reach a
 // log line.
+//
+// The events of this repository's contract (libs/contracts/events) carry the
+// task id as "id" and no event_type field: the relay sends the type as a
+// header. "task_id", "task.id" and "event_type" in the payload are accepted
+// too; nothing in this repository sends them.
 type taskEvent struct {
 	EventID   string `json:"event_id"`
 	EventType string `json:"event_type"`
@@ -134,10 +140,11 @@ func (e taskEvent) taskID() string {
 //
 // Dispatch is on the event_type header, falling back to an "event_type"
 // field in the payload, and to task.created for a payload with neither (the
-// pre-outbox producer sent only that event, without headers). An
-// undecodable payload or an unknown type is a [kafka.Permanent] error: no
-// retry can fix it, so it goes straight to the dead-letter topic. An event
-// id already applied is acknowledged without being applied again.
+// tasks relay always sends the header; nothing in this repository sends the
+// fallbacks). An undecodable payload or an unknown type is a
+// [kafka.Permanent] error: no retry can fix it, so it goes straight to the
+// dead-letter topic. An event id already applied is acknowledged without
+// being applied again.
 //
 // ctx carries the record's process span (continued from the producer's trace
 // via the record headers) and the event id as request_id, so the *Context
@@ -199,10 +206,12 @@ func (w *Worker) Handle(ctx context.Context, msg kafka.Message) error {
 	return nil
 }
 
+// truncate cuts s to at most n bytes for an error message. The type comes
+// from a record header — bytes anyone can publish.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
 
-	return s[:n]
+	return strings.ToValidUTF8(s[:n], "") // never cut a rune in half
 }

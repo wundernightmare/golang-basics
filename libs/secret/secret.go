@@ -63,9 +63,13 @@ func (s String) Expose() string {
 // YAML (omitempty) consult it.
 func (s String) IsZero() bool { return s.value == nil }
 
-// Equal reports whether the secret is candidate, in time that depends on
-// neither value nor on their lengths. An unset secret equals nothing, the
-// empty string included: no credential must not mean "any credential".
+// Equal reports whether the secret is candidate. It compares the SHA-256
+// digests of the two in constant time, so the answer takes as long whether
+// they differ in the first byte, the last, or in length. Hashing itself
+// takes time proportional to each value's own length (per 64-byte block),
+// which is the one thing timing can still tell. An unset secret equals
+// nothing, the empty string included: no credential must not mean "any
+// credential".
 func (s String) Equal(candidate string) bool {
 	if s.value == nil {
 		return false

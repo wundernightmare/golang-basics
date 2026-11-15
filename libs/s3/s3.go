@@ -83,10 +83,10 @@ type Object struct {
 // Client is an S3 client bound to one bucket. It is safe for concurrent use;
 // construct one with [New] and share it.
 //
-// Every call runs under its own deadline (Config.OpTimeout, or
-// Config.TransferTimeout for a call that moves a large body) with the SDK's
-// retries inside it, under an OpenTelemetry client span, and is measured —
-// register [Client.Collectors] to export the metrics.
+// Every call runs under its own deadline (Config.OpTimeout or
+// Config.TransferTimeout: the two fields say which call has which) with the
+// SDK's retries inside it, under an OpenTelemetry client span, and is
+// measured — register [Client.Collectors] to export the metrics.
 type Client struct {
 	api     api
 	cfg     Config
@@ -183,6 +183,8 @@ func sdkConfig(ctx context.Context, cfg Config, httpClient *http.Client) (aws.Co
 
 // newHTTPClient is the transport every call shares: bounded connects and a
 // bounded pool. There is no client-wide timeout — each call has its own.
+// What no Config key sets (keep-alive, idle and Expect-Continue timeouts,
+// HTTP/2) is written with net/http.DefaultTransport's values.
 func newHTTPClient(cfg Config) (*http.Client, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 
@@ -502,6 +504,9 @@ func (c *Client) Delete(ctx context.Context, keys []string) error {
 }
 
 // ensureLocks holds one mutex per endpoint + bucket, see [Client.Ensure].
+// UPSTREAM-WORKAROUND(rustfs 1.0.5): two clients creating one bucket at the
+// same moment leave the store answering NoSuchBucket for it
+// (docs/UPSTREAM-WORKAROUNDS.md).
 var ensureLocks sync.Map //nolint:gochecknoglobals // process-wide by purpose: it serializes clients that do not know of each other
 
 // Ensure verifies the bucket is reachable with these credentials and, when
@@ -564,11 +569,16 @@ func (c *Client) headBucket(ctx context.Context) error {
 	return nil
 }
 
+// readyTimeout bounds one readiness probe by itself, whatever deadline the
+// caller's ctx carries. It is the default of libs/httpx's
+// HEALTH_CHECK_TIMEOUT, which bounds the same probe from outside.
+const readyTimeout = 3 * time.Second
+
 // ReadyCheck returns a readiness probe (a libs/httpx CheckFunc) that asks the
 // store for the bucket with a short timeout.
 func (c *Client) ReadyCheck() func(ctx context.Context) error {
 	return func(ctx context.Context) error {
-		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, readyTimeout)
 		defer cancel()
 
 		return c.headBucket(ctx)

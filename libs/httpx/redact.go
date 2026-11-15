@@ -78,10 +78,13 @@ func isHex(s string) bool {
 // Redact returns a copy of v suitable for showing to an operator — what
 // GET /admin/config serves. It walks structs, pointers, slices and maps and:
 //
-//   - replaces the value of any struct field or map entry whose name matches
-//     password / secret / token / api key / private key / credential, or whose
-//     field carries `secret:"true"`, with "[redacted]" (an empty value stays
-//     empty, so "unset" remains visible); `secret:"false"` opts a field out;
+//   - replaces the value of any struct field or map entry whose name looks
+//     like a secret — it contains password, secret, token, api key, private
+//     key, credential, dsn, auth, cert, keystore or passphrase; the pattern
+//     is secretFieldName — or whose field carries `secret:"true"`, with
+//     "[redacted]" (an empty value stays empty, so "unset" remains visible);
+//     `secret:"false"` opts a field out. Such a value is replaced whole: a
+//     field named DSN shows "[redacted]", not a DSN with its password masked;
 //   - does the same for a value that is a secret by type (libs/secret's
 //     String), wherever it sits and whatever its tags say;
 //   - rewrites the password in any string that parses as a URL with
@@ -287,7 +290,9 @@ func redactURL(s string) string {
 }
 
 // redactURLForm masks the password and the secret query parameters of a
-// scheme://… string.
+// scheme://… string. The password placeholder is "xxxxx", not redactedValue:
+// brackets in userinfo come out of u.String() percent-encoded
+// (app:%5Bredacted%5D@host).
 func redactURLForm(s string) string {
 	u, err := url.Parse(s)
 	if err != nil {

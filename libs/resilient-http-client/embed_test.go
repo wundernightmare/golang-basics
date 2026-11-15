@@ -38,7 +38,7 @@ func loadService(t *testing.T, yaml string, environ map[string]string) (serviceC
 	cfg := serviceConfig{HTTPClient: resilient.DefaultConfig()}
 	err := httpx.LoadYAMLFrom(path, "SVC_", environ, &cfg)
 
-	return cfg, err //nolint:wrapcheck // the error under test
+	return cfg, err
 }
 
 func TestEmbedded_LoadsLikeLoadConfig(t *testing.T) {
