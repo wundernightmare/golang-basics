@@ -86,6 +86,13 @@ all — reads go to the loader. `DisableInvalidation` runs on TTLs alone.
 | On top (heap) | the store's index, about 16 bytes per live entry |
 | Entry limit | key + envelope under 64 KiB (65 531 bytes: what one chunk of the store holds, checked by a test against the store itself); larger values are served from L2 and counted in `tiercache_l1_oversize_total` |
 
+The Go memory limit does not see this memory. `libs/httpx` derives the limit
+from the container's (`RUNTIME_MEMORY_LIMIT_RATIO`, 0.85) and leaves the rest
+as headroom, and a full L1 is taken out of that headroom: 32 MiB of the
+38 MiB a 256 MiB container has. Subtract the capacity of every cache from
+the container limit before choosing the ratio —
+[docs/RUNTIME.md](../../docs/RUNTIME.md), "Choosing the ratio".
+
 A service with a tight budget shares one cache between its logical caches
 (telling keys apart in what they hash) rather than paying 32 MiB for each.
 
