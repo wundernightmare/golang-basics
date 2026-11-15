@@ -158,7 +158,7 @@ commands are the `cache_*` series above.
 | `tiercache_invalidations_total` | counter | `cache`, `scope` = `key` \| `all` (L1 emptied after the subscription reconnected) |
 | `tiercache_l2_bypassed_total` | counter | `cache` — lookups that skipped L2 while its breaker was open |
 | `tiercache_l1_oversize_total` | counter | `cache` — entries too large for L1 (served from L2) |
-| `tiercache_l1_bytes` | gauge | `cache` — bytes L1 holds, bounded by the configured capacity: off-heap memory in Go, the encoded size of the entries (kept decoded on the heap) in Node |
+| `tiercache_l1_bytes` | gauge | `cache` — bytes L1 holds, bounded by the configured capacity: in Go what the store reports (`offheap`: mapped so far; `onheap`: the whole of it, allocated at construction), the encoded size of the entries (kept decoded on the heap) in Node |
 
 ## Health, build, runtime
 

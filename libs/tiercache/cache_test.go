@@ -2,9 +2,12 @@ package tiercache_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -16,6 +19,8 @@ import (
 	"github.com/wundernightmare/golang-basics/libs/testx/containers"
 	"github.com/wundernightmare/golang-basics/libs/tiercache"
 	"github.com/wundernightmare/golang-basics/libs/tiercache/credential"
+	"github.com/wundernightmare/golang-basics/libs/tiercache/offheap"
+	"github.com/wundernightmare/golang-basics/libs/tiercache/onheap"
 )
 
 // One Valkey per test binary for the integration and chaos suites; the leak
@@ -204,7 +209,7 @@ func TestUnreachableL2NeverFailsARead(t *testing.T) {
 
 		synctest.Wait()
 
-		keys := make([]tiercache.Key, 20)
+		keys := make([]string, 20)
 		for i := range keys {
 			keys[i] = tiercache.KeyOf(fmt.Sprint("k", i))
 			src.set(keys[i], 1)
@@ -320,6 +325,99 @@ func TestLoadRacingAnInvalidationIsNotCached(t *testing.T) {
 				assert.Equal(t, "v2", rig.version(t, key), "nor in L2")
 			})
 		})
+	}
+}
+
+// Read your own write: a read that starts after Invalidate has returned
+// never joins a lookup that started before it — that lookup may hold the row
+// the write replaced. The reader that was already waiting still gets it (it
+// asked before the write); the next one asks again.
+func TestAReadAfterAnInvalidationDoesNotJoinAnOlderLookup(t *testing.T) {
+	t.Parallel()
+
+	// How the lookup that holds the old row gets started, once the source
+	// stalls: by a miss, or behind a stale read.
+	starts := map[string]struct {
+		prime func(t *testing.T, rig *harness, key string)
+		start func(t *testing.T, rig *harness, key string)
+	}{
+		"a miss": {
+			prime: func(*testing.T, *harness, string) {},
+			start: func(_ *testing.T, rig *harness, key string) {
+				go func() { _, _ = rig.read(key) }()
+			},
+		},
+		"a background refresh": {
+			prime: func(t *testing.T, rig *harness, key string) {
+				t.Helper()
+				require.Equal(t, "v1", rig.version(t, key))
+				time.Sleep(20 * time.Second) // stale: the next read refreshes behind
+			},
+			start: func(t *testing.T, rig *harness, key string) {
+				t.Helper()
+				require.Equal(t, "v1", rig.version(t, key))
+			},
+		},
+	}
+
+	// What tells this process that the row has changed.
+	signals := map[string]func(t *testing.T, rig, other *harness, remote *fakeRemote, key string){
+		"its own Invalidate": func(t *testing.T, rig, _ *harness, _ *fakeRemote, key string) {
+			t.Helper()
+			require.NoError(t, rig.cache.Invalidate(t.Context(), key))
+		},
+		"another process's Invalidate": func(t *testing.T, _, other *harness, _ *fakeRemote, key string) {
+			t.Helper()
+			require.NoError(t, other.cache.Invalidate(t.Context(), key))
+		},
+		// The write's tombstone is in L2, its message was lost: all this
+		// process learns is that its subscription came back.
+		"a reconnected subscription": func(t *testing.T, rig, _ *harness, remote *fakeRemote, key string) {
+			t.Helper()
+			require.NoError(t, remote.Tombstone(t.Context(), "tc:"+rig.name+":"+key, 5*time.Second))
+			remote.reconnect()
+		},
+	}
+
+	for startName, start := range starts {
+		for signalName, signal := range signals {
+			t.Run(startName+", then "+signalName, func(t *testing.T) {
+				t.Parallel()
+				synctest.Test(t, func(t *testing.T) {
+					remote, src, key := newFakeRemote(), newSource(), "tenant:42"
+					src.set(key, 1)
+
+					rig := newHarness(t, remote, src, nil)
+					other := newHarness(t, remote, src, sameName(rig.name))
+
+					synctest.Wait()
+					start.prime(t, rig, key)
+
+					release := src.hold()
+
+					start.start(t, rig, key)
+					synctest.Wait() // a lookup has read v1 and is stalled
+
+					src.set(key, 2)
+					signal(t, rig, other, remote, key)
+					synctest.Wait()
+
+					after := make(chan string, 1)
+
+					go func() {
+						version, _ := rig.read(key)
+						after <- version
+					}()
+
+					synctest.Wait()
+					release() // every stalled load goes on
+
+					assert.Equal(t, "v2", <-after, "a read that began after the write")
+					synctest.Wait()
+					assert.Equal(t, "v2", rig.version(t, key), "and the old row stayed nowhere")
+				})
+			})
+		}
 	}
 }
 
@@ -460,6 +558,39 @@ func TestCorruptL2EntriesAreReplaced(t *testing.T) {
 	}
 }
 
+// A value that outgrows L1 takes its smaller predecessor out of it: the
+// reads that follow are served from L2, not the older value from L1 until
+// its deadline.
+func TestAValueThatOutgrowsL1LeavesIt(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		remote, src, key := newFakeRemote(), newSource(), "tenant:42"
+		src.set(key, 1)
+
+		rig := newHarness(t, remote, src, nil)
+
+		synctest.Wait()
+		require.Equal(t, "v1", rig.version(t, key))
+		require.Equal(t, "v1", rig.version(t, key))
+		require.InDelta(t, 1, rig.reads(t, "fresh"), 0, "the small value is in L1")
+
+		// The row grows past the entry limit; the stale read refreshes it.
+		src.set(key, 2)
+		src.payload = 70_000
+
+		time.Sleep(20 * time.Second)
+		require.Equal(t, "v1", rig.version(t, key))
+		synctest.Wait()
+
+		require.InDelta(t, 1, rig.metric(t, "tiercache_l1_oversize_total", nil), 0)
+
+		fromL2 := rig.reads(t, "l2")
+
+		assert.Equal(t, "v2", rig.version(t, key), "not v1 from L1, stale for the rest of its hard TTL")
+		assert.InDelta(t, fromL2+1, rig.reads(t, "l2"), 0)
+	})
+}
+
 func TestEntryTooLargeForL1IsServedFromL2(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
@@ -489,7 +620,7 @@ func TestBackgroundRefreshesAreBounded(t *testing.T) {
 		src := newSource()
 		rig := newHarness(t, nil, src, func(cfg *tiercache.Config) { cfg.RefreshConcurrency = 2 })
 
-		keys := make([]tiercache.Key, 10)
+		keys := make([]string, 10)
 		for i := range keys {
 			keys[i] = tiercache.KeyOf(fmt.Sprint("k", i))
 			src.set(keys[i], 1)
@@ -615,14 +746,71 @@ func TestNewRejectsWhatItCannotRunWith(t *testing.T) {
 	load := newSource().load
 	good := tiercache.Config{Name: "c", HardTTL: time.Minute}
 
-	_, err := tiercache.New(tiercache.Config{HardTTL: time.Minute}, credential.Codec{}, load, nil, nil)
+	_, err := tiercache.New(tiercache.Config{HardTTL: time.Minute}, offheap.New, credential.Codec{}, load, nil, nil)
 	require.ErrorContains(t, err, "Name")
 
-	_, err = tiercache.New[credential.Credential](good, nil, load, nil, nil)
-	require.ErrorContains(t, err, "codec and loader")
+	_, err = tiercache.New[credential.Credential](good, offheap.New, nil, load, nil, nil)
+	require.ErrorContains(t, err, "store, codec and loader")
 
-	_, err = tiercache.New(good, credential.Codec{}, nil, nil, nil)
-	require.ErrorContains(t, err, "codec and loader")
+	_, err = tiercache.New(good, offheap.New, credential.Codec{}, nil, nil, nil)
+	require.ErrorContains(t, err, "store, codec and loader")
+
+	_, err = tiercache.New(good, nil, credential.Codec{}, load, nil, nil)
+	require.ErrorContains(t, err, "store, codec and loader")
+
+	_, err = tiercache.New(good, func(int) tiercache.Store { return nil }, credential.Codec{}, load, nil, nil)
+	require.ErrorContains(t, err, "returned no store")
+}
+
+// The factory is handed the capacity of the configuration — the default
+// when it names none — and its store is the cache's L1.
+func TestTheStoreIsBuiltWithTheConfiguredCapacity(t *testing.T) {
+	t.Parallel()
+
+	for configured, want := range map[int]int{0: tiercache.DefaultMaxBytes, -1: tiercache.DefaultMaxBytes, 4 << 20: 4 << 20} {
+		asked := 0
+
+		cache, err := tiercache.New(tiercache.Config{Name: "c", HardTTL: time.Minute, MaxBytes: configured},
+			func(maxBytes int) tiercache.Store {
+				asked = maxBytes
+
+				return onheap.New(maxBytes)
+			}, credential.Codec{}, newSource().load, nil, nil)
+		require.NoError(t, err)
+		cache.Close()
+
+		assert.Equal(t, want, asked, "configured: %d", configured)
+	}
+
+	assert.Equal(t, 32<<20, tiercache.DefaultMaxBytes)
+}
+
+// Every test builds its caches on the off-heap store unless it says
+// otherwise. This runs them all once more on the heap store — the same
+// binary, with the suite's store set — so a rule of the cache that holds on
+// one store and not on the other fails here. (What a store itself owes is
+// storetest's, run by each provider.)
+//
+//nolint:paralleltest // serial: a second suite beside this one would have both wait on each other's Valkey and CPU
+func TestTheSuiteHoldsOnTheHeapStore(t *testing.T) {
+	if onTheHeap() {
+		t.Skip("this is the second run")
+	}
+
+	args := []string{"-test.count=1", "-test.shuffle=on"}
+	if testing.Short() {
+		args = append(args, "-test.short")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Minute)
+	defer cancel()
+
+	child := exec.CommandContext(ctx, os.Args[0], args...)
+
+	child.Env = append(os.Environ(), suiteStoreEnv+"=onheap")
+
+	out, err := child.CombinedOutput()
+	require.NoError(t, err, "on the heap store:\n%s", out)
 }
 
 // The budget of the hot path: a fresh read allocates what Decode returns —
@@ -648,8 +836,8 @@ func TestFreshReadAllocatesOnlyTheDecodedValue(t *testing.T) {
 	})
 	assert.InDelta(t, 3, allocs, 0, "one per string field")
 
-	counters, err := tiercache.New(tiercache.Config{Name: "allocs", HardTTL: time.Minute}, fixedCodec{},
-		func(context.Context, tiercache.Key) (uint64, error) { return 42, nil }, nil, nil)
+	counters, err := tiercache.New(tiercache.Config{Name: "allocs", HardTTL: time.Minute, MaxBytes: suiteBytes()}, suiteStore(), fixedCodec{},
+		func(context.Context, string) (uint64, error) { return 42, nil }, nil, nil)
 	require.NoError(t, err)
 	t.Cleanup(counters.Close)
 
@@ -662,6 +850,149 @@ func TestFreshReadAllocatesOnlyTheDecodedValue(t *testing.T) {
 		}
 	})
 	assert.Zero(t, allocs, "a value without pointers: nothing at all")
+
+	// A key is lent to L1, not copied: the longest one costs no more.
+	long := strings.Repeat("k", tiercache.MaxKeyLen)
+
+	_, err = counters.Get(ctx, long)
+	require.NoError(t, err)
+
+	allocs = testing.AllocsPerRun(1000, func() {
+		if v, err := counters.Get(ctx, long); err != nil || v != 42 {
+			t.Fatal(v, err)
+		}
+	})
+	assert.Zero(t, allocs, "whatever the length of the key")
+}
+
+// A key is not hashed on the way: the loader is asked for it as it is, L2
+// holds it under "tc:<name>:<key>", and the other processes are told it.
+func TestAKeyTravelsAsItIs(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		for _, key := range []string{"42", "tenant:7/user:Ёж", "0190f3a2-7b1c-7e7e-9c1d-2f6a5b3c4d5e", strings.Repeat("k", tiercache.MaxKeyLen), tiercache.KeyOf("secret")} {
+			remote, src := newFakeRemote(), newSource()
+			src.set(key, 1)
+
+			writer := newHarness(t, remote, src, nil)
+			reader := newHarness(t, remote, src, sameName(writer.name))
+
+			synctest.Wait()
+			require.Equal(t, "v1", writer.version(t, key), "the loader was asked for the key itself")
+
+			_, inL2, err := remote.Get(t.Context(), "tc:"+writer.name+":"+key)
+			require.NoError(t, err)
+			require.True(t, inL2)
+
+			require.Equal(t, "v1", reader.version(t, key))
+			require.InDelta(t, 1, reader.reads(t, "l2"), 0)
+			require.Equal(t, "v1", reader.version(t, key))
+			require.InDelta(t, 1, reader.reads(t, "fresh"), 0, "and it is in L1 under that key")
+
+			src.set(key, 2)
+			require.NoError(t, writer.cache.Invalidate(t.Context(), key))
+			synctest.Wait()
+
+			assert.Equal(t, "v2", reader.version(t, key))
+			assert.InDelta(t, 1, reader.metric(t, "tiercache_invalidations_total", map[string]string{"scope": "key"}), 0)
+		}
+	})
+}
+
+// KeyOf is the SHA-256 and nothing else: what a cache wrote under it before
+// keys were strings is still found.
+func TestKeyOfIsTheSHA256(t *testing.T) {
+	t.Parallel()
+
+	sum := sha256.Sum256([]byte("an API key"))
+	assert.Equal(t, string(sum[:]), tiercache.KeyOf("an API key"))
+	assert.Len(t, tiercache.KeyOf(""), 32)
+	assert.Len(t, tiercache.KeyOf(strings.Repeat("k", 10_000)), 32)
+}
+
+// The limit is in bytes, and this is what it means in characters: the
+// numbers the README gives.
+func TestWhatFitsInAKey(t *testing.T) {
+	t.Parallel()
+
+	fits := map[string]string{
+		"a UUID, 36 bytes":      "0190f3a2-7b1c-7e7e-9c1d-2f6a5b3c4d5e",
+		"512 Latin letters":     strings.Repeat("a", 512),
+		"256 Cyrillic letters":  strings.Repeat("ж", 256),
+		"170 CJK characters":    strings.Repeat("\u6f22", 170),
+		"128 emoji":             strings.Repeat("😀", 128),
+		"a SHA-256 from KeyOf":  tiercache.KeyOf("secret"),
+		"one byte":              "k",
+		"bytes that are no UTF": "\xff\x00\xfe",
+	}
+	tooLong := map[string]string{
+		"513 Latin letters":    strings.Repeat("a", 513),
+		"257 Cyrillic letters": strings.Repeat("ж", 257),
+		"171 CJK characters":   strings.Repeat("\u6f22", 171),
+		"129 emoji":            strings.Repeat("😀", 129),
+	}
+
+	assert.Len(t, fits["a UUID, 36 bytes"], 36)
+
+	src := newSource()
+	rig := newHarness(t, nil, src, nil)
+
+	for name, key := range fits {
+		src.set(key, 1)
+		assert.Equal(t, "v1", rig.version(t, key), name)
+		require.NoError(t, rig.cache.Invalidate(t.Context(), key), name)
+	}
+
+	for name, key := range tooLong {
+		src.set(key, 1)
+
+		_, err := rig.cache.Get(t.Context(), key)
+		require.ErrorIs(t, err, tiercache.ErrKey, name)
+		require.ErrorIs(t, rig.cache.Invalidate(t.Context(), key), tiercache.ErrKey, name)
+	}
+}
+
+// An empty key and one over MaxKeyLen are refused before anything is asked:
+// not the loader, not L2, not the channel.
+func TestAKeyOutOfBoundsIsRefused(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		remote, src := newFakeRemote(), newSource()
+		writer := newHarness(t, remote, src, nil)
+		reader := newHarness(t, remote, src, sameName(writer.name))
+
+		synctest.Wait()
+
+		for _, key := range []string{"", strings.Repeat("k", tiercache.MaxKeyLen+1)} {
+			src.set(key, 1)
+
+			_, err := writer.cache.Get(t.Context(), key)
+			require.ErrorIs(t, err, tiercache.ErrKey)
+			require.ErrorIs(t, writer.cache.Invalidate(t.Context(), key), tiercache.ErrKey)
+
+			// Nor is one taken from the channel: it carries keys only.
+			require.NoError(t, remote.Publish(t.Context(), "tc:"+writer.name+":inv", key))
+		}
+
+		synctest.Wait()
+
+		assert.Zero(t, src.loads.Load())
+		assert.InDelta(t, 2, writer.reads(t, "error"), 0)
+
+		remote.mu.Lock()
+		assert.Empty(t, remote.data)
+		remote.mu.Unlock()
+
+		for _, rig := range []*harness{writer, reader} {
+			assert.Zero(t, rig.metric(t, "tiercache_invalidations_total", map[string]string{"scope": "key"}))
+		}
+
+		// The longest key is a key.
+		longest := strings.Repeat("k", tiercache.MaxKeyLen)
+		src.set(longest, 1)
+		assert.Equal(t, "v1", writer.version(t, longest))
+		require.NoError(t, writer.cache.Invalidate(t.Context(), longest))
+	})
 }
 
 // fixedCodec stores a uint64: a codec whose Decode allocates nothing.
@@ -698,7 +1029,7 @@ func TestL1StaysWithinItsCapacity(t *testing.T) {
 
 	const entries = 100_000 // ≈ 110 MiB of envelopes
 
-	keys := make([]tiercache.Key, entries)
+	keys := make([]string, entries)
 	for i := range keys {
 		keys[i] = tiercache.KeyOf(fmt.Sprint("k", i))
 		src.set(keys[i], 1)
@@ -729,7 +1060,7 @@ func BenchmarkGetFresh(b *testing.B) {
 	src, key := newSource(), tiercache.KeyOf("a")
 	src.set(key, 1)
 
-	cache, err := tiercache.New(tiercache.Config{Name: "bench", HardTTL: time.Hour}, credential.Codec{}, src.load, nil, nil)
+	cache, err := tiercache.New(tiercache.Config{Name: "bench", HardTTL: time.Hour, MaxBytes: suiteBytes()}, suiteStore(), credential.Codec{}, src.load, nil, nil)
 	require.NoError(b, err)
 	b.Cleanup(cache.Close)
 

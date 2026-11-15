@@ -129,6 +129,7 @@ linters:
             - "!$test"
             - "!**/libs/testx/**" # the harness modules themselves are test-only code
             - "!**/libs/kafka/kafkatest/**" # the Kafka conformance suite, imported only by the providers' tests
+            - "!**/libs/tiercache/storetest/**" # the L1 store conformance suite, imported only by the stores' tests
           deny:
             - pkg: github.com/wundernightmare/golang-basics/libs/testx
               desc: test-only harness; import it from _test.go files only
@@ -186,7 +187,7 @@ linters:
           - prealloc         # allocation counts do not matter in a test
       # Test-only harness packages (non-_test files, imported only by tests —
       # depguard keeps them out of production): same relaxations as tests.
-      - path: (libs/testx/|libs/kafka/kafkatest/|internal/testsupport/)
+      - path: (libs/testx/|libs/kafka/kafkatest/|libs/tiercache/storetest/|internal/testsupport/)
         linters:
           - gochecknoglobals
           - prealloc

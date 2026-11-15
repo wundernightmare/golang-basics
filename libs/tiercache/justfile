@@ -1,4 +1,4 @@
-# tiercache justfile — two-level cache (fastcache L1 + Valkey L2)
+# tiercache justfile — two-level cache (fastcache / freecache L1 + Valkey L2)
 #
 # One of the per-module justfiles; every module has the same recipes (plus
 # release/run for services), so `just each <recipe>` from the root works

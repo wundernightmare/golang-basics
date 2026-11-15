@@ -153,6 +153,16 @@ README; this file is only the high-signal, easy-to-miss bits.
   client buffer is a named key (never a client default), and
   `KAFKA_*_EXTRA_PROPERTIES` may not override a named key. Building the
   rdkafka provider (and `go test -race` anywhere) needs cgo / gcc.
+- **The L1 of `libs/tiercache` is a contract with two stores behind it.**
+  `tiercache.Store` says what a cache relies on; `tiercache/offheap`
+  (fastcache) and `tiercache/onheap` (freecache) implement it, and a service
+  names one in `tiercache.New` — nothing picks a store by size. A rule a
+  cache needs from its store goes into the contract and into
+  `tiercache/storetest`, which both run and which must fail a store that
+  breaks the rule (`storetest_test.go` holds the broken ones); never a
+  workaround in `cache.go` for one library's behaviour. A cache key is a
+  string and travels as it is (loader, L2 key, invalidation channel): a
+  secret is hashed with `tiercache.KeyOf` first.
 - **Local cross-module deps** resolve via `go.work`; each service `go.mod` also
   has a `replace … => ../../libs/httpx` so `go build` works outside the
   workspace too (e.g. inside the per-service Docker build).
