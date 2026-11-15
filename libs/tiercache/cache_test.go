@@ -3,6 +3,7 @@ package tiercache_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -528,12 +529,13 @@ func TestNotFoundIsNotCachedAndADeletedRowStopsBeingServed(t *testing.T) {
 func TestCorruptL2EntriesAreReplaced(t *testing.T) {
 	t.Parallel()
 
-	header := string([]byte{1, 0, 0, 0, 0, 0, 0, 0, 1, 0x3f, 0, 0, 0, 0, 0, 0, 0}) // version 1, soft 1, hard far away
+	// A header this process could have written: only what follows it is wrong.
+	header := func() string { return written(t, "a", 1, time.Now())[:17] }
 
-	for name, raw := range map[string]string{
-		"not an envelope":          "{\"id\":1,\"name\":\"left by another writer\"}",
-		"a future format version":  "\x02" + header[1:] + "payload",
-		"a payload that is not it": header + "\x0a\x05a",
+	for name, raw := range map[string]func() string{
+		"not an envelope":          func() string { return "{\"id\":1,\"name\":\"left by another writer\"}" },
+		"a future format version":  func() string { return "\x02" + header()[1:] + "payload" },
+		"a payload that is not it": func() string { return header() + "\x0a\x05a" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -544,7 +546,7 @@ func TestCorruptL2EntriesAreReplaced(t *testing.T) {
 				rig := newHarness(t, remote, src, nil)
 
 				synctest.Wait()
-				remote.put(rig.name, key, raw)
+				remote.put(rig.name, key, raw())
 
 				assert.Equal(t, "v1", rig.version(t, key))
 				assert.InDelta(t, 1, rig.reads(t, "load"), 0)
@@ -556,6 +558,111 @@ func TestCorruptL2EntriesAreReplaced(t *testing.T) {
 			})
 		})
 	}
+}
+
+// written is the L2 entry a process writes for key at version when its clock
+// reads at: the envelope of envelope.go, built by hand because the writer
+// here is another process with a clock of its own.
+func written(t *testing.T, key string, version int, at time.Time) string {
+	t.Helper()
+
+	env := []byte{1}
+	env = binary.BigEndian.AppendUint64(env, uint64(at.Add(softTTL).UnixMilli()))
+	env = binary.BigEndian.AppendUint64(env, uint64(at.Add(hardTTL).UnixMilli()))
+
+	env, err := credential.Codec{}.Append(env, record(key, version, 0))
+	require.NoError(t, err)
+
+	return string(env)
+}
+
+// The deadlines in an L2 entry are the writer's clock, read against the
+// reader's. A writer whose clock runs ahead would otherwise hand every other
+// process a value that looks fresh for as long as the clocks differ — and
+// their L1 would keep it that long, past the entry's TTL in L2. An entry
+// whose deadline is further away than this process could have set is not
+// trusted: the source answers and the entry is replaced.
+func TestAnEntryWrittenByAnotherClockIsHeldToThisOne(t *testing.T) {
+	t.Parallel()
+
+	const longest = hardTTL + hardTTL/10 // the jitter's upper end
+
+	for name, tc := range map[string]struct {
+		writerAhead time.Duration
+		want        string
+		loads       float64
+	}{
+		"the same clock":                   {writerAhead: 0, want: "v1", loads: 0},
+		"ahead by all the jitter allows":   {writerAhead: longest - hardTTL, want: "v1", loads: 0},
+		"ahead by a millisecond more":      {writerAhead: longest - hardTTL + time.Millisecond, want: "v2", loads: 1},
+		"an hour ahead":                    {writerAhead: time.Hour, want: "v2", loads: 1},
+		"an hour behind: expired already":  {writerAhead: -time.Hour, want: "v2", loads: 1},
+		"behind, within the soft deadline": {writerAhead: -softTTL / 2, want: "v1", loads: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				remote, src, key := newFakeRemote(), newSource(), "a"
+				src.set(key, 2)
+
+				rig := newHarness(t, remote, src, nil)
+
+				synctest.Wait()
+				remote.put(rig.name, key, written(t, key, 1, time.Now().Add(tc.writerAhead)))
+
+				assert.Equal(t, tc.want, rig.version(t, key))
+				assert.InDelta(t, tc.loads, rig.reads(t, "load"), 0)
+
+				// Whatever was served is what L1 now holds, for no longer
+				// than this process's own HardTTL.
+				assert.Equal(t, tc.want, rig.version(t, key))
+				assert.InDelta(t, 1, rig.reads(t, "fresh"), 0)
+
+				time.Sleep(longest)
+				assert.Equal(t, "v2", rig.version(t, key), "past HardTTL nothing older than the source is served")
+			})
+		})
+	}
+}
+
+// An hour-ahead entry is replaced in L2 too: the next process finds one it
+// can trust and does not load.
+func TestAnEntryFromAClockAheadIsReplacedInL2(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		remote, src, key := newFakeRemote(), newSource(), "a"
+		src.set(key, 2)
+
+		rig := newHarness(t, remote, src, nil)
+
+		synctest.Wait()
+		remote.put(rig.name, key, written(t, key, 1, time.Now().Add(time.Hour)))
+		require.Equal(t, "v2", rig.version(t, key))
+
+		other := newHarness(t, remote, newSource(), sameName(rig.name))
+
+		synctest.Wait()
+		assert.Equal(t, "v2", other.version(t, key))
+		assert.InDelta(t, 1, other.reads(t, "l2"), 0)
+	})
+}
+
+// With the source down, an entry from a clock ahead is not a fallback
+// either: its age is unknown.
+func TestAnEntryFromAClockAheadIsNoStaleFallback(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		remote, src, key := newFakeRemote(), newSource(), "a"
+		src.fail(errors.New("source down"))
+
+		rig := newHarness(t, remote, src, func(cfg *tiercache.Config) { cfg.StaleIfError = time.Hour })
+
+		synctest.Wait()
+		remote.put(rig.name, key, written(t, key, 1, time.Now().Add(time.Hour)))
+
+		_, err := rig.cache.Get(t.Context(), key)
+		require.ErrorContains(t, err, "source down")
+	})
 }
 
 // A value that outgrows L1 takes its smaller predecessor out of it: the

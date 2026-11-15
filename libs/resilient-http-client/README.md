@@ -90,6 +90,26 @@ retries per target at `retry_budget_min_retries + retry_budget_ratio ×
 requests` over a sliding `retry_budget_window`, so an outage cannot multiply
 the load on the dependency.
 
+**DNS** — the client has no DNS code: net/http resolves a name once per new
+connection, and what follows from that is tested against a real name server
+(`dns_test.go`):
+
+- A name that does not resolve (`NXDOMAIN`, `SERVFAIL`) is `KindConnection`:
+  a breaker failure, retried, the `*net.DNSError` kept as the cause. Every
+  attempt resolves again, so a record that appears or is corrected while the
+  client retries is found.
+- A name server that does not answer costs an attempt its `timeout`
+  (`KindTimeout`), not the resolver's own patience (seconds per try, several
+  tries). The lookup itself lives on in the background until the resolver
+  gives up.
+- **A live connection never asks again.** After a record moves, requests
+  keep going to the old address for as long as that server keeps the
+  connection open; the new one is found by the next connection — after the
+  old server closes this one, or after `idle_conn_timeout` without traffic.
+  Under steady traffic to a server that stays up, that is never: net/http has
+  no maximum connection age. Retire the old server (it closes its
+  connections) rather than wait for clients to leave it.
+
 **Shutdown** — a request counts as in flight from before the shutdown check to
 the end of its whole retry loop, or until its body is closed on success; so
 `Shutdown` never returns while a request can still reach the network. It may
@@ -212,7 +232,7 @@ just mod libs/resilient-http-client/integration test   # from the repo root; nee
 
 | Layer | Where | Owns |
 | --- | --- | --- |
-| Unit | `*_test.go` here — `httptest` on loopback, no mocks of the transport | every decision: what is retried, what the breaker hears, the order of an attempt, shutdown, config |
+| Unit | `*_test.go` here — `httptest` on loopback, no mocks of the transport; `dns_test.go` with a real name server on loopback (`testx.DNS`) and Go's resolver | every decision: what is retried, what the breaker hears, the order of an attempt, shutdown, config; a name that does not resolve, a silent name server, a record that moves |
 | Mutation | `.gremlins.yaml`, nightly | whether those tests notice a flipped comparison in the decision logic |
 | Fuzz | `FuzzParseRetryAfter` | the one parser of external bytes |
 | Integration | [`integration/`](integration) — a module of its own, so testcontainers, Toxiproxy and an HTTP/3 stack stay out of this `go.mod` | what only real servers and a real network show: the protocol the server saw (HTTP/1.1, h2c, HTTP/2, HTTP/3), TLS trust and handshake failures, TCP faults at a named point, a real API's view of retries |

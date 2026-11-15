@@ -201,6 +201,24 @@ func TestDeadlinesAreExactToTheMillisecond(t *testing.T) {
 	}
 }
 
+// The furthest deadline this cache trusts is the furthest it sets: HardTTL
+// and a tenth, rounded up to the millisecond.
+func TestTheFurthestTrustedDeadlineIsTheFurthestOneSet(t *testing.T) {
+	t.Parallel()
+
+	for hardTTL, longestMs := range map[time.Duration]int64{
+		time.Minute:           66_000,
+		time.Second:           1_100,
+		15 * time.Millisecond: 17, // 16.5 ms: a deadline at 17 ms is one this cache can set
+		time.Millisecond:      2,  // 1.1 ms
+	} {
+		cache := newByteCache(t, nil, func(cfg *Config) { cfg.HardTTL = hardTTL })
+
+		assert.True(t, cache.trusted(1_000_000+longestMs, 1_000_000), "%s", hardTTL)
+		assert.False(t, cache.trusted(1_000_000+longestMs+1, 1_000_000), "%s", hardTTL)
+	}
+}
+
 // The largest deadline the envelope accepts is the last one it can hold.
 func TestEnvelopeAcceptsItsLargestDeadline(t *testing.T) {
 	t.Parallel()
@@ -276,11 +294,14 @@ func TestWarningIsLoggedAndRateLimited(t *testing.T) {
 // The envelope carries any pair of deadlines it accepts and any payload:
 // what was written is what is read, and the deadlines decide the answer of
 // usable at every instant — fresh before the soft one, stale from it on,
-// gone from the hard one on.
+// gone from the hard one on, and not trusted while the hard one is further
+// away than this cache sets it.
 func TestEnvelopeRoundTripsAnyDeadlinesAndPayload(t *testing.T) {
 	t.Parallel()
 
 	cache := newByteCache(t, nil, nil)
+
+	const longest = int64((time.Minute + time.Minute/10) / time.Millisecond)
 
 	rapid.Check(t, func(t *rapid.T) {
 		hard := rapid.Int64Range(0, 1<<62).Draw(t, "hard")
@@ -288,6 +309,7 @@ func TestEnvelopeRoundTripsAnyDeadlinesAndPayload(t *testing.T) {
 		payload := rapid.SliceOfN(rapid.Byte(), 0, 512).Draw(t, "payload")
 		now := rapid.OneOf(
 			rapid.Just(soft), rapid.Just(soft-1), rapid.Just(hard), rapid.Just(hard-1),
+			rapid.Just(hard-longest), rapid.Just(hard-longest-1), rapid.Int64Range(hard-longest, hard),
 			rapid.Int64Range(0, 1<<62),
 		).Draw(t, "now")
 
@@ -300,8 +322,8 @@ func TestEnvelopeRoundTripsAnyDeadlinesAndPayload(t *testing.T) {
 		}
 
 		value, stale, usable := cache.usable(env, now)
-		if usable != (now < hard) {
-			t.Fatalf("at %d with the hard deadline at %d: usable=%t", now, hard, usable)
+		if usable != (now < hard && hard-now <= longest) {
+			t.Fatalf("at %d with the hard deadline at %d (%d away): usable=%t", now, hard, hard-now, usable)
 		}
 
 		if usable && (stale != (now >= soft) || !bytes.Equal(value, payload)) {

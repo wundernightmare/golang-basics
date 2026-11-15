@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
+	grpcdns "google.golang.org/grpc/resolver/dns"
 	"google.golang.org/grpc/status"
 
 	"github.com/wundernightmare/golang-basics/libs/grpcx"
@@ -29,7 +30,15 @@ import (
 	"github.com/wundernightmare/golang-basics/libs/testx"
 )
 
-func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
+func TestMain(m *testing.M) {
+	// gRPC's DNS resolver asks again no sooner than this after an answer —
+	// 30 seconds unless changed, process-wide and before the first channel.
+	// dns_test.go waits for one re-resolution; the default is what its
+	// comments and the README describe.
+	grpcdns.SetMinResolutionInterval(reResolveAfter)
+
+	goleak.VerifyTestMain(m)
+}
 
 const (
 	checkMethod   = "/grpc.health.v1.Health/Check"
@@ -104,6 +113,16 @@ func serve(t *testing.T, b *backend, opts ...grpc.ServerOption) *backend {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
+	serveOn(t, b, ln, opts...)
+
+	return b
+}
+
+// serveOn is serve on a listener of the caller's; stop ends the server and
+// closes its connections before the test does.
+func serveOn(t *testing.T, b *backend, ln net.Listener, opts ...grpc.ServerOption) (stop func()) {
+	t.Helper()
+
 	srv := grpc.NewServer(opts...)
 	healthpb.RegisterHealthServer(srv, b)
 	srv.RegisterService(&collector, struct{}{})
@@ -114,7 +133,7 @@ func serve(t *testing.T, b *backend, opts ...grpc.ServerOption) *backend {
 
 	b.addr = ln.Addr().String()
 
-	return b
+	return srv.Stop
 }
 
 // target is DefaultTarget("api", addr), plaintext, with fast retries, then mut.

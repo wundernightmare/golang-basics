@@ -7,7 +7,9 @@
 //     the real OpenTelemetry SDK, [LogBuffer] captures the real slog output,
 //     [Metric] and [LintMetrics] read the real Prometheus registry;
 //   - [Unique] names the schema / key prefix / topic a test owns on a shared
-//     dependency.
+//     dependency;
+//   - [DNS] is a name server on loopback whose answers a test changes while
+//     its client runs (no such name, a record that moves, no answer).
 //
 // It is deliberately light: no Docker, no test framework. The heavy helpers
 // live in separate modules so that only the packages that need them carry

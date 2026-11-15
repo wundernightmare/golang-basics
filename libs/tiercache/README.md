@@ -80,6 +80,30 @@ on read and overwritten by the ring buffer in due course.
 `SoftTTL == HardTTL` (the default) is plain cache-aside. Deadlines carry the
 ±10% jitter of `valkey.Jitter`. `ErrNotFound` is not cached.
 
+### Clocks
+
+The deadlines in an entry are wall-clock instants, and an L2 entry is read by
+processes other than the one that wrote it. A read does not trust a hard
+deadline further away than this process could have set — `HardTTL` and the
+jitter's tenth: such an entry is a miss, the loader answers and the entry is
+replaced. That is what keeps a process whose clock runs ahead (or one whose
+clock was stepped back) from handing everybody a value that looks fresh for
+as long as the clocks differ, in an L1 no TTL of Valkey's reaches.
+
+| The writer's clock, seen from the reader | What the reader does |
+| --- | --- |
+| ahead by more than the jitter leaves room for | ignores the entry, loads, replaces it — it is not a `StaleIfError` fallback either |
+| ahead by less | serves it for that much longer than its own `HardTTL` |
+| behind | serves it for that much less; behind by `HardTTL` or more, every entry of that writer is expired on arrival |
+
+So the cache stays correct under any skew — nothing is served for longer than
+`HardTTL` and a tenth by the reader's own clock — and what a skew costs is
+L2: processes whose clocks differ by more than `HardTTL` reload each other's
+entries. Two processes with different `HardTTL` for one cache name behave
+the same way: the one with the shorter TTL does not trust the other's
+entries. Clock synchronisation (NTP) with an error well under `HardTTL / 10`
+is assumed for L2 to be of use, not for correctness.
+
 ## Without Valkey
 
 L1 is the always-on level. Pass the untyped `nil` as the remote and the cache
@@ -218,7 +242,7 @@ Listed in [docs/METRICS.md](../../docs/METRICS.md); every series carries
 | Layer | File | What it proves |
 | --- | --- | --- |
 | Unit | `internal_test.go`, `credential/` | envelope and codec (table, fuzz, byte-compatibility with `google.golang.org/protobuf`), config |
-| Unit, virtual time | `cache_test.go` | every read rule and race above against an in-memory L2 (`testing/synctest`: no sleeps), the allocation budget of a fresh read, the L1 capacity bound, what a key may be and where it travels |
+| Unit, virtual time | `cache_test.go` | every read rule and race above against an in-memory L2 (`testing/synctest`: no sleeps), an entry written by a clock ahead of or behind this one, the allocation budget of a fresh read, the L1 capacity bound, what a key may be and where it travels |
 | Store contract | `storetest/`, run by `offheap/` and `onheap/` | each line of the `Store` contract against each store at several capacities, under concurrency; the entry limits against the libraries; and the suite against eight deliberately broken stores |
 | Both stores | `cache_test.go` (`TestTheSuiteHoldsOnTheHeapStore`) | the whole cache suite — this table, at the layer being run — once more on `onheap`: the test binary runs itself with `TIERCACHE_TEST_STORE=onheap` |
 | Integration | `integration_test.go` | the same cache on a real Valkey: TTLs, `SET NX` / `IFEQ`, tombstones, Pub/Sub, values from 0 bytes to 4 MiB |

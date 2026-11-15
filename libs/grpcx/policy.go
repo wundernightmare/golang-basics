@@ -20,7 +20,12 @@ import (
 // call as an interceptor. gRPC's own retries run below it, so it sees a call
 // once.
 type policy struct {
-	name    string
+	name string
+	// timeout is the target's default deadline, 0 for none. The service
+	// config carries it too, but a channel has no service config until its
+	// name has resolved: a call made before that would wait for the resolver
+	// with no deadline at all (gRPC gives a DNS lookup 30 seconds).
+	timeout time.Duration
 	breaker *resilience.Breaker // nil: no breaker
 	m       *metrics
 	stateMu sync.Mutex // serialises breaker-state gauge updates
@@ -55,17 +60,24 @@ type call struct {
 	once   sync.Once
 }
 
-// begin admits a call or rejects it; ctx is the one to make the call with.
-func (p *policy) begin(ctx context.Context, method string) (context.Context, *call, error) {
+// begin admits a call or rejects it; ctx is the one to make the call with,
+// under the target's deadline, and release frees that deadline's timer when
+// the call is over.
+func (p *policy) begin(ctx context.Context, method string) (_ context.Context, _ *call, release func(), _ error) {
 	grant, ok := p.breaker.Allow()
 	if !ok {
 		p.m.requests.WithLabelValues(p.name, method, outcomeCircuitOpen).Inc()
 
-		return ctx, nil, &rejection{target: p.name}
+		return ctx, nil, nil, &rejection{target: p.name}
+	}
+
+	release = func() {}
+	if p.timeout > 0 {
+		ctx, release = context.WithTimeout(ctx, p.timeout)
 	}
 
 	return context.WithValue(ctx, attemptsKey{}, new(atomic.Int32)),
-		&call{p: p, method: method, grant: grant, start: time.Now()}, nil
+		&call{p: p, method: method, grant: grant, start: time.Now()}, release, nil
 }
 
 func (c *call) finish(err error) {
@@ -77,10 +89,12 @@ func (c *call) finish(err error) {
 }
 
 func (p *policy) unary(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-	ctx, admitted, err := p.begin(ctx, method)
+	ctx, admitted, release, err := p.begin(ctx, method)
 	if err != nil {
 		return err
 	}
+
+	defer release()
 
 	err = invoker(ctx, method, req, reply, cc, opts...)
 	admitted.finish(err)
@@ -91,23 +105,27 @@ func (p *policy) unary(ctx context.Context, method string, req, reply any, cc *g
 func (p *policy) stream(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
 	parent := ctx
 
-	ctx, admitted, err := p.begin(ctx, method)
+	ctx, admitted, release, err := p.begin(ctx, method)
 	if err != nil {
 		return nil, err
 	}
 
 	cs, err := streamer(ctx, desc, cc, method, opts...)
 	if err != nil {
+		release()
 		admitted.finish(err)
 
 		return nil, err //nolint:wrapcheck // gRPC's status error, as is
 	}
 
-	s := &policyStream{ClientStream: cs, call: admitted, serverStreams: desc.ServerStreams}
+	s := &policyStream{ClientStream: cs, call: admitted, serverStreams: desc.ServerStreams, release: release}
 	// A caller that stops reading must cancel its context (gRPC's own rule):
 	// that is when an unfinished stream reports. The stream's context cannot
 	// be watched instead — gRPC cancels it at every end, a good one included.
-	s.stopWatch = context.AfterFunc(parent, func() { admitted.finish(status.FromContextError(parent.Err()).Err()) })
+	s.stopWatch = context.AfterFunc(parent, func() {
+		release()
+		admitted.finish(status.FromContextError(parent.Err()).Err())
+	})
 
 	return s, nil
 }
@@ -121,6 +139,7 @@ type policyStream struct {
 	call          *call
 	serverStreams bool
 	stopWatch     func() bool
+	release       func() // frees the deadline's timer; the stream is over
 }
 
 func (s *policyStream) RecvMsg(m any) error {
@@ -144,6 +163,7 @@ func (s *policyStream) RecvMsg(m any) error {
 
 func (s *policyStream) done(err error) {
 	s.stopWatch()
+	s.release()
 	s.call.finish(err)
 }
 

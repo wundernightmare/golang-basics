@@ -68,6 +68,13 @@ type Cache[T any] struct {
 	prefix  string
 	channel string
 
+	// longestMs is the furthest ahead, in milliseconds, a hard deadline can
+	// be when this process sets it: HardTTL with all of its jitter. One
+	// further away was set by another clock — a process whose clock runs
+	// ahead, or this one before its clock was stepped back — and says
+	// nothing about the value's age: it is not trusted (see trusted).
+	longestMs int64
+
 	// fillMu orders L1 fills against invalidations: a fill holds it shared
 	// and checks that epoch has not moved since its read began; an
 	// invalidation bumps epoch and removes the entry under the exclusive
@@ -124,6 +131,7 @@ func New[T any](cfg Config, store StoreFactory, codec Codec[T], load Loader[T], 
 		buffers:    sync.Pool{New: func() any { return new([]byte) }},
 		prefix:     "tc:" + cfg.Name + ":",
 		channel:    "tc:" + cfg.Name + ":inv",
+		longestMs:  int64((cfg.HardTTL + cfg.HardTTL/10 + time.Millisecond - 1) / time.Millisecond), // rounded up: see valkey.Jitter
 		refreshing: make(map[string]struct{}, cfg.RefreshConcurrency),
 		life:       life,
 		stop:       stop,
@@ -218,13 +226,26 @@ func (c *Cache[T]) release(buf *[]byte) {
 // — expired, not an envelope, a payload the codec refuses — is a miss.
 func (c *Cache[T]) usable(env []byte, nowMs int64) (value T, stale, ok bool) {
 	softMs, hardMs, payload, valid := parseEnvelope(env)
-	if !valid || nowMs >= hardMs {
+	if !valid || nowMs >= hardMs || !c.trusted(hardMs, nowMs) {
 		return value, false, false
 	}
 
 	value, err := c.codec.Decode(payload)
 
 	return value, nowMs >= softMs, err == nil
+}
+
+// trusted reports whether a hard deadline is one this process could have set
+// at nowMs or earlier. The deadlines in an envelope are wall-clock instants,
+// and an envelope in L2 was written by another process: without this, a
+// writer whose clock runs ahead by an hour gives every reader a value that
+// stays fresh for an hour, in their L1, whatever HardTTL says. An untrusted
+// envelope is a miss — the source answers and the entry is replaced.
+//
+// The other direction needs no rule: a deadline from a clock that runs
+// behind is merely nearer, and the value is reloaded sooner.
+func (c *Cache[T]) trusted(hardMs, nowMs int64) bool {
+	return hardMs-nowMs <= c.longestMs
 }
 
 // Invalidate drops key everywhere after a write to the source of truth has
@@ -353,7 +374,10 @@ func (c *Cache[T]) resolve(ctx context.Context, key string, refreshing bool) (re
 		heldSoftMs, heldHard, heldPayload, heldOK = parseEnvelope(heldEnv)
 	}
 
-	if nowMs := time.Now().UnixMilli(); heldOK && nowMs < heldHard && (!refreshing || nowMs < heldSoftMs) {
+	nowMs := time.Now().UnixMilli()
+	heldOK = heldOK && c.trusted(heldHard, nowMs) // from a clock ahead of this one: as good as absent
+
+	if heldOK && nowMs < heldHard && (!refreshing || nowMs < heldSoftMs) {
 		if value, err := c.codec.Decode(heldPayload); err == nil {
 			c.fill(epoch, key, heldEnv)
 
