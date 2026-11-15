@@ -100,9 +100,11 @@ tidy:
 tidy-check:
     GOWORK=off go mod tidy -diff
 
-# govulncheck (appsec profile: just setup-appsec at the root)
+# govulncheck (appsec profile: just setup-appsec at the root): the default
+# build and the franz-go one (internal/kafkaprovider links one per build)
 audit:
     MISE_ENV="${MISE_ENV:+$MISE_ENV,}appsec" {{MISE}} govulncheck ./...
+    MISE_ENV="${MISE_ENV:+$MISE_ENV,}appsec" {{MISE}} govulncheck -tags kafka_franz ./...
 
 # Direct + transitive module list
 deps:

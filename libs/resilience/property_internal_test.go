@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/goleak"
 	"pgregory.net/rapid"
 )
 
@@ -32,7 +33,7 @@ func TestMain(m *testing.M) {
 		}
 	}
 
-	os.Exit(m.Run())
+	goleak.VerifyTestMain(m) // as testx.Main; this module does not depend on libs/testx
 }
 
 // event is one add to the window model: when, and how much.

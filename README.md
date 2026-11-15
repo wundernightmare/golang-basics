@@ -83,7 +83,7 @@ line, `COVER=1` for e2e), `cover.sh` (coverage layers + merge),
 
 ```sh
 mise trust --all && just setup     # core toolchain + pnpm workspace + go work sync
-just ci                            # fmt-check → tidy-check → vet → lint → test-short
+just ci                            # fmt-check → tidy-check → leak-check → vet → lint → test-short
 
 just up                            # ping :8080 (admin 127.0.0.1:9080) + heartbeat (admin :9081)
 curl -s localhost:8080/ping | jq . && just down
@@ -189,7 +189,7 @@ them out as matrices, GitLab loops over them in one job per stage.
 
 | Job | What |
 | --- | --- |
-| `static` / `lint` | `just fmt-check tidy-check`, shellcheck (pinned image), `go vet` + golangci-lint per module (`-tags e2e`) |
+| `static` / `lint` | `just fmt-check tidy-check leak-check`, shellcheck (pinned image), `go vet` + golangci-lint per module (`-tags e2e`) |
 | `contracts` | `just contracts-check` — the only job with Node |
 | unit (`lint-test` / `unit`) | `-short -race`, JUnit via gotestsum, binary coverage into `.cover/unit` |
 | `integration` | modules requiring `libs/testx/containers`, `-race` (GitLab: dind) |
