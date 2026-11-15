@@ -40,7 +40,7 @@ easy-to-miss conventions, [`CONTRIBUTING.md`](CONTRIBUTING.md) the workflow.
 | [`libs/kafka-rdkafka`](libs/kafka-rdkafka) | Library | — | Kafka provider: **librdkafka** via confluent-kafka-go — the default; cgo, a static musl binary in the image; any librdkafka property through `KAFKA_*_EXTRA_PROPERTIES`. |
 | [`libs/kafka-franz`](libs/kafka-franz) | Library | — | Kafka provider: **franz-go**, pure Go (`KAFKA_PROVIDER=franz`, `CGO_ENABLED=0`). |
 | [`libs/otelx`](libs/otelx) | Library | — | OpenTelemetry tracing: OTLP over HTTP (TLS by default), W3C propagation; opt-in. Head sampling here, tail sampling in the collector (config shipped and tested: [`libs/otelx/integration`](libs/otelx/integration)). |
-| [`libs/testx`](libs/testx) | Test helpers | — | `_test`-only, no Docker: span recorder, log buffer, metric helpers, unique names. |
+| [`libs/testx`](libs/testx) | Test helpers | — | `_test`-only, no Docker: span recorder, log buffer, metric helpers, unique names, a DNS server whose answers a test changes. |
 | [`libs/testx/containers`](libs/testx/containers) | Test helpers | — | `_test`-only: one shared Postgres / Valkey / Kafka per test binary (testcontainers), Toxiproxy chaos. A module needs Docker exactly when it requires this. |
 | [`libs/testx/contract`](libs/testx/contract) | Test helpers | — | `_test`-only: validates exchanges against the OpenAPI / JSON Schema documents. |
 | [`e2e`](e2e) | Test suite | — | Real binaries over HTTP, build tag `e2e` (see "E2E tests"). |
@@ -349,7 +349,7 @@ harness waits for `/readyz`; asynchronous effects are polled with
 
 | Module | What | Pulls in |
 |---|---|---|
-| [`libs/testx`](libs/testx) | `Recorder` (real OTel SDK, in-memory spans), `LogBuffer` (real logger into memory; `Lines`, `Find`), `Metric` / `LintMetrics` (real registry), `Unique(prefix)` | OTel SDK, Prometheus — no Docker |
+| [`libs/testx`](libs/testx) | `Recorder` (real OTel SDK, in-memory spans), `LogBuffer` (real logger into memory; `Lines`, `Find`), `Metric` / `LintMetrics` (real registry), `Unique(prefix)`, `NewDNS(t)` (a name server on loopback: `Set`, `Remove`, `Fail`, `Silence`; Go's resolver through `Resolver()`, gRPC's through `dns://<Addr()>/name:port`) | OTel SDK, Prometheus, `x/net/dns/dnsmessage` — no Docker |
 | [`libs/testx/containers`](libs/testx/containers) | `Postgres(t)`, `Valkey(t)`, `Kafka(t)`: one container per test binary, started on first use, terminated by `func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }`; skipped under `-short` and without Docker locally, **failed** when `CI` is set. Chaos: `Proxied(t, dep)` (Toxiproxy: `Down`, `Up`, `Latency`, `Toxic`, `Reset`), `Pause(t, dep)` (SIGSTOP). A package's own containers: `Fixture(t, name, start)` under the same rules, `ProxyTo(t, name, container, port)` to put Toxiproxy in front of one | testcontainers, Docker client |
 | [`libs/testx/contract`](libs/testx/contract) | `LoadOpenAPI(t, rel).Validate(...)` for an HTTP exchange, `LoadJSONSchema(t, rel).Validate(t, doc)` for an event | kin-openapi, JSON Schema validator |
 
