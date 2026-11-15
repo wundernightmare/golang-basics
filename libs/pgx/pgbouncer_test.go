@@ -286,8 +286,12 @@ func TestBouncer_SessionTimeouts(t *testing.T) {
 			for _, cfg := range []bouncerConfig{stockBouncer, tunedBouncer} {
 				db := viaBouncer(t, cfg, alias, asGuarded)
 
+				// Simple protocol: a cached statement would stay on the stock
+				// PgBouncer's server connection, in the way of the next client
+				// (TestBouncer_PreparedStatementsInTransactionMode).
 				var statement, lock string
-				require.NoError(t, db.Pool().QueryRow(ctx, `SELECT current_setting('statement_timeout'), current_setting('lock_timeout')`).Scan(&statement, &lock))
+				require.NoError(t, db.Pool().QueryRow(ctx, `SELECT current_setting('statement_timeout'), current_setting('lock_timeout')`,
+					pgxv5.QueryExecModeSimpleProtocol).Scan(&statement, &lock))
 				assert.Equal(t, "700ms", statement, cfg.name)
 				assert.Equal(t, "300ms", lock, cfg.name)
 
@@ -314,15 +318,21 @@ func TestBouncer_SessionTimeouts(t *testing.T) {
 
 // pgx caches a prepared statement per connection and executes it by name. In
 // transaction pooling the next execution may be served by another server
-// connection, which never saw the PREPARE.
+// connection, which never saw the PREPARE. And the name is a hash of the SQL,
+// the same in every client, while the statement stays on the server
+// connection: the next client to prepare that SQL there is refused.
 //
 //nolint:paralleltest // serial: decides which server connection of a two-connection pool serves whom
 func TestBouncer_PreparedStatementsInTransactionMode(t *testing.T) {
 	ctx := context.Background()
 
-	const query = `SELECT $1::int + 1`
+	// statement is SQL no earlier test (or earlier run of this one: the
+	// PgBouncers outlive it) has prepared on any server connection.
+	statement := func() string { return `SELECT $1::int + 1 /* ` + testx.Unique("stmt") + ` */` }
 
-	// answer runs the cached statement and reports the backend that served it.
+	query := statement()
+
+	// answer runs the cached statement.
 	answer := func(db *pgx.DB, n int) (int, error) {
 		var out int
 
@@ -362,6 +372,34 @@ func TestBouncer_PreparedStatementsInTransactionMode(t *testing.T) {
 		err := onAnotherBackend(t, stockBouncer, nil)
 		require.Error(t, err)
 		assert.Equal(t, "26000", sqlState(err), "invalid_sql_statement_name: %v", err)
+	})
+
+	// One server connection (tx_one), so both clients are served by it. What
+	// the second one is refused is its own PREPARE: a restarted client, or
+	// another replica, running the same SQL.
+	t.Run("stock PgBouncer, pgx defaults: another client's statement is in the way", func(t *testing.T) {
+		shared := statement()
+
+		run := func() error {
+			var out int
+
+			return viaBouncer(t, stockBouncer, "tx_one", nil).Pool().QueryRow(ctx, shared, 1).Scan(&out)
+		}
+
+		require.NoError(t, run())
+
+		err := run()
+		require.Error(t, err)
+		assert.Equal(t, "42P05", sqlState(err), "duplicate_prepared_statement: %v", err)
+	})
+
+	t.Run("max_prepared_statements > 0, pgx defaults: two clients share the SQL", func(t *testing.T) {
+		shared := statement()
+
+		for range 2 {
+			var out int
+			require.NoError(t, viaBouncer(t, tunedBouncer, "tx_one", nil).Pool().QueryRow(ctx, shared, 1).Scan(&out))
+		}
 	})
 
 	t.Run("stock PgBouncer, default_query_exec_mode=exec: nothing to lose", func(t *testing.T) {
