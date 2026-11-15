@@ -32,7 +32,7 @@ several) in your shell to get a profile's tools on `PATH`.
    `libs/httpx`.
 3. Before pushing:
    ```sh
-   just ci                # fmt-check → tidy-check → vet → lint → test-short (pure Go)
+   just ci                # fmt-check → tidy-check → leak-check → vet → lint → test-short (pure Go)
    just contracts-check   # if api/ or libs/contracts changed (needs node/pnpm)
    just e2e               # Go e2e suite; `just infra-up` first for the data flow
    ```
@@ -81,6 +81,12 @@ git hooks use it: `--all` (lint / test / vuln matrices), `--integration`
 - Container-backed tests take their dependency from `containers.Postgres/
   Valkey/Kafka` and isolate by name (`testx.Unique`), never by starting their
   own container.
+- Every test package ends with a goroutine-leak check: its `TestMain` is
+  `os.Exit(testx.Main(m))` — or `containers.Main(m)` with the shared
+  containers, or `goleak.VerifyTestMain(m)` in a module without `libs/testx`.
+  A goroutine still running after the last test is a missing `Close`, `Stop`
+  or `cancel`: fix it, do not ignore it. `just leak-check` (in `just ci` and
+  the `static` jobs) fails a test package without one.
 - E2E lives in `e2e/` (Go, build tag `e2e`): `just e2e` builds the service
   binaries into `.build/` and runs the suite against them.
 - Reports: `just test-junit` (gotestsum → `.reports/junit`) and/or `just e2e` (native Allure results → `.reports/allure-native`), then `just allure`.

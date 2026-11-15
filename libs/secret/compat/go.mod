@@ -9,5 +9,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/stretchr/testify v1.12.1
 	github.com/tracehubmmp/golang-basics/libs/secret v0.0.0-00010101000000-000000000000
+	go.uber.org/goleak v1.3.0
 	go.yaml.in/yaml/v3 v3.0.6
 )
