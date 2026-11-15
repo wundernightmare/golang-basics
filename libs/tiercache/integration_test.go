@@ -70,7 +70,7 @@ func TestValkeySharesAValueBetweenProcessesWithItsTTL(t *testing.T) {
 	assert.InDelta(t, 1, second.reads(t, "l2"), 0)
 
 	client := remote.Client()
-	ttl, err := client.Do(t.Context(), client.B().Pttl().Key("tc:"+first.name+":"+string(key[:])).Build()).AsInt64()
+	ttl, err := client.Do(t.Context(), client.B().Pttl().Key("tc:"+first.name+":"+key).Build()).AsInt64()
 	require.NoError(t, err)
 	assert.Greater(t, ttl, (50 * time.Second).Milliseconds(), "the key expires with the value: HardTTL ±10%")
 	assert.LessOrEqual(t, ttl, (66 * time.Second).Milliseconds())

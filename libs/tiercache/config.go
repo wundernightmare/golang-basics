@@ -14,7 +14,7 @@ import (
 // the optional fields mean the defaults below.
 //
 //	TIERCACHE_NAME                 [name]                 metric label, L2 key prefix and channel   (required)
-//	TIERCACHE_MAX_BYTES            [max_bytes]            L1 capacity in bytes                      (default 32 MiB)
+//	TIERCACHE_MAX_BYTES            [max_bytes]            L1 capacity in bytes; below 32 MiB: heap  (default 32 MiB)
 //	TIERCACHE_SOFT_TTL             [soft_ttl]             age after which a value is refreshed      (default: HARD_TTL)
 //	TIERCACHE_HARD_TTL             [hard_ttl]             age after which a value is never served   (required)
 //	TIERCACHE_STALE_IF_ERROR       [stale_if_error]       grace past HARD_TTL when the source fails (default 0: off)
@@ -32,8 +32,11 @@ type Config struct {
 	// value's format version in it ("credentials:v1") so that a change of
 	// codec starts from an empty keyspace.
 	Name string `env:"TIERCACHE_NAME" yaml:"name"`
-	// MaxBytes is the L1 capacity. The off-heap store grows in steps of
-	// 32 MiB and never below one step: 16 MiB and 33 MiB mean 32 and 64.
+	// MaxBytes is the L1 capacity, and what L1 is made of. From 32 MiB up
+	// it is off the Go heap and sized in steps of 32 MiB (33 MiB mean 64);
+	// below, it is on the heap at exactly this size, 512 KiB at least, and
+	// holds entries of up to 1/1024 of it (4 KiB at 4 MiB). See "Memory" in
+	// the README for which to choose.
 	MaxBytes int `env:"TIERCACHE_MAX_BYTES" yaml:"max_bytes"`
 	// SoftTTL: past it a value is still served, and refreshed in the
 	// background (stale-while-revalidate). Equal to HardTTL (the default)
@@ -64,12 +67,9 @@ type Config struct {
 	DisableInvalidation bool `env:"TIERCACHE_DISABLE_INVALIDATION" yaml:"disable_invalidation"`
 }
 
-// l1Step is the granularity (and the minimum) of the off-heap store.
-const l1Step = 32 << 20
-
 func (c *Config) applyDefaults() {
 	if c.MaxBytes <= 0 {
-		c.MaxBytes = l1Step
+		c.MaxBytes = offHeapStep
 	}
 
 	if c.SoftTTL <= 0 {
@@ -162,4 +162,4 @@ type Codec[T any] interface {
 // Loader reads a value from the source of truth. It returns [ErrNotFound]
 // (wrapped or not) when there is none; any other error counts as a failure of
 // the source, which is what [Config.StaleIfError] is for.
-type Loader[T any] func(ctx context.Context, key Key) (T, error)
+type Loader[T any] func(ctx context.Context, key string) (T, error)

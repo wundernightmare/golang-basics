@@ -205,18 +205,18 @@ func (f *fakeRemote) reconnect() {
 }
 
 // put stores raw bytes at the cache's key for k, bypassing the cache.
-func (f *fakeRemote) put(cacheName string, key tiercache.Key, raw string) {
+func (f *fakeRemote) put(cacheName string, key string, raw string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.data["tc:"+cacheName+":"+string(key[:])] = fakeEntry{value: raw, expires: time.Now().Add(time.Hour)}
+	f.data["tc:"+cacheName+":"+key] = fakeEntry{value: raw, expires: time.Now().Add(time.Hour)}
 }
 
 // source is the source of truth: a versioned record per key. Tests bump the
 // version (a committed write), make it fail, or hold loads at a gate.
 type source struct {
 	mu       sync.Mutex
-	versions map[tiercache.Key]int
+	versions map[string]int
 	failure  error
 	gate     chan struct{} // when set, loads wait here
 	payload  int           // extra bytes in KeyEncrypted
@@ -226,9 +226,9 @@ type source struct {
 	peak     atomic.Int64
 }
 
-func newSource() *source { return &source{versions: map[tiercache.Key]int{}} }
+func newSource() *source { return &source{versions: map[string]int{}} }
 
-func (s *source) set(key tiercache.Key, version int) {
+func (s *source) set(key string, version int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -258,7 +258,7 @@ func (s *source) hold() (release func()) {
 	})
 }
 
-func (s *source) load(ctx context.Context, key tiercache.Key) (credential.Credential, error) {
+func (s *source) load(ctx context.Context, key string) (credential.Credential, error) {
 	s.loads.Add(1)
 
 	now := s.inFlight.Add(1)
@@ -286,7 +286,7 @@ func (s *source) load(ctx context.Context, key tiercache.Key) (credential.Creden
 	case err != nil:
 		return credential.Credential{}, err
 	case !found:
-		return credential.Credential{}, fmt.Errorf("credential %x: %w", key[:4], tiercache.ErrNotFound)
+		return credential.Credential{}, fmt.Errorf("credential %q: %w", key, tiercache.ErrNotFound)
 	}
 
 	return record(key, version, payload), nil
@@ -294,8 +294,8 @@ func (s *source) load(ctx context.Context, key tiercache.Key) (credential.Creden
 
 // record is the value the source holds for key at version: recognisably that
 // key's (so a cross-key mix-up shows) and that version's.
-func record(key tiercache.Key, version, payload int) credential.Credential {
-	sum := sha256.Sum256(key[:])
+func record(key string, version, payload int) credential.Credential {
+	sum := sha256.Sum256([]byte(key))
 	filler := make([]byte, payload)
 
 	for i := range filler {
@@ -303,7 +303,7 @@ func record(key tiercache.Key, version, payload int) credential.Credential {
 	}
 
 	return credential.Credential{
-		ID:           fmt.Sprintf("id-%x", key[:8]),
+		ID:           fmt.Sprintf("id-%x", sum[8:16]),
 		CRMID:        fmt.Sprintf("v%d", version),
 		KeyEncrypted: fmt.Sprintf("enc-%x-%s", sum[:8], filler),
 	}
@@ -332,6 +332,10 @@ func newHarness(t *testing.T, remote tiercache.Remote, src *source, tune func(*t
 		tune(&cfg)
 	}
 
+	if cfg.MaxBytes == 0 {
+		cfg.MaxBytes = tiercache.SuiteL1Bytes()
+	}
+
 	cache, err := tiercache.New(cfg, credential.Codec{}, src.load, remote, nil)
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
@@ -355,14 +359,14 @@ func (rig *harness) metric(t *testing.T, name string, labels map[string]string) 
 }
 
 // read is version without assertions, for goroutines other than the test's.
-func (rig *harness) read(key tiercache.Key) (string, error) {
+func (rig *harness) read(key string) (string, error) {
 	got, err := rig.cache.Get(context.Background(), key)
 
 	return got.CRMID, err
 }
 
 // version is the source version of the value Get returns for key.
-func (rig *harness) version(t *testing.T, key tiercache.Key) string {
+func (rig *harness) version(t *testing.T, key string) string {
 	t.Helper()
 
 	got, err := rig.cache.Get(t.Context(), key)

@@ -27,7 +27,7 @@ import (
 const readBound = 2 * time.Second
 
 // answers reads every key through rig and checks value and latency.
-func answers(t *testing.T, rig *harness, keys []tiercache.Key, payload int) {
+func answers(t *testing.T, rig *harness, keys []string, payload int) {
 	t.Helper()
 
 	for _, key := range keys {
@@ -39,8 +39,8 @@ func answers(t *testing.T, rig *harness, keys []tiercache.Key, payload int) {
 	}
 }
 
-func seeded(src *source, prefix string, n int) []tiercache.Key {
-	keys := make([]tiercache.Key, n)
+func seeded(src *source, prefix string, n int) []string {
+	keys := make([]string, n)
 	for i := range keys {
 		keys[i] = tiercache.KeyOf(fmt.Sprint(prefix, i))
 		src.set(keys[i], 1)

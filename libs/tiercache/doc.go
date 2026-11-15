@@ -1,7 +1,7 @@
 // Package tiercache is a two-level read cache for values that are read far
-// more often than they change: a fixed-size, off-heap L1 inside the process
-// (github.com/VictoriaMetrics/fastcache) in front of a shared L2 (Valkey,
-// through libs/valkey), in front of the source of truth (a [Loader]).
+// more often than they change: a fixed-size L1 inside the process in front
+// of a shared L2 (Valkey, through libs/valkey), in front of the source of
+// truth (a [Loader]).
 //
 // It adds little of its own: the store, the client, singleflight, the TTL
 // jitter and the tombstone scheme are the tested pieces it is assembled from.
@@ -35,19 +35,30 @@
 // the fills of readers that loaded the old row — see libs/valkey) and
 // publishes it, so every other process drops it from its L1. Pub/Sub is at
 // most once: every time the subscription is re-established, L1 is emptied.
+// A read that begins after an invalidation was applied here never joins a
+// lookup that began before it: once Invalidate has returned, this process
+// reads its own write.
 // Without [Cache.Invalidate] the cache is still correct up to HardTTL.
+//
+// # Keys
+//
+// A key is a string of 1 to [MaxKeyLen] bytes and travels as it is: to the
+// loader, into the L2 key, onto the invalidation channel. A secret is never
+// a key — [KeyOf] hashes it.
 //
 // # Memory
 //
-// L1's capacity is fixed at construction and its memory is not Go heap, so
-// it neither grows nor weighs on the garbage collector. Three properties of
-// the store are worth knowing when the budget is tight: capacity moves in
-// steps of 32 MiB (and is never less), the memory is never returned to the
-// OS (budget the full capacity as resident), and its per-bucket index — a
-// map of 16 bytes per live entry — is ordinary heap on top. Entries of
-// 64 KiB and more are not stored in L1: they are served from L2 and counted.
-// Several logical caches can share one budget by sharing one cache and
-// telling their keys apart in what they hash.
+// L1's capacity ([Config.MaxBytes]) is fixed at construction, and chooses
+// the store. From 32 MiB up it is github.com/VictoriaMetrics/fastcache: off
+// the Go heap, so neither the garbage collector nor the Go memory limit
+// counts it; sized in steps of 32 MiB; never returned to the OS (budget the
+// full capacity as resident); entries of 64 KiB and more are not held.
+// Below 32 MiB it is github.com/coocood/freecache: on the heap at exactly
+// the size asked for (512 KiB at least), counted by the memory limit, with
+// entries of up to 1/1024 of the capacity. Either keeps an index of 16 bytes
+// per entry on the heap on top. An entry too large for L1 is served from L2
+// and counted. Several logical caches can share one budget by sharing one
+// cache and telling their keys apart by a prefix.
 //
 // A service typically does:
 //

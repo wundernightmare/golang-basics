@@ -59,7 +59,7 @@ type commit struct {
 func TestReadsAreNeverStalerThanTheCachePromises(t *testing.T) {
 	t.Parallel()
 
-	keys := []tiercache.Key{tiercache.KeyOf("a"), tiercache.KeyOf("b"), tiercache.KeyOf("c")}
+	keys := []string{"tenant:42", tiercache.KeyOf("b"), strings.Repeat("c", tiercache.MaxKeyLen)}
 
 	// The deadlines are jittered by ±10%: nothing lives past 1.1 × HardTTL.
 	const oldest = hardTTL + hardTTL/10
@@ -83,10 +83,10 @@ func TestReadsAreNeverStalerThanTheCachePromises(t *testing.T) {
 			defer processes[0].Close()
 			defer processes[1].Close()
 
-			history := map[tiercache.Key][]commit{}
-			floor := map[tiercache.Key]int{} // the last invalidated version
+			history := map[string][]commit{}
+			floor := map[string]int{} // the last invalidated version
 
-			write := func(key tiercache.Key) int {
+			write := func(key string) int {
 				version := len(history[key]) + 1
 				src.set(key, version)
 				history[key] = append(history[key], commit{version: version, at: time.Now()})

@@ -18,7 +18,7 @@
 #   - NOT COVERED here is a gremlins limitation, not untested code: Go's
 #     cover profile has no block for a `case` expression or a const.
 #   - Known survivors, all equivalent — anything else is a gap:
-#       cache.go       cap(*buf) <= 2*l1MaxEntry   (which buffers are pooled: speed only)
+#       cache.go       cap(*buf) <= 2*maxEntry()   (which buffers are pooled: speed only)
 #                      nowMs < heldHard, < heldSoftMs, hardMs > limitMs
 #                                                  (resolve / staleFallback read the wall clock:
 #                                                   the equal millisecond is not reachable; the

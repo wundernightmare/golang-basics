@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
@@ -98,7 +97,7 @@ func TestConfig(t *testing.T) {
 func TestMetricsAreLintClean(t *testing.T) {
 	t.Parallel()
 
-	cache, err := New(Config{Name: "lint", HardTTL: time.Minute}, byteCodec{}, func(context.Context, Key) ([]byte, error) { return nil, nil }, nil, nil)
+	cache, err := New(Config{Name: "lint", HardTTL: time.Minute}, byteCodec{}, func(context.Context, string) ([]byte, error) { return nil, nil }, nil, nil)
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
 
@@ -120,7 +119,11 @@ func newByteCache(t *testing.T, log *slog.Logger, tune func(*Config)) *Cache[[]b
 		tune(&cfg)
 	}
 
-	cache, err := New(cfg, byteCodec{}, func(context.Context, Key) ([]byte, error) { return nil, nil }, nil, log)
+	if cfg.MaxBytes == 0 {
+		cfg.MaxBytes = SuiteL1Bytes()
+	}
+
+	cache, err := New(cfg, byteCodec{}, func(context.Context, string) ([]byte, error) { return nil, nil }, nil, log)
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
 
@@ -166,25 +169,6 @@ func TestEnvelopeAcceptsItsLargestDeadline(t *testing.T) {
 	_, hard, _, ok = parseEnvelope(appendHeader(nil, 1, 1<<62+1))
 	assert.False(t, ok)
 	assert.Zero(t, hard)
-}
-
-// l1MaxEntry is a promise about the store underneath: an entry of exactly
-// that size is held, and one byte more is refused and counted — never
-// dropped in silence.
-func TestLargestEntryL1AcceptsIsHeld(t *testing.T) {
-	t.Parallel()
-
-	cache := newByteCache(t, nil, nil)
-	key := KeyOf("largest")
-
-	cache.fill(cache.epoch.Load(), key, make([]byte, l1MaxEntry-len(key)))
-	assert.True(t, cache.local.Has(key[:]), "an entry of l1MaxEntry bytes is in L1")
-	assert.Zero(t, testutil.ToFloat64(cache.metrics.oversize))
-
-	over := KeyOf("one byte over")
-	cache.fill(cache.epoch.Load(), over, make([]byte, l1MaxEntry-len(over)+1))
-	assert.False(t, cache.local.Has(over[:]))
-	assert.InDelta(t, 1, testutil.ToFloat64(cache.metrics.oversize), 0)
 }
 
 // StaleIfError = 0 turns the fallback off, whatever the levels still hold.

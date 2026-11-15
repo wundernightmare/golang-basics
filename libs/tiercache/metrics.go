@@ -1,7 +1,6 @@
 package tiercache
 
 import (
-	"github.com/VictoriaMetrics/fastcache"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -16,7 +15,7 @@ type metrics struct {
 	collectors []prometheus.Collector
 }
 
-func newMetrics(name string, local *fastcache.Cache) *metrics {
+func newMetrics(name string, local store) *metrics {
 	labels := prometheus.Labels{"cache": name}
 
 	reads := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -46,15 +45,9 @@ func newMetrics(name string, local *fastcache.Cache) *metrics {
 	})
 	size := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name:        "tiercache_l1_bytes",
-		Help:        "Bytes of off-heap memory L1 currently holds (bounded by its configured capacity).",
+		Help:        "Bytes of memory L1 holds, bounded by its configured capacity: what the off-heap store has taken so far, or the whole of the heap store.",
 		ConstLabels: labels,
-	}, func() float64 {
-		var stats fastcache.Stats
-
-		local.UpdateStats(&stats)
-
-		return float64(stats.BytesSize)
-	})
+	}, func() float64 { return float64(local.bytes()) })
 
 	return &metrics{
 		fresh:          reads.WithLabelValues("fresh"),

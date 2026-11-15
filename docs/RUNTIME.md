@@ -60,10 +60,11 @@ headroom is for what it does not, and the kernel does:
   and fetch buffers live there: use about `0.7`, or subtract
   `kafka.producer_queue_max_kbytes` and take 0.85 of the rest;
 - memory a Go library maps outside the heap. The L1 of `libs/tiercache`
-  does (32 MiB at least, resident once filled and never returned): subtract
+  does from 32 MiB up (resident once filled and never returned): subtract
   `TIERCACHE_MAX_BYTES` per cache from the container limit and take 0.85 of
   the rest. Unsubtracted, one full L1 is nearly all of the default headroom
-  of a 256 MiB container (38 MiB);
+  of a 256 MiB container (38 MiB) — a container that small wants a cache
+  below 32 MiB, which is on the heap and needs nothing here;
 - files in a memory-backed `emptyDir` and, under pressure, page cache and
   socket buffers charged to the container;
 - the overshoot between the moment the heap crosses the limit and the moment
