@@ -79,7 +79,7 @@ jobs:
             echo "MUTATION_MODULES=$(scripts/touched-modules.sh --mutation | json)"
           } | tee -a "$GITHUB_OUTPUT"
 
-  # Formatting, go.mod tidiness and shell scripts — `just fmt-check tidy-check`
+  # Formatting, go.mod tidiness, the leak-check gate and shell scripts — `just fmt-check tidy-check leak-check`
   # plus shellcheck from its pinned image (the runner's own is a different version).
   static:
     needs: versions
@@ -94,7 +94,7 @@ jobs:
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
         with:
           just-version: ${{ needs.versions.outputs.JUST_VERSION }}
-      - run: just fmt-check tidy-check
+      - run: just fmt-check tidy-check leak-check
       - name: shellcheck
         env:
           SHELLCHECK_VERSION: ${{ needs.versions.outputs.SHELLCHECK_VERSION }}

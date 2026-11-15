@@ -10,7 +10,8 @@ README; this file is only the high-signal, easy-to-miss bits.
   the root fails. The workspace-wide `just` recipes (`just check` / `test` /
   `lint`) fan out over each module dir instead; run
   `go` directly only from inside a module dir (`libs/httpx`, `services/ping`,
-  …). `just ci` is pure Go (fmt → vet → lint → tidy-check → test-short);
+  …). `just ci` is pure Go (fmt-check → tidy-check → leak-check → vet → lint →
+  test-short);
   `just contracts-check` is the only recipe that needs Node.
 - Workspace-wide: `just check` / `just test` / `just lint` / `just ci`
   (full list in README "Common workspace commands").
@@ -288,6 +289,11 @@ README; this file is only the high-signal, easy-to-miss bits.
   chaos) and `libs/testx/contract` (OpenAPI / JSON Schema validation). Tests
   isolate with `testx.Unique` (a schema, a key prefix, a topic), never a
   fresh container. A depguard rule keeps all of them out of non-test code.
+- **Every test package checks for goroutine leaks**: `TestMain` is
+  `os.Exit(testx.Main(m))`, `containers.Main(m)` with the shared containers,
+  or `goleak.VerifyTestMain(m)` in a module without `libs/testx`.
+  `scripts/leak-check.sh` (`just leak-check`, in `just ci`) fails a new test
+  package without one; a leak is fixed (Close / Stop / cancel), not ignored.
 - **Rules over sequences are property tests** (rapid; `libs/resilience`,
   `libs/tiercache`): a state machine, a model to compare against, an invariant
   of any history — not for what one table of examples says as well. They are

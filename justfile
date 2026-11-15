@@ -266,12 +266,16 @@ tidy:
 tidy-check:
     scripts/tidy-check.sh
 
+# Gate: every test package ends with a goroutine-leak check (testx.Main)
+leak-check:
+    scripts/leak-check.sh
+
 # ── CI gates ──────────────────────────────────────────────────────────────────
 
 # Contracts are a separate gate: `just contracts-check` (needs node/pnpm).
 
-# Pure-Go pipeline (no Node, no Docker): fmt-check → tidy-check → vet → lint → test-short
-ci: fmt-check tidy-check vet lint test-short
+# Pure-Go pipeline (no Node, no Docker): fmt-check → tidy-check → leak-check → vet → lint → test-short
+ci: fmt-check tidy-check leak-check vet lint test-short
     @echo "CI passed"
 
 # Extended: + race tests (incl. Docker-backed suites) + govulncheck
@@ -317,9 +321,11 @@ sec-deps:
 sec-iac:
     find docker -name '*Dockerfile' -print0 | xargs -0 -I{} env {{APPSEC}} {{MISE}} hadolint --config .hadolint.yaml {}
 
-# Go-native reachable-vulnerability scan per module (GOVULNDB for a mirror)
+# Go-native reachable-vulnerability scan per module (GOVULNDB for a mirror).
+# A service links one Kafka provider per build (internal/kafkaprovider), so
+# it is scanned twice: the default build and the franz-go one.
 audit:
-    for m in {{MODULES}}; do echo "── govulncheck $m"; (cd "$m" && {{APPSEC}} {{MISE}} govulncheck ./...); done
+    for m in {{MODULES}}; do echo "── govulncheck $m"; (cd "$m" && {{APPSEC}} {{MISE}} govulncheck -tags e2e ./...) || exit 1; if [ -d "$m/internal/kafkaprovider" ]; then echo "── govulncheck $m (franz-go build)"; (cd "$m" && {{APPSEC}} {{MISE}} govulncheck -tags e2e,kafka_franz ./...) || exit 1; fi; done
 
 # ── Container images (docker/service.Dockerfile) ──────────────────────────────
 

@@ -260,14 +260,16 @@ prepare:
 
 # ── check ─────────────────────────────────────────────────────────────────────
 
-# `just fmt-check tidy-check`: gofmt over the module dirs (never `.` — the
-# module cache lives under .cache/), and every go.mod tidy on its own.
+# `just fmt-check tidy-check leak-check`: gofmt over the module dirs (never `.`
+# — the module cache lives under .cache/), every go.mod tidy on its own, and
+# a goroutine-leak check in every test package.
 static:
   extends: [.go, .rules-go]
   stage: check
   script:
     - out="$(gofmt -l $(scripts/touched-modules.sh --all))"; if [ -n "$out" ]; then echo "gofmt needed in:"; echo "$out"; exit 1; fi
     - scripts/tidy-check.sh
+    - scripts/leak-check.sh
 
 # `just lint-sh`, from the pinned shellcheck image.
 shellcheck:
@@ -720,6 +722,8 @@ govulncheck:
       status=0
       for m in $(scripts/touched-modules.sh --all); do
         echo "── $m"; (cd "$m" && govulncheck -tags e2e ./...) || status=1
+        # A service links one Kafka provider per build: the franz-go one too.
+        if [ -d "$m/internal/kafkaprovider" ]; then (cd "$m" && govulncheck -tags e2e,kafka_franz ./...) || status=1; fi
       done
       test "$status" = 0
 

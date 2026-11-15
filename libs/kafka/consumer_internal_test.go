@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/tracehubmmp/golang-basics/libs/secret"
+	"github.com/tracehubmmp/golang-basics/libs/testx"
 )
 
 // The provider-neutral loop against a scripted client: the paths a real
@@ -26,7 +27,7 @@ var fake = &fakeDriver{}
 
 func TestMain(m *testing.M) {
 	Register(fake)
-	os.Exit(m.Run())
+	os.Exit(testx.Main(m))
 }
 
 type fakeDriver struct {
