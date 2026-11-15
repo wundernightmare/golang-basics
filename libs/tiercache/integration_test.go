@@ -19,10 +19,27 @@ import (
 // says (PX, SET NX, SET IFEQ, tombstones, Pub/Sub) and that values survive
 // the wire at every size. The read rules themselves are the unit layer's.
 
+// valkeyAt is a client for the chaos tests: its operations give up after
+// 200ms, which is what bounds a read while Valkey misbehaves.
 func valkeyAt(t *testing.T, url string) *valkey.Cache {
 	t.Helper()
 
-	remote, err := valkey.New(valkey.Config{URL: url, DialTimeout: 5 * time.Second, OpTimeout: 200 * time.Millisecond}, nil)
+	return valkeyWithin(t, url, 200*time.Millisecond)
+}
+
+// valkeySteady is a client for the tests in which Valkey is healthy and is
+// expected to answer every time: an operation that is merely slow on a busy
+// machine must not read as a miss there.
+func valkeySteady(t *testing.T) *valkey.Cache {
+	t.Helper()
+
+	return valkeyWithin(t, containers.Valkey(t), 10*time.Second)
+}
+
+func valkeyWithin(t *testing.T, url string, opTimeout time.Duration) *valkey.Cache {
+	t.Helper()
+
+	remote, err := valkey.New(valkey.Config{URL: url, DialTimeout: 5 * time.Second, OpTimeout: opTimeout}, nil)
 	require.NoError(t, err)
 	t.Cleanup(remote.Close)
 
@@ -56,12 +73,12 @@ func (rig *harness) subscribed(t *testing.T) {
 func TestValkeySharesAValueBetweenProcessesWithItsTTL(t *testing.T) {
 	t.Parallel()
 
-	remote := valkeyAt(t, containers.Valkey(t))
+	remote := valkeySteady(t)
 	src, key := newSource(), tiercache.KeyOf("a")
 	src.set(key, 1)
 
 	first := newHarness(t, remote, src, realTime("", time.Minute, time.Minute))
-	second := newHarness(t, valkeyAt(t, containers.Valkey(t)), newSource(), realTime(first.name, time.Minute, time.Minute))
+	second := newHarness(t, valkeySteady(t), newSource(), realTime(first.name, time.Minute, time.Minute))
 	first.subscribed(t)
 	second.subscribed(t)
 
@@ -70,7 +87,7 @@ func TestValkeySharesAValueBetweenProcessesWithItsTTL(t *testing.T) {
 	assert.InDelta(t, 1, second.reads(t, "l2"), 0)
 
 	client := remote.Client()
-	ttl, err := client.Do(t.Context(), client.B().Pttl().Key("tc:"+first.name+":"+string(key[:])).Build()).AsInt64()
+	ttl, err := client.Do(t.Context(), client.B().Pttl().Key("tc:"+first.name+":"+key).Build()).AsInt64()
 	require.NoError(t, err)
 	assert.Greater(t, ttl, (50 * time.Second).Milliseconds(), "the key expires with the value: HardTTL ±10%")
 	assert.LessOrEqual(t, ttl, (66 * time.Second).Milliseconds())
@@ -82,8 +99,8 @@ func TestValkeyInvalidationReachesTheOtherProcess(t *testing.T) {
 	src, key := newSource(), tiercache.KeyOf("a")
 	src.set(key, 1)
 
-	writer := newHarness(t, valkeyAt(t, containers.Valkey(t)), src, realTime("", time.Minute, time.Minute))
-	reader := newHarness(t, valkeyAt(t, containers.Valkey(t)), src, realTime(writer.name, time.Minute, time.Minute))
+	writer := newHarness(t, valkeySteady(t), src, realTime("", time.Minute, time.Minute))
+	reader := newHarness(t, valkeySteady(t), src, realTime(writer.name, time.Minute, time.Minute))
 	writer.subscribed(t)
 	reader.subscribed(t)
 
@@ -111,7 +128,7 @@ func TestValkeyRefreshReplacesTheSharedValue(t *testing.T) {
 	src, key := newSource(), tiercache.KeyOf("a")
 	src.set(key, 1)
 
-	rig := newHarness(t, valkeyAt(t, containers.Valkey(t)), src, realTime("", 300*time.Millisecond, time.Minute))
+	rig := newHarness(t, valkeySteady(t), src, realTime("", 300*time.Millisecond, time.Minute))
 	rig.subscribed(t)
 	require.Equal(t, "v1", rig.version(t, key))
 
@@ -120,7 +137,7 @@ func TestValkeyRefreshReplacesTheSharedValue(t *testing.T) {
 	assert.Equal(t, "v1", rig.version(t, key), "stale: served, refreshed behind")
 	require.Eventually(t, func() bool { return rig.version(t, key) == "v2" }, 5*time.Second, 10*time.Millisecond)
 
-	other := newHarness(t, valkeyAt(t, containers.Valkey(t)), newSource(), realTime(rig.name, time.Minute, time.Minute))
+	other := newHarness(t, valkeySteady(t), newSource(), realTime(rig.name, time.Minute, time.Minute))
 	assert.Equal(t, "v2", other.version(t, key), "SET IFEQ replaced the value in Valkey")
 }
 
@@ -130,7 +147,7 @@ func TestValkeyTombstoneRefusesAFillThatRacedTheWrite(t *testing.T) {
 	src, key := newSource(), tiercache.KeyOf("a")
 	src.set(key, 1)
 
-	rig := newHarness(t, valkeyAt(t, containers.Valkey(t)), src, realTime("", time.Minute, time.Minute))
+	rig := newHarness(t, valkeySteady(t), src, realTime("", time.Minute, time.Minute))
 	rig.subscribed(t)
 
 	release := src.hold()
@@ -150,7 +167,7 @@ func TestValkeyTombstoneRefusesAFillThatRacedTheWrite(t *testing.T) {
 	assert.Equal(t, "v1", <-racing)
 	assert.Equal(t, "v2", rig.version(t, key))
 
-	other := newHarness(t, valkeyAt(t, containers.Valkey(t)), newSource(), realTime(rig.name, time.Minute, time.Minute))
+	other := newHarness(t, valkeySteady(t), newSource(), realTime(rig.name, time.Minute, time.Minute))
 	require.Eventually(t, func() bool {
 		// The first read after the tombstone has expired fills Valkey again.
 		if version, err := rig.read(key); err != nil || version != "v2" {
@@ -175,8 +192,8 @@ func TestValkeyCarriesValuesOfEverySize(t *testing.T) {
 			src.set(key, 1)
 			src.payload = size
 
-			rig := newHarness(t, valkeyAt(t, containers.Valkey(t)), src, realTime("", time.Minute, time.Minute))
-			other := newHarness(t, valkeyAt(t, containers.Valkey(t)), newSource(), realTime(rig.name, time.Minute, time.Minute))
+			rig := newHarness(t, valkeySteady(t), src, realTime("", time.Minute, time.Minute))
+			other := newHarness(t, valkeySteady(t), newSource(), realTime(rig.name, time.Minute, time.Minute))
 			want := record(key, 1, size)
 
 			for _, reader := range []*harness{rig, rig, other, other} {

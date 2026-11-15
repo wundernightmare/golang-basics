@@ -52,6 +52,7 @@ exclude:
     - ^libs/[^/]+/doc\.go$
     - ^libs/testx/      # the harness (testx, testx/containers, testx/contract) is not a coverage target
     - ^libs/kafka/kafkatest/  # the Kafka conformance suite both providers' tests run: test code in a non-_test file
+    - ^libs/tiercache/storetest/  # the L1 store conformance suite both stores' tests run: test code in a non-_test file
     - /internal/testsupport/  # a service's test fixtures (fakes, builders), imported only by its tests
     - ^libs/secret/compat/  # libs/secret against the config libraries: test code, not a target
     - ^libs/grpcx/integration/  # the gRPC wiring's integration suite: test code, not a target

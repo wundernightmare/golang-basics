@@ -32,8 +32,9 @@ type Config struct {
 	// value's format version in it ("credentials:v1") so that a change of
 	// codec starts from an empty keyspace.
 	Name string `env:"TIERCACHE_NAME" yaml:"name"`
-	// MaxBytes is the L1 capacity. The off-heap store grows in steps of
-	// 32 MiB and never below one step: 16 MiB and 33 MiB mean 32 and 64.
+	// MaxBytes is the L1 capacity, handed to the [StoreFactory]. A store
+	// that cannot have it exactly says what it has instead: offheap rounds
+	// up to steps of 32 MiB, onheap takes it as it is from 512 KiB up.
 	MaxBytes int `env:"TIERCACHE_MAX_BYTES" yaml:"max_bytes"`
 	// SoftTTL: past it a value is still served, and refreshed in the
 	// background (stale-while-revalidate). Equal to HardTTL (the default)
@@ -64,12 +65,12 @@ type Config struct {
 	DisableInvalidation bool `env:"TIERCACHE_DISABLE_INVALIDATION" yaml:"disable_invalidation"`
 }
 
-// l1Step is the granularity (and the minimum) of the off-heap store.
-const l1Step = 32 << 20
+// DefaultMaxBytes is the L1 capacity of a cache that names none.
+const DefaultMaxBytes = 32 << 20
 
 func (c *Config) applyDefaults() {
 	if c.MaxBytes <= 0 {
-		c.MaxBytes = l1Step
+		c.MaxBytes = DefaultMaxBytes
 	}
 
 	if c.SoftTTL <= 0 {
@@ -162,4 +163,4 @@ type Codec[T any] interface {
 // Loader reads a value from the source of truth. It returns [ErrNotFound]
 // (wrapped or not) when there is none; any other error counts as a failure of
 // the source, which is what [Config.StaleIfError] is for.
-type Loader[T any] func(ctx context.Context, key Key) (T, error)
+type Loader[T any] func(ctx context.Context, key string) (T, error)
