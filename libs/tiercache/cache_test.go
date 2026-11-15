@@ -817,6 +817,48 @@ func TestKeyOfIsTheSHA256(t *testing.T) {
 	assert.Len(t, tiercache.KeyOf(strings.Repeat("k", 10_000)), 32)
 }
 
+// The limit is in bytes, and this is what it means in characters: the
+// numbers the README gives.
+func TestWhatFitsInAKey(t *testing.T) {
+	t.Parallel()
+
+	fits := map[string]string{
+		"a UUID, 36 bytes":      "0190f3a2-7b1c-7e7e-9c1d-2f6a5b3c4d5e",
+		"512 Latin letters":     strings.Repeat("a", 512),
+		"256 Cyrillic letters":  strings.Repeat("ж", 256),
+		"170 CJK characters":    strings.Repeat("\u6f22", 170),
+		"128 emoji":             strings.Repeat("😀", 128),
+		"a SHA-256 from KeyOf":  tiercache.KeyOf("secret"),
+		"one byte":              "k",
+		"bytes that are no UTF": "\xff\x00\xfe",
+	}
+	tooLong := map[string]string{
+		"513 Latin letters":    strings.Repeat("a", 513),
+		"257 Cyrillic letters": strings.Repeat("ж", 257),
+		"171 CJK characters":   strings.Repeat("\u6f22", 171),
+		"129 emoji":            strings.Repeat("😀", 129),
+	}
+
+	assert.Len(t, fits["a UUID, 36 bytes"], 36)
+
+	src := newSource()
+	rig := newHarness(t, nil, src, nil)
+
+	for name, key := range fits {
+		src.set(key, 1)
+		assert.Equal(t, "v1", rig.version(t, key), name)
+		require.NoError(t, rig.cache.Invalidate(t.Context(), key), name)
+	}
+
+	for name, key := range tooLong {
+		src.set(key, 1)
+
+		_, err := rig.cache.Get(t.Context(), key)
+		require.ErrorIs(t, err, tiercache.ErrKey, name)
+		require.ErrorIs(t, rig.cache.Invalidate(t.Context(), key), tiercache.ErrKey, name)
+	}
+}
+
 // An empty key and one over MaxKeyLen are refused before anything is asked:
 // not the loader, not L2, not the channel.
 func TestAKeyOutOfBoundsIsRefused(t *testing.T) {

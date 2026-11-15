@@ -20,8 +20,8 @@ import (
 // not have, and what [Cache.Get] returns then. It is not cached.
 var ErrNotFound = errors.New("tiercache: not found")
 
-// MaxKeyLen is the longest key, in bytes: 512 ASCII characters, 256
-// Cyrillic ones, 128 of the longest UTF-8 has.
+// MaxKeyLen is the longest key, in bytes. A UUID as text is 36; in UTF-8 the
+// limit is 512 Latin characters, 256 Cyrillic ones, 170 CJK ones, 128 emoji.
 const MaxKeyLen = 512
 
 // ErrKey is what [Cache.Get] and [Cache.Invalidate] return for a key that is

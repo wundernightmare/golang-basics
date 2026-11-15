@@ -37,8 +37,17 @@ u, err := users.Get(ctx, userID) // a key is a string: the loader is called with
 
 A key is any string of 1 to 512 bytes (`tiercache.MaxKeyLen`; anything else
 is `tiercache.ErrKey`): a number, a UUID (36 bytes), `tenant:7/user:42`.
-512 bytes are 512 ASCII characters, 256 Cyrillic ones, about 170 CJK ones,
-128 emoji.
+The limit is in bytes, so what fits depends on the script
+(`TestWhatFitsInAKey` holds the table to the code):
+
+| A key of | takes | fits up to |
+| --- | --- | --- |
+| a UUID as text | 36 bytes | — |
+| Latin letters, digits, punctuation | 1 byte each | 512 characters |
+| Cyrillic, Greek, Hebrew, Arabic | 2 bytes each | 256 characters |
+| CJK characters | 3 bytes each | 170 characters |
+| emoji | 4 bytes each (more for a combined one) | 128 |
+| `tiercache.KeyOf(…)` | 32 bytes | any input |
 
 It is not hashed on the way. The loader is called with it, L2 holds the value
 under `tc:<name>:<key>`, and an invalidation publishes it on `tc:<name>:inv`.
