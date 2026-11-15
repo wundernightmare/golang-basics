@@ -6,7 +6,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// instrumentationName names this library's tracer.
 const instrumentationName = "github.com/tracehubmmp/golang-basics/libs/kafka"
 
 // Option configures a [Producer] or a [Consumer].

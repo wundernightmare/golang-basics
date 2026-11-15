@@ -167,16 +167,15 @@ func (c *Client) newPolicy(tc *TargetConfig) *policy {
 	p := &policy{name: name, timeout: tc.Timeout, m: c.m}
 	p.breaker = resilience.NewBreaker(tc.Breaker, time.Now, func(from, to resilience.State) {
 		c.m.transitions.WithLabelValues(name, from.String(), to.String()).Inc()
-		// The current state, not `to`, and read under the lock: concurrent
-		// notifications may run out of order, but whichever sets the gauge
-		// last has read a state at least as new as every earlier writer's.
+		// State(), not `to`, and under the lock: see resilience.NewBreaker.
 		p.stateMu.Lock()
 		c.m.breakerState.WithLabelValues(name).Set(float64(p.breaker.State()))
 		p.stateMu.Unlock()
 		c.log.Info("grpcx: circuit breaker "+to.String(), "target", name, "from", from.String())
 	})
 
-	c.m.breakerState.WithLabelValues(name).Set(0)
+	// Set, so the series is there before the first transition.
+	c.m.breakerState.WithLabelValues(name).Set(float64(resilience.StateClosed))
 
 	return p
 }

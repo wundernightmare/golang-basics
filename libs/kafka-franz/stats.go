@@ -11,12 +11,13 @@ import (
 )
 
 // stats implements the franz-go hooks behind kafka.ClientStats: live
-// connections per broker and request errors. Consumer-group lag is not
-// measured here: the broker exports it (once, for every group).
+// connections per broker and request errors.
 type stats struct {
 	cfg kafka.Config
 	cl  *kgo.Client
 
+	// mu guards conns and reqErrors: franz-go calls the hooks from its own
+	// goroutines, a scrape reads them from another.
 	mu        sync.Mutex
 	conns     map[int32]int // open connections per broker node id
 	reqErrors int64
@@ -31,7 +32,6 @@ var (
 	_ kgo.HookBrokerRead       = (*stats)(nil)
 )
 
-// OnBrokerConnect implements kgo.HookBrokerConnect.
 func (s *stats) OnBrokerConnect(meta kgo.BrokerMetadata, _ time.Duration, _ net.Conn, err error) {
 	if err != nil {
 		s.addError()
@@ -43,7 +43,6 @@ func (s *stats) OnBrokerConnect(meta kgo.BrokerMetadata, _ time.Duration, _ net.
 	s.mu.Unlock()
 }
 
-// OnBrokerDisconnect implements kgo.HookBrokerDisconnect.
 func (s *stats) OnBrokerDisconnect(meta kgo.BrokerMetadata, _ net.Conn) {
 	s.mu.Lock()
 	if s.conns[meta.NodeID]--; s.conns[meta.NodeID] <= 0 {
@@ -52,14 +51,12 @@ func (s *stats) OnBrokerDisconnect(meta kgo.BrokerMetadata, _ net.Conn) {
 	s.mu.Unlock()
 }
 
-// OnBrokerWrite implements kgo.HookBrokerWrite.
 func (s *stats) OnBrokerWrite(_ kgo.BrokerMetadata, _ int16, _ int, _, _ time.Duration, err error) {
 	if err != nil {
 		s.addError()
 	}
 }
 
-// OnBrokerRead implements kgo.HookBrokerRead.
 func (s *stats) OnBrokerRead(_ kgo.BrokerMetadata, _ int16, _ int, _, _ time.Duration, err error) {
 	if err != nil {
 		s.addError()
@@ -72,9 +69,9 @@ func (s *stats) addError() {
 	s.mu.Unlock()
 }
 
-// common is the connection part; seed brokers (negative node ids) are not
-// brokers of the cluster.
-func (s *stats) common() kafka.ClientStats {
+// commonLocked is the connection part; seed brokers (negative node ids) are
+// not brokers of the cluster. s.mu must be held.
+func (s *stats) commonLocked() kafka.ClientStats {
 	up := int64(0)
 
 	for id := range s.conns {
@@ -88,7 +85,7 @@ func (s *stats) common() kafka.ClientStats {
 
 func (s *stats) producer() kafka.ClientStats {
 	s.mu.Lock()
-	st := s.common()
+	st := s.commonLocked()
 	s.mu.Unlock()
 
 	if s.cl != nil {
@@ -104,5 +101,5 @@ func (s *stats) consumer() kafka.ClientStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.common()
+	return s.commonLocked()
 }

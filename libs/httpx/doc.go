@@ -11,9 +11,10 @@
 //     OpenTelemetry provider), sampled, trace-correlated request logging,
 //     Prometheus metrics with trace exemplars, panic recovery, a request-body
 //     limit, a per-request deadline, and 404/405 as problem+json (see [Server]);
-//   - a separate admin listener with /healthz, /livez, /readyz, /metrics, /version,
-//     /admin/config, /admin/log-level and /debug/pprof, kept off the API port
-//     so an ingress never exposes them; /admin and /debug take a bearer token;
+//   - a separate admin listener with the probes, /metrics, /version, /admin/*
+//     and /debug/pprof (the routes are listed in the README, "Endpoints
+//     provided for free"), kept off the API port so an ingress never exposes
+//     them; /admin and /debug take a bearer token;
 //   - runtime debugging without a redeploy: the log level switchable for a
 //     while (see [LogLevel]), debug logging for one request via X-Debug-Token
 //     (see [WithDebugLogging]), the effective config with secrets redacted

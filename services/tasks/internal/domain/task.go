@@ -81,7 +81,7 @@ func (p Patch) Normalize() (Patch, error) {
 }
 
 // Apply returns t with p applied (the store does the same in SQL; this is the
-// in-memory form for fakes and events).
+// in-memory form, used by the api tests' fake store).
 func (p Patch) Apply(t Task) Task {
 	if p.Title != nil {
 		t.Title = *p.Title

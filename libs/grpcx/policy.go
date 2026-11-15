@@ -99,7 +99,7 @@ func (p *policy) unary(ctx context.Context, method string, req, reply any, cc *g
 	err = invoker(ctx, method, req, reply, cc, opts...)
 	admitted.finish(err)
 
-	return err //nolint:wrapcheck // gRPC's status error, as is
+	return err
 }
 
 func (p *policy) stream(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
@@ -115,7 +115,7 @@ func (p *policy) stream(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.Cli
 		release()
 		admitted.finish(err)
 
-		return nil, err //nolint:wrapcheck // gRPC's status error, as is
+		return nil, err
 	}
 
 	s := &policyStream{ClientStream: cs, call: admitted, serverStreams: desc.ServerStreams, release: release}
@@ -158,7 +158,7 @@ func (s *policyStream) RecvMsg(m any) error {
 		s.done(err)
 	}
 
-	return err //nolint:wrapcheck // io.EOF or gRPC's status error, as is
+	return err // io.EOF or gRPC's status error, as is
 }
 
 func (s *policyStream) done(err error) {

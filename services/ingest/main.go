@@ -33,8 +33,6 @@ func main() {
 	}
 
 	if err := run(cfg); err != nil {
-		// app.Run owns logging on the failure path; main only sets the exit
-		// code, after every deferred cleanup has executed.
 		os.Exit(1)
 	}
 }

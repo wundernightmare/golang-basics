@@ -86,8 +86,9 @@ func validate(cfg kafka.Config) []error {
 }
 
 // commonProperties are the properties every client shares: brokers,
-// identity, security, statistics, and the logs routed to slog. A password
-// file is read here, once per client built.
+// identity, security, statistics, and the logs routed to slog. The password
+// comes from [kafka.Config.SASLSecret], which says when a password file is
+// read.
 func commonProperties(cfg kafka.Config) (ckafka.ConfigMap, error) {
 	props := ckafka.ConfigMap{
 		"bootstrap.servers":                  strings.Join(cfg.Brokers, ","),

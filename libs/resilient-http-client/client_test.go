@@ -136,13 +136,13 @@ func TestSend_RejectsUnknownTargetAndBadURL(t *testing.T) {
 	t.Parallel()
 
 	c := newClient(t, target(nil))
-	_, err := c.Send("nope", get(t, t.Context(), "http://127.0.0.1:1/")) //nolint:bodyclose // error
+	_, err := c.Send("nope", get(t, t.Context(), "http://127.0.0.1:1/"))
 	require.ErrorIs(t, err, resilient.KindInvalid)
 	_, err = c.BreakerState("nope")
 	require.ErrorIs(t, err, resilient.KindInvalid)
 
 	req := get(t, t.Context(), "/relative")
-	_, err = c.Send("api", req) //nolint:bodyclose // error
+	_, err = c.Send("api", req)
 	require.ErrorIs(t, err, resilient.KindInvalid)
 	assert.InDelta(t, 1, metric(t, c, "http_client_requests_total", map[string]string{"target": "api", "outcome": "invalid"}), 0,
 		"a bad request to a known target is counted")
@@ -150,7 +150,7 @@ func TestSend_RejectsUnknownTargetAndBadURL(t *testing.T) {
 		"an unknown target name never becomes a label value")
 
 	for _, url := range []string{"ftp://example.com/file", "http:///no-host", "//example.com/no-scheme"} {
-		_, err = c.Send("api", get(t, t.Context(), url)) //nolint:bodyclose // error
+		_, err = c.Send("api", get(t, t.Context(), url))
 		require.ErrorIs(t, err, resilient.KindInvalid, url)
 	}
 }
@@ -189,7 +189,7 @@ func TestSend_ZeroTargetConfigDisablesEverything(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	for range 5 {
-		_, err = client.SendWithRetry("api", get(t, t.Context(), srv.URL+"/down")) //nolint:bodyclose // error
+		_, err = client.SendWithRetry("api", get(t, t.Context(), srv.URL+"/down"))
 		require.ErrorIs(t, err, resilient.KindStatus)
 	}
 
@@ -229,7 +229,7 @@ func TestSend_StatusErrorKeepsBodyAndRetryAfter(t *testing.T) {
 		_, _ = io.WriteString(w, `{"error":"slow down"}`)
 	})
 	c := newClient(t, target(nil))
-	resp, err := c.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // always nil here
+	resp, err := c.Send("api", get(t, t.Context(), srv.URL)) // always nil here
 	require.Nil(t, resp)
 
 	var oe *resilient.OutboundError
@@ -284,7 +284,7 @@ func TestSendWithRetry_GivesUpAfterMaxAttemptsAndOnNonRetryable(t *testing.T) {
 
 			srv, hits := server(t, status(tc.code))
 			c := newClient(t, target(nil))
-			_, err := c.SendWithRetry("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // always an error
+			_, err := c.SendWithRetry("api", get(t, t.Context(), srv.URL))
 
 			var oe *resilient.OutboundError
 			require.ErrorAs(t, err, &oe)
@@ -330,7 +330,7 @@ func TestSendWithRetry_RetryAfterBeyondLimitsStops(t *testing.T) {
 	})
 
 	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.RetryMaxDelay = time.Second }))
-	_, err := c.SendWithRetry("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+	_, err := c.SendWithRetry("api", get(t, t.Context(), srv.URL))
 	require.ErrorIs(t, err, resilient.KindStatus)
 	assert.Equal(t, int32(1), hits.Load(), "3s > retry_max_delay: no retry")
 
@@ -340,7 +340,7 @@ func TestSendWithRetry_RetryAfterBeyondLimitsStops(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, err = c2.SendWithRetry("api", get(t, ctx, srv.URL)) //nolint:bodyclose // error
+	_, err = c2.SendWithRetry("api", get(t, ctx, srv.URL))
 	require.ErrorIs(t, err, resilient.KindStatus, "the last real error, not a cancellation")
 	assert.Less(t, time.Since(start), 500*time.Millisecond, "no pointless wait past the caller's deadline")
 	assert.Equal(t, int32(2), hits.Load())
@@ -375,18 +375,18 @@ func TestSendWithRetry_NonIdempotentNeedsKey(t *testing.T) {
 		return req
 	}
 
-	_, err := client.SendWithRetry("api", post("")) //nolint:bodyclose // error
+	_, err := client.SendWithRetry("api", post(""))
 	require.ErrorIs(t, err, resilient.KindStatus)
 	assert.Equal(t, int32(1), hits.Load(), "POST without a key is sent once")
 
-	_, err = client.SendWithRetry("api", post("k-1")) //nolint:bodyclose // error
+	_, err = client.SendWithRetry("api", post("k-1"))
 	require.ErrorIs(t, err, resilient.KindStatus)
 	assert.Equal(t, int32(4), hits.Load(), "with a key: 3 attempts")
 	assert.Equal(t, []string{"payload", "payload", "payload", "payload"}, bodies, "the body is replayed via GetBody")
 
 	req := post("k-2")
-	req.GetBody = nil                         // an unreplayable body
-	_, err = client.SendWithRetry("api", req) //nolint:bodyclose // error
+	req.GetBody = nil // an unreplayable body
+	_, err = client.SendWithRetry("api", req)
 	require.Error(t, err)
 	assert.Equal(t, int32(5), hits.Load(), "no GetBody: sent once")
 }
@@ -403,7 +403,7 @@ func TestSendWithRetry_BudgetBoundsAmplification(t *testing.T) {
 		tc.RetryBudgetMinRetries = 2
 	}))
 	for range 10 {
-		_, err := c.SendWithRetry("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+		_, err := c.SendWithRetry("api", get(t, t.Context(), srv.URL))
 		require.ErrorIs(t, err, resilient.KindStatus)
 	}
 	// 10 requests → 2 + 0.1×10 = 3 retries at most, instead of 40.
@@ -421,7 +421,7 @@ func TestSendWithRetry_StopsOnCallerCancellation(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
 	c := newClient(t, target(nil))
-	_, err := c.SendWithRetry("api", get(t, ctx, srv.URL)) //nolint:bodyclose // error
+	_, err := c.SendWithRetry("api", get(t, ctx, srv.URL))
 	require.ErrorIs(t, err, resilient.KindCanceled)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, int32(1), hits.Load())
@@ -445,7 +445,7 @@ func TestSend_TimeoutIsABreakerFailure(t *testing.T) {
 		tc.Breaker.MinRequests = 2
 	}))
 	for range 2 {
-		_, err := client.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+		_, err := client.Send("api", get(t, t.Context(), srv.URL))
 		require.ErrorIs(t, err, resilient.KindTimeout)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 	}
@@ -453,7 +453,7 @@ func TestSend_TimeoutIsABreakerFailure(t *testing.T) {
 	st, err := client.BreakerState("api")
 	require.NoError(t, err)
 	assert.Equal(t, resilient.StateOpen, st)
-	_, err = client.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+	_, err = client.Send("api", get(t, t.Context(), srv.URL))
 	require.ErrorIs(t, err, resilient.KindCircuitOpen)
 
 	assert.InDelta(t, 2, metric(t, client, "http_client_requests_total", map[string]string{"outcome": "timeout"}), 0)
@@ -482,7 +482,7 @@ func TestSend_CallerCancellationDoesNotTripBreaker(t *testing.T) {
 			cancel()
 		}()
 
-		_, err := client.Send("api", get(t, ctx, srv.URL)) //nolint:bodyclose // error
+		_, err := client.Send("api", get(t, ctx, srv.URL))
 		require.ErrorIs(t, err, resilient.KindCanceled)
 		require.ErrorIs(t, err, context.Canceled)
 	}
@@ -502,7 +502,7 @@ func TestSend_CallerDeadlineIsABreakerFailure(t *testing.T) {
 	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 2 }))
 	for range 2 {
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
-		_, err := c.Send("api", get(t, ctx, srv.URL)) //nolint:bodyclose // error
+		_, err := c.Send("api", get(t, ctx, srv.URL))
 
 		cancel()
 		require.ErrorIs(t, err, resilient.KindCanceled, "the caller's deadline is still reported as a cancellation, not a timeout")
@@ -761,7 +761,7 @@ func TestSend_4xxDoesNotTripBreaker(t *testing.T) {
 
 	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }))
 	for range 5 {
-		_, err := c.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+		_, err := c.Send("api", get(t, t.Context(), srv.URL))
 		require.ErrorIs(t, err, resilient.KindStatus)
 	}
 
@@ -793,7 +793,7 @@ func TestSend_ConnectionErrorTripsBreaker(t *testing.T) {
 	addr := ln.Addr().String()
 
 	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }))
-	_, err = c.Send("api", get(t, t.Context(), "http://"+addr)) //nolint:bodyclose // error
+	_, err = c.Send("api", get(t, t.Context(), "http://"+addr))
 	require.ErrorIs(t, err, resilient.KindConnection)
 
 	st, _ := c.BreakerState("api")
@@ -821,7 +821,7 @@ func TestSend_HalfOpenAdmitsOneProbeUnderConcurrency(t *testing.T) {
 		tc.Breaker.MinRequests = 1
 		tc.Breaker.OpenTimeout = 50 * time.Millisecond
 	}))
-	_, err := client.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+	_, err := client.Send("api", get(t, t.Context(), srv.URL))
 	require.ErrorIs(t, err, resilient.KindStatus)
 	failing.Store(false)
 	time.Sleep(60 * time.Millisecond)
@@ -890,7 +890,7 @@ func TestSend_RateLimitWaitsWithinAttemptTimeout(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	start := time.Now()
-	_, err = c2.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+	_, err = c2.Send("api", get(t, t.Context(), srv.URL))
 	require.ErrorIs(t, err, resilient.KindRateLimited, "the next token is 2s away, past the attempt timeout")
 	assert.Less(t, time.Since(start), 90*time.Millisecond, "fails fast instead of sleeping into the deadline")
 	assert.Equal(t, int32(3), hits.Load())
@@ -912,7 +912,7 @@ func TestSend_BulkheadCapsConcurrency(t *testing.T) {
 	assert.InDelta(t, 1, metric(t, client, "http_client_bulkhead_in_flight", nil), 0, "the slot is held until the body is closed")
 
 	start := time.Now()
-	_, err = client.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+	_, err = client.Send("api", get(t, t.Context(), srv.URL))
 	require.ErrorIs(t, err, resilient.KindBulkheadFull)
 	assert.GreaterOrEqual(t, time.Since(start), 20*time.Millisecond, "it waited max_concurrent_wait")
 	assert.InDelta(t, 1, metric(t, client, "http_client_bulkhead_rejected_total", nil), 0)
@@ -967,7 +967,7 @@ func TestSend_Redirects(t *testing.T) {
 		srv, otherHits := servers(t)
 
 		c := newClient(t, target(nil))
-		_, err := c.Send("api", get(t, t.Context(), srv.URL+"/away")) //nolint:bodyclose // error
+		_, err := c.Send("api", get(t, t.Context(), srv.URL+"/away"))
 		require.ErrorIs(t, err, resilient.KindRedirect)
 		assert.Contains(t, err.Error(), "cross-host")
 		assert.Equal(t, int32(0), otherHits.Load())
@@ -981,7 +981,7 @@ func TestSend_Redirects(t *testing.T) {
 		srv, _ := servers(t)
 
 		c := newClient(t, target(nil))
-		_, err := c.Send("api", get(t, t.Context(), srv.URL+"/loop")) //nolint:bodyclose // error
+		_, err := c.Send("api", get(t, t.Context(), srv.URL+"/loop"))
 		require.ErrorIs(t, err, resilient.KindRedirect)
 		assert.Contains(t, err.Error(), "10 redirects")
 	})
@@ -1089,7 +1089,7 @@ func TestSend_LogsWithoutQueryString(t *testing.T) {
 	buf := &testx.LogBuffer{}
 	srv, _ := server(t, status(http.StatusInternalServerError)) // 500: the lowest status logged at warn
 	c := newClient(t, target(nil), resilient.WithLogger(slog.New(slog.NewJSONHandler(buf, nil))))
-	_, err := c.Send("api", get(t, t.Context(), srv.URL+"/v1/items?token=s3cr3t")) //nolint:bodyclose // error
+	_, err := c.Send("api", get(t, t.Context(), srv.URL+"/v1/items?token=s3cr3t"))
 	require.Error(t, err)
 
 	line := buf.Find(t, map[string]any{"level": "WARN", "target": "api", "msg": "resilient: server error"})
@@ -1117,10 +1117,10 @@ func TestSend_WarnsOnBodyFailureRequestFailureAndRejection(t *testing.T) {
 		require.ErrorIs(t, err, resilient.KindTimeout)
 		require.NoError(t, resp.Body.Close())
 
-		_, err = client.Send("api", get(t, t.Context(), hung+"/hang")) //nolint:bodyclose // error
+		_, err = client.Send("api", get(t, t.Context(), hung+"/hang"))
 		require.ErrorIs(t, err, resilient.KindTimeout)
 
-		_, err = client.Send("api", get(t, t.Context(), hung+"/hang")) //nolint:bodyclose // error
+		_, err = client.Send("api", get(t, t.Context(), hung+"/hang"))
 		require.ErrorIs(t, err, resilient.KindCircuitOpen)
 
 		for _, want := range []map[string]any{
@@ -1149,7 +1149,7 @@ func TestShutdown_WaitsForInFlightThenRejects(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded, "an unclosed body is still in flight")
 	assert.Contains(t, err.Error(), "1 requests in flight")
 
-	_, err = client.Send("api", get(t, t.Context(), srv.URL)) //nolint:bodyclose // error
+	_, err = client.Send("api", get(t, t.Context(), srv.URL))
 	require.ErrorIs(t, err, resilient.KindShutdown)
 	assert.InDelta(t, 1, metric(t, client, "http_client_requests_total", map[string]string{"outcome": "shutdown"}), 0)
 

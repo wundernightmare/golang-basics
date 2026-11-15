@@ -55,16 +55,16 @@ func TestChaos_LostAcknowledgement(t *testing.T) {
 
 	proxy.Toxic("timeout", "downstream", map[string]any{"timeout": 0}) // answers are dropped
 
-	_, err = client.Send(api, produce(t, t.Context(), base, once, "sent-once")) //nolint:bodyclose // error
+	_, err = client.Send(api, produce(t, t.Context(), base, once, "sent-once"))
 	require.ErrorIs(t, err, resilient.KindTimeout)
 
-	_, err = client.SendWithRetry(api, produce(t, t.Context(), base, unkeyed, "no-key")) //nolint:bodyclose // error
+	_, err = client.SendWithRetry(api, produce(t, t.Context(), base, unkeyed, "no-key"))
 	require.ErrorIs(t, err, resilient.KindTimeout)
 
 	withKey := produce(t, t.Context(), base, keyed, "with-key")
 	withKey.Header.Set("Idempotency-Key", "order-42")
 
-	_, err = client.SendWithRetry(api, withKey) //nolint:bodyclose // error
+	_, err = client.SendWithRetry(api, withKey)
 	require.ErrorIs(t, err, resilient.KindTimeout)
 	assert.InDelta(t, 2, metric(t, client, "http_client_retries_total", nil), 0, "only the keyed request was retried")
 
@@ -99,13 +99,13 @@ func TestNonHTTPPeer_Postgres(t *testing.T) {
 			}), nil)
 
 			start := time.Now()
-			_, err := client.SendWithRetry(api, get(t, scheme+"://"+dsn.Host+"/")) //nolint:bodyclose // error
+			_, err := client.SendWithRetry(api, get(t, scheme+"://"+dsn.Host+"/"))
 			require.ErrorIs(t, err, resilient.KindConnection)
 			assert.Less(t, time.Since(start), time.Second, "the database hangs up at once; nothing waits for the timeout")
 			assert.InDelta(t, 3, requests(t, client, "connection"), 0, "retried as a connection error")
 			assert.Equal(t, resilient.StateOpen, breakerState(t, client))
 
-			_, err = client.Send(api, get(t, scheme+"://"+dsn.Host+"/")) //nolint:bodyclose // error
+			_, err = client.Send(api, get(t, scheme+"://"+dsn.Host+"/"))
 			require.ErrorIs(t, err, resilient.KindCircuitOpen, "and then left alone")
 		})
 	}

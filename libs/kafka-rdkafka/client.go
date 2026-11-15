@@ -51,8 +51,9 @@ const logFoldWindow = time.Minute
 // dropped, which librdkafka retries on its own (reconnect.backoff.ms), is a
 // warning. Whether the service is actually cut off shows in readiness and
 // kafka_client_brokers_up, not in one connect attempt (librdkafka tries every
-// resolved address, so `localhost` alone fails over [::1] first). A line repeated within logFoldWindow is counted instead of
-// logged; the next one after the window carries the count.
+// resolved address, so `localhost` alone fails over [::1] first). A line
+// repeated within logFoldWindow is counted instead of logged; the next one
+// after the window carries the count.
 func pumpLogs(logs <-chan ckafka.LogEvent, log *slog.Logger, role string) {
 	type seen struct {
 		at         time.Time
@@ -155,6 +156,8 @@ func parseStats(raw string) (statsSnapshot, error) {
 
 // statsHolder keeps the latest snapshot for the collectors.
 type statsHolder struct {
+	// mu guards every field: the client's event pump (a consumer's Poll)
+	// updates, a scrape reads.
 	mu   sync.Mutex
 	snap statsSnapshot
 	// seen is each broker's last cumulative error count, total the sum of
@@ -212,7 +215,8 @@ func statsMaxAge(cfg kafka.Config) time.Duration {
 	return max(3*time.Duration(cfg.StatisticsInterval)*time.Millisecond, time.Minute)
 }
 
-// clientStats turns the latest snapshot into kafka.ClientStats.
+// clientStats is invalid (the zero value) rather than a stale snapshot: see
+// latest.
 func (h *statsHolder) clientStats(cfg kafka.Config) kafka.ClientStats {
 	s, ok := h.latest(statsMaxAge(cfg))
 	if !ok {

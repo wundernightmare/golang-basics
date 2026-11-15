@@ -96,8 +96,10 @@ nothing; do not use human-chosen passwords as service secrets.
 if !cfg.AdminToken.Equal(presented) { /* 401 */ }
 ```
 
-`Equal` is constant-time and independent of both lengths (it compares SHA-256
-digests). An unset secret equals nothing, `""` included. `==` on two `String`s
+`Equal` compares SHA-256 digests in constant time: it takes as long whether
+the values differ in the first byte, the last, or in length (hashing a value
+takes time proportional to its own length, nothing more is told). An unset
+secret equals nothing, `""` included. `==` on two `String`s
 compares identity, not content — use `Equal`, or `reflect.DeepEqual` /
 `assert.Equal` in tests.
 

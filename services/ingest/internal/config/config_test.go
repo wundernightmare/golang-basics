@@ -177,9 +177,7 @@ func TestDefaultsAreTheReference(t *testing.T) {
 	assert.Equal(t, 10*time.Second, def.Archive.Linger)
 }
 
-// Serial on purpose: exercises the process-environment path (t.Setenv cannot run in parallel).
-//
-//nolint:paralleltest // t.Setenv
+//nolint:paralleltest // exercises the process-environment path; t.Setenv in a loop, which paralleltest does not see
 func TestLoad_ReadsTheProcessEnvironment(t *testing.T) {
 	for k, v := range base(map[string]string{"INGEST_ARCHIVE_PREFIX": "from-env/"}) {
 		t.Setenv(k, v)

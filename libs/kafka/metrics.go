@@ -153,7 +153,7 @@ func newConsumerMetrics(stats func() ClientStats, provider string, topics []stri
 	}
 }
 
-// topic is the label for a record from t.
+// topic keeps the label to the configured topic names (see otherTopic).
 func (m *consumerMetrics) topic(t string) string {
 	if m.topics[t] {
 		return t
@@ -181,8 +181,9 @@ func (m *consumerMetrics) topic(t string) string {
 // subscription. How far behind the group is comes from the broker, not from
 // here: kafka_consumer_records_total flat while the broker's group lag grows
 // means the worker is stuck, both climbing means it is under-provisioned.
-// The client gauges refresh every KAFKA_STATISTICS_INTERVAL_MS and disappear
-// when the client stops reporting.
+// The client gauges are exposed while the driver has something current to
+// report (see [ClientStats]): not with KAFKA_STATISTICS_INTERVAL_MS
+// negative, and not from a client that stopped reporting.
 func (c *Consumer) Collectors() []prometheus.Collector {
 	m := c.metrics
 
@@ -219,7 +220,6 @@ func newClientCollector(role, provider string, stats func() ClientStats) *client
 	}
 }
 
-// Describe implements prometheus.Collector.
 func (c *clientCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.info
 
@@ -234,7 +234,8 @@ func (c *clientCollector) Describe(ch chan<- *prometheus.Desc) {
 	}
 }
 
-// Collect implements prometheus.Collector.
+// Collect emits the info series always, the rest only from a valid
+// [ClientStats]: an absent series, not a stale or zero one.
 func (c *clientCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.info, prometheus.GaugeValue, 1)
 

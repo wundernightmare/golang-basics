@@ -46,7 +46,7 @@ type (
 // backoffMultiplier doubles the backoff per retry, as the HTTP client does.
 const backoffMultiplier = 2
 
-// serviceConfigJSON renders t's service config. The entry named {} is the
+// serviceConfigJSON renders target's service config. The entry named {} is the
 // default for every method; with retry_methods a second entry, which gRPC
 // prefers for the methods it names, carries the retry policy.
 func serviceConfigJSON(target *TargetConfig) (string, error) {

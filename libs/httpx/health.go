@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,8 +53,9 @@ const (
 // /readyz answers from the cached results — so a probe returns in
 // microseconds, a hundred pods probing every few seconds do not turn into a
 // hundred pings per second on the database, and a slow dependency cannot
-// make the probe itself time out. Results older than two intervals (the loop
-// is not running, or is stuck) are refreshed inline, serialised so concurrent
+// make the probe itself time out. Results older than two intervals plus the
+// check timeout (the loop is not running, or is stuck; the reason for the
+// formula is on snapshot) are refreshed inline, serialised so concurrent
 // probes trigger a single refresh, and detached from the probe's own
 // context so a kubelet giving up early cannot poison the cache with its
 // cancellation.
@@ -322,18 +322,12 @@ func (h *Health) ReadyHandler() http.HandlerFunc {
 
 		results, critical := h.snapshot(r.Context())
 
-		names := make([]string, 0, len(results))
-		for name := range results {
-			names = append(names, name)
-		}
-
-		sort.Strings(names) // deterministic output for tests + humans
-
-		checks := make(map[string]string, len(names))
+		// No ordering needed: the two flags are order-independent and
+		// encoding/json writes the keys of the "checks" map sorted.
+		checks := make(map[string]string, len(results))
 		criticalFailing, optionalFailing := false, false
 
-		for _, name := range names {
-			res := results[name]
+		for name, res := range results {
 			if res.err == nil {
 				checks[name] = "ok"
 				continue

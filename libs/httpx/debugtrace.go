@@ -25,6 +25,9 @@ import (
 // The mark cannot come from the internet: a service that does not trust
 // remote parents (OTEL_TRACES_TRUST_REMOTE_PARENT=false, the edge) drops a
 // remote tracestate, so only its own debug token sets it.
+
+// The mark of a debug trace in tracestate: libs/otelx's sampler writes it,
+// [IsDebugTrace] reads it.
 const (
 	// DebugTraceStateKey is the tracestate key of the mark (a W3C simple key).
 	DebugTraceStateKey = "dbg"

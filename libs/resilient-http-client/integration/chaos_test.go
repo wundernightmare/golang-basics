@@ -88,7 +88,7 @@ func TestChaos_TLSHandshake(t *testing.T) {
 			fault.inject()
 
 			start := time.Now()
-			_, err := client.Send(api, get(t, base+"/whoami")) //nolint:bodyclose // error
+			_, err := client.Send(api, get(t, base+"/whoami"))
 			require.ErrorIs(t, err, fault.kind)
 			assert.Less(t, time.Since(start), fault.within)
 			assert.True(t, resilient.Retryable(err), "a broken handshake may succeed next time")
@@ -131,7 +131,7 @@ func TestChaos_OutageOpensTheBreakerAndAProbeClosesIt(t *testing.T) {
 	proxy.Down()
 
 	for range 8 {
-		_, err := client.Send(api, get(t, base+"/whoami")) //nolint:bodyclose // error
+		_, err := client.Send(api, get(t, base+"/whoami"))
 		require.Error(t, err)
 
 		if breakerState(t, client) == resilient.StateOpen {
@@ -145,7 +145,7 @@ func TestChaos_OutageOpensTheBreakerAndAProbeClosesIt(t *testing.T) {
 	start := time.Now()
 
 	for range 50 {
-		_, err := client.Send(api, get(t, base+"/whoami")) //nolint:bodyclose // error
+		_, err := client.Send(api, get(t, base+"/whoami"))
 		require.ErrorIs(t, err, resilient.KindCircuitOpen)
 	}
 
@@ -224,7 +224,7 @@ func TestChaos_LatencyAgainstTheAttemptTimeout(t *testing.T) {
 
 	hasty := newClient(t, policy(func(tc *resilient.TargetConfig) { tc.Timeout = 100 * time.Millisecond }), nil)
 	start = time.Now()
-	_, err := hasty.Send(api, get(t, base+"/whoami")) //nolint:bodyclose // error
+	_, err := hasty.Send(api, get(t, base+"/whoami"))
 	require.ErrorIs(t, err, resilient.KindTimeout)
 	assert.Less(t, time.Since(start), 280*time.Millisecond, "the caller got its answer before the network delivered one")
 }
@@ -343,7 +343,7 @@ func TestChaos_HTTP2PingDetectsAConnectionThatWentSilent(t *testing.T) {
 		defer proxy.Reset()
 
 		start := time.Now()
-		_, err := client.Send(api, get(t, base+"/whoami")) //nolint:bodyclose // error
+		_, err := client.Send(api, get(t, base+"/whoami"))
 
 		return time.Since(start), err
 	}

@@ -68,7 +68,6 @@ const (
 // Enabled reports whether the configuration asks for a buffer.
 func (c Config) Enabled() bool { return c.BufferMiB >= 0 }
 
-// withDefaults fills the zero fields.
 func (c Config) withDefaults() Config {
 	if c.BufferMiB == 0 {
 		c.BufferMiB = DefaultBufferMiB
@@ -150,7 +149,7 @@ func (p *Processor) OnEnd(span sdktrace.ReadOnlySpan) {
 		p.resource.CompareAndSwap(nil, span.Resource())
 	}
 
-	scratch, _ := p.scratch.Get().(*[]byte)
+	scratch := p.scratch.Get().(*[]byte) //nolint:forcetypeassert // the pool only ever holds *[]byte
 
 	encoded, ok := p.codec.encode((*scratch)[:0], span)
 	*scratch = encoded

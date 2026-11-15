@@ -83,6 +83,9 @@ type Cache[T any] struct {
 	fillMu sync.RWMutex
 	epoch  atomic.Uint64
 
+	// refreshMu guards refreshing and closed. A refresh is added to wg under
+	// it, and Close sets closed under it before it waits: no refresh starts
+	// behind Close's back.
 	refreshMu  sync.Mutex
 	refreshing map[string]struct{}
 	closed     bool
@@ -432,6 +435,8 @@ func (c *Cache[T]) resolve(ctx context.Context, key string, refreshing bool) (re
 	// value somebody else wrote meanwhile, refuses the write, and then L1
 	// must not keep it either. With L2 unreachable there is nobody to ask —
 	// and nobody to learn of an invalidation from; L1 keeps it for its TTL.
+	// L2 keeps the entry for StaleIfError past its hard deadline: that is
+	// where staleFallback finds it when the source fails.
 	if c.remoteStore(ctx, remoteKey, held, string(env), hardTTL+c.cfg.StaleIfError, heldFound) {
 		c.fill(epoch, key, env)
 	}
@@ -571,8 +576,12 @@ func (c *Cache[T]) runRefresh(ctx context.Context, key string) {
 // subscribe applies the invalidations other processes publish. Pub/Sub is at
 // most once, so every (re-)established subscription empties L1: whatever was
 // published while it was down is unknown.
+//
+// Subscribe reconnects by itself (libs/valkey) and returns only when the
+// subscription has ended for good; the loop then starts another, after a
+// pause, so that a remote which fails at once is not called in a spin.
 func (c *Cache[T]) subscribe() {
-	retry := time.NewTimer(time.Hour)
+	retry := time.NewTimer(time.Hour) // one timer for every pause; Reset arms it, the hour is never waited for
 	defer retry.Stop()
 
 	for {

@@ -12,8 +12,8 @@ import (
 )
 
 // newTransport clones http.DefaultTransport — proxy from the environment,
-// HTTP/2, dial and TLS timeouts — and overrides only the pool settings and
-// the HTTP/2 health check.
+// HTTP/2, dial and TLS timeouts — and overrides only the pool settings, the
+// response-header timeout and the HTTP/2 health check.
 func newTransport(cfg *Config) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // the stdlib's documented type
 	t.MaxIdleConns = cfg.MaxIdleConns

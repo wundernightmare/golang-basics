@@ -56,7 +56,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		instruments.requests, instruments.duration, instruments.retries, instruments.breakerState, instruments.transitions,
 	} {
 		if err := reg.Register(c); err != nil {
-			return nil, err //nolint:wrapcheck // wrapped by New
+			return nil, err
 		}
 	}
 

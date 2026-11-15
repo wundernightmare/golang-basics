@@ -144,6 +144,7 @@ func (r *Reader) Next() (Record, error) {
 	bodyLen := int(binary.LittleEndian.Uint32(prefix[:4]))
 	sum := binary.LittleEndian.Uint32(prefix[4:])
 
+	// +1: an id is never empty (AppendRecord refuses one).
 	if bodyLen < bodyFixedSize+1 || bodyLen > r.maxRecord {
 		return Record{}, fmt.Errorf("%w: record body of %d bytes (limit %d)", ErrCorrupt, bodyLen, r.maxRecord)
 	}

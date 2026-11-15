@@ -24,9 +24,8 @@ import (
 func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }
 
 // The process-environment path of LoadConfig (LoadConfigFrom with nil);
-// everything else reads a map through LoadConfigFrom.
-//
-// Serial on purpose: exercises the process-environment path (t.Setenv cannot run in parallel).
+// everything else reads a map through LoadConfigFrom. Serial: t.Setenv
+// cannot run in a parallel test.
 func TestLoadConfig_ReadsTheProcessEnvironment(t *testing.T) {
 	t.Setenv("TASKS_VALKEY_ADDR", "cache.from-env:6380")
 
@@ -519,6 +518,61 @@ func TestSubscribeSignalsAReconnect(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		require.Fail(t, "no message after the reconnect")
 	}
+
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+}
+
+// The pause before a resubscription grows within one outage and starts over
+// with the next: after an outage long enough to reach the longest pause, a
+// blip is still answered within the shortest ones.
+//
+//nolint:paralleltest // serial: chaos via the shared Toxiproxy proxy
+func TestSubscribeStartsEveryOutageFromTheShortestPause(t *testing.T) {
+	proxy := containers.Proxied(t, "valkey")
+	subscriber, err := valkey.New(valkey.Config{URL: "valkey://" + proxy.Addr, DialTimeout: 5 * time.Second, OpTimeout: 200 * time.Millisecond}, nil)
+	require.NoError(t, err)
+	t.Cleanup(subscriber.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	subscribed := make(chan struct{}, 8)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- subscriber.Subscribe(ctx, testx.Unique("events"), func(string) {}, func() { subscribed <- struct{}{} })
+	}()
+
+	waitSubscribed := func(what string) {
+		select {
+		case <-subscribed:
+		case <-time.After(15 * time.Second):
+			require.Fail(t, what)
+		}
+	}
+	waitSubscribed("the first subscription")
+
+	// Long enough for the pauses to reach their limit: the attempts of this
+	// outage fail at once (connection refused) and wait longer each time.
+	longest := valkey.ResubscribeDelay(1_000)
+
+	var climb time.Duration
+	for attempt := 0; valkey.ResubscribeDelay(attempt) < longest; attempt++ {
+		climb += valkey.ResubscribeDelay(attempt)
+	}
+
+	proxy.Down()
+	time.Sleep(climb + longest/2)
+	proxy.Up()
+	waitSubscribed("the subscription after the long outage")
+
+	proxy.Down()
+	proxy.Up()
+
+	blip := time.Now()
+
+	waitSubscribed("the subscription after the blip")
+	assert.Less(t, time.Since(blip), longest*3/4,
+		"the blip was answered after the first pauses, not after the one the long outage had reached")
 
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)

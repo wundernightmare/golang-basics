@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -149,7 +148,12 @@ func applyOne(ctx context.Context, pool *pgxpool.Pool, mig Migration) (ran bool,
 
 	defer func() {
 		if !ran || err != nil {
-			rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			// Detached and bounded, as in DB.run (see rollbackTimeout): ctx
+			// may be what ended the migration. A failed rollback changes
+			// nothing in the result and is dropped: the server ends the
+			// transaction — and with it the advisory lock — when the
+			// connection goes.
+			rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
 			defer cancel()
 
 			_ = tx.Rollback(rbCtx)

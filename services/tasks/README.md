@@ -94,7 +94,8 @@ relay (internal/outbox) ◄────── wake / poll ───────�
   `kafka.Rejected`: an outage is never counted (no broker outage can kill an
   event), a rejection — the record itself is the problem — counts in
   `rejections`, lets the rest go past and is retried after
-  `TASKS_OUTBOX_REJECT_BACKOFF` (1s), doubled per rejection up to an hour, so
+  `TASKS_OUTBOX_REJECT_BACKOFF`, doubled per rejection up to a cap (both in
+  the configuration table below), so
   the tries span minutes rather than the next few passes. After
   `TASKS_OUTBOX_MAX_ATTEMPTS` (10) rejections the row is *dead*: kept with its
   `last_error`, never sent again, counted by `outbox_dead` (alert on any). Fix

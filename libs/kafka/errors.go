@@ -26,9 +26,10 @@ import (
 //
 // Only "rejected" is not retryable: everything else is the broker, the
 // network or the deployment, and an event kept for later is never lost.
-// The kinds are also the result label of kafka_producer_records_total. Each driver
-// maps its client's error codes onto them (the same codes Node's
-// KAFKA_SEND_ERRORS lists).
+// The kinds are also the result label of kafka_producer_records_total, and
+// the same as nodejs-basics' KAFKA_SEND_ERRORS. Each driver maps its client's
+// error codes onto them: README "Errors" is the table of record for which
+// code is which kind.
 const (
 	// KindQueueFull: the local send queue is full (KAFKA_PRODUCER_QUEUE_MAX_*):
 	// the broker is slower than the app.

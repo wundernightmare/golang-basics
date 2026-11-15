@@ -51,10 +51,10 @@ type LogConfig struct {
 // sampler for the records emitted with it.
 func NewLogger(cfg LogConfig) *slog.Logger {
 	level := newLogLevel(parseLevel(cfg.Level))
+	ecs := strings.EqualFold(cfg.Format, "ecs")
 	// The inner handler gets the same LevelVar for completeness, but the
 	// decision is levelHandler's: slog consults only the outermost Enabled,
 	// and Handle does not re-check the level.
-	ecs := strings.EqualFold(cfg.Format, "ecs")
 	opts := &slog.HandlerOptions{Level: &level.lv, ReplaceAttr: newAttrRewriter(ecs, cfg.RedactKeys).replace}
 
 	w := cfg.Writer

@@ -1,22 +1,5 @@
 package containers
 
-// Chaos: dependencies that fail, slow down or hang, on demand, so the code
-// paths written for those cases — optional readiness checks, best-effort
-// publishing, cache bypass, breakers, timeouts — are exercised rather than
-// trusted. Two mechanisms:
-//
-//   - [Proxy] puts Toxiproxy between the service and a shared container
-//     (Postgres, Valkey, S3): the proxy can be disabled (connection refused) or
-//     given a latency toxic (slow), then reset. The service is wired to the
-//     proxied address instead of the container's.
-//   - [Pause] freezes a shared container (Kafka, whose advertised listeners
-//     would let a client bypass a proxy): connections hang until the caller's
-//     timeout fires, which is what a wedged broker looks like.
-//
-// Both restore the dependency on t.Cleanup, so a chaos test can share the
-// package's containers with the rest of the suite as long as it is not
-// parallel with tests that need the dependency healthy.
-
 import (
 	"context"
 	"fmt"
@@ -78,12 +61,12 @@ func toxiproxy(tb testing.TB) *toxiclient.Client {
 			}),
 		)
 		if err != nil {
-			return nil, nil, err
+			return nil, container, err // with the container: use removes it
 		}
 
 		uri, err := container.URI(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, container, err
 		}
 
 		return toxiclient.NewClient(uri), container, nil
@@ -217,48 +200,43 @@ func (p *Proxy) Reset() {
 	_ = p.proxy.Enable()
 }
 
-// Pause freezes the named shared container ("kafka", "postgres", "valkey", "s3")
+// Pause freezes the shared Kafka container (dep is "kafka", the one target)
 // until the returned func or the test's cleanup runs. A frozen dependency does
 // not refuse connections, it stops answering: exactly what timeouts, readiness
-// deadlines and best-effort paths are there for.
+// deadlines and best-effort paths are there for. Kafka gets this instead of a
+// [Proxied] address because its advertised listeners would let a client
+// bypass a proxy.
 //
-// The freeze is SIGSTOP / SIGCONT to *every* process in the container
-// (`kill -STOP -1` through exec) rather than the cgroup freezer (`docker
-// pause`): the effect on clients is the same, `docker kill -s STOP` would only
-// reach PID 1 (an entrypoint script in most images — the broker's JVM would
-// keep running), and the freezer path proved able to wedge a desktop Docker
-// daemon (OrbStack) on unpause during development.
+// The freeze is SIGSTOP / SIGCONT through `kill -<sig> -1` in the container,
+// which reaches every process but PID 1 (see signalAll). That freezes the
+// workload only where PID 1 is a wrapper: the testcontainers Kafka module
+// (v0.45.0) starts the broker's JVM from a shell. The other shared
+// dependencies run their server as PID 1 — the Postgres postmaster, RustFS,
+// and valkey-server (the Valkey module replaces the image's entrypoint with
+// it) — so the same signal would leave them answering, and Pause refuses
+// them rather than freeze nothing; cut those off with [Proxied].
+//
+// Not the cgroup freezer (`docker pause`): the effect on clients is the same,
+// but that path proved able to wedge a desktop Docker daemon (OrbStack) on
+// unpause during development. Not `docker kill -s STOP` either: it reaches
+// PID 1 only, the shell, and the JVM would keep running.
 func Pause(tb testing.TB, dep string) (unpause func()) {
 	tb.Helper()
 
-	var container testcontainers.Container
-
-	switch dep {
-	case "kafka":
-		Kafka(tb)
-
-		container = kafka.container
-	case "postgres":
-		Postgres(tb)
-
-		container = postgres.container
-	case "valkey":
-		Valkey(tb)
-
-		container = valkey.container
-	case "s3":
-		S3(tb)
-
-		container = s3store.container
-	default:
-		tb.Fatalf("containers: cannot pause %q", dep)
+	if dep != "kafka" {
+		tb.Fatalf("containers: cannot pause %q: only \"kafka\" runs its server below PID 1, which the freeze cannot reach", dep)
 	}
+
+	Kafka(tb)
+
+	container := kafka.container
 
 	signalAll := func(sig string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		// -1: every process the sender may signal, except itself and init —
-		// exactly the container's workload.
+		// -1: every process the sender may signal except itself and PID 1
+		// (Linux kill(2)) — the container's workload only where PID 1 is not
+		// the server, which is why Pause takes Kafka alone.
 		code, _, err := container.Exec(ctx, []string{"/bin/sh", "-c", "kill -" + sig + " -1"})
 		if err != nil {
 			return err

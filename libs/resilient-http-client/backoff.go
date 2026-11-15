@@ -22,8 +22,8 @@ func fullJitter(retry int, base, capDelay time.Duration) time.Duration {
 	if ceiling < 1 {
 		return 0
 	}
-	//nolint:gosec // jitter smooths a backoff, it is not a security primitive.
-	return time.Duration(rand.Int64N(int64(ceiling) + 1))
+
+	return time.Duration(rand.Int64N(int64(ceiling) + 1)) //nolint:gosec // G404: jitter, predictability is harmless
 }
 
 // maxRetryAfter bounds a parsed Retry-After, so absurd values cannot overflow
@@ -106,6 +106,9 @@ func certificateRejected(err error) bool {
 	return errors.As(err, &verification)
 }
 
+// retryableStatus reports whether a status says "try again". 501 and 505 are
+// 5xx that do not: the server does not support the method or the protocol
+// version, and the same request gets the same answer.
 func retryableStatus(code int) bool {
 	switch code {
 	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:

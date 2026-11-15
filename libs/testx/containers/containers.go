@@ -13,7 +13,6 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	tcvalkey "github.com/testcontainers/testcontainers-go/modules/valkey"
 	"github.com/testcontainers/testcontainers-go/wait"
-	"go.uber.org/goleak"
 
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 )
@@ -95,12 +94,8 @@ func Main(m *testing.M) int {
 	}
 
 	// After the containers are gone, nothing the tests started may still run.
-	return testx.CheckLeaks(leakIgnores...)
+	return testx.CheckLeaks()
 }
-
-// leakIgnores are goroutines that belong to the container tooling, not to
-// the code under test.
-var leakIgnores []goleak.Option
 
 // Postgres returns the DSN of the package's shared Postgres, starting it on
 // first use. Skips under -short and, outside CI, when Docker is unavailable.
@@ -115,13 +110,17 @@ func Postgres(tb testing.TB) string {
 			// overlay filesystem is most of what a store test waits for.
 			testcontainers.WithTmpfs(map[string]string{"/var/lib/postgresql": "rw"}),
 			// The log line says the server is up; the listening-port check says the
-			// host-side port mapping is, which can lag the log by a moment.
+			// host-side port mapping is, which can lag the log by a moment. The
+			// second occurrence of the line: the image's entrypoint first runs a
+			// temporary server to initialise the database, which logs it too (the
+			// testcontainers postgres module v0.45.0 waits the same way,
+			// BasicWaitStrategies).
 			testcontainers.WithWaitStrategy(wait.ForAll(
 				wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
 				wait.ForListeningPort("5432/tcp"),
 			).WithStartupTimeoutDefault(60*time.Second)))
 		if err != nil {
-			return "", nil, err
+			return "", ctr, err
 		}
 
 		dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
@@ -147,7 +146,7 @@ func Valkey(tb testing.TB) string {
 				wait.ForListeningPort("6379/tcp").SkipInternalCheck(),
 			).WithStartupTimeoutDefault(60*time.Second)))
 		if err != nil {
-			return "", nil, err
+			return "", c, err
 		}
 
 		url, err := c.ConnectionString(ctx)
@@ -163,7 +162,7 @@ func Kafka(tb testing.TB) []string {
 	return use(tb, &kafka, "kafka", func(ctx context.Context) ([]string, testcontainers.Container, error) {
 		c, err := tckafka.Run(ctx, KafkaImage)
 		if err != nil {
-			return nil, nil, err
+			return nil, c, err
 		}
 
 		brokers, err := c.Brokers(ctx)
@@ -205,7 +204,9 @@ func S3(tb testing.TB) S3Store {
 type fixtureSet struct {
 	mu     sync.Mutex
 	byName map[string]any // *shared[V]
-	order  []func() func(context.Context) error
+	// order holds a getter per fixture, not its terminator: that is set
+	// only once the fixture has started, after it was registered here.
+	order []func() func(context.Context) error
 }
 
 var fixtures fixtureSet
@@ -311,8 +312,11 @@ func use[V any](tb testing.TB, s *shared[V], name string,
 				return
 			}
 			// testcontainers returns the half-started container with the
-			// error; without Ryuk (rootless podman, the GitLab dind job) it
-			// would otherwise leak.
+			// error, and a starter passes both on: without Ryuk (rootless
+			// podman, the GitLab dind job) nothing else would remove it. A
+			// module that failed before creating one returns a nil pointer,
+			// which TerminateContainer ignores (testcontainers-go v0.45.0;
+			// TestUseRemovesAHalfStartedContainer).
 			if s.container != nil {
 				_ = testcontainers.TerminateContainer(s.container)
 				s.container = nil

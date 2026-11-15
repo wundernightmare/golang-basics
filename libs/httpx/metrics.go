@@ -40,8 +40,9 @@ type Metrics struct {
 // Latency buckets tuned for a service that answers in milliseconds: the
 // default Prometheus buckets start at 5ms and would put a whole cached read
 // path in the first bucket. Native histograms are enabled alongside, so a
-// scraper that speaks them (Prometheus ≥ 2.40, VictoriaMetrics) gets exact
-// quantiles at no extra series.
+// scraper that speaks them (Prometheus ≥ 2.40, VictoriaMetrics) gets
+// quantiles at the resolution of the native buckets (a factor of 1.1 apart,
+// see NewMetrics) at no extra series.
 var latencyBuckets = []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10} //nolint:gochecknoglobals // read-only bucket boundaries: part of the metrics contract
 
 // schedLatencies selects the scheduler-latency histogram from runtime/metrics
@@ -57,9 +58,14 @@ var schedLatencies = collectors.GoRuntimeMetricsRule{Matcher: regexp.MustCompile
 //	http_request_duration_seconds{method,route}       histogram (classic + native)
 //	http_requests_in_flight
 //	http_unhandled_errors_total                       handler panics recovered (answered 500)
-//	http_rate_limited_total{scope}                    requests answered 429 by the server's own limit (only with HTTP_RATE_*)
 //	background_panics_total{task}                     panics recovered in a background task ([Server.Guard])
-//	log_dropped_total{level}                          records dropped by log sampling
+//	log_dropped_total{level}                          records dropped by log sampling (only when log is a [NewLogger] logger with sampling on)
+//
+// [NewServer] registers the rest of what a server exports on the same
+// registry: the health-check metrics ([Health.Collectors]),
+// http_rate_limited_total{scope} (requests answered 429 by the server's own
+// limit, only with HTTP_RATE_LIMIT / HTTP_RATE_LIMIT_PER_CLIENT) and
+// diag_dumps_total{kind,result} (diagnostics.go).
 //
 // The names are the workspace's metrics contract, shared with nodejs-basics.
 // route is the matched route template ("/tasks/{id}"), never the raw URL

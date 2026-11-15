@@ -173,11 +173,14 @@ func preset() Config {
 	// A put is what an acknowledgement waits on while Kafka is away: fail it
 	// in seconds and let the client retry rather than hold the request.
 	cfg.S3.OpTimeout = 5 * time.Second
-	// One archive call is a whole batch: two failed batches in a minute are
-	// an outage, where ten failed Kafka requests in ten seconds are.
+	// Kafka is one call per request: its circuit is judged on at least ten
+	// of them in ten seconds, half failed.
 	cfg.Ingest.KafkaBreaker = resilience.BreakerConfig{
 		FailureRatio: 0.5, MinRequests: 10, Window: 10 * time.Second, OpenTimeout: 5 * time.Second, HalfOpenProbes: 1,
 	}
+	// One archive call is a whole batch, so there are few of them: two in a
+	// minute are enough to judge, and one of the two failing opens the
+	// circuit.
 	cfg.Ingest.ArchiveBreaker = resilience.BreakerConfig{
 		FailureRatio: 0.5, MinRequests: 2, Window: time.Minute, OpenTimeout: 10 * time.Second, HalfOpenProbes: 1,
 	}

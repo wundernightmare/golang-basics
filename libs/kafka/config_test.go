@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -247,6 +248,31 @@ func TestDeadLetterTopic(t *testing.T) {
 	assert.Equal(t, "orders.dlq", Config{DeadLetterTopic: "{topic}.dlq"}.deadLetterTopic("orders"))
 	assert.Equal(t, "parked", Config{DeadLetterTopic: "parked"}.deadLetterTopic("orders"))
 	assert.Empty(t, Config{DeadLetterTopic: DeadLetterDisabled}.deadLetterTopic("orders"))
+	assert.Empty(t, Config{DeadLetterTopic: "-"}.deadLetterTopic("orders"), `"-" is a second spelling of "none"`)
+}
+
+// The sizes a client hands to the Kafka protocol as int32 are refused above
+// it at Validate, with the key's name, instead of wrapping in a provider.
+func TestConfig_ValidateBoundsProtocolSizesToInt32(t *testing.T) {
+	t.Parallel()
+
+	atLimit := Config{
+		Brokers: []string{"b:9092"}, ProducerQueueMaxKBytes: math.MaxInt32/1024 + 1,
+		MessageMaxBytes: math.MaxInt32, ConsumerFetchMaxBytes: math.MaxInt32, ConsumerPartitionFetchMaxBytes: math.MaxInt32,
+	}
+	require.NoError(t, atLimit.Validate(), "the int32 maximum itself is a valid size")
+
+	over := int64(math.MaxInt32) + 1
+
+	for key, mutate := range map[string]func(*Config){
+		"KAFKA_MESSAGE_MAX_BYTES":                  func(c *Config) { c.MessageMaxBytes = int(over) },
+		"KAFKA_CONSUMER_FETCH_MAX_BYTES":           func(c *Config) { c.ConsumerFetchMaxBytes = int(over) },
+		"KAFKA_CONSUMER_PARTITION_FETCH_MAX_BYTES": func(c *Config) { c.ConsumerPartitionFetchMaxBytes = int(over) },
+	} {
+		cfg := atLimit
+		mutate(&cfg)
+		require.ErrorContains(t, cfg.Validate(), key+" (2147483648) is above 2147483647", key)
+	}
 }
 
 func TestSendError(t *testing.T) {

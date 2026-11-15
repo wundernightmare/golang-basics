@@ -135,7 +135,8 @@ func runIngest(ctx, bootCtx context.Context, cfg config.Config, srv *httpx.Serve
 			logger.ErrorContext(ctx, "kafka init failed", "err", err)
 			return err
 		}
-		// Closed last (deferred first): after the pipeline has drained.
+		// Closed when runIngest returns: after serveIngest has drained the
+		// pipeline, and before the store and the telemetry (deferred in Run).
 		defer producer.Close()
 
 		kafkaBreaker = breakers.breaker(cfg.Ingest.KafkaBreaker, sinkKafka, logger)
@@ -278,10 +279,7 @@ func (m *breakerMetrics) breaker(cfg resilience.BreakerConfig, sink string, log 
 
 	breaker = resilience.NewBreaker(cfg, time.Now, func(from, to resilience.State) {
 		m.transitions.WithLabelValues(sink, to.String()).Inc()
-		// The current state, not `to`, and read under the lock: the
-		// breaker notifies concurrently and possibly out of order, but
-		// whichever notification sets the gauge last has read a state at
-		// least as new as every earlier writer's.
+		// State(), not `to`, and under the lock: see resilience.NewBreaker.
 		mu.Lock()
 		m.state.WithLabelValues(sink).Set(float64(breaker.State()))
 		mu.Unlock()

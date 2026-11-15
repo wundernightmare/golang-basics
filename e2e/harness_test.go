@@ -44,7 +44,6 @@ const (
 // timeout keeps a wedged child from hanging the run.
 var client = &http.Client{Timeout: 5 * time.Second}
 
-// service is one running child process.
 type service struct {
 	name     string
 	apiURL   string // "" for a worker (no API listener)
@@ -57,7 +56,6 @@ type service struct {
 	err  error         // cmd.Wait's result, valid after done is closed
 }
 
-// spec describes how to start a service.
 type spec struct {
 	name   string            // binary name and /version service name
 	prefix string            // env prefix, e.g. "PING_"
@@ -238,7 +236,8 @@ func (s *service) exitCode() int {
 	return s.cmd.ProcessState.ExitCode()
 }
 
-// get issues a GET with an optional bearer token.
+// get sends no bearer token when token is ""; do bounds the request by
+// client's timeout, not by a context.
 func (s *service) get(url, token string) (int, []byte, error) {
 	return do(http.MethodGet, url, token, nil)
 }
@@ -344,7 +343,9 @@ func binDir(t testing.TB) string {
 
 // childEnv is the parent's environment minus anything already carrying the
 // service's prefix (a developer's PING_HTTP_ADDR must not leak in), plus
-// the prefixed harness settings, plus GOCOVERDIR when E2E_COVER_DIR is set.
+// the prefixed harness settings. An inherited GOCOVERDIR is dropped as well:
+// E2E_COVER_DIR alone says whether, and where, a child writes its coverage
+// counters.
 func childEnv(prefix string, env map[string]string) []string {
 	var out []string
 
@@ -408,14 +409,15 @@ func dataEnv(t testing.TB) (dbURL, valkeyURL, brokers string) {
 	return dbURL, valkeyURL, brokers
 }
 
-// eventually polls cond every 100ms until it holds or timeout passes.
 func eventually(t testing.TB, timeout time.Duration, msg string, cond func(c *assert.CollectT)) {
 	t.Helper()
 	assert.EventuallyWithT(t, cond, timeout, 100*time.Millisecond, msg)
 }
 
-// syncBuffer is a bytes.Buffer safe for the two copy goroutines exec starts
-// (stdout, stderr) and the test reading it.
+// syncBuffer is a bytes.Buffer safe for the goroutine in which exec copies
+// the child's output and the test reading it meanwhile. Stdout and Stderr are
+// the same writer, which os/exec serves through one pipe and one goroutine
+// (go1.27, Cmd.childStderr), so the two streams do not race each other.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- retry-backoff jitter, not security-sensitive
+	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- jitter, predictability is harmless
 	"sync"
 	"time"
 
@@ -115,7 +115,7 @@ type unit struct {
 	tx        pgx.Tx
 	isolation pgx.TxIsoLevel // of the outermost transaction
 
-	mu    sync.Mutex
+	mu    sync.Mutex // guards hooks
 	hooks []func(context.Context)
 }
 
@@ -266,7 +266,7 @@ func (db *DB) run(
 		return nil, fmt.Errorf("pgx: begin: %w", err)
 	}
 
-	defer func() { // a no-op after a commit; also what a panic in work goes through
+	defer func() { // also the path a panic in work takes
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
 		defer cancel()
 
@@ -305,7 +305,7 @@ func retryable(err error) bool {
 // pause waits a random time before retry number attempt, so that the units
 // that collided do not collide again in step; false when ctx ended first.
 func pause(ctx context.Context, attempt int) bool {
-	timer := time.NewTimer(rand.N(time.Duration(attempt) * retryBackoff)) //nolint:gosec // jitter, not a secret
+	timer := time.NewTimer(rand.N(time.Duration(attempt) * retryBackoff)) //nolint:gosec // G404: jitter, predictability is harmless
 	defer timer.Stop()
 
 	select {

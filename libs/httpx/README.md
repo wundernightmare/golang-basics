@@ -75,7 +75,9 @@ started; never a fixed port.
 
 ## The middleware chain
 
-In order, outermost first:
+In order, outermost first (with `DIAG_FLIGHT_RECORDER` and
+`DIAG_FLIGHT_SLOW_REQUEST` set, the flight-recorder trigger wraps all of it,
+so that it times the whole request):
 
 1. **entry** — request id, client address, per-request deadline
    (`HTTP_REQUEST_TIMEOUT`, shortened — never extended — by a caller's
@@ -86,7 +88,7 @@ In order, outermost first:
 2. **debug token** — when `DEBUG_TOKEN` is set (see below);
 3. **tracing** — a server span per request (see *Traces* below);
 4. **access log** — one line per request;
-5. **metrics** — count, latency, sizes, in-flight;
+5. **metrics** — count, latency, in-flight;
 6. **rate limit** — when `HTTP_RATE_LIMIT` or `HTTP_RATE_LIMIT_PER_CLIENT` is
    set: a token bucket for all requests and one per client address; over it
    → 429 problem with `Retry-After`, a tick of
@@ -165,7 +167,7 @@ or `token_type` is hidden too; name it otherwise if it must be read.
 | `httpx.Internal(detail, cause)`    | A 500 with a cause                                                   |
 | `p.WithCause(err)`                 | Attach the underlying error: logged (5xx) and recorded on the span, never sent |
 | `httpx.WriteProblem(w, r, p)`      | Write it; fills `instance` (the path) and the `request_id` extension |
-| `httpx.WriteError(w, r, err)`      | `Problem` (also wrapped) → itself; `context.DeadlineExceeded` → 504; anything else → 500 with `err` as the cause |
+| `httpx.WriteError(w, r, err)`      | `Problem` (also wrapped) → itself; `context.DeadlineExceeded` → 504; `context.Canceled` on a request whose own context is cancelled (the client left) → 499; anything else → 500 with `err` as the cause |
 | `httpx.DecodeJSON(r, &v)`          | Decode one JSON value; returns a 413 / 400 `Problem` ready for `WriteError` |
 | `httpx.WriteJSON(w, status, v)`    | A plain JSON response                                                |
 
@@ -187,6 +189,9 @@ as an error. An out-of-range status degrades to 500 instead of panicking.
 | `GET /admin/log-level`     | token | `{"level","base","expires_at","max_ttl"}`                |
 | `PUT /admin/log-level`     | token | `?level=debug\|info\|warn\|error&ttl=30m` — change the level for a while |
 | `DELETE /admin/log-level`  | token | Revert to the configured level now                       |
+| `GET /admin/debug-subjects` | token | Tenants / users under investigation, and when each expires |
+| `PUT /admin/debug-subjects/{subject}` | token | `?ttl=15m` (required, capped) — debug logs and a kept trace for that subject |
+| `DELETE /admin/debug-subjects/{subject}` | token | Stop now                                   |
 | `GET /debug/pprof/…`       | token | Go runtime profiles (`profile`, `heap`, `goroutine`, `block`, `mutex`, `trace`) |
 
 Nothing on this listener goes through the access log, the request metrics or
@@ -313,6 +318,9 @@ its own registry, `srv.Metrics.Registry`; register the data libs'
 | `http_request_duration_seconds`                   | histogram (classic + native) | `method, route` |
 | `http_requests_in_flight`                         | gauge     |                            |
 | `http_unhandled_errors_total`                     | counter   | (recovered panics, answered 500) |
+| `http_rate_limited_total`                         | counter   | `scope` (only with `HTTP_RATE_LIMIT` / `HTTP_RATE_LIMIT_PER_CLIENT`) |
+| `background_panics_total`                         | counter   | `task`                     |
+| `diag_dumps_total`                                | counter   | `kind, result`             |
 | `health_check_up`                                 | gauge     | `check, critical`          |
 | `health_check_duration_seconds`                   | histogram | `check`                    |
 | `log_dropped_total`                               | counter   | `level`                    |

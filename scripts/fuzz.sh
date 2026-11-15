@@ -11,8 +11,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fuzztime="${FUZZTIME:-20s}"
 status=0
 
-# shellcheck disable=SC2013 # module dirs and target names are single words
-for m in $(awk '/^use \(/{f=1;next} /^\)/{f=0} f{sub(/^[ \t]*\.\//,""); print}' "$root/go.work"); do
+for m in $("$root/scripts/touched-modules.sh" --all); do
   while IFS= read -r file; do
     [ -n "$file" ] || continue
     pkg="$(dirname "$file")"

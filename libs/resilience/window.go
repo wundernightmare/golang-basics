@@ -23,7 +23,8 @@ func newWindow(length time.Duration) window {
 	return window{slot: max(length/windowSlots, 1)}
 }
 
-// add counts a and b at now.
+// add counts a and b in now's slot; a slot still holding an earlier turn of
+// the ring is zeroed first.
 func (w *window) add(now time.Time, a, b int) {
 	idx := now.UnixNano() / int64(w.slot)
 
@@ -49,5 +50,4 @@ func (w *window) sum(now time.Time) (a, b int) {
 	return a, b
 }
 
-// reset forgets everything counted.
 func (w *window) reset() { w.slots = [windowSlots]windowSlot{} }

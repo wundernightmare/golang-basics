@@ -55,9 +55,9 @@ The request's context is the overall deadline; `Send` sends once,
 **Breaker** — counts 5xx, attempt timeouts and connection errors as
 failures, and so the caller's own **deadline** passing while the request is
 with the dependency (still reported as `KindCanceled`): a caller deadline
-shorter than the target's `timeout` must not hide an outage. It ignores the
-caller cancelling, 4xx (429 included: the dependency answered) and local
-rejections.
+shorter than the target's `timeout` must not hide an outage. A 4xx is a
+success for it (429 included: the dependency answered). The caller
+cancelling and local rejections tell it nothing.
 
 **Response body** — an attempt lasts until its body is read to the end or
 closed, and only then does the breaker hear a success. The attempt timeout
@@ -212,10 +212,10 @@ or user info — and warnings are rate-limited per target.
 ## What it does not do
 
 No response cache, request coalescing, fallbacks, DNS cache or adaptive
-concurrency (removed: they were incorrect or not worth their weight). No
-hedged requests, no per-request policy override, no retry of non-idempotent
-requests without an `Idempotency-Key`. `WithHTTPClient` builds on a copy of
-your client, which is never modified; its idle connections are yours to close.
+concurrency. No hedged requests, no per-request policy override, no retry of
+non-idempotent requests without an `Idempotency-Key`. `WithHTTPClient` builds
+on a copy of your client, which is never modified; its idle connections are
+yours to close.
 
 ## Develop
 
