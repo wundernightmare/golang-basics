@@ -136,6 +136,15 @@ storm of errors does not become a storm of traces; a trigger above it is
 refused and its line keeps `trace_unsampled_id`. A negative
 `OTEL_RETRO_BUFFER_MIB` turns the buffer off.
 
+**An unused buffer.** The arena is allocated at start whatever the sampling
+ratio — a service at ratio 1 can still be handed an unsampled trace by a
+trusted parent. Unused, it costs address space rather than memory: the pages
+of a fresh allocation are not resident until a span is written to them, so an
+empty 16 MiB buffer adds 2–3 MiB to the resident set and fills in as the
+shards do (`TestProcessor_AnEmptyBufferIsNotResident`, Linux). It is counted
+as live heap from the start, though: `GOMEMLIMIT` and the collector's heap
+goal see all 16 MiB, and so does `go_memstats_heap_alloc_bytes`.
+
 **What it costs** (`go test -bench . ./retro`, 32 cores): keeping a span of
 eight attributes is 0.8 µs on one core and no allocation; under 32 writers
 the shards (64 at 16 MiB, by a seeded hash of the trace id) keep it at 80 ns

@@ -59,12 +59,19 @@ headroom is for what it does not, and the kernel does:
 - memory allocated by C code. With the librdkafka provider the producer queue
   and fetch buffers live there: use about `0.7`, or subtract
   `kafka.producer_queue_max_kbytes` and take 0.85 of the rest;
+- memory a Go library maps outside the heap. The L1 of `libs/tiercache`
+  does (32 MiB at least, resident once filled and never returned): subtract
+  `TIERCACHE_MAX_BYTES` per cache from the container limit and take 0.85 of
+  the rest. Unsubtracted, one full L1 is nearly all of the default headroom
+  of a 256 MiB container (38 MiB);
 - files in a memory-backed `emptyDir` and, under pressure, page cache and
   socket buffers charged to the container;
 - the overshoot between the moment the heap crosses the limit and the moment
   the collection that was triggered finishes.
 
 A pure-Go service (franz-go, pgx, the HTTP stack) is fine at the default.
+The retroactive sampling buffer of `libs/otelx` needs nothing here: it is on
+the heap, so the limit already counts it.
 
 **What it does not do.** It does not make a too-small pod work. A service
 that sizes buffers in bytes (`ingest.max_in_flight_bytes`, a Kafka send
