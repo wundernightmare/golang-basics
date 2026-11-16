@@ -15,6 +15,7 @@ import (
 	"github.com/wundernightmare/golang-basics/libs/kafka"
 	"github.com/wundernightmare/golang-basics/libs/testx"
 	"github.com/wundernightmare/golang-basics/libs/testx/containers"
+	"github.com/wundernightmare/golang-basics/services/consumer/internal/config"
 	_ "github.com/wundernightmare/golang-basics/services/consumer/internal/kafkaprovider" // the Kafka client the binary links
 	"github.com/wundernightmare/golang-basics/services/consumer/internal/worker"
 )
@@ -67,10 +68,17 @@ func TestIntegration_ConsumesTaskEvents(t *testing.T) {
 	publish("task.archived", "e2")    // a type this worker does not know
 	publish(worker.TaskDeleted, "e3")
 
-	cons, err := kafka.NewConsumer(t.Context(), kafka.Config{
-		Brokers: brokers, Topics: []string{topic}, Group: testx.Unique("group"), ClientID: testx.Unique("cons"),
-		AllowAutoTopicCreation: true, PublishTimeout: 15 * time.Second, StatisticsInterval: -1,
-	}, log, traced...)
+	// The service's own defaults (retries and their backoff: a hand-built
+	// kafka.Config has none for the keys whose zero is a setting), then what
+	// the test needs.
+	defaults, err := config.Defaults()
+	require.NoError(t, err)
+
+	ccfg := defaults.Kafka
+	ccfg.Brokers, ccfg.Topics, ccfg.Group, ccfg.ClientID = brokers, []string{topic}, testx.Unique("group"), testx.Unique("cons")
+	ccfg.AllowAutoTopicCreation, ccfg.PublishTimeout, ccfg.StatisticsInterval = true, 15*time.Second, -1
+
+	cons, err := kafka.NewConsumer(t.Context(), ccfg, log, traced...)
 	require.NoError(t, err)
 
 	reg := prometheus.NewRegistry()

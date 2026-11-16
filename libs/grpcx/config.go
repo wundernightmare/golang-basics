@@ -5,12 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net"
+	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/resolver"
 
 	"github.com/wundernightmare/golang-basics/libs/resilience"
 )
@@ -48,7 +53,9 @@ type TargetConfig struct {
 	// Name identifies the target in [Client.Conn] and in metric labels.
 	// Required, unique.
 	Name string `yaml:"name"`
-	// Address is the gRPC target URI, e.g. "dns:///billing.internal:443".
+	// Address is the gRPC target: a URI such as "dns:///billing.internal:443"
+	// (host and port after three slashes) or a bare "host:port", which gRPC
+	// resolves through DNS.
 	// Required.
 	Address string `yaml:"address"`
 	// Insecure connects without TLS (default false: TLS with the system
@@ -60,7 +67,8 @@ type TargetConfig struct {
 	// the caller's context).
 	Timeout time.Duration `yaml:"timeout"`
 	// WaitForReady queues calls while the connection is down instead of
-	// failing them at once with Unavailable (default false).
+	// failing them at once with Unavailable (default false; needs a Timeout,
+	// which is where the wait for a connection that is never made ends).
 	WaitForReady bool `yaml:"wait_for_ready"`
 	// LoadBalancing is "round_robin" (default) or "pick_first".
 	LoadBalancing string `yaml:"load_balancing"`
@@ -86,7 +94,8 @@ type TargetConfig struct {
 	// [UNAVAILABLE]; must not be empty with retries).
 	RetryCodes []string `yaml:"retry_codes"`
 	// RetryMethods limits retries to these services ("pkg.Service") or
-	// methods ("pkg.Service/Method"); empty (the default) = every method.
+	// methods ("pkg.Service/Method"), each once; empty (the default) = every
+	// method.
 	// gRPC does not know which methods are idempotent: list them when a
 	// retried code can mean "partly done".
 	RetryMethods []string `yaml:"retry_methods"`
@@ -206,12 +215,17 @@ func (t *TargetConfig) validate() []error {
 
 	bad := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
 
-	if t.Address == "" {
-		bad("address is empty")
+	if err := checkAddress(t.Address); err != nil {
+		errs = append(errs, err)
 	}
 
 	if t.Timeout < 0 {
 		bad("timeout must not be negative")
+	}
+
+	// On a connection that can never be made the wait ends only at a deadline.
+	if t.WaitForReady && t.Timeout == 0 {
+		bad("timeout must be > 0 with wait_for_ready")
 	}
 
 	if t.LoadBalancing != RoundRobin && t.LoadBalancing != PickFirst {
@@ -233,7 +247,7 @@ func (t *TargetConfig) validate() []error {
 	}
 
 	errs = append(errs, t.validateRetry()...)
-	for _, err := range t.Breaker.Validate() {
+	if err := t.Breaker.Validate(); err != nil {
 		errs = append(errs, fmt.Errorf("breaker: %w", err))
 	}
 
@@ -253,14 +267,23 @@ func (t *TargetConfig) validateRetry() []error {
 		bad("retry_throttle_max_tokens must be in [0, 1000]")
 	}
 
-	if t.RetryThrottleMaxTokens > 0 && t.RetryThrottleTokenRatio <= 0 {
-		bad("retry_throttle_token_ratio must be > 0 with throttling")
+	// Not `ratio <= 0`: NaN must fail too, and neither it nor an infinity has
+	// a JSON form for the service config.
+	if ratio := t.RetryThrottleTokenRatio; t.RetryThrottleMaxTokens > 0 && (!(ratio > 0) || math.IsInf(ratio, 1)) {
+		bad("retry_throttle_token_ratio must be a number > 0 with throttling")
 	}
 
+	// gRPC refuses a service config that names a method twice.
+	listed := make(map[[2]string]bool, len(t.RetryMethods))
 	for _, m := range t.RetryMethods {
-		if _, _, ok := splitMethod(m); !ok {
+		service, method, ok := splitMethod(m)
+		if !ok {
 			bad("retry_methods: %q is not pkg.Service or pkg.Service/Method", m)
+		} else if listed[[2]string{service, method}] {
+			bad("retry_methods: %q is listed twice", m)
 		}
+
+		listed[[2]string{service, method}] = true
 	}
 
 	if !t.retries() {
@@ -282,6 +305,56 @@ func (t *TargetConfig) validateRetry() []error {
 	}
 
 	return errs
+}
+
+// checkAddress reports an address a call could only fail on. It reads the
+// address the way grpc.NewClient does — which builds a channel from any
+// string and leaves the mistake to the first call, as Unavailable.
+//
+// The address is not quoted in the error: a target URI may carry a query.
+func checkAddress(address string) error {
+	if address == "" {
+		return errors.New("address is empty")
+	}
+
+	// gRPC takes "scheme:…" as a URI only when the scheme has a resolver —
+	// "billing:443" parses as a URI too. A scheme followed by "//" is taken
+	// as one here whatever it is: its resolver may arrive with
+	// grpc.WithResolvers, which a config cannot see.
+	u, err := url.Parse(address)
+	if err != nil || (resolver.Get(u.Scheme) == nil && !strings.Contains(address, "://")) {
+		return checkHostPort(address) // gRPC hands it whole to the DNS resolver
+	}
+
+	endpoint := (resolver.Target{URL: *u}).Endpoint()
+	if endpoint == "" {
+		return fmt.Errorf("address has no endpoint after %s://authority/ (for a host and port: dns:///host:port)", u.Scheme)
+	}
+
+	if u.Scheme == "dns" {
+		return checkHostPort(endpoint)
+	}
+
+	return nil
+}
+
+// checkHostPort accepts what gRPC's DNS resolver does: an IP, host:port, or a
+// host alone (it adds port 443).
+func checkHostPort(s string) error {
+	if _, err := netip.ParseAddr(s); err == nil {
+		return nil
+	}
+
+	_, port, err := net.SplitHostPort(s)
+	if err == nil && port != "" {
+		return nil
+	}
+
+	if _, _, bare := net.SplitHostPort(s + ":443"); err != nil && bare == nil {
+		return nil
+	}
+
+	return errors.New("address is not host:port")
 }
 
 // keepalive is the target's keepalive pings; ok is false when they are off.

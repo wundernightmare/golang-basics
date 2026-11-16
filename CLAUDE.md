@@ -113,11 +113,13 @@ README; this file is only the high-signal, easy-to-miss bits.
   hides traces from the collector. That file is tested as
   shipped by `libs/otelx/integration` — change a policy there, prove it there.
   **The head sampler is ours** (`libs/otelx/sampler.go`): children follow the
-  parent, an edge (`*_OTEL_TRACES_TRUST_REMOTE_PARENT=false`) redraws a remote
+  parent, an edge (`*_OTEL_TRACES_REDRAW_REMOTE_PARENT=true`) redraws a remote
   parent and drops its tracestate, a request with the debug token is forced
   and marked `dbg=1` for the services behind (`httpx.ForceTrace` /
   `FollowDebugTrace` — a library that starts the span of a unit of work calls
-  the latter). **Unsampled spans wait in `libs/otelx/retro`** — an arena of
+  the latter; an httpx server follows the mark of an incoming request only
+  with `*_DEBUG_TRACE_TRUST_REMOTE=true` and drops it otherwise, tracing on
+  or off). **Unsampled spans wait in `libs/otelx/retro`** — an arena of
   byte rings of a fixed size (`*_OTEL_RETRO_BUFFER_MIB`) — and a warn / error
   line of their trace exports them; so `trace_id` in a log line means "there
   is a trace", and an unsampled trace is logged as `trace_unsampled_id`. Keep
@@ -171,17 +173,17 @@ README; this file is only the high-signal, easy-to-miss bits.
   (`golang-basics-deps`) + host ports, so one Postgres/Valkey/Kafka stack serves
   every worktree (`just infra-up`). `docker/stack.yml` runs the `tasks`/`consumer`
   images on that network (`just stack-up`).
-- **Data services need deps.** `tasks`/`consumer` (and the `pgx`/`valkey`/`kafka`
-  libs) talk to Postgres/Valkey/Kafka. Their integration tests use
+- **Data services need deps.** `tasks`/`consumer`/`ingest` talk to
+  Postgres/Valkey/Kafka/S3. Their integration tests use
   testcontainers through `libs/testx/containers`, so `just mod <m> test` needs
   a Docker daemon and the suites skip under `-short`. A module needs Docker
   exactly when its `go.mod` requires `libs/testx/containers`; CI derives the
   integration matrix from that (and runs a service with internal/kafkaprovider
-  once more with `-tags kafka_franz`). `ping`, `heartbeat`, `httpx` and
-  `resilient-http-client`, `grpcx`, `resilience` and `secret` stay dependency-free — and so do their module
-  graphs: `libs/testx` (the light harness) pulls no Docker client. A dependency-free library that
+  once more with `-tags kafka_franz`). `ping`, `heartbeat` and every library's
+  own module stay Docker-free — and so do their module
+  graphs: `libs/testx` (the light harness) pulls no Docker client. A library that
   needs a container-backed suite gets a nested module next to its code
-  (`libs/resilient-http-client/integration`, `libs/grpcx/integration`, `libs/otelx/integration`, `libs/secret/compat`: own `go.mod`, in `go.work`), never a
+  (`libs/resilient-http-client/integration`, `libs/grpcx/integration`, `libs/otelx/integration`, `libs/pgx/integration`, `libs/s3/integration`, `libs/valkey/integration`, `libs/tiercache/integration`, `libs/kafka-rdkafka/integration`, `libs/kafka-franz/integration` (both run the conformance suite, itself the module `libs/kafka/kafkatest`), `libs/secret/compat`: own `go.mod`, in `go.work`), never a
   `libs/testx/containers` require in its own `go.mod` and never one shared "all integration tests"
   module.
 
@@ -200,7 +202,7 @@ README; this file is only the high-signal, easy-to-miss bits.
   port + 1000, workers have only this one). Never register ops routes on the
   API mux, and point probes / scrapes / e2e health waits at the admin port.
 - **Tracing is built into the httpx chain** (request id → debug token →
-  tracing → access log → metrics → the server's rate limit → your
+  tracing → access log → metrics → recovery → the server's rate limit → your
   `WithMiddleware` extras → recovery → body limit → routing; the order of
   record is the `httpx.NewServer` doc; a 401/429 from your authenticator is still traced,
   logged and counted). Do not add a tracing middleware; `otelx.Init` installs
@@ -215,11 +217,12 @@ README; this file is only the high-signal, easy-to-miss bits.
   password file (`DB_PASSWORD_FILE`, `KAFKA_SASL_PASSWORD_FILE` — through
   `kafka.Config.SASLSecret`, the one place both providers take it from),
   `secret.CertPool` for a CA bundle. A CA file *is* the trust store, never an
-  addition to the system roots — the same in Kafka (both providers), S3 and
-  OTLP. No `os.ReadFile` + trim, no `x509.NewCertPool` in a client.
+  addition to the system roots — the same in Kafka (both providers), S3,
+  Valkey and OTLP (pgx, grpcx and the HTTP client have no CA key). No `os.ReadFile` + trim, no `x509.NewCertPool` in a client.
 - **httpx defaults are written once, in the `envDefault` tags**: a hand-built
   `httpx.Config` gets them from there (`withDefaults`); a field whose zero is
-  a setting of its own is listed in `keepsZero`. Never a second copy of a
+  a setting of its own is listed in `keepsZero`, and for every other field a
+  zero — hand-built, YAML or env — is "not set". Never a second copy of a
   default as a constant next to the tag.
 - **Service configs embed the lib configs** (`httpx.Config` inline,
   `pgx.Config`/`valkey.Config`/`kafka.Config`/`otelx.Config` as named YAML
@@ -238,8 +241,9 @@ README; this file is only the high-signal, easy-to-miss bits.
   `srv.Guard` with the server's own context. Never a bare `go worker.Run`.
 - **A circuit breaker is configured by `resilience.BreakerConfig`, nowhere
   else**: a field `Breaker resilience.BreakerConfig` with
-  `envPrefix:"…BREAKER_"` / `yaml:"breaker"` (HTTP client, grpcx, tiercache;
-  ingest has two, one per sink). No copies of its five fields, no defaults in
+  `yaml:"breaker"` (the HTTP client and grpcx, which load YAML only), plus
+  `envPrefix:"…BREAKER_"` where the config is read from the environment
+  (tiercache; ingest has two, one per sink). No copies of its five fields, no defaults in
   its tags — the owner presets its own policy before loading.
 - **Durability patterns live in the tasks vertical**: writes go through a
   transactional outbox (row + event in one transaction, relay publishes), the
@@ -274,7 +278,8 @@ README; this file is only the high-signal, easy-to-miss bits.
   module's `telemetry_test.go`; do not assert it against a mock.
 - **Tests are plain `go test` + testify.** `func TestX(t *testing.T)`,
   `t.Run` sub-tests, table tests, `t.Parallel()` where nothing swaps globals
-  (`testx.Recorder` does). No test framework, no per-test Allure plugin in
+  (`testx.Recorder` does not: its provider and propagator are passed to the
+  code under test). No test framework, no per-test Allure plugin in
   the unit and integration layers: their report is `gotestsum --junitfile` →
   `allure generate`. **The e2e suite alone uses testo + testo-allure**
   (`e2e/report_test.go`; depguard keeps both out of every other module):
@@ -284,7 +289,7 @@ README; this file is only the high-signal, easy-to-miss bits.
   `scripts/allure-collect.sh` merges its native results with the JUnit files
   and drops the e2e JUnit they replace. Helpers come from
   three `_test`-only modules — `libs/testx` (Recorder, LogBuffer, Metric,
-  LintMetrics, Unique), `libs/testx/containers` (`Postgres/Valkey/Kafka/S3`, one
+  NoMetric, LintMetrics, Unique, NewDNS, Main / CheckLeaks), `libs/testx/containers` (`Postgres/Valkey/Kafka/S3`, one
   per test binary via `TestMain` → `containers.Main`; `Proxied`/`Pause` for
   chaos) and `libs/testx/contract` (OpenAPI / JSON Schema validation). Tests
   isolate with `testx.Unique` (a schema, a key prefix, a topic), never a
@@ -321,7 +326,7 @@ README; this file is only the high-signal, easy-to-miss bits.
   `^libs/…` exclude and override in `.testcoverage.yml` matches nothing.
 - **Mutation testing is scoped**: `just mutate <module>` runs gremlins on the
   modules with a `.gremlins.yaml` (`libs/resilient-http-client`, `libs/grpcx`,
-  `libs/resilience`, `libs/httpx`, `libs/tiercache`, `libs/secret`, `libs/otelx`
+  `libs/resilience`, `libs/httpx`, `libs/tiercache`, `libs/tiercache/credential`, `libs/secret`, `libs/otelx`
   (the sampler and the retroactive buffer); each file
   says what it excludes and which survivors are known equivalents) with
   thresholds that fail the run. The oracle is the unit layer (`-short`). Always through `scripts/mutate.sh`, never a bare `gremlins
@@ -338,7 +343,9 @@ README; this file is only the high-signal, easy-to-miss bits.
   fall-through, a timeout) gets a chaos test with `containers.Proxied`
   (or `containers.Pause` for Kafka, which a proxy cannot front), and restores the dependency on cleanup.
   Every outbound call must carry its own deadline (`VALKEY_OP_TIMEOUT`,
-  `KAFKA_PUBLISH_TIMEOUT`, the readiness check timeout) — a request context
+  `KAFKA_PUBLISH_TIMEOUT`, `S3_OP_TIMEOUT`, the readiness check timeout; for
+  Postgres `DB_OP_TIMEOUT` is off by default and the server-side
+  `DB_STATEMENT_TIMEOUT` is the bound) — a request context
   is not a deadline.
 - **Schemathesis owns "bad input → 4xx"**: do not hand-write validation
   tests for what the schema already says (`minLength`, documented responses);
@@ -368,16 +375,20 @@ README; this file is only the high-signal, easy-to-miss bits.
   ticket, not a retry. Anything parsing external
   bytes gets a `Fuzz*` target; crashers under `testdata/fuzz/` are committed.
 - **Container-backed tests need `DOCKER_HOST` on OrbStack/rootless Docker**
-  (`unix://$HOME/.orbstack/run/docker.sock`); they skip when Docker is
-  unreachable and fail when `CI` is set.
+  (`unix://$HOME/.orbstack/run/docker.sock`); they skip when the
+  container runtime does not answer and fail when `CI` is non-empty; a
+  container that does not start on a runtime that answers fails everywhere.
 - **Test containers are disposable, and are treated so** (`libs/testx/containers`):
   Postgres and the S3 store keep their data on tmpfs, and every container is
   removed without a graceful stop. Both were measured (a store test waited
   mostly for fsync through the overlay filesystem; Kafka ignored SIGTERM for
   10s per package) — keep them when adding a fixture. `just test-integration`
-  runs the modules `JOBS` at a time (default 4).
-- **Metrics come from the libs.** `pgx`, `valkey`, `kafka` expose `Collectors()`;
-  a service registers them on `srv.Metrics.Registry`. Route-level labels use the
+  runs the modules `JOBS` at a time (default 4) and lists every skipped test.
+- **Metrics come from the libs.** `pgx`, `valkey`, `kafka`, `s3`, `tiercache`
+  and `otelx` expose `Collectors()`;
+  a service registers them on `srv.Metrics.Registry` (two instances of one
+  library: each through `prometheus.WrapRegistererWith` with a label of its
+  own). The HTTP client and grpcx take the registry as `WithRegisterer`. Route-level labels use the
   route template (`route="/tasks/{id}"`), never the raw path; methods outside
   the standard set are `_OTHER`; no `status` on latency histograms; sampled
   requests carry a `trace_id` exemplar.

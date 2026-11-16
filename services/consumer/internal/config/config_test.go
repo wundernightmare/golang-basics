@@ -89,10 +89,12 @@ func TestLoad_RejectsBadConfig(t *testing.T) {
 	require.ErrorContains(t, err, "topicz", "an unknown key is an error, not a silent default")
 
 	_, err = config.LoadFrom("", map[string]string{
-		"CONSUMER_ADMIN_INSECURE":       "true",
-		"CONSUMER_KAFKA_SASL_MECHANISM": "kerberos",
-		"CONSUMER_DEDUPE_SIZE":          "-1",
+		"CONSUMER_ADMIN_INSECURE":              "true",
+		"CONSUMER_KAFKA_SASL_MECHANISM":        "kerberos",
+		"CONSUMER_DEDUPE_SIZE":                 "-1",
+		"CONSUMER_OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
 	})
 	require.ErrorContains(t, err, "KAFKA_SASL_")
+	require.ErrorContains(t, err, "OTEL_EXPORTER_OTLP_ENDPOINT")
 	require.ErrorContains(t, err, "DEDUPE_SIZE", "all problems are reported at once")
 }

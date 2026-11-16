@@ -29,9 +29,37 @@ const (
 	sparePortCount = 12
 )
 
-var spare struct {
+type sparePorts struct {
 	mu     sync.Mutex
 	byName map[string]int
+}
+
+var spare sparePorts
+
+// port returns the listen port of name, taking the next free one for a new
+// name. Running out fails the test through FailNow, which unwinds like a
+// panic: the lock is released by defer so the binary's other tests are not
+// left waiting for it.
+func (s *sparePorts) port(tb testing.TB, name string) int {
+	tb.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if listen, ok := s.byName[name]; ok {
+		return listen
+	}
+
+	if s.byName == nil {
+		s.byName = map[string]int{}
+	}
+
+	require.Lessf(tb, len(s.byName), sparePortCount, "containers: no spare proxy port left for %q", name)
+
+	listen := sparePortFirst + len(s.byName)
+	s.byName[name] = listen
+
+	return listen
 }
 
 var toxi shared[*toxiclient.Client]
@@ -121,23 +149,7 @@ func ProxyTo(tb testing.TB, name string, upstream testcontainers.Container, port
 
 	upstreamHost := mappedHostPort(tb, upstream, port)
 
-	spare.mu.Lock()
-
-	listen, ok := spare.byName[name]
-	if !ok {
-		if spare.byName == nil {
-			spare.byName = map[string]int{}
-		}
-
-		require.Lessf(tb, len(spare.byName), sparePortCount, "containers: no spare proxy port left for %q", name)
-
-		listen = sparePortFirst + len(spare.byName)
-		spare.byName[name] = listen
-	}
-
-	spare.mu.Unlock()
-
-	return proxyOn(tb, name, listen, upstreamHost)
+	return proxyOn(tb, name, spare.port(tb, name), upstreamHost)
 }
 
 // proxyOn creates (or finds) the proxy name listening on port inside the

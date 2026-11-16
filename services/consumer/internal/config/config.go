@@ -105,6 +105,10 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("kafka: %w", err))
 	}
 
+	if err := c.OTel.Validate(); err != nil {
+		errs = append(errs, err)
+	}
+
 	if c.DedupeSize <= 0 {
 		errs = append(errs, errors.New("DEDUPE_SIZE must be positive"))
 	}

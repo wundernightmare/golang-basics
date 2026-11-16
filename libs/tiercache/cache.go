@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,12 +15,21 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/wundernightmare/golang-basics/libs/resilience"
-	"github.com/wundernightmare/golang-basics/libs/valkey"
 )
 
 // ErrNotFound is what a [Loader] returns for a key the source of truth does
 // not have, and what [Cache.Get] returns then. It is not cached.
 var ErrNotFound = errors.New("tiercache: not found")
+
+// ErrClosed is what [Cache.Get] and [Cache.Invalidate] return once
+// [Cache.Close] has been called.
+var ErrClosed = errors.New("tiercache: the cache is closed")
+
+// ErrPanic is what [Cache.Get] returns to every caller of a lookup in which
+// the [Loader], the [Codec] or the [Remote] panicked: the panic happened in
+// the goroutine of the shared lookup, where no recover of the caller's would
+// have caught it. The error carries the panic's value; its stack is logged.
+var ErrPanic = errors.New("tiercache: panic in a lookup")
 
 // MaxKeyLen is the longest key, in bytes. A UUID as text is 36; in UTF-8 the
 // limit is 512 Latin characters, 256 Cyrillic ones, 170 CJK ones, 128 emoji.
@@ -76,24 +87,43 @@ type Cache[T any] struct {
 	longestMs int64
 
 	// fillMu orders L1 fills against invalidations: a fill holds it shared
-	// and checks that epoch has not moved since its read began; an
-	// invalidation bumps epoch and removes the entry under the exclusive
+	// and checks that its key's epoch has not moved since its read began; an
+	// invalidation moves the epoch and removes the entry under the exclusive
 	// lock. Without it a value read just before an invalidation could be
 	// written to L1 just after it and live there for a full TTL.
+	//
+	// An epoch is shared by the keys that hash to one of epochShards, so an
+	// invalidation costs the lookups in flight of its own key and of one key
+	// in epochShards of the others their L1 fill; resets is the epoch of
+	// every key at once.
 	fillMu sync.RWMutex
-	epoch  atomic.Uint64
+	seed   maphash.Seed
+	epochs [epochShards]atomic.Uint64
+	resets atomic.Uint64
 
-	// A refresh is added to wg under refreshMu, and Close sets closed under
-	// it before it waits: no refresh starts behind Close's back.
+	// A lookup or a refresh is added to wg under refreshMu, and Close sets
+	// closed under it before it waits: none starts behind Close's back.
+	// closed is atomic for Get alone, which reads it without the lock.
 	refreshMu  sync.Mutex
 	refreshing map[string]struct{}
-	closed     bool
+	closed     atomic.Bool
 
 	lastWarn atomic.Int64 // Unix seconds of the last rate-limited warning
 
 	life context.Context //nolint:containedctx // the cache's own lifetime: cancelled by Close to stop its goroutines
 	stop context.CancelFunc
 	wg   sync.WaitGroup
+}
+
+const epochShards = 256
+
+// epoch is what a lookup remembers of the invalidations when it begins.
+type epoch struct{ key, all uint64 }
+
+func (c *Cache[T]) shard(key string) uint64 { return maphash.String(c.seed, key) % epochShards }
+
+func (c *Cache[T]) epochOf(key string) epoch {
+	return epoch{key: c.epochs[c.shard(key)].Load(), all: c.resets.Load()}
 }
 
 // New builds a cache on the L1 store makes (offheap.New, onheap.New — see
@@ -133,7 +163,8 @@ func New[T any](cfg Config, store StoreFactory, codec Codec[T], load Loader[T], 
 		buffers:    sync.Pool{New: func() any { return new([]byte) }},
 		prefix:     "tc:" + cfg.Name + ":",
 		channel:    "tc:" + cfg.Name + ":inv",
-		longestMs:  int64((cfg.HardTTL + cfg.HardTTL/10 + time.Millisecond - 1) / time.Millisecond), // rounded up: see valkey.Jitter
+		seed:       maphash.MakeSeed(),
+		longestMs:  int64((cfg.HardTTL + cfg.HardTTL/10 + time.Millisecond - 1) / time.Millisecond), // rounded up: see resilience.Jitter
 		refreshing: make(map[string]struct{}, cfg.RefreshConcurrency),
 		life:       life,
 		stop:       stop,
@@ -141,9 +172,11 @@ func New[T any](cfg Config, store StoreFactory, codec Codec[T], load Loader[T], 
 
 	cache.flight.Store(new(singleflight.Group))
 
+	// Not through warn: the breaker opens once per OpenTimeout at most, and
+	// the line must not be lost to another warning of the same second.
 	cache.breaker = resilience.NewBreaker(cfg.Breaker, time.Now, func(_, to resilience.State) {
 		if to == resilience.StateOpen {
-			cache.warn(life, "tiercache: L2 is failing, skipping it", "cache", cfg.Name, "for", cfg.Breaker.OpenTimeout.String())
+			log.WarnContext(life, "tiercache: L2 is failing, skipping it", "cache", cfg.Name, "for", cfg.Breaker.OpenTimeout.String())
 		}
 	})
 
@@ -154,17 +187,38 @@ func New[T any](cfg Config, store StoreFactory, codec Codec[T], load Loader[T], 
 	return cache, nil
 }
 
-// Close stops the subscription and waits for the background refreshes, then
-// hands L1's memory back for reuse by other caches of the process. The cache
-// must not be used afterwards.
+// Close stops the subscription, cancels the lookups and background refreshes
+// in flight and waits for them — for as long as a [Loader] that ignores its
+// context takes — then hands L1's memory back for reuse by other caches of
+// the process. Afterwards [Cache.Get] and [Cache.Invalidate] return
+// [ErrClosed]; a second Close does nothing.
 func (c *Cache[T]) Close() {
 	c.refreshMu.Lock()
-	c.closed = true
+	already := c.closed.Swap(true)
 	c.refreshMu.Unlock()
+
+	if already {
+		return
+	}
 
 	c.stop()
 	c.wg.Wait()
 	c.local.Reset()
+}
+
+// begin counts one more lookup for Close to wait for, unless the cache is
+// closed; the caller ends it with wg.Done.
+func (c *Cache[T]) begin() bool {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	if c.closed.Load() {
+		return false
+	}
+
+	c.wg.Add(1)
+
+	return true
 }
 
 // Get returns the value for key.
@@ -175,16 +229,23 @@ func (c *Cache[T]) Close() {
 //     background — at most one refresh per key, RefreshConcurrency in all.
 //   - Past HardTTL or absent: ignored. The value comes from L2 or, failing
 //     that, from the loader; concurrent callers for one key share one such
-//     lookup, each honouring its own ctx while it waits.
+//     lookup, each honouring its own ctx while it waits. The lookup runs
+//     until the deadline of the caller that started it; a caller that joined
+//     and has time left when that deadline ends the lookup starts another.
 //
 // An unreachable L2 never fails a read: the loader answers, L1 keeps what it
 // has. When the loader fails too, a value past HardTTL is served for
-// StaleIfError more; beyond that the loader's error is returned.
+// StaleIfError more; beyond that the loader's error is returned. A panic in
+// the loader, the codec or the remote is returned as [ErrPanic].
 func (c *Cache[T]) Get(ctx context.Context, key string) (T, error) {
-	if !validKey(key) {
+	if !validKey(key) || c.closed.Load() {
 		var zero T
 
 		c.metrics.failed.Inc()
+
+		if validKey(key) {
+			return zero, ErrClosed
+		}
 
 		return zero, ErrKey
 	}
@@ -255,15 +316,21 @@ func (c *Cache[T]) trusted(hardMs, nowMs int64) bool {
 // also refuses fills racing the write (see libs/valkey), and from every other
 // process's L1 through the invalidation channel.
 //
-// The local part cannot fail. An error means L2 or the channel could not be
-// reached: other processes then keep the old value until its TTL (or until
-// their subscription reconnects, which empties their L1) — log it.
+// The local part cannot fail, and holds whatever the rest does: once
+// Invalidate has returned, this process does not read the value from before
+// it again. An error means L2 or the channel could not be reached: other
+// processes then keep the old value until its TTL (or until their
+// subscription reconnects, which empties their L1) — log it.
 func (c *Cache[T]) Invalidate(ctx context.Context, key string) error {
-	if !validKey(key) {
+	switch {
+	case !validKey(key):
 		return ErrKey
+	case c.closed.Load():
+		return ErrClosed
 	}
 
-	c.invalidateLocal(key)
+	c.metrics.invalidatedKey.Inc()
+	c.drop(key)
 
 	if c.remote == nil {
 		return nil
@@ -272,6 +339,11 @@ func (c *Cache[T]) Invalidate(ctx context.Context, key string) error {
 	// The breaker is neither consulted nor told: an invalidation is worth
 	// one attempt even while reads are skipping L2.
 	tombErr := c.remote.Tombstone(ctx, c.remoteKey(key), c.cfg.TombstoneTTL)
+
+	// Once more: a reader of this process that asked L2 while the tombstone
+	// was on its way found the old value there, and the first drop was
+	// before its fill. From here on L2 answers with the tombstone.
+	c.drop(key)
 
 	var pubErr error
 	if !c.cfg.DisableInvalidation {
@@ -301,53 +373,110 @@ const (
 )
 
 // fetch is the synchronous path of a miss: one lookup per key however many
-// callers. As in valkey.Aside, the shared lookup runs detached from the
-// first caller's cancellation (keeping its deadline and trace), so one
-// impatient caller cannot fail the others.
+// callers. The shared lookup runs detached from the first caller's
+// cancellation, keeping its deadline and trace: a caller that leaves does
+// not fail the others. Its deadline can: the lookup then ends with a context
+// error that is not the joiners', and one of them with time left asks again
+// — as the first caller of the next lookup, bounded by its own deadline.
 func (c *Cache[T]) fetch(ctx context.Context, key string) (T, error) {
 	var zero T
 
-	shared := c.flight.Load().DoChan(key, func() (any, error) {
-		lookupCtx := context.WithoutCancel(ctx)
-		if deadline, ok := ctx.Deadline(); ok {
-			var cancel context.CancelFunc
+	for {
+		// Written by the lookup's goroutine before it sends the result,
+		// read here only after receiving it.
+		led := false
 
-			lookupCtx, cancel = context.WithDeadline(lookupCtx, deadline)
-			defer cancel()
-		}
+		shared := c.flight.Load().DoChan(key, func() (any, error) {
+			led = true
 
-		return c.resolve(lookupCtx, key, false)
-	})
+			return c.lookup(ctx, key)
+		})
 
-	select {
-	case res := <-shared:
-		if res.Err != nil {
-			if errors.Is(res.Err, ErrNotFound) {
-				c.metrics.notFound.Inc()
-			} else {
-				c.metrics.failed.Inc()
+		select {
+		case res := <-shared:
+			ended := errors.Is(res.Err, context.DeadlineExceeded) || errors.Is(res.Err, context.Canceled)
+			if ended && !led && ctx.Err() == nil {
+				continue
 			}
 
-			return zero, res.Err
+			return c.answer(res)
+		case <-ctx.Done():
+			c.metrics.failed.Inc()
+
+			return zero, ctx.Err()
 		}
-
-		got := res.Val.(result[T]) //nolint:forcetypeassert // resolve only ever returns result[T]
-
-		switch got.source {
-		case sourceL2:
-			c.metrics.fromL2.Inc()
-		case sourceLoad:
-			c.metrics.loaded.Inc()
-		case sourceStaleError:
-			c.metrics.staleError.Inc()
-		}
-
-		return got.value, nil
-	case <-ctx.Done():
-		c.metrics.failed.Inc()
-
-		return zero, ctx.Err()
 	}
+}
+
+// lookup is the body of one shared lookup, in the goroutine singleflight
+// gives it: bounded by the deadline of the caller that started it and by the
+// cache's lifetime, and waited for by Close.
+func (c *Cache[T]) lookup(ctx context.Context, key string) (any, error) {
+	if !c.begin() {
+		return nil, ErrClosed
+	}
+	defer c.wg.Done()
+
+	deadline, bounded := ctx.Deadline()
+
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
+
+	defer context.AfterFunc(c.life, cancel)()
+
+	if bounded {
+		var expire context.CancelFunc
+
+		ctx, expire = context.WithDeadline(ctx, deadline)
+		defer expire()
+	}
+
+	return c.guarded(ctx, key, false)
+}
+
+// guarded is resolve with a panic of the loader, the codec or the remote
+// turned into the lookup's error. It runs in a goroutine of the cache's own —
+// singleflight's, or a refresh's — where a panic would end the process
+// whatever the callers recover.
+func (c *Cache[T]) guarded(ctx context.Context, key string, refreshing bool) (res result[T], err error) {
+	defer func() {
+		if cause := recover(); cause != nil {
+			c.log.ErrorContext(ctx, "tiercache: panic in a lookup", "cache", c.cfg.Name, "panic", cause, "stack", string(debug.Stack()))
+
+			err = fmt.Errorf("%w: %v", ErrPanic, cause)
+		}
+	}()
+
+	return c.resolve(ctx, key, refreshing)
+}
+
+// answer turns the result of a shared lookup into one caller's return
+// values, and counts the read.
+func (c *Cache[T]) answer(res singleflight.Result) (T, error) {
+	if res.Err != nil {
+		var zero T
+
+		if errors.Is(res.Err, ErrNotFound) {
+			c.metrics.notFound.Inc()
+		} else {
+			c.metrics.failed.Inc()
+		}
+
+		return zero, res.Err
+	}
+
+	got := res.Val.(result[T]) //nolint:forcetypeassert // resolve only ever returns result[T]
+
+	switch got.source {
+	case sourceL2:
+		c.metrics.fromL2.Inc()
+	case sourceLoad:
+		c.metrics.loaded.Inc()
+	case sourceStaleError:
+		c.metrics.staleError.Inc()
+	}
+
+	return got.value, nil
 }
 
 // resolve looks key up in L2 and then in the source of truth, and fills the
@@ -357,7 +486,7 @@ func (c *Cache[T]) fetch(ctx context.Context, key string) (T, error) {
 func (c *Cache[T]) resolve(ctx context.Context, key string, refreshing bool) (result[T], error) {
 	var none result[T]
 
-	epoch := c.epoch.Load()
+	began := c.epochOf(key)
 	remoteKey := c.remoteKey(key)
 
 	// What L2 holds now: the value a refresh replaces (compare-and-set), and
@@ -381,7 +510,7 @@ func (c *Cache[T]) resolve(ctx context.Context, key string, refreshing bool) (re
 
 	if heldOK && nowMs < heldHard && (!refreshing || nowMs < heldSoftMs) {
 		if value, err := c.codec.Decode(heldPayload); err == nil {
-			c.fill(epoch, key, heldEnv)
+			c.fill(began, key, heldEnv)
 
 			return result[T]{value: value, source: sourceL2}, nil
 		}
@@ -393,8 +522,10 @@ func (c *Cache[T]) resolve(ctx context.Context, key string, refreshing bool) (re
 
 	switch {
 	case errors.Is(err, ErrNotFound):
-		// Gone from the source: stop serving what L1 and L2 still have.
-		c.invalidateLocal(key)
+		// Gone from the source: stop serving what L1 and L2 still have. Not
+		// an invalidation — nothing was written, and no lookup in flight
+		// holds a row this one makes older.
+		c.local.Delete(key)
 
 		if heldFound {
 			_ = c.remote.Tombstone(ctx, remoteKey, c.cfg.TombstoneTTL) // best effort: the entry's TTL bounds it otherwise
@@ -417,8 +548,14 @@ func (c *Cache[T]) resolve(ctx context.Context, key string, refreshing bool) (re
 	defer c.release(buf)
 
 	now := time.Now()
-	hardTTL := valkey.Jitter(c.cfg.HardTTL)
-	softTTL := min(valkey.Jitter(c.cfg.SoftTTL), hardTTL)
+	hardTTL := resilience.Jitter(c.cfg.HardTTL)
+
+	// Without a soft TTL of its own a value is never stale: the two
+	// deadlines are one instant, not two draws of the jitter.
+	softTTL := hardTTL
+	if c.cfg.SoftTTL < c.cfg.HardTTL {
+		softTTL = min(resilience.Jitter(c.cfg.SoftTTL), hardTTL)
+	}
 
 	env, err := c.codec.Append(appendHeader((*buf)[:0], now.Add(softTTL).UnixMilli(), now.Add(hardTTL).UnixMilli()), value)
 	*buf = env
@@ -437,14 +574,15 @@ func (c *Cache[T]) resolve(ctx context.Context, key string, refreshing bool) (re
 	// L2 keeps the entry for StaleIfError past its hard deadline: that is
 	// where staleFallback finds it when the source fails.
 	if c.remoteStore(ctx, remoteKey, held, string(env), hardTTL+c.cfg.StaleIfError, heldFound) {
-		c.fill(epoch, key, env)
+		c.fill(began, key, env)
 	}
 
 	return result[T]{value: value, source: sourceLoad}, nil
 }
 
 // staleFallback finds a value past its hard deadline but within StaleIfError
-// of it: the one just read from L2, else the one L1 still physically holds.
+// of it: the one just read from L2, else the one L1 still physically holds —
+// either only with a deadline this process could have set (see trusted).
 func (c *Cache[T]) staleFallback(key string, heldPayload []byte, heldHardMs int64, heldOK bool) (T, bool) {
 	var zero T
 
@@ -452,7 +590,8 @@ func (c *Cache[T]) staleFallback(key string, heldPayload []byte, heldHardMs int6
 		return zero, false
 	}
 
-	limitMs := time.Now().Add(-c.cfg.StaleIfError).UnixMilli()
+	nowMs := time.Now().UnixMilli()
+	limitMs := nowMs - c.cfg.StaleIfError.Milliseconds()
 
 	if heldOK && heldHardMs > limitMs {
 		if value, err := c.codec.Decode(heldPayload); err == nil {
@@ -465,7 +604,7 @@ func (c *Cache[T]) staleFallback(key string, heldPayload []byte, heldHardMs int6
 		return zero, false
 	}
 
-	if _, hardMs, payload, ok := parseEnvelope(env); ok && hardMs > limitMs {
+	if _, hardMs, payload, ok := parseEnvelope(env); ok && hardMs > limitMs && c.trusted(hardMs, nowMs) {
 		if value, err := c.codec.Decode(payload); err == nil {
 			return value, true
 		}
@@ -474,11 +613,11 @@ func (c *Cache[T]) staleFallback(key string, heldPayload []byte, heldHardMs int6
 	return zero, false
 }
 
-// fill writes an envelope to L1 unless an invalidation arrived since epoch.
+// fill writes an envelope to L1 unless an invalidation arrived since began.
 // One too large for L1 is not offered to it, and takes the key's previous
 // envelope out: the value is served from L2 from now on, not an older one
 // from L1 until its deadline.
-func (c *Cache[T]) fill(epoch uint64, key string, env []byte) {
+func (c *Cache[T]) fill(began epoch, key string, env []byte) {
 	if len(key)+len(env) > c.local.MaxEntry() {
 		c.metrics.oversize.Inc()
 		c.local.Delete(key)
@@ -489,19 +628,20 @@ func (c *Cache[T]) fill(epoch uint64, key string, env []byte) {
 	c.fillMu.RLock()
 	defer c.fillMu.RUnlock()
 
-	if c.epoch.Load() == epoch {
+	if c.epochOf(key) == began {
 		c.local.Set(key, env)
 	}
 }
 
-func (c *Cache[T]) invalidateLocal(key string) {
+// drop takes key out of L1 and keeps out what the lookups now in flight for
+// it have read; whoever asks next starts a lookup of their own.
+func (c *Cache[T]) drop(key string) {
 	c.fillMu.Lock()
 	defer c.fillMu.Unlock()
 
-	c.epoch.Add(1)
+	c.epochs[c.shard(key)].Add(1)
 	c.local.Delete(key)
 	c.flight.Load().Forget(key)
-	c.metrics.invalidatedKey.Inc()
 }
 
 // reset empties L1: invalidations may have been missed.
@@ -509,7 +649,7 @@ func (c *Cache[T]) reset() {
 	c.fillMu.Lock()
 	defer c.fillMu.Unlock()
 
-	c.epoch.Add(1)
+	c.resets.Add(1)
 	c.local.Reset()
 	c.flight.Store(new(singleflight.Group))
 	c.metrics.invalidatedAll.Inc()
@@ -522,7 +662,7 @@ func (c *Cache[T]) refresh(ctx context.Context, key string) {
 	c.refreshMu.Lock()
 
 	_, busy := c.refreshing[key]
-	if busy || c.closed {
+	if busy || c.closed.Load() {
 		c.refreshMu.Unlock()
 
 		return
@@ -561,7 +701,7 @@ func (c *Cache[T]) runRefresh(ctx context.Context, key string) {
 
 	// The same flight group as fetch: a refresh and a synchronous lookup of
 	// one key (after an invalidation, say) are still a single load.
-	_, err, _ := c.flight.Load().Do(key, func() (any, error) { return c.resolve(ctx, key, true) })
+	_, err, _ := c.flight.Load().Do(key, func() (any, error) { return c.guarded(ctx, key, true) })
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		c.metrics.refreshError.Inc()
 		c.warn(ctx, "tiercache: background refresh failed, the stale value stays", "cache", c.cfg.Name, "err", err)
@@ -606,7 +746,8 @@ func (c *Cache[T]) onInvalidation(message string) {
 		return // not ours: the channel carries keys only
 	}
 
-	c.invalidateLocal(message)
+	c.metrics.invalidatedKey.Inc()
+	c.drop(message)
 }
 
 func (c *Cache[T]) remoteKey(key string) string { return c.prefix + key }
@@ -618,15 +759,22 @@ func (c *Cache[T]) remoteGet(ctx context.Context, remoteKey string) (string, boo
 		return "", false
 	}
 
-	ticket, allowed := c.breaker.Allow()
-	if !allowed {
+	var (
+		value string
+		found bool
+		err   error
+	)
+
+	skipped := c.breaker.Do(func() resilience.Outcome {
+		value, found, err = c.remote.Get(ctx, remoteKey)
+
+		return outcome(ctx, err)
+	})
+	if skipped != nil {
 		c.metrics.bypassed.Inc()
 
 		return "", false
 	}
-
-	value, found, err := c.remote.Get(ctx, remoteKey)
-	c.breaker.Record(ticket, outcome(err))
 
 	return value, found && err == nil
 }
@@ -640,38 +788,41 @@ func (c *Cache[T]) remoteStore(ctx context.Context, remoteKey, old, env string, 
 		return true
 	}
 
-	ticket, allowed := c.breaker.Allow()
-	if !allowed {
-		return true
-	}
-
 	var (
 		stored bool
 		err    error
 	)
 
-	if replace {
-		stored, err = c.remote.Replace(ctx, remoteKey, old, env, ttl)
-	} else {
-		stored, err = c.remote.SetNX(ctx, remoteKey, env, ttl)
-	}
+	skipped := c.breaker.Do(func() resilience.Outcome {
+		if replace {
+			stored, err = c.remote.Replace(ctx, remoteKey, old, env, ttl)
+		} else {
+			stored, err = c.remote.SetNX(ctx, remoteKey, env, ttl)
+		}
 
-	c.breaker.Record(ticket, outcome(err))
+		return outcome(ctx, err)
+	})
+	if skipped != nil {
+		return true
+	}
 
 	return stored || err != nil
 }
 
-// outcome is what an L2 call tells the breaker: a caller that went away says
-// nothing about L2; any other error — a timeout included — is its failure.
-func outcome(err error) resilience.Outcome {
-	switch {
-	case err == nil:
+// outcome is what an L2 call tells the breaker. A call made on a context
+// that is done — the lookup's caller left, or its deadline passed — says
+// nothing about L2; an error while the lookup still had time is L2's
+// failure, its own timeout (the remote's per-call deadline) included.
+func outcome(ctx context.Context, err error) resilience.Outcome {
+	if err == nil {
 		return resilience.OutcomeSuccess
-	case errors.Is(err, context.Canceled):
-		return resilience.OutcomeIgnored
-	default:
-		return resilience.OutcomeFailure
 	}
+
+	if ctx.Err() != nil {
+		return resilience.OutcomeIgnored
+	}
+
+	return resilience.OutcomeFailure
 }
 
 // warn logs at most one warning a second per cache: an outage must be seen,

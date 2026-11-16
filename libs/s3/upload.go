@@ -20,10 +20,12 @@ const maxUploadParts = 10_000
 // that never fills a part is stored with a single put instead.
 //
 // The object appears at its key only when [Upload.Close] returns nil — a
-// reader never sees half of it. After a failed Write or Close, or instead of
-// Close, call [Upload.Abort] to discard the parts already sent; a process that
-// dies first leaves them for the bucket's "abort incomplete multipart
-// uploads" lifecycle rule.
+// reader never sees half of it. A failed Write spoils the upload: every later
+// Write and Close returns that error and sends nothing, so a caller that
+// closes unconditionally cannot publish a truncated object. After a failed
+// Write or Close, or instead of Close, call [Upload.Abort] to discard the
+// parts already sent; a process that dies first leaves them for the bucket's
+// "abort incomplete multipart uploads" lifecycle rule.
 //
 // An Upload is not safe for concurrent use.
 type Upload struct {
@@ -37,6 +39,8 @@ type Upload struct {
 	parts    []types.CompletedPart
 	size     int64
 	done     bool
+	// failed is the error of the Write that spoiled the upload.
+	failed error
 }
 
 // NewUpload starts a streaming upload to key. Nothing is sent until the first
@@ -49,25 +53,32 @@ func (c *Client) NewUpload(ctx context.Context, key, contentType string) *Upload
 // Size is the number of bytes written so far.
 func (u *Upload) Size() int64 { return u.size }
 
-// Write buffers p, sending a part each time the buffer fills.
-func (u *Upload) Write(p []byte) (int, error) {
+// Write buffers data, sending a part each time the buffer fills. After a Write
+// that failed, every Write fails with the same error.
+func (u *Upload) Write(data []byte) (int, error) {
 	if u.done {
 		return 0, errors.New("s3: write to a finished upload")
+	}
+
+	if u.failed != nil {
+		return 0, u.failed
 	}
 
 	partSize := int(u.client.cfg.UploadPartBytes)
 	written := 0
 
-	for len(p) > 0 {
-		chunk := min(partSize-u.buf.Len(), len(p))
-		u.buf.Write(p[:chunk])
+	for len(data) > 0 {
+		chunk := min(partSize-u.buf.Len(), len(data))
+		u.buf.Write(data[:chunk])
 
-		p = p[chunk:]
+		data = data[chunk:]
 		written += chunk
 		u.size += int64(chunk)
 
 		if u.buf.Len() == partSize {
 			if err := u.flushPart(); err != nil {
+				u.failed = err
+
 				return written, err
 			}
 		}
@@ -82,7 +93,7 @@ func (u *Upload) flushPart() error {
 	cfg := u.client.cfg
 
 	if u.uploadID == "" {
-		err := u.client.call(u.ctx, opCreateUpload, u.key, cfg.OpTimeout, false, func(ctx context.Context) error {
+		err := u.client.call(u.ctx, opCreateUpload, u.key, cfg.OpTimeout, nil, func(ctx context.Context) error {
 			out, err := u.client.api.CreateMultipartUpload(ctx, &awss3.CreateMultipartUploadInput{
 				Bucket: aws.String(cfg.Bucket), Key: aws.String(u.key), ContentType: contentTypeOrNil(u.contentType),
 			})
@@ -106,7 +117,7 @@ func (u *Upload) flushPart() error {
 
 	body := u.buf.Bytes()
 
-	err := u.client.call(u.ctx, opUploadPart, u.key, cfg.TransferTimeout, false, func(ctx context.Context) error {
+	err := u.client.call(u.ctx, opUploadPart, u.key, cfg.TransferTimeout, nil, func(ctx context.Context) error {
 		out, err := u.client.api.UploadPart(ctx, &awss3.UploadPartInput{
 			Bucket: aws.String(cfg.Bucket), Key: aws.String(u.key), UploadId: aws.String(u.uploadID),
 			PartNumber: aws.Int32(number), Body: bytes.NewReader(body), ContentLength: aws.Int64(int64(len(body))),
@@ -128,11 +139,20 @@ func (u *Upload) flushPart() error {
 	return nil
 }
 
-// Close sends what is buffered and makes the object visible. On error the
-// object does not exist; call [Upload.Abort] to discard the parts.
+// Close sends what is buffered and makes the object visible. After a failed
+// Write it sends nothing and returns that Write's error. On error call
+// [Upload.Abort] to discard the parts.
+//
+// An error does not always mean the object is absent: the store may have
+// applied the final request and its answer been lost (a timeout, a broken
+// connection). A caller that must know asks [Client.Head].
 func (u *Upload) Close() error {
 	if u.done {
 		return errors.New("s3: upload already finished")
+	}
+
+	if u.failed != nil {
+		return u.failed
 	}
 
 	if u.uploadID == "" {
@@ -154,7 +174,7 @@ func (u *Upload) Close() error {
 
 	cfg := u.client.cfg
 
-	err := u.client.call(u.ctx, opCompleteUpload, u.key, cfg.TransferTimeout, false, func(ctx context.Context) error {
+	err := u.client.call(u.ctx, opCompleteUpload, u.key, cfg.TransferTimeout, nil, func(ctx context.Context) error {
 		_, err := u.client.api.CompleteMultipartUpload(ctx, &awss3.CompleteMultipartUploadInput{
 			Bucket: aws.String(cfg.Bucket), Key: aws.String(u.key), UploadId: aws.String(u.uploadID),
 			MultipartUpload: &types.CompletedMultipartUpload{Parts: u.parts},
@@ -193,7 +213,7 @@ func (u *Upload) Abort() {
 	cfg := u.client.cfg
 	ctx := context.WithoutCancel(u.ctx)
 
-	err := u.client.call(ctx, opAbortUpload, u.key, cfg.OpTimeout, false, func(ctx context.Context) error {
+	err := u.client.call(ctx, opAbortUpload, u.key, cfg.OpTimeout, nil, func(ctx context.Context) error {
 		_, err := u.client.api.AbortMultipartUpload(ctx, &awss3.AbortMultipartUploadInput{
 			Bucket: aws.String(cfg.Bucket), Key: aws.String(u.key), UploadId: aws.String(u.uploadID),
 		})

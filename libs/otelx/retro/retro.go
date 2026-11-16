@@ -55,7 +55,9 @@ type Config struct {
 	// is the default (16); a negative value turns retroactive sampling off.
 	BufferMiB int `env:"BUFFER_MIB" envDefault:"16" yaml:"buffer_mib"`
 	// TriggersPerSecond is the traces triggered a second at most; the
-	// triggers above it are refused. Zero is the default (50).
+	// triggers above it are refused. Zero is the default (50); under a
+	// negative value every trigger is refused, with the buffer still
+	// allocated and filled.
 	TriggersPerSecond int `env:"TRIGGERS_PER_SECOND" envDefault:"50" yaml:"triggers_per_second"`
 }
 
@@ -240,6 +242,10 @@ func (p *Processor) trigger(traceID trace.TraceID, local bool) Outcome {
 
 	return outcome
 }
+
+// Capacity is the bytes the arena was allocated with: the configured size,
+// whichever way it was arrived at.
+func (p *Processor) Capacity() int { return p.arena.allocated() }
 
 // Collectors returns the Prometheus collectors of the buffer (the
 // trace_retro_* families of docs/METRICS.md) for the service's registry.

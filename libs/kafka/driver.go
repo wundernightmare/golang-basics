@@ -26,12 +26,14 @@ import (
 // held to the same behaviour by the conformance suite (libs/kafka/kafkatest)
 // every driver runs.
 type Driver interface {
-	// Name is "rdkafka" or "franz": the kafka_provider label of
-	// kafka_client_info and the startup log.
+	// Name is "rdkafka" or "franz": the provider label of kafka_client_info
+	// and the provider field of the startup log.
 	Name() string
-	// Validate reports what this client cannot do with cfg (e.g. franz-go
-	// has no librdkafka property passthrough). cfg is already defaulted and
-	// passed the neutral checks.
+	// Validate reports what this client cannot do with cfg: everything its
+	// NewProducer and NewConsumer would refuse on the config alone (a value
+	// outside the client's range, a property it does not have, a file it
+	// cannot parse), so [Config.Validate] passing means both can be built.
+	// cfg is already defaulted and passed the neutral checks.
 	Validate(cfg Config) []error
 	// NewProducer builds a producing client. It does not wait for the
 	// brokers: [NewProducer] pings them.
@@ -49,24 +51,31 @@ type Driver interface {
 type ProducerClient interface {
 	// Send enqueues msg (to msg.Topic) and waits until the brokers
 	// acknowledge it, the client gives up (Config.PublishTimeout) or ctx
-	// ends. The headers already carry the trace context. Every error is a
-	// *[SendError].
+	// ends. ctx bounds the wait of this call only: its end must not fail a
+	// record another call is waiting for. The headers already carry the
+	// trace context. Every error is a *[SendError]; after Close it wraps
+	// [ErrClientClosed].
 	Send(ctx context.Context, msg Message) error
-	// Ping checks the brokers answer (metadata), bounded by ctx.
+	// Ping checks the brokers answer (metadata), bounded by ctx. After
+	// Close the error wraps [ErrClientClosed].
 	Ping(ctx context.Context) error
 	// Stats is the latest client snapshot for the metrics.
 	Stats() ClientStats
-	// Close flushes what is queued (briefly) and releases the client.
+	// Close flushes what is queued (briefly) and releases the client. It is
+	// idempotent.
 	Close()
 }
 
 // ConsumerClient is a consumer-group member.
 type ConsumerClient interface {
-	// Poll returns up to maxRecords records, waiting while there are none until
-	// ctx ends. Fetch errors that do not stop the client are returned next
-	// to the records (errors.Join); [ErrClientClosed] once it is closed;
-	// an error wrapping [ErrClientFailed] when the client failed for good.
-	// Records of a partition revoked during the call are not returned.
+	// Poll returns up to maxRecords records, waiting while there are none
+	// until ctx ends, the client is closed or a fetch fails. Fetch errors
+	// that do not stop the client are returned next to the records
+	// (errors.Join), or without any when nothing was fetched — a client
+	// whose brokers are away reports that, it does not wait in silence;
+	// [ErrClientClosed] once it is closed; an error wrapping
+	// [ErrClientFailed] when the client failed for good. Records of a
+	// partition revoked during the call are not returned.
 	Poll(ctx context.Context, maxRecords int) ([]Message, error)
 	// Commit commits the given next offsets (last processed + 1)
 	// synchronously.
@@ -82,6 +91,8 @@ type ConsumerClient interface {
 	Stats() ClientStats
 	// Close leaves the group — calling Revoked for the partitions it held,
 	// so their processed offsets are committed — and releases the client.
+	// It may be called while another goroutine is inside Poll, which then
+	// returns [ErrClientClosed].
 	Close()
 }
 
@@ -121,8 +132,11 @@ type ClientStats struct {
 	QueueMaxBytes int64 // producer: the queue's bound
 }
 
-// ErrClientClosed is what [ConsumerClient.Poll] returns once the client is
-// closed.
+// ErrClientClosed marks a call on a client that was closed: what
+// [ConsumerClient.Poll] returns once the client is closed, and what the error
+// of a [Producer.Send] or a readiness check after Close wraps
+// (errors.Is). A Send error carrying it is a *[SendError] of
+// [KindUnavailable].
 var ErrClientClosed = errors.New("kafka: client closed")
 
 // ErrClientFailed marks an error the client cannot recover from (librdkafka's

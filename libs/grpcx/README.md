@@ -11,7 +11,7 @@ grpc-go has no answer for:
 
 | Concern | Implementation |
 | --- | --- |
-| Default deadline | gRPC service config `timeout`, and the same value as the context deadline of every call — the service config does not exist until the name has resolved (a caller's shorter deadline wins) |
+| Default deadline | **added**: the context deadline of every call, set by the interceptor (a caller's shorter deadline wins). Not the service config's `timeout`: a channel has no service config until its name has resolved |
 | Retries | gRPC service config `retryPolicy`: listed status codes, exponential backoff ±20 % jitter, server pushback (`grpc-retry-pushback-ms`) |
 | Retry amplification | gRPC service config `retryThrottling` (token bucket per connection) |
 | Load balancing | `round_robin` (default) or `pick_first` |
@@ -43,14 +43,19 @@ case status.Code(err) == codes.NotFound:
 }
 ```
 
-Errors are gRPC's own status errors, untouched. The one this package makes —
-a call rejected by the breaker — is `errors.Is(err, grpcx.ErrCircuitOpen)`
-and reads as `Unavailable` to code that only looks at the status.
+Errors are gRPC's own status errors, untouched. The two this package makes
+are gRPC statuses as well:
+
+- a call rejected by the breaker is `errors.Is(err, grpcx.ErrCircuitOpen)`
+  (and `resilience.ErrOpen`, the same question for every client built on
+  `libs/resilience`) and reads as `Unavailable`;
+- a call started after `Close` is `errors.Is(err, grpcx.ErrClosed)` and reads
+  as `Canceled`.
 
 ## Semantics
 
-**Order of a call** — the interceptor admits the call (breaker) and counts
-it; below it gRPC applies the default deadline and makes the attempts. So the
+**Order of a call** — the interceptor admits the call (breaker), puts it
+under the default deadline and counts it; below it gRPC makes the attempts. So the
 breaker and `grpc_client_requests_total` see a call **once**, after its
 retries; `grpc_client_retries_total` counts the attempts after the first.
 
@@ -59,8 +64,23 @@ and `DataLoss` as failures. `DeadlineExceeded` includes the caller's own
 deadline: one shorter than the target's `timeout` must not hide an outage.
 Every other status means the dependency answered (`NotFound`,
 `InvalidArgument`, `ResourceExhausted`, `Unimplemented`, …); `Canceled` — the
-caller walked away — is ignored. Half-open, generations and probes are
-[`libs/resilience`](../resilience)'s.
+caller walked away — is ignored. An error that is not a gRPC status reads as
+`Unknown`: a failure. Half-open, generations and probes are
+[`libs/resilience`](../resilience)'s; a call that panics (an interceptor or a
+codec of yours) is recorded as a failure, so a probe never keeps its slot.
+
+**Your interceptors** (`WithDialOptions`) — one added with
+`grpc.WithChainUnaryInterceptor` / `WithChainStreamInterceptor` runs
+**inside** the policy: after the breaker admitted the call, under the
+target's deadline, and what it returns is what the breaker and the metrics
+see. One added with `grpc.WithUnaryInterceptor` / `WithStreamInterceptor`
+runs **outside** (gRPC puts it first): no target deadline yet, and it sees the
+calls the breaker rejects. An inside interceptor that refuses a call itself —
+a rate limiter, a bulkhead — returns
+`grpcx.LocalRejection(codes.ResourceExhausted, "…")`: the caller gets that
+status (and `errors.Is(err, grpcx.ErrLocalRejection)`), `outcome` is its
+code, and the breaker ignores the call. A plain `errors.New` there would
+count against the dependency.
 
 **Streams** — a stream is one call, settled when it **ends**: the server's
 status (`io.EOF` is OK), the single response of a client-streaming call, or
@@ -92,9 +112,9 @@ Two things the integration suite pins about retries on a real network:
   about a second (grpc-go's reconnect backoff). A call made in that gap fails
   with `Unavailable` although the server is back well before its deadline.
   `wait_for_ready: true` is the setting for restarts and failovers: the call
-  waits for the connection. With it, a target must have a `timeout` — on a
-  connection that can never be made (a rejected certificate) the wait ends
-  only there.
+  waits for the connection. With it, a target must have a `timeout`
+  (`Validate` rejects `wait_for_ready` with `timeout: 0`) — on a connection
+  that can never be made (a rejected certificate) the wait ends only there.
 
 `grpc_client_retries_total` counts every attempt after the first, including
 grpc-go's transparent retries (a request that never left the client), which
@@ -139,7 +159,9 @@ gRPC becomes `Unknown` (a failure).
 
 **Close** — closes every connection; calls in flight fail with `Canceled`
 (gRPC has no client-side drain). Close after whatever makes the calls has
-stopped.
+stopped. Afterwards `Conn`, and a call on a connection taken earlier, fail
+with `ErrClosed`; `BreakerState` keeps answering. The metrics leave a
+registerer given with `WithRegisterer`, so a new client can be built on it.
 
 ## Configuration
 
@@ -151,10 +173,10 @@ feature off. In code, start from `DefaultTarget(name, address)`.
 ```yaml
 targets:
   - name: billing                      # required, unique; the metric label
-    address: dns:///billing.internal:443   # required: a gRPC target URI
+    address: dns:///billing.internal:443   # required: a gRPC target URI, or host:port
     insecure: false                    # true = plaintext
     timeout: 5s                        # whole call, retries included; 0 = only the caller's deadline
-    wait_for_ready: false              # true = queue calls while the connection is down
+    wait_for_ready: false              # true = queue calls while the connection is down; needs a timeout
     load_balancing: round_robin        # or pick_first
     keepalive_time: 0s                 # 0 = off; else ≥ 10s, agreed with the server
     keepalive_timeout: 20s
@@ -162,7 +184,7 @@ targets:
     retry_base_delay: 100ms            # doubles per retry
     retry_max_delay: 5s
     retry_codes: [UNAVAILABLE]         # canonical status names
-    retry_methods: []                  # empty = every method; else pkg.Service or pkg.Service/Method
+    retry_methods: []                  # empty = every method; else pkg.Service or pkg.Service/Method, each once
     retry_throttle_max_tokens: 10      # ≤ 1000; 0 = no throttling
     retry_throttle_token_ratio: 0.1
     breaker:
@@ -173,9 +195,20 @@ targets:
       half_open_probes: 1
 ```
 
+**`address`** — `Validate` reads it the way gRPC will and rejects what a call
+could only fail on: `grpc.NewClient` builds a channel from any string, and the
+mistake would surface as `Unavailable` on the first call. `dns://host:443`
+(two slashes: the host becomes the authority — the name server — and no
+endpoint is left), `https://host`, `host:443:443` are errors. A scheme
+followed by `//` is otherwise taken as it is: its resolver may come with
+`grpc.WithResolvers`, which a config cannot see — so a misspelt scheme with
+three slashes still passes.
+
 **In a service config.** A service does not call `LoadConfig`: it embeds
 `grpcx.Config` under a key of its own config and loads everything with the
-workspace's one loader, `httpx.LoadYAML` (pinned by `embed_test.go`):
+workspace's one loader, `httpx.LoadYAML` (pinned by
+[`integration/embed_test.go`](integration/embed_test.go) — there, so that
+`libs/httpx` stays out of this `go.mod`):
 
 ```go
 type Config struct {
@@ -211,13 +244,25 @@ names are the workspace's metrics contract
 ([docs/METRICS.md](../../docs/METRICS.md)).
 
 Without `WithRegisterer` they live on a private registry, `client.Registry()`,
-which no `/metrics` endpoint serves (one client per registry — a second one
-collides).
+which no `/metrics` endpoint serves.
+
+**Two clients on one registry** collide — `New` returns the error. Give each
+of them (each: one metric name has one label set) a view of the registry with
+a label of its own:
+
+```go
+billing, err := grpcx.New(billingCfg, grpcx.WithRegisterer(
+    prometheus.WrapRegistererWith(prometheus.Labels{"client": "billing"}, reg)))
+search, err := grpcx.New(searchCfg, grpcx.WithRegisterer(
+    prometheus.WrapRegistererWith(prometheus.Labels{"client": "search"}, reg)))
+```
+
+Usually one client with two targets is the simpler answer.
 
 ## What it does not do
 
 No rate limiter or bulkhead (add an interceptor through `WithDialOptions` if a
-target needs one), no hedging and no per-attempt timeout (grpc-go has
+target needs one — see "Your interceptors"), no hedging and no per-attempt timeout (grpc-go has
 neither), no outlier detection or xDS, no server side. The breaker is per
 target, not per backend address: it is meant for a dependency behind one
 virtual address; with client-side balancing over many addresses, gRPC's
@@ -227,9 +272,9 @@ outlier detection is the finer tool.
 
 | Layer | Where | Owns |
 | --- | --- | --- |
-| Unit | `*_test.go` here — an in-process gRPC server on loopback; `dns_test.go` with a real name server on loopback (`testx.DNS`) and gRPC's resolver | the breaker's view of every status, streams, config and service-config rendering; a name that does not resolve, a silent name server, a record that moves |
+| Unit | `*_test.go` here — an in-process gRPC server on loopback; `dns_test.go` with a real name server on loopback (`testx.DNS`) and gRPC's resolver | the breaker's view of every status, streams, config and service-config rendering (every rendered document goes through grpc-go's parser); where a caller's interceptors run; a resolver's service config being ignored; a name that does not resolve, a silent name server, a record that moves |
 | Mutation | `.gremlins.yaml`, nightly | whether those tests notice a flipped comparison |
-| Integration | [`integration/`](integration) — a module of its own, so testcontainers, Toxiproxy and the OTLP stubs stay out of this `go.mod` | a real server (Jaeger) over cleartext, TLS, TLS 1.3 and mutual TLS; a real stream; an HTTP gateway and a database on the other end; TCP faults at a named point; what retries, `wait_for_ready` and keepalive do on a real network |
+| Integration | [`integration/`](integration) — a module of its own, so testcontainers, Toxiproxy and the OTLP stubs stay out of this `go.mod` | a real server (Jaeger) over cleartext, TLS, TLS 1.3 and mutual TLS; a real stream; an HTTP gateway and a database on the other end; TCP faults at a named point; what retries, `wait_for_ready` and keepalive do on a real network — keepalive reaching gRPC at all is pinned only here (grpc-go pings no sooner than after 10 s, too slow for the unit layer); the config embedded in a service's file and loaded by `httpx.LoadYAML` |
 
 ## Develop
 

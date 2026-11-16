@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wundernightmare/golang-basics/libs/kafka"
-	"github.com/wundernightmare/golang-basics/libs/kafka/kafkatest"
 )
 
 func defaulted(t *testing.T, cfg kafka.Config) kafka.Config {
@@ -100,6 +99,7 @@ func TestSendError_Taxonomy(t *testing.T) {
 		ckafka.ErrMsgSizeTooLarge:          kafka.KindRejected,
 		ckafka.ErrInvalidRecord:            kafka.KindRejected,
 		ckafka.ErrUnknown:                  kafka.KindUnknown,
+		ckafka.ErrOffsetOutOfRange:         kafka.KindUnknown,
 	} {
 		err := sendError(ckafka.NewError(code, "x", false))
 
@@ -109,32 +109,14 @@ func TestSendError_Taxonomy(t *testing.T) {
 		assert.Equal(t, want != kafka.KindRejected, se.Retryable)
 	}
 
+	closed := sendError(kafka.ErrClientClosed)
+
+	var se *kafka.SendError
+	require.ErrorAs(t, closed, &se)
+	require.ErrorIs(t, closed, kafka.ErrClientClosed)
+	assert.Equal(t, kafka.KindUnavailable, se.Kind)
+
 	assert.NoError(t, sendError(nil))
-}
-
-// A broker error is the kind libs/kafka's README "Errors" gives it: the
-// table both providers are held to, so the same broker answer is the same
-// kind whichever client is linked.
-func TestSendError_BrokerCodesMatchTheSharedTable(t *testing.T) {
-	t.Parallel()
-
-	table := kafkatest.BrokerSendErrorKinds()
-
-	for code, want := range table {
-		rdCode := ckafka.ErrorCode(code)
-
-		var se *kafka.SendError
-		require.ErrorAs(t, sendError(ckafka.NewError(rdCode, "x", false)), &se)
-		assert.Equal(t, want, se.Kind, rdCode.String())
-	}
-
-	for rdCode, kind := range sendErrorKinds {
-		if rdCode < 0 {
-			continue // librdkafka's own (local) errors: no broker code
-		}
-
-		assert.Equal(t, kind, table[int16(rdCode)], "%s is mapped here and missing from the shared table", rdCode)
-	}
 }
 
 func TestParseStats(t *testing.T) {

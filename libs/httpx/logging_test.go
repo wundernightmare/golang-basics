@@ -200,6 +200,17 @@ func TestLogger_DroppedCountIsExported(t *testing.T) {
 	}
 
 	assert.Equal(t, 9.0, droppedInfo(t, log))
+
+	// A derived logger counts into the same counter, and debug has its own.
+	derived := log.With("component", "x")
+	for range 5 {
+		derived.Info("dropped")
+		derived.DebugContext(httpx.WithDebugLogging(t.Context()), "not sampled: asked for")
+	}
+
+	m := httpx.NewMetrics(httpx.Build("t"), log)
+	assert.Equal(t, 14.0, testx.Metric(t, m.Registry, "log_dropped_total", map[string]string{"level": "info"}))
+	assert.Equal(t, 0.0, testx.Metric(t, m.Registry, "log_dropped_total", map[string]string{"level": "debug"}))
 }
 
 // droppedInfo reads log_dropped_total{level="info"} off a fresh registry

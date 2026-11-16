@@ -98,9 +98,12 @@ func holds(t *testing.T, store tiercache.Store, _ Capacity) {
 	_, found := get(t, store, "absent")
 	assert.False(t, found)
 
-	// Keys are bytes, not text; one is a prefix of another; a value may be
-	// empty, and that is not the same as absent.
-	keys := []string{"a", "ab", "b", "tenant:7/user:Ёж", "\xff\x00\xfe", strings.Repeat("k", min(64, store.MaxEntry()/2))}
+	// Keys are bytes, not text; one is a prefix of another; two of the
+	// longest differ in their last byte alone; a value may be empty, and
+	// that is not the same as absent.
+	long := strings.Repeat("k", min(tiercache.MaxKeyLen, limit/2)-1)
+
+	keys := []string{"a", "ab", "b", "tenant:7/user:Ёж", "\xff\x00\xfe", long + "a", long + "b"}
 	for i, key := range keys {
 		store.Set(key, valueOf(key, i, 5*i))
 	}

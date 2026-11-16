@@ -2,46 +2,52 @@ package pgx_test
 
 import (
 	"context"
-	"maps"
-	"net/url"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/goleak"
 
 	"github.com/wundernightmare/golang-basics/libs/pgx"
 	"github.com/wundernightmare/golang-basics/libs/secret"
-	"github.com/wundernightmare/golang-basics/libs/testx"
-	"github.com/wundernightmare/golang-basics/libs/testx/containers"
 )
 
-// One Postgres per test binary; tests own their schema by name.
-func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }
+// Nothing here needs a database; what does lives in the integration module.
+func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
 
 func TestConfigDSN(t *testing.T) {
 	t.Parallel()
 
-	t.Run("explicit URL wins", func(t *testing.T) {
-		t.Parallel()
+	fields := func(host string) pgx.Config {
+		return pgx.Config{Host: host, Port: 5432, User: "app", Password: secret.New("s3cret"), Name: "app", SSLMode: "disable"}
+	}
 
-		cfg := pgx.Config{URL: "postgres://u:p@h:1/db?sslmode=require", Host: "ignored"}
-		assert.Equal(t, "postgres://u:p@h:1/db?sslmode=require", cfg.DSN())
-	})
-	t.Run("assembled from fields", func(t *testing.T) {
-		t.Parallel()
+	for name, tc := range map[string]struct {
+		cfg  pgx.Config
+		want string
+	}{
+		"explicit URL wins": {
+			pgx.Config{URL: secret.New("postgres://u:p@h:1/db?sslmode=require"), Host: "ignored"},
+			"postgres://u:p@h:1/db?sslmode=require",
+		},
+		"assembled from fields":  {fields("db"), "postgres://app:s3cret@db:5432/app?sslmode=disable"},
+		"IPv6 literal":           {fields("::1"), "postgres://app:s3cret@[::1]:5432/app?sslmode=disable"},
+		"IPv6 literal, brackets": {fields("[2001:db8::10]"), "postgres://app:s3cret@[2001:db8::10]:5432/app?sslmode=disable"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-		cfg := pgx.Config{Host: "db", Port: 5432, User: "app", Password: secret.New("s3cret"), Name: "app", SSLMode: "disable"}
-		assert.Equal(t, "postgres://app:s3cret@db:5432/app?sslmode=disable", cfg.DSN())
-	})
+			assert.Equal(t, tc.want, tc.cfg.DSN())
+			require.NoError(t, tc.cfg.Validate(), "and pgx parses it")
+		})
+	}
 }
 
 // The process-environment path of LoadConfig (LoadConfigFrom with nil);
@@ -66,16 +72,22 @@ func TestLoadConfigDefaults(t *testing.T) {
 	assert.Equal(t, 30*time.Second, cfg.StatementTimeout)
 	assert.Equal(t, 5*time.Second, cfg.LockTimeout)
 	assert.Equal(t, time.Minute, cfg.IdleInTransactionSessionTimeout)
+	assert.Zero(t, cfg.OpTimeout, "no client-side deadline unless asked for")
 
 	cfg, err = pgx.LoadConfigFrom("TASKS_", map[string]string{
 		"TASKS_DB_HOST":              "db.internal",
 		"TASKS_DB_MAX_CONNS":         "42",
 		"TASKS_DB_STATEMENT_TIMEOUT": "2s",
+		"TASKS_DB_OP_TIMEOUT":        "3s",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "db.internal", cfg.Host)
 	assert.Equal(t, int32(42), cfg.MaxConns)
 	assert.Equal(t, 2*time.Second, cfg.StatementTimeout)
+	assert.Equal(t, 3*time.Second, cfg.OpTimeout)
+
+	_, err = pgx.LoadConfigFrom("TASKS_", map[string]string{"TASKS_DB_MIN_CONNS": "11"})
+	require.ErrorContains(t, err, "DB_MIN_CONNS", "what Validate refuses does not load")
 }
 
 func TestLoadMigrations(t *testing.T) {
@@ -113,285 +125,79 @@ func TestLoadMigrations(t *testing.T) {
 	})
 }
 
-// schemaConfig returns a config whose connections live in a fresh schema of
-// the shared Postgres: search_path points there, so the tables a test (or a
-// migration) creates are its own.
-func schemaConfig(t testing.TB) (pgx.Config, string) {
-	t.Helper()
-	base := containers.Postgres(t)
-	schema := strings.ReplaceAll(testx.Unique("t"), "-", "_")
-	ctx := context.Background()
-	admin, err := pgx.New(ctx, pgx.Config{URL: base, MaxConns: 1}, nil)
-	require.NoError(t, err)
-	_, err = admin.Pool().Exec(ctx, `CREATE SCHEMA `+schema)
-	require.NoError(t, err)
-	admin.Close()
+// Validate refuses, without connecting, what New would refuse — so
+// --check-config and the boot catch it before the first dial — and New
+// refuses it with the same words.
+func TestConfig_Validate(t *testing.T) {
+	t.Parallel()
 
-	u, err := url.Parse(base)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "pw"), []byte("s3cret\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "empty"), []byte("\n"), 0o600))
+
+	valid, err := pgx.LoadConfigFrom("", map[string]string{})
 	require.NoError(t, err)
 
-	q := u.Query()
-	q.Set("search_path", schema)
-	u.RawQuery = q.Encode()
+	with := func(mut func(*pgx.Config)) pgx.Config {
+		cfg := valid
+		mut(&cfg)
 
-	return pgx.Config{URL: u.String(), ConnectTimeout: 5 * time.Second, MaxConns: 5}, schema
-}
-
-func newDB(t testing.TB, cfg pgx.Config, opts ...pgx.Option) *pgx.DB {
-	t.Helper()
-
-	db, err := pgx.New(context.Background(), cfg, nil, opts...)
-	require.NoError(t, err)
-	t.Cleanup(db.Close)
-
-	return db
-}
-
-var widgets = fstest.MapFS{
-	"001_widgets.sql":      {Data: []byte(`CREATE TABLE widgets (id INT PRIMARY KEY, name TEXT NOT NULL);`)},
-	"002_seed_widgets.sql": {Data: []byte("INSERT INTO widgets (id, name) VALUES (1, 'gadget');\nINSERT INTO widgets (id, name) VALUES (2, 'gizmo');")},
-}
-
-func appliedVersions(t testing.TB, db *pgx.DB) []int64 {
-	t.Helper()
-
-	rows, err := db.Pool().Query(context.Background(), `SELECT version FROM schema_migrations ORDER BY version`)
-	require.NoError(t, err)
-
-	var out []int64
-
-	for rows.Next() {
-		var v int64
-		require.NoError(t, rows.Scan(&v))
-		out = append(out, v)
+		return cfg
 	}
 
-	require.NoError(t, rows.Err())
+	require.NoError(t, with(func(c *pgx.Config) { c.PasswordFile = filepath.Join(dir, "pw") }).Validate())
 
-	return out
-}
+	for name, tc := range map[string]struct {
+		cfg  pgx.Config
+		want string
+	}{
+		"URL with a port that is not one": {
+			with(func(c *pgx.Config) { c.URL = secret.New("postgres://app:Sup3rS3cret@db:not-a-port/app") }), "parse dsn",
+		},
+		"unknown sslmode": {
+			with(func(c *pgx.Config) { c.SSLMode = "bogus"; c.Password = secret.New("Sup3rS3cret") }), "sslmode is invalid",
+		},
+		"port out of range":          {with(func(c *pgx.Config) { c.Port = -1 }), "parse dsn"},
+		"negative statement timeout": {with(func(c *pgx.Config) { c.StatementTimeout = -time.Second }), "DB_STATEMENT_TIMEOUT"},
+		"negative operation timeout": {with(func(c *pgx.Config) { c.OpTimeout = -time.Second }), "DB_OP_TIMEOUT"},
+		"negative pool size":         {with(func(c *pgx.Config) { c.MaxConns = -1 }), "DB_MAX_CONNS"},
+		"more warm connections than the pool holds": {
+			with(func(c *pgx.Config) { c.MinConns, c.MaxConns = 50, 2 }), "DB_MIN_CONNS 50 is above DB_MAX_CONNS 2",
+		},
+		"password file missing": {
+			with(func(c *pgx.Config) { c.PasswordFile = filepath.Join(dir, "nope") }), "DB_PASSWORD_FILE: open " + filepath.Join(dir, "nope"),
+		},
+		"password file empty": {
+			with(func(c *pgx.Config) { c.PasswordFile = filepath.Join(dir, "empty") }), "DB_PASSWORD_FILE: " + filepath.Join(dir, "empty") + " is empty",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-func TestMigrate_FreshSchemaThenRerunIsANoop(t *testing.T) {
-	t.Parallel()
+			err := tc.cfg.Validate()
+			require.ErrorContains(t, err, tc.want)
+			assert.NotContains(t, err.Error(), "Sup3rS3cret")
 
-	cfg, _ := schemaConfig(t)
-	db := newDB(t, cfg)
-	ctx := context.Background()
-
-	require.NoError(t, pgx.Migrate(ctx, db.Pool(), widgets, nil))
-	assert.Equal(t, []int64{1, 2}, appliedVersions(t, db))
-
-	var n int
-	require.NoError(t, db.Pool().QueryRow(ctx, `SELECT count(*) FROM widgets`).Scan(&n))
-	assert.Equal(t, 2, n, "a multi-statement file runs every statement")
-
-	// Re-run: nothing applies again (the seed would violate the primary key).
-	require.NoError(t, pgx.Migrate(ctx, db.Pool(), widgets, nil))
-	assert.Equal(t, []int64{1, 2}, appliedVersions(t, db))
-
-	// A new file is picked up on the next run.
-	next := fstest.MapFS{"003_widget_color.sql": {Data: []byte(`ALTER TABLE widgets ADD COLUMN color TEXT`)}}
-	maps.Copy(next, widgets)
-
-	require.NoError(t, pgx.Migrate(ctx, db.Pool(), next, nil))
-	assert.Equal(t, []int64{1, 2, 3}, appliedVersions(t, db))
-}
-
-func TestMigrate_ConcurrentRunnersDoNotCollide(t *testing.T) {
-	t.Parallel()
-
-	cfg, _ := schemaConfig(t)
-	ctx := context.Background()
-	// Separate pools: separate "replicas".
-	dbs := []*pgx.DB{newDB(t, cfg), newDB(t, cfg), newDB(t, cfg), newDB(t, cfg)}
-
-	var wg sync.WaitGroup
-
-	errs := make([]error, len(dbs))
-	start := make(chan struct{})
-
-	for i, db := range dbs {
-		wg.Go(func() {
-			<-start
-
-			errs[i] = pgx.Migrate(ctx, db.Pool(), widgets, nil)
+			_, newErr := pgx.New(t.Context(), tc.cfg, nil)
+			require.EqualError(t, newErr, "pgx: "+err.Error())
 		})
 	}
+}
 
-	close(start)
-	wg.Wait()
+// DATABASE_URL carries the password, so no way of printing the config shows it.
+func TestConfig_PrintingDoesNotShowTheURL(t *testing.T) {
+	t.Parallel()
 
-	for i, err := range errs {
-		require.NoError(t, err, "runner %d", i)
+	cfg := pgx.Config{URL: secret.New("postgres://app:Sup3rS3cret@db:5432/app")}
+
+	var logged strings.Builder
+	slog.New(slog.NewJSONHandler(&logged, nil)).Info("config", "postgres", cfg)
+
+	for form, printed := range map[string]string{
+		"%v": fmt.Sprintf("%v", cfg), "%+v": fmt.Sprintf("%+v", cfg), "%#v": fmt.Sprintf("%#v", cfg), "slog": logged.String(),
+	} {
+		assert.NotContains(t, printed, "Sup3rS3cret", form)
 	}
-
-	assert.Equal(t, []int64{1, 2}, appliedVersions(t, dbs[0]), "each version applied exactly once")
-
-	var n int
-	require.NoError(t, dbs[0].Pool().QueryRow(ctx, `SELECT count(*) FROM widgets`).Scan(&n))
-	assert.Equal(t, 2, n)
-}
-
-func TestMigrate_FailingMigrationRollsBackAndIsNamed(t *testing.T) {
-	t.Parallel()
-
-	cfg, schema := schemaConfig(t)
-	db := newDB(t, cfg)
-	ctx := context.Background()
-
-	broken := fstest.MapFS{
-		"001_ok.sql":     {Data: []byte(`CREATE TABLE ok_table (id INT)`)},
-		"002_broken.sql": {Data: []byte("CREATE TABLE half_done (id INT);\nTHIS IS NOT VALID SQL;")},
-		"003_never.sql":  {Data: []byte(`CREATE TABLE never_reached (id INT)`)},
-	}
-	err := pgx.Migrate(ctx, db.Pool(), broken, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "002_broken.sql", "the error names the file")
-
-	assert.Equal(t, []int64{1}, appliedVersions(t, db), "earlier migrations stay, the failing one is not recorded")
-
-	for table, want := range map[string]bool{"ok_table": true, "half_done": false, "never_reached": false} {
-		var exists bool
-		require.NoError(t, db.Pool().QueryRow(ctx,
-			`SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)`,
-			schema, table).Scan(&exists))
-		assert.Equal(t, want, exists, table)
-	}
-}
-
-func TestSessionTimeoutsAreApplied(t *testing.T) {
-	t.Parallel()
-
-	cfg, _ := schemaConfig(t)
-	cfg.StatementTimeout = 1500 * time.Millisecond
-	cfg.LockTimeout = 250 * time.Millisecond
-	cfg.IdleInTransactionSessionTimeout = 0 // left at the server default
-	db := newDB(t, cfg)
-	ctx := context.Background()
-
-	show := func(name string) string {
-		var v string
-		require.NoError(t, db.Pool().QueryRow(ctx, "SHOW "+name).Scan(&v))
-
-		return v
-	}
-	assert.Equal(t, "1500ms", show("statement_timeout"))
-	assert.Equal(t, "250ms", show("lock_timeout"))
-	assert.Equal(t, "0", show("idle_in_transaction_session_timeout"), "zero leaves the server default (off)")
-
-	// And the statement timeout bites: Postgres cancels, the error says so.
-	_, err := db.Pool().Exec(ctx, `SELECT pg_sleep(3)`)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "statement timeout")
-}
-
-// DB_PASSWORD_FILE wins over the URL's password; a bad file fails the boot.
-func TestNew_PasswordFile(t *testing.T) {
-	t.Parallel()
-
-	cfg, _ := schemaConfig(t)
-	u, err := url.Parse(cfg.URL)
-	require.NoError(t, err)
-
-	right, _ := u.User.Password()
-	u.User = url.UserPassword(u.User.Username(), "wrong")
-	cfg.URL = u.String()
-
-	dir := t.TempDir()
-	cfg.PasswordFile = dir + "/pw"
-	require.NoError(t, os.WriteFile(cfg.PasswordFile, []byte(right+"\n"), 0o600))
-	db := newDB(t, cfg)
-	require.NoError(t, db.ReadyCheck()(context.Background()), "the file's password (trailing newline dropped) is used")
-
-	for name, path := range map[string]string{"missing": dir + "/nope", "empty": dir + "/empty"} {
-		require.NoError(t, os.WriteFile(dir+"/empty", []byte("\n"), 0o600))
-
-		cfg.PasswordFile = path
-		_, err := pgx.New(context.Background(), cfg, nil)
-		require.ErrorContains(t, err, "DB_PASSWORD_FILE", name)
-	}
-}
-
-// Validate checks the password file without connecting, so --check-config
-// and the boot catch a missing secret mount before the first dial.
-func TestConfig_ValidatePasswordFile(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(dir+"/pw", []byte("s3cret\n"), 0o600))
-	require.NoError(t, os.WriteFile(dir+"/empty", []byte("\n"), 0o600))
-
-	require.NoError(t, pgx.Config{}.Validate(), "no file: nothing to check")
-	require.NoError(t, pgx.Config{PasswordFile: dir + "/pw"}.Validate())
-	require.ErrorContains(t, pgx.Config{PasswordFile: dir + "/nope"}.Validate(), "DB_PASSWORD_FILE: open "+dir+"/nope")
-	require.ErrorContains(t, pgx.Config{PasswordFile: dir + "/empty"}.Validate(), "DB_PASSWORD_FILE: "+dir+"/empty is empty")
-}
-
-func TestReadyCheckFailsWhenClosed(t *testing.T) {
-	t.Parallel()
-
-	cfg, _ := schemaConfig(t)
-	ctx := context.Background()
-	db, err := pgx.New(ctx, cfg, nil)
-	require.NoError(t, err)
-	require.NoError(t, db.ReadyCheck()(ctx))
-	db.Close()
-	require.Error(t, db.ReadyCheck()(ctx), "readiness must fail once the pool is closed")
-}
-
-func TestNew_ZeroConnectTimeoutStillPings(t *testing.T) {
-	t.Parallel()
-
-	cfg, _ := schemaConfig(t)
-	cfg.ConnectTimeout = 0 // a hand-built config: must not expire the boot ping immediately
-	db := newDB(t, cfg)
-	require.NoError(t, db.ReadyCheck()(context.Background()))
-}
-
-// Every query is a client span inside the caller's trace, and the pool
-// statistics and query metrics move with real usage.
-func TestQueriesAreTracedAndMeasured(t *testing.T) {
-	t.Parallel()
-
-	cfg, _ := schemaConfig(t)
-	recorder := testx.Recorder(t)
-	db := newDB(t, cfg, pgx.WithTracerProvider(recorder.Provider))
-	ctx := context.Background()
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(db.Collectors()...)
-
-	qctx, parent := recorder.Tracer().Start(ctx, "handler")
-
-	var one int
-	require.NoError(t, db.Pool().QueryRow(qctx, "SELECT 1").Scan(&one))
-	_, err := db.Pool().Exec(pgx.WithOperation(qctx, "widgets.broken"), "SELECT id FROM no_such_table")
-	require.Error(t, err)
-	parent.End()
-
-	// The query span is a direct child of the handler span (its prepare step,
-	// also named by the statement, is a child of the query span).
-	var query sdktrace.ReadOnlySpan
-
-	for _, s := range recorder.Ended() {
-		if s.SpanKind() == trace.SpanKindClient && strings.HasPrefix(strings.ToUpper(s.Name()), "SELECT") &&
-			s.Parent().SpanID() == parent.SpanContext().SpanID() {
-			query = s
-			break
-		}
-	}
-
-	require.NotNil(t, query, "a client span named by the statement, child of the caller's span")
-	assert.Equal(t, parent.SpanContext().TraceID(), query.SpanContext().TraceID())
-
-	assert.Equal(t, float64(cfg.MaxConns), testx.Metric(t, reg, "db_pool_max_connections", nil))
-	assert.Equal(t, 0.0, testx.Metric(t, reg, "db_pool_connections", map[string]string{"state": "in_use"}), "released after the query")
-	assert.GreaterOrEqual(t, testx.Metric(t, reg, "db_pool_connections", map[string]string{"state": "idle"}), 1.0)
-	assert.GreaterOrEqual(t, testx.Metric(t, reg, "db_pool_acquire_wait_seconds_total", nil), 0.0)
-	assert.GreaterOrEqual(t, testx.Metric(t, reg, "db_query_duration_seconds", map[string]string{"operation": "select"}), 1.0,
-		"unnamed queries are labelled by their keyword")
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "db_query_duration_seconds", map[string]string{"operation": "widgets.broken"}))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "db_query_errors_total", map[string]string{"operation": "widgets.broken"}))
-	assert.Equal(t, -1.0, testx.Metric(t, reg, "db_query_errors_total", map[string]string{"operation": "select"}))
-	testx.LintMetrics(t, reg)
 }
 
 func TestNew_UnreachableDatabaseFailsFast(t *testing.T) {
@@ -399,24 +205,9 @@ func TestNew_UnreachableDatabaseFailsFast(t *testing.T) {
 
 	start := time.Now()
 	_, err := pgx.New(context.Background(), pgx.Config{
-		URL: "postgres://app:app@127.0.0.1:1/app?sslmode=disable", ConnectTimeout: time.Second,
+		URL: secret.New("postgres://app:app@127.0.0.1:1/app?sslmode=disable"), ConnectTimeout: time.Second,
 	}, nil)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "pgx: initial ping")
 	assert.Less(t, time.Since(start), 5*time.Second)
 	assert.NotErrorIs(t, err, context.Canceled)
-}
-
-// Boot errors that need no database: a DSN that does not parse, and a
-// password file that is not there when the pool is built.
-func TestNew_BadDSNAndMissingPasswordFile(t *testing.T) {
-	t.Parallel()
-
-	_, err := pgx.New(t.Context(), pgx.Config{URL: "postgres://app@localhost:not-a-port/app"}, nil)
-	require.ErrorContains(t, err, "pgx: parse dsn")
-
-	_, err = pgx.New(t.Context(), pgx.Config{
-		URL:          "postgres://app@localhost:5432/app",
-		PasswordFile: filepath.Join(t.TempDir(), "no-such-secret"),
-	}, nil)
-	require.ErrorContains(t, err, "DB_PASSWORD_FILE")
 }

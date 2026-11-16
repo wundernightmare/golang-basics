@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"encoding"
 	"fmt"
 	"maps"
 	"net/url"
@@ -23,10 +24,6 @@ var secretFieldName = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|
 // secretParam matches URL query parameters and keyword-DSN keys whose value
 // is a secret (?sslpassword=…, ?token=…, "host=db password=x").
 var secretParam = regexp.MustCompile(`(?i)^(.*(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|credential|sslkey|auth))$`)
-
-// rawUserinfo matches "scheme://user:password@" in a string net/url cannot
-// parse; the password runs to the last '@'.
-var rawUserinfo = regexp.MustCompile(`^([^:/?#]+://[^:@/?#]*):(.*)@`)
 
 // dsnPair matches one "key=value" of a libpq keyword/value DSN.
 var dsnPair = regexp.MustCompile(`(?i)\b(password|passwd|pwd|sslpassword)=('(?:[^'\\]|\\.)*'|\S+)`)
@@ -80,17 +77,21 @@ func isHex(s string) bool {
 //   - replaces the value of any struct field or map entry whose name looks
 //     like a secret — it contains password, secret, token, api key, private
 //     key, credential, dsn, auth, cert, keystore or passphrase; the pattern
-//     is secretFieldName — or whose field carries `secret:"true"`, with
+//     is secretFieldName, and a field is matched by its Go name and by the
+//     name it is shown under — or whose field carries `secret:"true"`, with
 //     "[redacted]" (an empty value stays empty, so "unset" remains visible);
 //     `secret:"false"` opts a field out. Such a value is replaced whole: a
 //     field named DSN shows "[redacted]", not a DSN with its password masked;
 //   - does the same for a value that is a secret by type (libs/secret's
 //     String), wherever it sits and whatever its tags say;
-//   - rewrites the password in any string that parses as a URL with
-//     userinfo (postgres://app:s3cret@host → postgres://app:xxxxx@host), any
-//     secret-looking query parameter of such a URL (?sslpassword=, ?token=),
-//     and the password pair of a libpq keyword DSN ("host=db password=x");
-//   - renders time.Duration as its string ("10s"), not nanoseconds;
+//   - rewrites, in any other string, the userinfo password of every URL in
+//     it (postgres://app:s3cret@host → postgres://app:xxxxx@host), the
+//     secret-looking query and fragment parameters of those URLs
+//     (?sslpassword=, ?token=), and the password pair of a libpq keyword DSN
+//     ("host=db password=x");
+//   - renders time.Duration as its string ("10s"), not nanoseconds, and a
+//     struct with a text form of its own (url.URL, an encoding.TextMarshaler
+//     such as netip.Addr) as that text, under the rules for strings;
 //   - names struct fields by their yaml tag, then json tag, then Go name, so
 //     the output reads like the config file the operator wrote.
 //
@@ -125,6 +126,10 @@ func redactValue(rv reflect.Value, secret bool) any {
 			return secretPlaceholder(s)
 		}
 
+		if text, ok := ownText(rv); ok {
+			return redactString(text, secret)
+		}
+
 		return redactStruct(rv, secret)
 	case reflect.Slice, reflect.Array:
 		return redactList(rv, secret)
@@ -144,6 +149,23 @@ func redactValue(rv reflect.Value, secret bool) any {
 	}
 
 	return rv.Interface()
+}
+
+// ownText returns the text form of a struct that has one — an address, a
+// prefix, a URL: taken apart field by field it shows nothing (netip.Addr has
+// no exported fields) or too much (url.URL keeps its query in RawQuery).
+func ownText(rv reflect.Value) (string, bool) {
+	if u, ok := reflect.TypeAssert[url.URL](rv); ok {
+		return u.String(), true
+	}
+
+	if m, ok := reflect.TypeAssert[encoding.TextMarshaler](rv); ok {
+		if text, err := m.MarshalText(); err == nil {
+			return string(text), true
+		}
+	}
+
+	return "", false
 }
 
 // redactList renders a slice or array; a []byte is a blob, never an
@@ -227,7 +249,7 @@ func redactStruct(rv reflect.Value, inherited bool) map[string]any {
 			continue
 		}
 
-		secret := inherited || secretFieldName.MatchString(f.Name)
+		secret := inherited || secretFieldName.MatchString(f.Name) || secretFieldName.MatchString(name)
 		switch f.Tag.Get("secret") {
 		case "true":
 			secret = true
@@ -273,14 +295,54 @@ func keyString(k reflect.Value) string {
 	return fmt.Sprint(k.Interface())
 }
 
-// redactURL masks the password of a URL with userinfo and any secret-looking
-// query parameter, and the password pair of a keyword DSN; any other string
-// is returned unchanged.
+// urlStart matches where a URL begins inside a text: a scheme and "//", or
+// a bare "//" (a reference without a scheme has an authority too).
+var urlStart = regexp.MustCompile(`(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//`)
+
+// urlEnd is what ends a URL inside a text: whitespace, a quote, a bracket.
+const urlEnd = " \t\r\n\"'`<>"
+
+// passwordMask replaces a userinfo password. Not redactedValue: a reader
+// that parses the result (net/url) rejects brackets in userinfo.
+const passwordMask = "xxxxx"
+
+// redactURL masks credentials wherever they stand in s — a config value, an
+// error's text: the userinfo password and the secret-looking query and
+// fragment parameters of every URL in it, and the password pair of a keyword
+// DSN outside them. Everything else comes back byte for byte, and a string
+// with nothing to mask is returned as it is.
 func redactURL(s string) string {
-	if strings.Contains(s, "://") {
-		return redactURLForm(s)
+	if !strings.Contains(s, "://") {
+		return redactDSN(s)
 	}
 
+	var out strings.Builder
+
+	// A string that is one URL from its first byte is a configured value,
+	// where a password may hold what would end a URL inside a text.
+	whole := strings.Count(s, "://") == 1
+
+	rest := s
+	for {
+		at := urlStart.FindStringIndex(rest)
+		if at == nil {
+			break
+		}
+
+		masked, end := redactURLAt(rest, at[0], at[1], whole && at[0] == 0 && out.Len() == 0)
+
+		out.WriteString(redactDSN(rest[:at[0]]))
+		out.WriteString(masked)
+
+		rest = rest[end:]
+	}
+
+	out.WriteString(redactDSN(rest))
+
+	return out.String()
+}
+
+func redactDSN(s string) string {
 	if strings.Contains(s, "=") && dsnPair.MatchString(s) {
 		return dsnPair.ReplaceAllString(s, "$1="+redactedValue)
 	}
@@ -288,53 +350,94 @@ func redactURL(s string) string {
 	return s
 }
 
-// redactURLForm masks the password and the secret query parameters of a
-// scheme://… string. The password placeholder is "xxxxx", not redactedValue:
-// brackets in userinfo come out of u.String() percent-encoded
-// (app:%5Bredacted%5D@host).
-func redactURLForm(s string) string {
-	u, err := url.Parse(s)
-	if err != nil {
-		if rawUserinfo.MatchString(s) {
-			// A URL net/url rejects (a bad escape, a space, several hosts)
-			// still carries its password in plain sight: mask everything
-			// between the user and the last '@' rather than show it.
-			return rawUserinfo.ReplaceAllString(s, "${1}:xxxxx@")
+// redactURLAt masks the URL of s that starts at start and whose authority
+// starts at authority, and returns it with the index in s where it ends.
+// The URL runs to the first byte of urlEnd; with whole set, its authority
+// does not stop there (a password with a space in it).
+func redactURLAt(s string, start, authority int, whole bool) (masked string, end int) {
+	stops := "/?#" + urlEnd
+	if whole {
+		stops = "/?#"
+	}
+
+	authorityEnd := len(s)
+	if i := strings.IndexAny(s[authority:], stops); i >= 0 {
+		authorityEnd = authority + i
+	}
+
+	end = len(s)
+	if i := strings.IndexAny(s[authorityEnd:], urlEnd); i >= 0 {
+		end = authorityEnd + i
+	}
+
+	host, tail := s[authority:authorityEnd], s[authorityEnd:end]
+
+	if at := strings.LastIndexByte(host, '@'); at >= 0 {
+		if user, _, has := strings.Cut(host[:at], ":"); has {
+			host = user + ":" + passwordMask + host[at:]
 		}
+	} else if at := strings.LastIndexByte(tail, '@'); at >= 0 && strings.Contains(host, ":") {
+		// "scheme://user:pa/ss@host": a password with a raw '/', '?' or '#'
+		// ends the authority early. net/url tells that from a URL with an
+		// '@' in its path — "https://host:443/pkg@1" parses, this does not.
+		if _, err := url.Parse(s[start:end]); err != nil {
+			user, _, _ := strings.Cut(host, ":")
 
-		return s
+			return s[start:authority] + user + ":" + passwordMask + redactURLTail(tail[at:]), end
+		}
 	}
 
-	if u.User == nil && u.RawQuery == "" {
-		return s
-	}
-
-	if _, has := u.User.Password(); has { // (*url.Userinfo).Password is nil-safe
-		u.User = url.UserPassword(u.User.Username(), "xxxxx")
-	}
-
-	if u.RawQuery != "" {
-		redactQuery(u)
-	}
-
-	return u.String()
+	return s[start:authority] + host + redactURLTail(tail), end
 }
 
-// redactQuery replaces the value of every secret-looking query parameter;
-// the query is re-encoded only when something changed.
-func redactQuery(u *url.URL) {
-	q := u.Query()
+// redactURLTail masks the query and the fragment of what follows an
+// authority; a fragment is treated as a query because tokens travel there in
+// that form (#access_token=…).
+func redactURLTail(tail string) string {
+	rest, fragment, hasFragment := strings.Cut(tail, "#")
+	path, query, hasQuery := strings.Cut(rest, "?")
+
+	if hasQuery {
+		path += "?" + redactRawQuery(query)
+	}
+
+	if hasFragment {
+		path += "#" + redactRawQuery(fragment)
+	}
+
+	return path
+}
+
+// redactRawQuery replaces the value of every secret-looking parameter of an
+// encoded query ("a=1&token=x") and leaves the rest of it as it was written.
+func redactRawQuery(query string) string {
+	if !strings.Contains(query, "=") {
+		return query
+	}
+
+	pairs := strings.Split(query, "&")
 	changed := false
 
-	for k := range q {
-		if secretParam.MatchString(k) {
-			q.Set(k, redactedValue)
+	for i, pair := range pairs {
+		key, value, _ := strings.Cut(pair, "=")
+		if value == "" {
+			continue
+		}
 
+		name, err := url.QueryUnescape(key)
+		if err != nil {
+			name = key
+		}
+
+		if secretParam.MatchString(name) {
+			pairs[i] = key + "=" + redactedValue
 			changed = true
 		}
 	}
 
-	if changed {
-		u.RawQuery = q.Encode()
+	if !changed {
+		return query
 	}
+
+	return strings.Join(pairs, "&")
 }

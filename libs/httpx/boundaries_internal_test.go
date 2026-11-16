@@ -151,6 +151,25 @@ func TestBucketDepth(t *testing.T) {
 	assert.Equal(t, 1, bucketDepth(0.1, 0), "never less than one request")
 }
 
+// A full table is walked for forgettable clients at most once per
+// retryAfterUnknown: between two walks a new address is shed at the price of
+// a map lookup, however many of them arrive.
+func TestRateLimiterWalksAFullTableOncePerRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	l := newRateLimiter(Config{RateLimitPerClient: 2, RateBurstPerClient: 1, RateClientsMax: 2}, prometheus.NewRegistry())
+	start := time.Now()
+
+	for _, key := range []string{"a", "b"} {
+		ok, _ := take(l.client(key, start), start)
+		require.True(t, ok)
+	}
+
+	require.Nil(t, l.client("c", start), "both slots belong to clients in debt")
+	assert.Nil(t, l.client("c", start.Add(600*time.Millisecond)), "refilled by now, but the table was walked a moment ago")
+	assert.NotNil(t, l.client("c", start.Add(retryAfterUnknown)))
+}
+
 func TestRateLimiterExistsOnlyWithALimit(t *testing.T) {
 	t.Parallel()
 
@@ -232,20 +251,23 @@ func TestSamplingCountsARecordWithoutATimeNow(t *testing.T) {
 func TestHealthDefaultsAndStaleness(t *testing.T) {
 	t.Parallel()
 
-	h := NewHealth(0, 0)
-	assert.Equal(t, defaultHealthInterval, h.interval)
-	assert.Equal(t, defaultHealthTimeout, h.timeout)
+	health := NewHealth(0, 0)
+	assert.Equal(t, defaultHealthInterval, health.interval)
+	assert.Equal(t, defaultHealthTimeout, health.timeout)
 
 	// A result is stale once it is older than two intervals plus one timeout:
 	// one missed round and the time the next may take.
-	h = NewHealth(10*time.Second, 3*time.Second)
-	h.Register("db", func(context.Context) error { return nil })
+	health = NewHealth(10*time.Second, 3*time.Second)
+	health.Register("db", func(context.Context) error { return nil })
 
-	assert.True(t, h.stale(), "never evaluated")
+	assert.True(t, health.stale(), "never evaluated")
 
-	h.results["db"] = result{checkedAt: time.Now().Add(-22 * time.Second)}
-	assert.False(t, h.stale(), "22s old, limit 23s")
+	health.results["db"] = result{checkedAt: time.Now().Add(-22 * time.Second)}
+	assert.False(t, health.stale(), "22s old, limit 23s")
 
-	h.results["db"] = result{checkedAt: time.Now().Add(-24 * time.Second)}
-	assert.True(t, h.stale(), "24s old, limit 23s")
+	health.results["db"] = result{checkedAt: time.Now().Add(-24 * time.Second)}
+	assert.True(t, health.stale(), "24s old, limit 23s")
+
+	health.checks["db"].running.Store(true)
+	assert.False(t, health.stale(), "a check that has not returned cannot be refreshed: probes keep answering from the cache")
 }

@@ -227,17 +227,51 @@ func TestHealth_ReRegisterClearsStaleSeries(t *testing.T) {
 	reg := srv.Metrics.Registry
 
 	srv.Health.Register("cache", func(context.Context) error { return errors.New("down") })
+	// A second check keeps the family gathered while the first has no series.
+	srv.Health.Register("db", func(context.Context) error { return nil }, httpx.Optional())
 	probe(srv)
 	assert.Equal(t, 0.0, testx.Metric(t, reg, "health_check_up", map[string]string{"check": "cache", "critical": "true"}))
 
 	srv.Health.Register("cache", func(context.Context) error { return errors.New("down") }, httpx.Optional())
-	assert.Equal(t, -1.0, testx.Metric(t, reg, "health_check_up", map[string]string{"check": "cache", "critical": "true"}),
-		"the critical series is gone as soon as the check is replaced")
+	// The critical series is gone as soon as the check is replaced.
+	testx.NoMetric(t, reg, "health_check_up", map[string]string{"check": "cache", "critical": "true"})
 
 	code, _ := probe(srv)
 	assert.Equal(t, http.StatusOK, code, "fresh evaluation: optional now, so degraded not unready")
 	assert.Equal(t, 0.0, testx.Metric(t, reg, "health_check_up", map[string]string{"check": "cache", "critical": "false"}))
-	assert.Len(t, series(t, reg, "health_check_up"), 1)
+	assert.Len(t, series(t, reg, "health_check_up"), 2, "one per check")
+}
+
+// The same when the check is replaced while its old version is being
+// evaluated: the result that comes back belongs to a check that is gone.
+func TestHealth_ReRegisterDuringAnEvaluationDropsItsResult(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := loggedServer(t, httpx.Config{HealthInterval: time.Hour})
+	srv.Health.SetReady(true)
+
+	entered, release := make(chan struct{}), make(chan struct{})
+
+	srv.Health.Register("cache", func(context.Context) error {
+		close(entered)
+		<-release
+
+		return errors.New("down")
+	})
+
+	probed := make(chan struct{})
+	go func() { defer close(probed); probe(srv) }()
+
+	<-entered
+	srv.Health.Register("cache", func(context.Context) error { return nil }, httpx.Optional())
+	close(release)
+	<-probed
+
+	assert.Empty(t, series(t, srv.Metrics.Registry, "health_check_up"), "no series for the check that was replaced")
+
+	code, body := probe(srv)
+	assert.Equal(t, http.StatusOK, code)
+	assert.Contains(t, body, `"status":"ready"`, "the replacement is evaluated, not answered for by its predecessor")
 }
 
 func TestHealth_StandaloneCollectorsLint(t *testing.T) {

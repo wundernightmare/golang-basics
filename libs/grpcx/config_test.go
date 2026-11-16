@@ -1,13 +1,18 @@
 package grpcx
 
 import (
+	"encoding/json"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/wundernightmare/golang-basics/libs/resilience"
@@ -97,7 +102,12 @@ func TestValidate(t *testing.T) {
 		{"empty name", func(t *TargetConfig) { t.Name = "" }, "name is empty"},
 		{"duplicate", func(t *TargetConfig) { t.Name = "b" }, "declared twice"},
 		{"address", func(t *TargetConfig) { t.Address = "" }, "address is empty"},
+		{"address: two slashes put the host into the authority", func(t *TargetConfig) { t.Address = "dns://billing.internal:443" }, "address has no endpoint"},
+		{"address: a URL, not a target", func(t *TargetConfig) { t.Address = "https://billing.internal" }, "address has no endpoint"},
+		{"address: not host:port", func(t *TargetConfig) { t.Address = "billing.internal:443:443" }, "address is not host:port"},
+		{"address: dns endpoint not host:port", func(t *TargetConfig) { t.Address = "dns:///billing.internal:" }, "address is not host:port"},
 		{"timeout", func(t *TargetConfig) { t.Timeout = -1 }, "timeout must not"},
+		{"wait_for_ready without a timeout", func(t *TargetConfig) { t.WaitForReady, t.Timeout = true, 0 }, "timeout must be > 0 with wait_for_ready"},
 		{"lb", func(t *TargetConfig) { t.LoadBalancing = "random" }, "load_balancing"},
 		{"lb empty", func(t *TargetConfig) { t.LoadBalancing = "" }, "load_balancing"},
 		{"keepalive negative", func(t *TargetConfig) { t.KeepaliveTime = -1 }, "keepalive durations"},
@@ -114,9 +124,13 @@ func TestValidate(t *testing.T) {
 		{"OK code", func(t *TargetConfig) { t.RetryCodes = []string{"OK"} }, `retry_codes: "OK"`},
 		{"bad method", func(t *TargetConfig) { t.RetryMethods = []string{"a.B/C/D"} }, "retry_methods"},
 		{"empty method", func(t *TargetConfig) { t.RetryMethods = []string{"/"} }, "retry_methods"},
+		{"method twice", func(t *TargetConfig) { t.RetryMethods = []string{"a.B/C", "/a.B/C"} }, `retry_methods: "/a.B/C" is listed twice`},
+		{"service twice", func(t *TargetConfig) { t.RetryMethods = []string{"a.B", "a.B/"} }, `retry_methods: "a.B/" is listed twice`},
 		{"tokens negative", func(t *TargetConfig) { t.RetryThrottleMaxTokens = -1 }, "retry_throttle_max_tokens"},
 		{"tokens above gRPC's cap", func(t *TargetConfig) { t.RetryThrottleMaxTokens = 1001 }, "retry_throttle_max_tokens"},
 		{"token ratio", func(t *TargetConfig) { t.RetryThrottleTokenRatio = 0 }, "retry_throttle_token_ratio"},
+		{"token ratio NaN", func(t *TargetConfig) { t.RetryThrottleTokenRatio = math.NaN() }, "retry_throttle_token_ratio"},
+		{"token ratio infinite", func(t *TargetConfig) { t.RetryThrottleTokenRatio = math.Inf(1) }, "retry_throttle_token_ratio"},
 		{"breaker", func(t *TargetConfig) { t.Breaker.MinRequests = 0 }, "breaker: min_requests"},
 	} {
 		c := valid()
@@ -137,9 +151,21 @@ func TestValidate(t *testing.T) {
 	edge.RetryMaxAttempts = 5
 	edge.RetryMaxDelay = edge.RetryBaseDelay
 	edge.RetryThrottleMaxTokens = 1000
-	edge.RetryMethods = []string{"a.B", "a.B/C", "/a.B/C"}
+	edge.RetryMethods = []string{"a.B", "a.B/C", "/a.B/D"}
 
 	require.NoError(t, cfg.Validate())
+
+	// Every form of target gRPC resolves itself, and a bare host.
+	for _, address := range []string{
+		"billing.internal:443", "billing.internal", "127.0.0.1:443", "[::1]:443", ":443",
+		"dns:///billing.internal:443", "dns:billing.internal", "dns://10.0.0.53/billing.internal:443",
+		"passthrough:///anything at all", "unix:///run/billing.sock", "unix:billing.sock",
+		"mesh:///billing", // a scheme whose resolver comes with grpc.WithResolvers
+	} {
+		cfg = valid()
+		cfg.Targets[0].Address = address
+		require.NoError(t, cfg.Validate(), address)
+	}
 
 	// Zero means disabled, never invalid: without retries their knobs are free.
 	cfg = DefaultConfig(TargetConfig{Name: "a", Address: "x", LoadBalancing: PickFirst})
@@ -175,7 +201,7 @@ func TestServiceConfigJSON(t *testing.T) {
 		{
 			"defaults", nil,
 			`{"loadBalancingConfig":[{"round_robin":{}}],
-			  "methodConfig":[{"name":[{}],"timeout":"5s","retryPolicy":{
+			  "methodConfig":[{"name":[{}],"retryPolicy":{
 			    "maxAttempts":3,"initialBackoff":"0.1s","maxBackoff":"5s","backoffMultiplier":2,"retryableStatusCodes":["UNAVAILABLE"]}}],
 			  "retryThrottling":{"maxTokens":10,"tokenRatio":0.1}}`,
 		},
@@ -189,27 +215,26 @@ func TestServiceConfigJSON(t *testing.T) {
 		{
 			"one attempt is no retry policy, and no throttling",
 			func(t *TargetConfig) { t.RetryMaxAttempts, t.WaitForReady = 1, true },
-			`{"loadBalancingConfig":[{"round_robin":{}}],"methodConfig":[{"name":[{}],"timeout":"5s","waitForReady":true}]}`,
+			`{"loadBalancingConfig":[{"round_robin":{}}],"methodConfig":[{"name":[{}],"waitForReady":true}]}`,
 		},
 		{
 			"no throttling",
 			func(t *TargetConfig) { t.RetryThrottleMaxTokens, t.RetryMaxAttempts = 0, 2 },
 			`{"loadBalancingConfig":[{"round_robin":{}}],
-			  "methodConfig":[{"name":[{}],"timeout":"5s","retryPolicy":{
+			  "methodConfig":[{"name":[{}],"retryPolicy":{
 			    "maxAttempts":2,"initialBackoff":"0.1s","maxBackoff":"5s","backoffMultiplier":2,"retryableStatusCodes":["UNAVAILABLE"]}}]}`,
 		},
 		{
-			"retry methods get their own entry; the default one keeps the timeout",
+			"retry methods get their own entry",
 			func(t *TargetConfig) {
-				t.Timeout = 1500 * time.Millisecond
 				t.RetryMethods = []string{"a.B", "/a.C/Get"}
 				t.RetryCodes = []string{"UNAVAILABLE", "ABORTED"}
 				t.RetryThrottleMaxTokens, t.RetryThrottleTokenRatio = 100, 0.5
 			},
 			`{"loadBalancingConfig":[{"round_robin":{}}],
 			  "methodConfig":[
-			    {"name":[{}],"timeout":"1.5s"},
-			    {"name":[{"service":"a.B"},{"service":"a.C","method":"Get"}],"timeout":"1.5s","retryPolicy":{
+			    {"name":[{}]},
+			    {"name":[{"service":"a.B"},{"service":"a.C","method":"Get"}],"retryPolicy":{
 			      "maxAttempts":3,"initialBackoff":"0.1s","maxBackoff":"5s","backoffMultiplier":2,"retryableStatusCodes":["UNAVAILABLE","ABORTED"]}}],
 			  "retryThrottling":{"maxTokens":100,"tokenRatio":0.5}}`,
 		},
@@ -222,7 +247,19 @@ func TestServiceConfigJSON(t *testing.T) {
 		got, err := serviceConfigJSON(&target)
 		require.NoError(t, err, tc.name)
 		assert.JSONEq(t, tc.want, got, tc.name)
+		requireAccepted(t, got)
 	}
+}
+
+// requireAccepted fails unless grpc-go takes serviceConfig as a channel's
+// default: it parses the document when the channel is built.
+func requireAccepted(t *testing.T, serviceConfig string) {
+	t.Helper()
+
+	conn, err := grpc.NewClient("passthrough:///unused",
+		grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultServiceConfig(serviceConfig))
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
 }
 
 func TestKeepalive(t *testing.T) {
@@ -244,14 +281,39 @@ func TestProtoDuration(t *testing.T) {
 	t.Parallel()
 
 	for d, want := range map[time.Duration]string{
-		5 * time.Second:        "5s",
-		100 * time.Millisecond: "0.1s",
-		time.Millisecond:       "0.001s",
-		90 * time.Minute:       "5400s",
-		time.Nanosecond:        "0.000000001s",
+		5 * time.Second:         "5s",
+		100 * time.Millisecond:  "0.1s",
+		time.Millisecond:        "0.001s",
+		4544 * time.Millisecond: "4.544s",
+		90 * time.Minute:        "5400s",
+		time.Nanosecond:         "0.000000001s",
+		math.MaxInt64:           "9223372036.854775807s",
 	} {
 		assert.Equal(t, want, protoDuration(d))
 	}
+}
+
+// grpc-go refuses a duration with more than nine fractional digits, and a
+// config is free to name any: every whole millisecond up to a minute goes
+// through its parser, one method config each.
+func TestProtoDuration_EveryMillisecondIsAcceptedByGRPC(t *testing.T) {
+	t.Parallel()
+
+	var methods []methodConfig
+
+	for d := time.Millisecond; d <= time.Minute; d += time.Millisecond {
+		target := DefaultTarget("a", "x")
+		target.RetryBaseDelay, target.RetryMaxDelay = d, d
+
+		methods = append(methods, methodConfig{
+			Name:        []methodName{{Service: "s" + strconv.FormatInt(int64(d), 10)}},
+			RetryPolicy: target.retryPolicy(),
+		})
+	}
+
+	raw, err := json.Marshal(serviceConfig{MethodConfig: methods})
+	require.NoError(t, err)
+	requireAccepted(t, string(raw))
 }
 
 func TestSplitMethod(t *testing.T) {

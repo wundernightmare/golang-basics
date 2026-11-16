@@ -33,20 +33,68 @@ the `TASKS_` prefix the keys are:
 
 | Env | YAML | Default | |
 | --- | --- | --- | --- |
-| `TASKS_DATABASE_URL` | `url` | — | full DSN; wins over the discrete fields |
+| `TASKS_DATABASE_URL` | `url` | — | full DSN; wins over the discrete fields. A `secret.String`: it carries the password, and printing the config does not print it |
 | `TASKS_DB_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_NAME` / `_SSLMODE` | `host` … `sslmode` | `localhost` / `5432` / `app` / `app` / `app` / `disable` | |
-| `TASKS_DB_PASSWORD_FILE` | `password_file` | — | a mounted secret, read once at boot; wins over `DB_PASSWORD` and the URL's password (trailing newline dropped) |
-| `TASKS_DB_MAX_CONNS` / `_MIN_CONNS` | `max_conns` / `min_conns` | `10` / `0` | pool size |
+| `TASKS_DB_PASSWORD_FILE` | `password_file` | — | a mounted secret, read for every new connection — a rotated mount reaches the connections opened after it, no restart; wins over `DB_PASSWORD` and the URL's password (trailing newline dropped) |
+| `TASKS_DB_MAX_CONNS` / `_MIN_CONNS` | `max_conns` / `min_conns` | `10` / `0` | pool size; in a hand-built `Config` a zero `MaxConns` is pgxpool's own default |
 | `TASKS_DB_MAX_CONN_LIFETIME` / `_MAX_CONN_IDLE` | … | `1h` / `30m` | recycling |
 | `TASKS_DB_CONNECT_TIMEOUT` | `connect_timeout` | `5s` | dial + boot ping (zero → 5s, never "expire at once") |
 | `TASKS_DB_STATEMENT_TIMEOUT` | `statement_timeout` | `30s` | Postgres cancels a statement running longer |
 | `TASKS_DB_LOCK_TIMEOUT` | `lock_timeout` | `5s` | … or waiting longer for a lock |
 | `TASKS_DB_IDLE_IN_TX_TIMEOUT` | `idle_in_transaction_session_timeout` | `60s` | … and ends a session left idle inside a transaction |
+| `TASKS_DB_OP_TIMEOUT` | `op_timeout` | `0` (none) | client-side deadline of one call — see [Deadlines](#deadlines) |
+
+`DB_HOST` takes an IPv6 literal with or without brackets.
+
+`Config.Validate()` checks, without connecting, everything `New` would refuse
+on the config alone: a DSN pgx cannot parse (host, port, `sslmode`, TLS
+files), negative sizes and durations, `DB_MIN_CONNS` above `DB_MAX_CONNS`, a
+password file that is missing or empty. `LoadConfig` / `LoadConfigFrom` and
+`New` run it; the error never contains the password.
 
 The three timeouts are sent as run-time parameters on every connection
 (`SHOW statement_timeout` reports them); zero leaves the server's setting.
 They are the database's own guard rails against a runaway query, a migration
 queued behind a long lock, or a code path that forgot to commit.
+
+## Deadlines
+
+The session timeouts are enforced by the server, so they bound only what the
+server sees. Two waits it does not see last as long as the context of the
+call: waiting for a free connection when the pool is exhausted, and waiting
+for an answer over a network path that went dead after the connection was
+made. A request context usually has a deadline; a worker's, a relay's or
+`context.Background()` does not.
+
+`DB_OP_TIMEOUT` is the client-side bound for those. When set, every call on
+`db.Conn(ctx)` — in a unit of work or outside — runs under that deadline on
+top of the context's own: getting a connection, the statement, and reading
+its result (until `Rows` are closed or read to the end, a `Row` is scanned,
+`BatchResults` are closed). `InTx` puts the same deadline on its begin, which
+is what waits for a connection, and on its commit; the unit as a whole is not
+bounded by it. Keep it above `DB_STATEMENT_TIMEOUT`, so that the server's
+cancellation answers first: its error names the cause and the connection
+stays usable, while a client-side deadline that fires mid-statement closes
+the connection.
+
+| Call | Client-side bound |
+| --- | --- |
+| `db.Conn(ctx).…`, begin and commit of `db.InTx` | `ctx`, and `DB_OP_TIMEOUT` when set |
+| `db.Pool().…`, `pgx.Migrate` | `ctx` only — the raw pool |
+| opening a connection | `DB_CONNECT_TIMEOUT` |
+| `db.ReadyCheck()` | 2s of its own |
+| rollback of a failed unit | 5s of its own, detached from a cancelled `ctx` |
+
+The default is no `DB_OP_TIMEOUT`: such calls are then bounded by their
+context alone.
+
+After `db.Close()` every call fails with an error for which
+`errors.Is(err, pgx.ErrClosed)` holds — through `Conn`, `InTx`, `ReadyCheck`
+or the raw pool.
+
+`ReadyCheck` needs a connection of the pool. When its ping times out with
+every connection in use it reports `postgres pool exhausted (N of N
+connections in use)`, otherwise `postgres unreachable`.
 
 ## Migrations
 
@@ -61,11 +109,26 @@ the root of `fsys`, in version order:
   re-reads `schema_migrations`, so replicas booting together serialise and
   each version is applied exactly once; a transaction-scoped lock cannot leak
   from a crashed runner and works behind a transaction-pooling proxy;
+- a runner that finds the lock taken waits for as long as its `ctx` allows:
+  `lock_timeout` and `statement_timeout` are lifted for that wait and put
+  back for the migration;
 - a misnamed `.sql` file or a duplicate version is an error, not a skip.
 
 Forward-only: never edit a shipped file, add the next number.
 `CREATE INDEX CONCURRENTLY` cannot run in a transaction and does not belong
 here.
+
+The migration itself runs under the pool's guard rails, each statement of the
+file on its own: one that runs longer than `DB_STATEMENT_TIMEOUT` (30s by
+default) is cancelled with `57014`, one that waits for a table lock longer
+than `DB_LOCK_TIMEOUT` with `55P03`, and the run stops there. A statement
+that needs longer says so in its file — the setting lasts until the end of
+that migration's transaction:
+
+```sql
+SET LOCAL statement_timeout = '10min';
+CREATE INDEX tasks_owner_idx ON tasks (owner_id);
+```
 
 ## Unit of work
 
@@ -140,8 +203,8 @@ a weaker guarantee. `ReadOnly()` on a nested call is not enforced.
 
 ## Behind PgBouncer
 
-`pgbouncer_test.go` runs the library through a real PgBouncer (1.24, built
-from `testdata/pgbouncer/Dockerfile`) in front of the shared Postgres, in
+`integration/pgbouncer_test.go` runs the library through a real PgBouncer (1.24, built
+from `integration/testdata/pgbouncer/Dockerfile`) in front of the shared Postgres, in
 transaction and in session pooling, with PgBouncer's defaults and with a tuned
 configuration. What it found, per setting:
 
@@ -189,12 +252,31 @@ mode (it forbids multi-statement transactions, so `InTx` cannot work there).
 | --- | --- |
 | `db_pool_connections{state}`, `db_pool_max_connections` | connections idle / in_use / constructing, and the ceiling |
 | `db_pool_acquires_waited_total`, `db_pool_acquire_wait_seconds_total`, `db_pool_acquires_canceled_total` | acquires that found no idle connection, time spent acquiring, acquires given up — "exhausted" is waited acquires climbing while in_use sits at the max |
-| `db_query_duration_seconds{operation}` | Exec / Query / QueryRow latency |
+| `db_query_duration_seconds{operation}` | Exec / Query / QueryRow / SendBatch / CopyFrom latency; a batch is one observation, from `SendBatch` to the `Close` of its results |
 | `db_query_errors_total{operation}` | of those, the failed ones |
 
 `operation` is the name set with `pgx.WithOperation(ctx, "tasks.create")`, or
-the statement's leading keyword (`select`, `insert`, `begin`, …) — never the
-SQL text, so the label set stays bounded. The metrics tracer runs beside
+the statement's leading keyword (`select`, `insert`, …; `other` outside the
+list), `batch` for a `SendBatch`, `copy` for a `CopyFrom` — never the SQL
+text, so the label set stays bounded. `begin`, `commit`, `rollback`,
+`savepoint` and `release` are always under their keyword: `InTx` sends them
+with the caller's context, and under its name they would count as that
+operation's queries. A call that never got a connection is in neither query
+metric; one that gave up waiting for it shows in
+`db_pool_acquires_canceled_total`.
+
+**Two pools in one process** (primary and replica) have the same metric
+names, and registering the second on the same registry fails. Wrap the
+registry for each of them — both, not only the second, or the label sets
+differ and the registration fails just the same:
+
+```go
+for name, db := range map[string]*pgx.DB{"primary": primary, "replica": replica} {
+    prometheus.WrapRegistererWith(prometheus.Labels{"pool": name}, srv.Metrics.Registry).MustRegister(db.Collectors()...)
+}
+```
+
+The metrics tracer runs beside
 otelpgx (a client span per query, child of the caller's span) through pgx's
 `multitracer`. The names follow the workspace's metrics contract
 ([docs/METRICS.md](../../docs/METRICS.md)); what the server itself sees
@@ -202,16 +284,24 @@ otelpgx (a client span per query, child of the caller's span) through pgx's
 
 ## Tests
 
-`go test ./...` — container-backed (one Postgres per test binary, a fresh
-schema per test via `search_path`), skipped under `-short`: migration runner
-(fresh / re-run / concurrent runners / failing file), session timeouts
-applied and enforced, spans and metrics, promlint; the unit of work — commit,
-rollback on error / panic / cancelled context, joined and savepoint nesting,
-nested options refused, `AfterCommit` ordering and a panicking hook, a real
-serialization conflict (retried, and surfacing on `COMMIT` without retry), a
-real deadlock retried, a pool of one connection, `statement_timeout` and
-`idle_in_transaction_session_timeout` ending a unit, two pools kept apart —
-and its chaos tests through Toxiproxy in front of the same Postgres: the
-connection lost mid-unit, the reply to `COMMIT` lost, a deadline on a slow
-link. `pgbouncer_test.go` runs the library behind PgBouncer in both
-pooling modes — see [Behind PgBouncer](#behind-pgbouncer).
+`go test ./...` here needs no Docker and pulls none into `go.mod`:
+configuration and `Validate`, the DSN, migration files, the metric labels,
+`DB_OP_TIMEOUT` / `DB_CONNECT_TIMEOUT` / the readiness timeout against a
+server that accepts and never answers, `ErrClosed`, two pools on one
+registry.
+
+Everything that needs a database is the module next door,
+[`integration/`](integration) — container-backed (one Postgres per test
+binary, a fresh schema per test via `search_path`), skipped under `-short`:
+migration runner (fresh / re-run / concurrent runners / a runner outwaiting
+the session timeouts / failing file), session timeouts applied and enforced,
+password file re-read, spans and metrics, promlint, an exhausted pool; the
+unit of work — commit, rollback on error / panic / cancelled context, joined
+and savepoint nesting, nested options refused, `AfterCommit` ordering and a
+panicking hook, a real serialization conflict (retried, and surfacing on
+`COMMIT` without retry), a real deadlock retried, a pool of one connection,
+`statement_timeout` and `idle_in_transaction_session_timeout` ending a unit,
+two pools kept apart — and its chaos tests through Toxiproxy in front of the
+same Postgres: the connection lost mid-unit, the reply to `COMMIT` lost, a
+deadline on a slow link. `pgbouncer_test.go` there runs the library behind
+PgBouncer in both pooling modes — see [Behind PgBouncer](#behind-pgbouncer).

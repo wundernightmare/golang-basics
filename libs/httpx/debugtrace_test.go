@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/wundernightmare/golang-basics/libs/httpx"
 	"github.com/wundernightmare/golang-basics/libs/secret"
@@ -173,6 +174,7 @@ func TestBindTraceTrigger(t *testing.T) {
 	t.Parallel()
 
 	assert.False(t, httpx.BindTraceTrigger(slog.New(slog.DiscardHandler), &triggers{}), "not a logger of NewLogger")
+	assert.False(t, httpx.BindTraceTrigger(nil, &triggers{}), "no logger at all")
 
 	log, buf := bufferedLogger("json")
 	child := log.With("component", "x")
@@ -254,7 +256,7 @@ func (forcedSampler) ShouldSample(p sdktrace.SamplingParameters) sdktrace.Sampli
 	}
 }
 
-func tracedDebugServer(t *testing.T, cfg httpx.Config) (*httpx.Server, *testx.LogBuffer, *bool, *trace.SpanContext) {
+func tracedDebugServer(t *testing.T, cfg httpx.Config, opts ...httpx.Option) (*httpx.Server, *testx.LogBuffer, *bool, *trace.SpanContext) {
 	t.Helper()
 
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(forcedSampler{}))
@@ -266,7 +268,9 @@ func tracedDebugServer(t *testing.T, cfg httpx.Config) (*httpx.Server, *testx.Lo
 		seen      trace.SpanContext
 	)
 
-	srv, buf := loggedServer(t, cfg, httpx.WithTracerProvider(provider), httpx.WithPropagator(propagation.TraceContext{}))
+	opts = append([]httpx.Option{httpx.WithTracerProvider(provider), httpx.WithPropagator(propagation.TraceContext{})}, opts...)
+
+	srv, buf := loggedServer(t, cfg, opts...)
 	srv.Mux().HandleFunc("GET /work", func(w http.ResponseWriter, r *http.Request) {
 		debugging = httpx.DebugLogging(r.Context())
 		seen = trace.SpanContextFromContext(r.Context())
@@ -307,9 +311,12 @@ func TestServer_TheDebugTokenForcesTheTrace(t *testing.T) {
 	assert.NotNil(t, buf.Find(t, map[string]any{"msg": "detail", "trace_id": seen.TraceID().String()}))
 }
 
-// A request that arrives inside a debug trace is logged from debug up; the
-// mark of an unsampled trace, or a sampled trace without it, changes nothing.
-func TestServer_FollowsADebugTraceStartedUpstream(t *testing.T) {
+// A server told to trust the mark logs a request that arrives inside a debug
+// trace from debug up; the mark of an unsampled trace, or a sampled trace
+// without it, changes nothing. Any other server drops the mark before its
+// span starts — with tracing on or off — so it neither follows it nor hands
+// it to the services behind.
+func TestServer_FollowsADebugTraceOnlyWhenTrusted(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -318,18 +325,34 @@ func TestServer_FollowsADebugTraceStartedUpstream(t *testing.T) {
 		mark            = httpx.DebugTraceStateKey + "=" + httpx.DebugTraceStateValue
 	)
 
-	srv, buf, debugging, _ := tracedDebugServer(t, httpx.Config{})
+	for name, opts := range map[string][]httpx.Option{
+		"tracing on":  nil,
+		"tracing off": {httpx.WithTracerProvider(noop.NewTracerProvider())},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	work(srv, "Traceparent", sampledParent)
-	assert.False(t, *debugging, "a sampled trace is not a debug trace")
+			srv, buf, debugging, seen := tracedDebugServer(t, httpx.Config{}, opts...)
 
-	work(srv, "Traceparent", unsampledParent, "Tracestate", mark)
-	assert.False(t, *debugging)
-	assert.Nil(t, buf.Find(t, map[string]any{"msg": "detail"}))
+			work(srv, "Traceparent", sampledParent, "Tracestate", "vendor=x,"+mark)
+			assert.False(t, *debugging, "the mark of a caller nobody vouched for")
+			assert.Equal(t, "vendor=x", seen.TraceState().String(), "only the mark is dropped")
+			assert.Nil(t, buf.Find(t, map[string]any{"msg": "detail"}))
 
-	work(srv, "Traceparent", sampledParent, "Tracestate", mark)
-	assert.True(t, *debugging)
-	assert.NotNil(t, buf.Find(t, map[string]any{"msg": "detail", "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"}))
+			srv, buf, debugging, _ = tracedDebugServer(t, httpx.Config{DebugTraceTrustRemote: true}, opts...)
+
+			work(srv, "Traceparent", sampledParent)
+			assert.False(t, *debugging, "a sampled trace is not a debug trace")
+
+			work(srv, "Traceparent", unsampledParent, "Tracestate", mark)
+			assert.False(t, *debugging)
+			assert.Nil(t, buf.Find(t, map[string]any{"msg": "detail"}))
+
+			work(srv, "Traceparent", sampledParent, "Tracestate", mark)
+			assert.True(t, *debugging)
+			assert.NotNil(t, buf.Find(t, map[string]any{"msg": "detail", "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"}))
+		})
+	}
 }
 
 // A subject under investigation: its unsampled trace is handed to the

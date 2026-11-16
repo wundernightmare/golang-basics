@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,10 +55,11 @@ const maxCachedKeys = 4096
 //     key, credential, authorization, …) or is listed in LogConfig.RedactKeys
 //     is logged as "[redacted]" — strings, errors and composite values;
 //     numbers, booleans, durations and times pass, they carry no secret;
-//   - a string (or an error's text) that is a URL with credentials, or a
-//     keyword DSN with a password, has them masked wherever it appears;
+//     the same holds for every attribute of a group with such a name;
+//   - a string (or an error's text) with a URL that carries credentials, or
+//     a keyword DSN with a password, has them masked wherever it appears;
 //   - headers and string maps get the same treatment entry by entry, structs
-//     go through [Redact].
+//     and lists go through [Redact].
 //
 // The message itself is not rewritten: do not format secrets into it.
 type attrRewriter struct {
@@ -100,7 +102,9 @@ func (rw *attrRewriter) replace(groups []string, attr slog.Attr) slog.Attr {
 	builtin := len(groups) == 0 && (attr.Key == slog.TimeKey || attr.Key == slog.LevelKey || attr.Key == slog.MessageKey)
 
 	if !builtin {
-		attr.Value = rw.mask(attr.Key, attr.Value)
+		// A group under a secret name: slog hands over its leaves one by
+		// one, each with the names of the groups above it.
+		attr.Value = rw.mask(attr.Key, attr.Value, slices.ContainsFunc(groups, rw.isSensitive))
 	}
 
 	if rw.ecs && len(groups) == 0 {
@@ -117,7 +121,8 @@ func (rw *attrRewriter) replace(groups []string, attr slog.Attr) slog.Attr {
 }
 
 // mask returns v with private data removed, or v itself when there is none.
-func (rw *attrRewriter) mask(key string, v slog.Value) slog.Value {
+// under is true when v sits under a key that names a secret already.
+func (rw *attrRewriter) mask(key string, v slog.Value, under bool) slog.Value {
 	switch v.Kind() {
 	case slog.KindString:
 		s := v.String()
@@ -125,7 +130,7 @@ func (rw *attrRewriter) mask(key string, v slog.Value) slog.Value {
 			return v
 		}
 
-		if rw.isSensitive(key) {
+		if under || rw.isSensitive(key) {
 			return slog.StringValue(redactedValue)
 		}
 
@@ -135,19 +140,19 @@ func (rw *attrRewriter) mask(key string, v slog.Value) slog.Value {
 
 		return v
 	case slog.KindAny:
-		return rw.maskAny(key, v)
+		return rw.maskAny(key, v, under)
 	default: // numbers, booleans, durations, times; groups arrive attribute by attribute
 		return v
 	}
 }
 
-func (rw *attrRewriter) maskAny(key string, v slog.Value) slog.Value {
+func (rw *attrRewriter) maskAny(key string, v slog.Value, under bool) slog.Value {
 	anyValue := v.Any()
 	if anyValue == nil {
 		return v
 	}
 
-	if rw.isSensitive(key) {
+	if under || rw.isSensitive(key) {
 		return slog.StringValue(redactedValue)
 	}
 
@@ -179,7 +184,7 @@ func (rw *attrRewriter) maskAny(key string, v slog.Value) slog.Value {
 	case map[string]string:
 		out := make(map[string]string, len(typed))
 		for name, value := range typed {
-			out[name] = rw.mask(name, slog.StringValue(value)).String()
+			out[name] = rw.mask(name, slog.StringValue(value), false).String()
 		}
 
 		return slog.AnyValue(out)
@@ -187,8 +192,14 @@ func (rw *attrRewriter) maskAny(key string, v slog.Value) slog.Value {
 		return v // the type renders itself; taking it apart field by field would change what is logged
 	}
 
-	if kind := reflect.Indirect(reflect.ValueOf(anyValue)).Kind(); kind == reflect.Struct || kind == reflect.Map {
+	switch rv := reflect.Indirect(reflect.ValueOf(anyValue)); rv.Kind() {
+	case reflect.Struct, reflect.Map:
 		return slog.AnyValue(Redact(anyValue))
+	case reflect.Slice, reflect.Array:
+		if rv.Type().Elem().Kind() != reflect.Uint8 { // bytes are a blob, not a list of values
+			return slog.AnyValue(Redact(anyValue))
+		}
+	default: // a scalar slog had no kind for
 	}
 
 	return v

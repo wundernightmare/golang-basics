@@ -5,12 +5,19 @@ change: a fixed-size **L1** inside the process — a store the service
 chooses: [`offheap`](offheap)
 ([`fastcache`](https://github.com/VictoriaMetrics/fastcache)),
 [`onheap`](onheap) ([`freecache`](https://github.com/coocood/freecache)), or
-its own — in front of a shared **L2** (Valkey, through [`libs/valkey`](../valkey)), in front of the
-source of truth (a loader).
+its own — in front of a shared **L2** (`tiercache.Remote`: Valkey, through
+[`libs/valkey`](../valkey)), in front of the source of truth (a loader).
 
 It is assembled from tested parts — the store, the client, singleflight, the
 TTL jitter and the tombstone scheme — and owns only the envelope and the read
 rules.
+
+The module requires neither `libs/valkey` nor a Valkey client: `Remote` is an
+interface that `*valkey.Cache` happens to implement, and a service that runs
+on L1 alone links none of it. The worked example of a codec,
+[`credential`](credential), is a module of its own for the same reason — it
+is what needs `google.golang.org/protobuf` — and so is the suite that needs
+Docker, [`integration`](integration).
 
 ## Usage
 
@@ -77,8 +84,28 @@ on read and overwritten by the ring buffer in due course.
 | `≥ HardTTL`, or absent | ignores it: L2, then the loader — one lookup per key however many callers, each honouring its own context |
 | … and the loader fails | returns it for `StaleIfError` more (off by default); beyond that, the loader's error |
 
-`SoftTTL == HardTTL` (the default) is plain cache-aside. Deadlines carry the
-±10% jitter of `valkey.Jitter`. `ErrNotFound` is not cached.
+`SoftTTL == HardTTL` (the default) is plain cache-aside: the two deadlines of
+an entry are one instant, nothing is served stale or refreshed behind.
+Deadlines carry the ±10% jitter of `resilience.Jitter`. `ErrNotFound` is not
+cached, and is not an invalidation either: it takes the key out of L1 and L2
+and leaves `tiercache_invalidations_total` alone.
+
+**The shared lookup.** It is detached from the cancellation of the caller
+that started it and keeps that caller's deadline. A caller that leaves fails
+nobody. A deadline that ends the lookup ends it for the caller it belonged
+to: one that joined and still has time starts the next lookup, bounded by its
+own deadline, instead of returning somebody else's `DeadlineExceeded`.
+
+**A panic** in the loader, the codec or the remote is the failure of that
+lookup: every caller waiting for it gets an error for which
+`errors.Is(err, tiercache.ErrPanic)` holds, the stack is logged at error
+level, and a background refresh that panicked counts as a failed refresh. The
+lookup runs in a goroutine of the cache, so without this no `recover` of the
+caller's — the recovery middleware of `httpx` included — would keep the
+process alive.
+
+**Close** cancels the lookups and refreshes in flight, waits for them and
+empties L1. Afterwards `Get` and `Invalidate` return `tiercache.ErrClosed`.
 
 ### Clocks
 
@@ -113,14 +140,22 @@ deadline (`VALKEY_OP_TIMEOUT`), the circuit breaker of
 [`libs/resilience`](../resilience) skips L2 for `breaker.open_timeout` once
 `breaker.failure_ratio` of its recent calls failed, and the loader answers. What is
 lost meanwhile is sharing between processes and invalidation, both bounded
-by the TTL; when the subscription comes back, L1 starts over.
+by the TTL; when the subscription comes back, L1 starts over. While L2 is
+skipped a loaded value goes into L1 without L2 being asked whether a
+tombstone refuses it: there is nobody to ask.
+
+The breaker counts L2's failures, not the callers': an L2 call that fails
+because the lookup's own context was done — its caller cancelled, or out of
+time before the call was made — is not counted, so requests that arrive with
+their budget spent do not switch a healthy L2 off. An L2 call that times out
+on its own deadline is counted.
 
 ## Invalidation
 
 `Invalidate(key)` drops the key from this process's L1, replaces it in Valkey
 with a tombstone (which refuses the fills of readers that loaded the old row —
 the scheme of `libs/valkey`), and publishes it on `tc:<name>:inv` so every
-other process drops it from its L1. Four races are closed and tested:
+other process drops it from its L1. Five races are closed and tested:
 
 - a load that straddles the commit is not written to L2 (tombstone) nor L1;
 - a value read from L2 just before the invalidation is not copied into L1
@@ -130,7 +165,16 @@ other process drops it from its L1. Four races are closed and tested:
   began before it (a miss or a background refresh still holding the old
   row): once `Invalidate` has returned, the process reads its own write. The
   callers already waiting for that lookup get its answer — they asked before
-  the write.
+  the write;
+- a read of this process that finds the old value in L2 while the tombstone
+  is still on its way there does not leave it in L1: `Invalidate` drops the
+  key once more after the tombstone is written. That holds with
+  `DisableInvalidation` and when the publish fails, where no message of the
+  process's own would have done it.
+
+An invalidation costs the lookups in flight at that moment their L1 fill —
+those of its own key, and of the keys that share its epoch (one key in 256):
+they are answered, and loaded again at the next read.
 
 Pub/Sub is at most once: each time the subscription is re-established, L1 is
 emptied. For `TombstoneTTL` after an invalidation the key is not cached at
@@ -138,8 +182,6 @@ all — reads go to the loader. `DisableInvalidation` runs on TTLs alone.
 
 ## Memory
 
-| | |
-| --- | --- |
 `MaxBytes` is the capacity, fixed at construction; the second argument of
 `New` is what L1 is made of. The service says it in code — nothing is chosen
 for it:
@@ -191,7 +233,7 @@ func TestStore(t *testing.T) {
 ```
 
 The suite is itself checked: a thirty-line map behind a mutex passes it, and
-each of eight ways of breaking that map fails it
+each of nine ways of breaking that map fails it
 (`storetest/storetest_test.go`).
 
 What the cache promises about memory and allocations — a fixed budget,
@@ -214,7 +256,9 @@ Valkey 8.1 or newer is required (`SET … IFEQ`).
 ## Configuration
 
 `tiercache.Config` carries `env` and `yaml` tags; a service embeds one per
-cache with an `envPrefix`.
+cache with an `envPrefix`. `Config.Validate()` answers before anything is
+built: it judges the configuration with the defaults below in place of the
+fields left at zero, exactly as `New` does, and `New` calls it.
 
 | Env | YAML | Default | |
 | --- | --- | --- | --- |
@@ -241,14 +285,17 @@ Listed in [docs/METRICS.md](../../docs/METRICS.md); every series carries
 
 | Layer | File | What it proves |
 | --- | --- | --- |
-| Unit | `internal_test.go`, `credential/` | envelope and codec (table, fuzz, byte-compatibility with `google.golang.org/protobuf`), config |
-| Unit, virtual time | `cache_test.go` | every read rule and race above against an in-memory L2 (`testing/synctest`: no sleeps), an entry written by a clock ahead of or behind this one, the allocation budget of a fresh read, the L1 capacity bound, what a key may be and where it travels |
-| Store contract | `storetest/`, run by `offheap/` and `onheap/` | each line of the `Store` contract against each store at several capacities, under concurrency; the entry limits against the libraries; and the suite against eight deliberately broken stores |
-| Both stores | `cache_test.go` (`TestTheSuiteHoldsOnTheHeapStore`) | the whole cache suite — this table, at the layer being run — once more on `onheap`: the test binary runs itself with `TIERCACHE_TEST_STORE=onheap` |
-| Integration | `integration_test.go` | the same cache on a real Valkey: TTLs, `SET NX` / `IFEQ`, tombstones, Pub/Sub, values from 0 bytes to 4 MiB |
-| Chaos | `chaos_test.go` | Valkey down, frozen, slow, black-holed, resetting, cutting replies mid-value: every read answers correctly within a bound, and L2 is picked up again |
-| Soak | `chaos_test.go` | two processes reading and invalidating under flapping faults: no failed read, no foreign or uncommitted value, convergence afterwards |
-| Property | `property_test.go`, `internal_test.go` | for any history of commits, invalidations, passing time and reads across two processes: a read never fails, never returns another key's value or an uncommitted version, never one older than the last invalidation or than the hard TTL allows; the codec and the envelope round-trip any value (rapid, virtual time) |
-| Mutation | `.gremlins.yaml`, nightly | whether the unit tests notice a deadline or a size limit off by one (`just mutate libs/tiercache` from the repo root) |
+| Unit | `internal_test.go` | the envelope (table, fuzz), config, what an invalidation costs the lookups of other keys |
+| Unit, its own module | [`credential/`](credential) | the example codec: table, fuzz, property, byte-compatibility with `google.golang.org/protobuf` |
+| Unit, virtual time | `cache_test.go` | every read rule and race above against an in-memory L2 (`testing/synctest`: no sleeps), an entry written by a clock ahead of or behind this one, a panic in a lookup, what the breaker counts, what `Close` ends and waits for, the allocation budget of a fresh read, the L1 capacity bound, what a key may be and where it travels |
+| Store contract | `storetest/`, run by `offheap/` and `onheap/` | each line of the `Store` contract against each store at several capacities, under concurrency; the entry limits against the libraries; and the suite against nine deliberately broken stores |
+| Both stores | `cache_test.go` (`TestTheSuiteHoldsOnTheHeapStore`) | the whole unit suite of the cache once more on `onheap`: the test binary runs itself with `TIERCACHE_TEST_STORE=onheap` |
+| Integration | [`integration/`](integration) | the same cache on a real Valkey: TTLs, `SET NX` / `IFEQ`, tombstones, Pub/Sub, values from 0 bytes to 4 MiB |
+| Chaos | `integration/` (`chaos_test.go`) | Valkey down, frozen, slow, black-holed, resetting, cutting replies mid-value: every read answers correctly within a bound, and L2 is picked up again |
+| Soak | `integration/` (`chaos_test.go`) | two processes reading and invalidating under flapping faults: no failed read, no foreign or uncommitted value, convergence afterwards |
+| Property | `property_test.go`, `internal_test.go` | for any history of commits, invalidations, passing time and reads across two processes: a read never fails, never returns another key's value or an uncommitted version, never one older than the last invalidation or than the hard TTL allows; the envelope round-trips any value (rapid, virtual time) |
+| Mutation | `.gremlins.yaml`, nightly | whether the unit tests notice a deadline or a size limit off by one (`just mutate libs/tiercache` from the repo root; `libs/tiercache/credential` for the codec) |
 
-Integration, chaos and soak need Docker and skip under `-short`.
+Integration, chaos and soak are the module `libs/tiercache/integration`
+(`just mod libs/tiercache/integration test`): they need Docker and skip under
+`-short`. This module's own tests need neither.

@@ -58,8 +58,9 @@ type Config struct {
 	// 0 = none: a 3xx response is returned to the caller as is).
 	MaxRedirects int `yaml:"max_redirects"`
 	// AllowCrossHostRedirects follows a redirect to another host (or an
-	// https→http downgrade). Off by default: the per-target policy is keyed
-	// on the host the caller chose, and a redirect must not escape it.
+	// https→http downgrade). Off by default. A policy belongs to a target
+	// name, not to a host: every hop of a redirect is sent and counted under
+	// the target the caller named, whatever host it goes to.
 	AllowCrossHostRedirects bool `yaml:"allow_cross_host_redirects"`
 
 	// UserAgent is sent when the request has no User-Agent of its own
@@ -82,7 +83,7 @@ type TargetConfig struct {
 	Timeout time.Duration `yaml:"timeout"`
 
 	// RateLimit is the sustained requests per second, fractions allowed
-	// (default 0 = no rate limit).
+	// (default 0 = no rate limit). It must be finite.
 	RateLimit float64 `yaml:"rate_limit"`
 	// RateBurst is the token-bucket depth (0 = max(1, ceil(RateLimit))).
 	RateBurst int `yaml:"rate_burst"`

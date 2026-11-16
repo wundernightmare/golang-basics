@@ -89,10 +89,24 @@ func LoadMigrations(fsys fs.FS) ([]Migration, error) {
 //   - every transaction first takes pg_advisory_xact_lock on a key derived
 //     from the current schema and then re-reads schema_migrations, so
 //     concurrent runners (replicas booting together) serialise: the second
-//     one waits, then finds the version applied and skips it. A transaction-
-//     scoped lock is released by commit / rollback / a dropped connection, so
-//     a crashed runner cannot leave the lock held, and it works through a
-//     transaction-pooling proxy where a session lock would not.
+//     one waits, then finds the version applied and skips it. The wait is
+//     bounded by ctx alone — the session's lock_timeout and statement_timeout
+//     are lifted for it, since the holder may be running a long migration. A
+//     transaction-scoped lock is released by commit / rollback / a dropped
+//     connection, so a crashed runner cannot leave the lock held, and it
+//     works through a transaction-pooling proxy where a session lock would
+//     not.
+//
+// The migration itself runs under the pool's session timeouts
+// (DB_STATEMENT_TIMEOUT, DB_LOCK_TIMEOUT), each statement of the file on its
+// own. A statement that needs longer — a backfill, an index on a large table
+// — says so in its file, where the setting lasts until the end of that
+// migration's transaction:
+//
+//	SET LOCAL statement_timeout = '10min';
+//
+// Migrate takes the raw pool: DB_OP_TIMEOUT does not apply, ctx is the only
+// client-side bound.
 //
 // Migrations are forward-only; there is no "down". A migration that must not
 // run in a transaction (CREATE INDEX CONCURRENTLY) does not belong here.
@@ -130,6 +144,32 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, log *slog.Logg
 // maps the key to the bigint the advisory lock functions take.
 const lockSQL = `SELECT pg_advisory_xact_lock(hashtextextended('golang-basics/pgx.Migrate:' || coalesce(current_schema(), ''), 0))`
 
+// lock takes the migration lock, waiting for as long as ctx allows: both
+// session timeouts that would end the wait are switched off for it and put
+// back for what follows in the transaction. statement_timeout is one of them
+// because the wait is a statement.
+func lock(ctx context.Context, tx pgx.Tx) error {
+	var lockTimeout, statementTimeout string
+	if err := tx.QueryRow(ctx, `SELECT current_setting('lock_timeout'), current_setting('statement_timeout')`).
+		Scan(&lockTimeout, &statementTimeout); err != nil {
+		return err
+	}
+
+	const setSQL = `SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)`
+
+	if _, err := tx.Exec(ctx, setSQL, "0", "0"); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, lockSQL); err != nil {
+		return err
+	}
+
+	_, err := tx.Exec(ctx, setSQL, lockTimeout, statementTimeout)
+
+	return err
+}
+
 const ensureTableSQL = `CREATE TABLE IF NOT EXISTS schema_migrations (
     version    BIGINT PRIMARY KEY,
     name       TEXT        NOT NULL,
@@ -160,7 +200,7 @@ func applyOne(ctx context.Context, pool *pgxpool.Pool, mig Migration) (ran bool,
 		}
 	}()
 
-	if _, err := tx.Exec(ctx, lockSQL); err != nil {
+	if err := lock(ctx, tx); err != nil {
 		return false, fmt.Errorf("pgx: migration %s: lock: %w", mig.File, err)
 	}
 

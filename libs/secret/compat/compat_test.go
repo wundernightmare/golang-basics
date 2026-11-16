@@ -38,6 +38,28 @@ func TestString_YAML(t *testing.T) {
 	out, err := yaml.Marshal(cfg)
 	require.NoError(t, err)
 	assert.YAMLEq(t, "host: db\npassword: '"+redacted+"'\n", string(out), "set → redacted, unset + omitempty → absent")
+
+	require.NoError(t, yaml.Unmarshal([]byte("password: 012345\ntoken: true\n"), &cfg))
+	assert.Equal(t, "012345", cfg.Password.Expose(), "an unquoted scalar is its text, not the number it resolves to")
+	assert.Equal(t, "true", cfg.Token.Expose())
+}
+
+// Without KnownFields(true) a mapping decoded into a struct with no exported
+// fields is no error, and the secret would come out unset.
+func TestString_YAML_RefusesWhatIsNotAScalar(t *testing.T) {
+	t.Parallel()
+
+	for name, document := range map[string]string{
+		"mapping":  "password:\n  value: " + hunter + "\n",
+		"sequence": "password: [" + hunter + "]\n",
+	} {
+		cfg := config{Password: secret.New("previous")}
+
+		err := yaml.Unmarshal([]byte(document), &cfg)
+		require.ErrorIs(t, err, secret.ErrDecode, name)
+		assert.NotContains(t, err.Error(), hunter, name)
+		assert.Equal(t, "previous", cfg.Password.Expose(), name)
+	}
 }
 
 func TestString_Env(t *testing.T) {

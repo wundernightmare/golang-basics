@@ -13,15 +13,16 @@
 //
 // # What grpc-go does (configured through the service config)
 //
-// The default deadline of a call, retries with jittered exponential backoff
-// for the listed status codes (and the server's pushback), retry throttling,
-// load balancing, keepalive pings, TLS.
+// Retries with jittered exponential backoff for the listed status codes (and
+// the server's pushback), retry throttling, load balancing, keepalive pings,
+// TLS.
 //
 // # What this package adds
 //
 // A circuit breaker per target (libs/resilience — the one the HTTP client
-// uses), Prometheus metrics under the workspace's metrics contract, and
-// otelgrpc tracing with an explicit provider.
+// uses), the default deadline of a call, Prometheus metrics under the
+// workspace's metrics contract, and otelgrpc tracing with an explicit
+// provider.
 //
 // # What counts as a failure
 //
@@ -29,6 +30,7 @@
 // DataLoss — the caller's own deadline included, so a deadline shorter than
 // the target's timeout cannot hide an outage. Every other status means the
 // dependency answered (NotFound, InvalidArgument, ResourceExhausted, …), and
-// the caller cancelling says nothing. It sees a call once, after gRPC's own
-// retries; a stream when it ends.
+// the caller cancelling says nothing — and neither does a call an interceptor
+// of the caller's refused with [LocalRejection]. It sees a call once, after
+// gRPC's own retries; a stream when it ends.
 package grpcx

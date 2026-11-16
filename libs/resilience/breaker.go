@@ -53,6 +53,12 @@ const (
 	OutcomeIgnored
 )
 
+// ErrOpen is the error of a request the breaker rejected: [Breaker.Do]
+// returns it, and a client that reports the rejection with an error of its
+// own wraps it, so errors.Is(err, resilience.ErrOpen) asks "was the circuit
+// open?" of any of them.
+var ErrOpen = errors.New("resilience: circuit open")
+
 // Ticket is what [Breaker.Allow] hands out and [Breaker.Record] takes back:
 // the generation the request was admitted in, and whether it holds a probe
 // slot. Results from an older generation are ignored.
@@ -84,7 +90,10 @@ type snapshot struct {
 // outbound clients').
 type BreakerConfig struct {
 	// FailureRatio trips the breaker when failures / requests in the window
-	// reach it, in (0, 1]; 0 = no breaker.
+	// reach it, in (0, 1]. 0 = no breaker: [BreakerConfig.Validate] accepts
+	// it and [NewBreaker] returns nil. An owner that cannot run without a
+	// breaker, or that reads 0 as "use my default", decides that itself
+	// before it gets here.
 	FailureRatio float64 `env:"FAILURE_RATIO" yaml:"failure_ratio"`
 	// MinRequests is the least requests in the window before the ratio is
 	// evaluated (≥ 1 with a breaker).
@@ -112,12 +121,15 @@ func DefaultBreakerConfig() BreakerConfig {
 	}
 }
 
-// Validate reports every problem in c, by its yaml key within the breaker's
-// block (the owner prefixes its own name); nil when there is none. With
-// FailureRatio 0 (no breaker) the other fields are free.
-func (c BreakerConfig) Validate() []error {
-	if c.FailureRatio < 0 || c.FailureRatio > 1 {
-		return []error{errors.New("failure_ratio must be in [0, 1]")}
+// Validate reports every problem in c — joined with [errors.Join], each
+// named by its yaml key within the breaker's block (the owner prefixes its
+// own name) — or nil when there is none. With FailureRatio 0 (no breaker)
+// the other fields are free.
+func (c BreakerConfig) Validate() error {
+	// Written as "not inside" so that NaN, for which every comparison is
+	// false, is rejected too.
+	if !(c.FailureRatio >= 0 && c.FailureRatio <= 1) {
+		return errors.New("failure_ratio must be in [0, 1]")
 	}
 
 	if c.FailureRatio == 0 {
@@ -138,7 +150,7 @@ func (c BreakerConfig) Validate() []error {
 		errs = append(errs, errors.New("half_open_probes must be ≥ 1"))
 	}
 
-	return errs
+	return errors.Join(errs...)
 }
 
 // Breaker is a circuit breaker: closed / open / half-open, lock-free on the
@@ -149,6 +161,9 @@ func (c BreakerConfig) Validate() []error {
 //	if !ok { /* reject: the dependency is down */ }
 //	// … send …
 //	b.Record(grant, resilience.OutcomeFailure) // exactly once per granted ticket
+//
+// [Breaker.Do] is the two calls in one, and keeps the "exactly once" when
+// the request panics.
 type Breaker struct {
 	cur atomic.Pointer[snapshot]
 
@@ -162,15 +177,16 @@ type Breaker struct {
 	maxProbes   int
 	now         func() time.Time
 	onChange    func(from, to State)
+
+	mirrorMu sync.Mutex // serialises Mirror's read of the state with its set
 }
 
 // NewBreaker builds a breaker from cfg, which must pass
 // [BreakerConfig.Validate]; nil (admit everything) when cfg.FailureRatio is
-// 0. now is the clock (time.Now); onChange, if not nil, is called after every
-// state transition — concurrently, possibly out of order. An owner that
-// mirrors the state somewhere (a gauge) therefore writes [Breaker.State],
-// read under a lock of its own, rather than to: whichever writes last has
-// then read a state at least as new as every earlier writer's.
+// 0 (or below). now is the clock (time.Now) and must not be nil; onChange,
+// if not nil, is called after every state transition — concurrently,
+// possibly out of order. An owner that mirrors the state somewhere (a gauge)
+// therefore does not write to: it calls [Breaker.Mirror].
 func NewBreaker(cfg BreakerConfig, now func() time.Time, onChange func(from, to State)) *Breaker {
 	if cfg.FailureRatio <= 0 {
 		return nil
@@ -197,6 +213,43 @@ func (b *Breaker) State() State {
 	}
 
 	return b.cur.Load().state
+}
+
+// Mirror calls set with the current state, one call at a time: of several
+// concurrent calls, whichever sets last has read a state at least as new as
+// every earlier one's, so what set writes to (a gauge) ends on the breaker's
+// latest state. It is what an onChange hook calls instead of trusting its to
+// argument, and what sets the initial value. A nil breaker is closed.
+func (b *Breaker) Mirror(set func(State)) {
+	if b == nil {
+		set(StateClosed)
+		return
+	}
+
+	b.mirrorMu.Lock()
+	defer b.mirrorMu.Unlock()
+
+	set(b.State())
+}
+
+// Do runs fn if the breaker admits a request and records the [Outcome] fn
+// returns; it returns [ErrOpen], without calling fn, when the breaker
+// rejects. If fn does not return — it panics, or its goroutine exits — the
+// request is recorded as [OutcomeFailure] and the panic continues to the
+// caller: a half-open probe never keeps its slot. A nil breaker runs fn.
+func (b *Breaker) Do(fn func() Outcome) error {
+	t, ok := b.Allow()
+	if !ok {
+		return ErrOpen
+	}
+
+	result := OutcomeFailure
+
+	defer func() { b.Record(t, result) }()
+
+	result = fn()
+
+	return nil
 }
 
 // Allow admits a request, returning its ticket, or reports false when the
@@ -236,7 +289,9 @@ func (b *Breaker) Allow() (Ticket, bool) {
 }
 
 // Record reports how the request admitted with t ended. Every granted ticket
-// must be recorded exactly once: an unrecorded probe keeps its half-open slot.
+// must be recorded exactly once: an unrecorded probe keeps its half-open slot
+// for good, and half-open then admits nothing more. [Breaker.Do] records on
+// every path out of the request.
 func (b *Breaker) Record(t Ticket, result Outcome) {
 	if b == nil {
 		return
@@ -263,6 +318,13 @@ func (b *Breaker) Record(t Ticket, result Outcome) {
 
 	now := b.now()
 	b.mu.Lock()
+	// The state may have moved on since s was loaded: a newer generation
+	// that already counts in the window keeps it.
+	if b.winGen > s.gen {
+		b.mu.Unlock()
+		return
+	}
+
 	if b.winGen != s.gen {
 		b.win.reset()
 		b.winGen = s.gen

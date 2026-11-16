@@ -196,7 +196,6 @@ func TestConfigValidate_ReportsEveryProblemAndAppliesDefaults(t *testing.T) {
 	assert.Equal(t, "json", cfg.LogFormat)
 	assert.NotEmpty(t, cfg.Service)
 	assert.Equal(t, 30*time.Second, cfg.RuntimeMemoryLimitRefresh)
-	assert.Equal(t, 10*time.Minute, cfg.DiagMemoryCooldown)
 	assert.Equal(t, 10*time.Second, cfg.DiagFlightMinAge)
 	assert.Equal(t, int64(8<<20), cfg.DiagFlightMaxBytes)
 
@@ -210,6 +209,26 @@ func TestConfigValidate_ReportsEveryProblemAndAppliesDefaults(t *testing.T) {
 	assert.Equal(t, 7*time.Second, cfg.DiagMemoryCooldown)
 	assert.Equal(t, 7*time.Second, cfg.DiagFlightMinAge)
 	assert.Equal(t, int64(7), cfg.DiagFlightMaxBytes)
+}
+
+// An explicit zero is kept where zero is a setting of its own; for any other
+// key it is "not set" and takes the default, whichever way it was written.
+func TestLoadConfig_ExplicitZero(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := httpx.LoadConfigFrom("", map[string]string{
+		"ADMIN_INSECURE":        "true",
+		"HTTP_SHUTDOWN_DELAY":   "0s",
+		"HTTP_SLOW_REQUEST":     "0s",
+		"DIAG_MEMORY_COOLDOWN":  "0s",
+		"HTTP_SHUTDOWN_TIMEOUT": "0s",
+	})
+	require.NoError(t, err)
+
+	assert.Zero(t, cfg.ShutdownDelay, "no delay")
+	assert.Zero(t, cfg.SlowRequest, "no slow-request warning")
+	assert.Zero(t, cfg.DiagMemoryCooldown, "no cooldown")
+	assert.Equal(t, 10*time.Second, cfg.ShutdownTimeout, "a drain without a budget is not a setting")
 }
 
 // A hand-built config and a loaded one agree on every default: there is one
@@ -231,6 +250,7 @@ func TestConfigValidate_AHandBuiltConfigGetsTheLoadedDefaults(t *testing.T) {
 	assert.Zero(t, built.LogSampleInitial, "no sampling")
 	assert.Zero(t, built.LogSampleThereafter)
 	assert.Zero(t, built.DiagFlightCooldown)
+	assert.Zero(t, built.DiagMemoryCooldown, "no cooldown")
 
 	worker := httpx.Config{AdminAddr: "127.0.0.1:0"}
 	require.NoError(t, worker.Validate())
@@ -239,7 +259,7 @@ func TestConfigValidate_AHandBuiltConfigGetsTheLoadedDefaults(t *testing.T) {
 	built.RequestTimeout, built.RequestTimeoutMin = loaded.RequestTimeout, loaded.RequestTimeoutMin
 	built.ShutdownDelay, built.SlowRequest = loaded.ShutdownDelay, loaded.SlowRequest
 	built.LogSampleInitial, built.LogSampleThereafter = loaded.LogSampleInitial, loaded.LogSampleThereafter
-	built.DiagFlightCooldown = loaded.DiagFlightCooldown
+	built.DiagFlightCooldown, built.DiagMemoryCooldown = loaded.DiagFlightCooldown, loaded.DiagMemoryCooldown
 
 	assert.Equal(t, loaded, built)
 }
@@ -363,11 +383,15 @@ func TestLoadYAML_EnvDefaultsWithoutFile(t *testing.T) {
 	t.Parallel()
 
 	var cfg serviceConfig
+
+	cfg.AdminAddr, cfg.DB.MaxConns = ":9082", 3 // the service's own defaults for two lib fields
+
 	require.NoError(t, httpx.LoadYAMLFrom("", envPrefix, map[string]string{}, &cfg))
 	assert.Equal(t, ":8080", cfg.Addr)
 	assert.Equal(t, 4, cfg.Workers)
 	assert.Equal(t, "postgres://localhost/app", cfg.DB.DSN)
-	assert.Equal(t, 10, cfg.DB.MaxConns)
+	assert.Equal(t, ":9082", cfg.AdminAddr, "what the service preset is its default: the tag does not replace it")
+	assert.Equal(t, 3, cfg.DB.MaxConns)
 }
 
 func TestLoadYAML_Errors(t *testing.T) {
@@ -389,6 +413,14 @@ func TestLoadYAML_Errors(t *testing.T) {
 
 		err := httpx.LoadYAMLFrom(writeYAML(t, "db:\n  max_con: 3\n"), envPrefix, map[string]string{}, &cfg)
 		require.ErrorContains(t, err, "max_con")
+	})
+	t.Run("a second document", func(t *testing.T) {
+		t.Parallel()
+
+		var cfg sampleConfig
+
+		err := httpx.LoadYAMLFrom(writeYAML(t, "workers: 1\n---\nworkers: 2\n"), envPrefix, map[string]string{}, &cfg)
+		require.ErrorContains(t, err, "one YAML document", "what it says would be dropped without a word")
 	})
 	t.Run("wrong type", func(t *testing.T) {
 		t.Parallel()

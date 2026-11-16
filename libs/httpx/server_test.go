@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,7 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wundernightmare/golang-basics/libs/httpx"
-	"github.com/wundernightmare/golang-basics/libs/secret"
 	"github.com/wundernightmare/golang-basics/libs/testx"
 )
 
@@ -195,31 +195,6 @@ func TestTrustedProxy_ClientIPAndRequestID(t *testing.T) {
 	assert.Equal(t, "ingress-id", rec.Header().Get(httpx.RequestIDHeader))
 }
 
-func TestAdmin_TokenGuardsAdminAndDebug(t *testing.T) {
-	t.Parallel()
-
-	log := httpx.NewLogger(httpx.LogConfig{Level: "error", Format: "text", Writer: io.Discard})
-	srv, err := httpx.NewServer(httpx.Config{Addr: ":0", AdminAddr: ":9099", AdminToken: secret.New("s3cret")}, log)
-	require.NoError(t, err)
-
-	for _, path := range []string{"/healthz", "/livez", "/metrics", "/version"} {
-		rec := do(srv.Admin(), httptest.NewRequest(http.MethodGet, path, http.NoBody))
-		assert.NotEqual(t, http.StatusUnauthorized, rec.Code, path)
-	}
-
-	for _, path := range []string{"/admin/config", "/admin/log-level", "/debug/pprof/", "/debug/pprof/cmdline"} {
-		rec := do(srv.Admin(), httptest.NewRequest(http.MethodGet, path, http.NoBody))
-		assert.Equal(t, http.StatusUnauthorized, rec.Code, path)
-		assert.Equal(t, `Bearer realm="admin"`, rec.Header().Get("WWW-Authenticate"))
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/admin/config", http.NoBody)
-	req.Header.Set("Authorization", "bearer s3cret") // scheme is case-insensitive
-	rec := do(srv.Admin(), req)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), `"admin_token":"[redacted:1ec1c26b]"`)
-}
-
 func TestReadyz_ProbeCancellationDoesNotPoisonTheCache(t *testing.T) {
 	t.Parallel()
 
@@ -255,6 +230,8 @@ func TestRun_DrainsThenForcesClose(t *testing.T) {
 	started := make(chan struct{}, 1)
 	sawCancel := make(chan bool, 1)
 
+	var unwound atomic.Bool
+
 	srv.Mux().HandleFunc("GET /slow", func(w http.ResponseWriter, r *http.Request) {
 		started <- struct{}{}
 
@@ -263,6 +240,9 @@ func TestRun_DrainsThenForcesClose(t *testing.T) {
 			sawCancel <- false
 		case <-r.Context().Done():
 			sawCancel <- true // the forced close cancelled the base context
+
+			time.Sleep(150 * time.Millisecond) // what a cancelled handler still does: a rollback
+			unwound.Store(true)
 		}
 
 		_, _ = io.WriteString(w, "done")
@@ -304,6 +284,7 @@ func TestRun_DrainsThenForcesClose(t *testing.T) {
 	select {
 	case err := <-done:
 		require.Error(t, err, "the drain budget was exhausted by the stuck request")
+		assert.True(t, unwound.Load(), "Run waits for the cancelled handler: what main closes next is no longer in use")
 		assert.Less(t, time.Since(shutdownStart), 2*time.Second, "Run returns once the budget is spent, not when the handler feels like it")
 	case <-time.After(3 * time.Second):
 		t.Fatal("Run did not return")

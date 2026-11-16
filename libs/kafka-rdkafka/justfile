@@ -1,4 +1,4 @@
-# kafka-rdkafka justfile — the rdkafka Kafka provider (runs the libs/kafka conformance suite)
+# kafka-rdkafka justfile — the librdkafka Kafka provider (its broker-backed suite is libs/kafka-rdkafka/integration)
 #
 # One of the per-module justfiles; every module has the same recipes (plus
 # release/run for services), so `just each <recipe>` from the root works

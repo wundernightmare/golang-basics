@@ -2,6 +2,8 @@ package containers
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	tcvalkey "github.com/testcontainers/testcontainers-go/modules/valkey"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"go.uber.org/goleak"
 
 	"github.com/wundernightmare/golang-basics/libs/testx"
 )
@@ -65,15 +68,17 @@ var (
 	s3store  shared[S3Store]
 )
 
-// Main terminates the shared containers after the package's tests have run.
-// Wire it once per package that uses them:
+// Main terminates the shared containers after the package's tests have run,
+// then checks for leaked goroutines as testx.Main does (opts are its goleak
+// ignores). Wire it once per package that uses the containers:
 //
 //	func TestMain(m *testing.M) { os.Exit(containers.Main(m)) }
 //
-// Without it the containers are still reaped by testcontainers' Ryuk when the
-// process exits; Main makes the teardown explicit and Ryuk-independent (the
-// GitLab integration job runs with Ryuk disabled).
-func Main(m *testing.M) int {
+// The teardown does not depend on testcontainers' Ryuk, which the GitLab
+// integration job and rootless podman run without. It runs only when m.Run
+// returns: a test binary that panics, is killed or runs into -timeout leaves
+// its containers to Ryuk, and without Ryuk they stay until removed by hand.
+func Main(m *testing.M, opts ...goleak.Option) int {
 	code := m.Run()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -84,8 +89,12 @@ func Main(m *testing.M) int {
 	terms = append(terms, toxi.terminate) // last: it fronts the others
 
 	for _, term := range terms {
-		if term != nil {
-			_ = term(ctx)
+		if term == nil {
+			continue
+		}
+
+		if err := term(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "containers: a container was not removed: %v\n", err)
 		}
 	}
 
@@ -94,11 +103,13 @@ func Main(m *testing.M) int {
 	}
 
 	// After the containers are gone, nothing the tests started may still run.
-	return testx.CheckLeaks()
+	return testx.CheckLeaks(opts...)
 }
 
 // Postgres returns the DSN of the package's shared Postgres, starting it on
-// first use. Skips under -short and, outside CI, when Docker is unavailable.
+// first use. Skips under -short and — unless CI is set to a non-empty value —
+// on a machine whose container runtime does not answer; a container that
+// does not start on a runtime that answers fails the test.
 func Postgres(tb testing.TB) string {
 	tb.Helper()
 
@@ -229,6 +240,11 @@ func (f *fixtureSet) terminators() []func(context.Context) error {
 // under -short, required in CI, terminated by [Main]. start returns the
 // value tests use (an address, a struct of them) and the container.
 //
+// start reports a failure by returning the error, together with the container
+// if one was created: that is what gets the container removed and the start
+// retried. A start that fails the test itself (require, t.Fatal) fails every
+// later caller of the fixture and leaves its container behind.
+//
 // The name identifies the fixture within the test binary; asking for it again
 // returns the same value. The container is reachable for [ProxyTo] through
 // [FixtureContainer].
@@ -291,9 +307,8 @@ func HostPort(tb testing.TB, c testcontainers.Container, port string) string {
 	return mappedHostPort(tb, c, port)
 }
 
-// use starts the container once (three attempts: a container runtime under
-// load can stall an inspect call during a concurrent start) and applies the
-// skip/fail policy for every caller.
+// use starts the container once and applies the skip/fail policy for every
+// caller.
 func use[V any](tb testing.TB, s *shared[V], name string,
 	start func(context.Context) (V, testcontainers.Container, error),
 ) V {
@@ -303,8 +318,33 @@ func use[V any](tb testing.TB, s *shared[V], name string,
 		tb.Skip("skipping container-backed test in -short mode")
 	}
 
+	return useIn(tb, s, name, start, inCI(), providerHealth)
+}
+
+// inCI reads CI as scripts/cover.sh does: set and empty is not CI.
+func inCI() bool { return os.Getenv("CI") != "" }
+
+// errStartDidNotReturn is what every later caller of a fixture gets when its
+// starter left through t.Fatal, require or a panic instead of returning.
+var errStartDidNotReturn = errors.New("the start function did not return (it must return its error, not fail the test)")
+
+// useIn is use with its environment passed in: whether this is CI, and how to
+// ask the container runtime whether it is there at all. Three attempts: a
+// container runtime under load can stall an inspect call during a concurrent
+// start.
+func useIn[V any](tb testing.TB, s *shared[V], name string,
+	start func(context.Context) (V, testcontainers.Container, error),
+	inCI bool, runtimeHealth func(context.Context) error,
+) V {
+	tb.Helper()
+
 	s.once.Do(func() {
 		ctx := context.Background()
+		// sync.Once counts a start that left through runtime.Goexit or a
+		// panic as done: without this the callers after it would get the
+		// zero value as if the fixture had started.
+		s.err = errStartDidNotReturn
+
 		for attempt := 1; attempt <= 3; attempt++ {
 			s.value, s.container, s.err = start(ctx)
 			if s.err == nil {
@@ -326,15 +366,49 @@ func use[V any](tb testing.TB, s *shared[V], name string,
 		}
 	})
 
-	if s.err != nil {
-		if _, inCI := os.LookupEnv("CI"); inCI {
-			tb.Fatalf("%s container must start in CI: %v", name, s.err)
-		}
-
-		tb.Skipf("could not start %s container (docker unavailable?): %v", name, s.err)
+	if s.err == nil {
+		return s.value
 	}
 
+	if inCI {
+		tb.Fatalf("%s container must start in CI: %v", name, s.err)
+	}
+
+	// A machine without a container runtime skips; a runtime that is there
+	// and did not start the container is a broken fixture — a wait strategy
+	// that no longer matches, an image that does not pull — and a skip would
+	// report it as a green run of no tests.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := runtimeHealth(ctx); err != nil {
+		tb.Skipf("no container runtime to start %s on: %v", name, err)
+	}
+
+	tb.Fatalf("%s container did not start on a healthy container runtime: %v", name, s.err)
+
 	return s.value
+}
+
+// providerHealth asks the container runtime testcontainers would use whether
+// it answers. A panic counts as "it does not": without a reachable daemon
+// testcontainers-go v0.45.0 panics while building its client
+// (core.MustExtractDockerSocket) — its own SkipIfProviderIsNotHealthy
+// recovers for the same reason, and takes *testing.T where this package
+// takes testing.TB.
+func providerHealth(ctx context.Context) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("container runtime: %v", r)
+		}
+	}()
+
+	provider, err := testcontainers.ProviderDefault.GetProvider()
+	if err != nil {
+		return err
+	}
+
+	return provider.Health(ctx) // closes the provider's client itself
 }
 
 // terminator removes a container without waiting for it to shut down: a

@@ -157,6 +157,7 @@ func TestValidateRejects(t *testing.T) {
 		"compact sizes":           {map[string]string{"INGEST_COMPACT_FETCH_CONCURRENCY": "0"}, "COMPACT_PART_BYTES"},
 		"compact compression":     {map[string]string{"INGEST_COMPACT_COMPRESSION": "lz4"}, "COMPACT_COMPRESSION"},
 		"no admin token":          {map[string]string{"INGEST_ADMIN_TOKEN": ""}, "ADMIN_TOKEN"},
+		"collector as a URL":      {map[string]string{"INGEST_OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318"}, "OTEL_EXPORTER_OTLP_ENDPOINT"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

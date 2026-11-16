@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -177,6 +178,30 @@ func TestString_JSON(t *testing.T) {
 	assert.JSONEq(t, `{"direct":"`+redacted+`","pointer":"`+redacted+`","unset":""}`, string(out))
 
 	require.Error(t, json.Unmarshal([]byte(`{"password":{"value":"x"}}`), &cfg), "only a JSON string is a secret")
+}
+
+// The YAML libraries are compat's dependencies; here the method is driven the
+// way they drive it — with a function that decodes the node into a target.
+func TestString_UnmarshalYAML(t *testing.T) {
+	t.Parallel()
+
+	got := secret.New("previous")
+
+	require.NoError(t, got.UnmarshalYAML(func(target any) error {
+		text, ok := target.(*string)
+		require.True(t, ok, "the node is asked for as text, so 012345 is not read as a number")
+
+		*text = hunter
+
+		return nil
+	}))
+	assert.Equal(t, hunter, got.Expose())
+
+	err := got.UnmarshalYAML(func(any) error { return errors.New("cannot unmarshal: value: " + hunter) })
+	require.EqualError(t, err, "secret: cannot decode into secret.String: not a YAML scalar",
+		"the library's error may quote the document, so it is not passed on")
+	require.ErrorIs(t, err, secret.ErrDecode)
+	assert.Equal(t, hunter, got.Expose(), "a refused node leaves the secret as it was")
 }
 
 func TestString_Flag(t *testing.T) {

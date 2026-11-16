@@ -1,10 +1,9 @@
 package storetest_test
 
 import (
-	"os"
 	"testing"
 
-	"github.com/wundernightmare/golang-basics/libs/testx"
+	"go.uber.org/goleak"
 )
 
-func TestMain(m *testing.M) { os.Exit(testx.Main(m)) }
+func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }

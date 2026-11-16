@@ -19,7 +19,13 @@
 //	HardTTL ≤ age            ignored: L2, then the loader       (one lookup per key)
 //	  … and the source fails served for StaleIfError more       (off by default)
 //
-// SoftTTL == HardTTL is plain cache-aside.
+// SoftTTL == HardTTL is plain cache-aside: nothing is served stale.
+//
+// Concurrent callers of one key share one lookup. It outlives the caller
+// that started it when that one cancels, and ends at that caller's deadline;
+// a caller that joined and has time left then starts another. A panic of the
+// loader, the codec or the remote fails the lookup with [ErrPanic] instead
+// of ending the process.
 //
 // # Running without L2
 //
@@ -38,7 +44,8 @@
 // most once: every time the subscription is re-established, L1 is emptied.
 // A read that begins after an invalidation was applied here never joins a
 // lookup that began before it: once Invalidate has returned, this process
-// reads its own write.
+// reads its own write — with the subscription disabled and with a failed
+// publish too.
 // Without [Cache.Invalidate] the cache is still correct up to HardTTL.
 //
 // # Keys

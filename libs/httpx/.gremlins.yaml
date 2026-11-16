@@ -25,8 +25,9 @@
 #   - NOT COVERED here is a gremlins limitation, not untested code: Go's
 #     cover profile has no block for a `case` expression or a const.
 #   - Known survivors, all equivalent or cosmetic — anything else is a gap:
-#       config.go      `<= 0` / `< 0` on a field withDefaults already replaced
-#                      when zero (zero never reaches the check)
+#       config.go      `< 0` on a field withDefaults already replaced when
+#                      zero (zero never reaches the check, so `<= 0` rejects
+#                      the same configs)
 #       logformat.go   the sensitivity cache and its cap (speed only);
 #                      built-in keys and struct/map detection, which end in
 #                      the same output for every value the tests can build
@@ -34,7 +35,12 @@
 #       loglevel.go    gen++                       (compared for equality only)
 #       middleware.go  configured < asked          (equal: the same budget either way)
 #                      routeOf: the method strip   (the host strip removes it as well)
+#                      routeOf: `i > 0` on the host strip (a pattern that
+#                      starts with "/" has no host: cutting at 0 cuts nothing)
 #       problem.go     map capacity hints; RecordError(nil) is a no-op
+#       redact.go      redactURLAt: `at >= 0` on the '@' of the authority
+#                      (at 0 there is no user and so no password) and of the
+#                      tail (the tail starts with '/', '?' or '#', never '@')
 #       sampling.go    n <= initial                (n == initial also passes the modulo)
 #                      level+128 in slot()         (which slot, not whether it is sampled)
 #       subjects.go    `<` in sort                 (subjects are unique)

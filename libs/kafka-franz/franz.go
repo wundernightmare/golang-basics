@@ -73,6 +73,12 @@ type producer struct {
 // Send implements kafka.ProducerClient: TryProduce (never block on a full
 // buffer inside the client) retried while the buffer is full, then the
 // promise awaited.
+//
+// The record is produced with a context that ctx cannot cancel. franz-go
+// fails every buffered record of a partition when the context of the batch's
+// first record ends, so a caller that gave up would fail the sends of other
+// callers. ctx bounds this call's wait instead; the record itself is bounded
+// by RecordDeliveryTimeout (KAFKA_PUBLISH_TIMEOUT).
 func (p *producer) Send(ctx context.Context, msg kafka.Message) error {
 	rec := &kgo.Record{Topic: msg.Topic, Key: msg.Key, Value: msg.Value}
 	for _, h := range msg.Headers {
@@ -82,7 +88,7 @@ func (p *producer) Send(ctx context.Context, msg kafka.Message) error {
 	for {
 		done := make(chan error, 1)
 
-		p.cl.TryProduce(ctx, rec, func(_ *kgo.Record, err error) { done <- err })
+		p.cl.TryProduce(context.WithoutCancel(ctx), rec, func(_ *kgo.Record, err error) { done <- err })
 
 		var err error
 		select {
@@ -127,57 +133,37 @@ func ping(ctx context.Context, cl *kgo.Client) error {
 
 	select {
 	case err := <-done:
-		return err
+		return closedError(err)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// sendErrorKinds maps Kafka protocol errors onto the libs/kafka kinds. The
-// table of record is libs/kafka's README "Errors"; a broker code is the same
-// kind in the librdkafka provider's map.
-var sendErrorKinds = map[*kerr.Error]string{ //nolint:gochecknoglobals // read-only lookup table (Go has no const maps)
-	kerr.RequestTimedOut:              kafka.KindUnavailable,
-	kerr.LeaderNotAvailable:           kafka.KindUnavailable,
-	kerr.NotLeaderForPartition:        kafka.KindUnavailable,
-	kerr.NetworkException:             kafka.KindUnavailable,
-	kerr.NotEnoughReplicas:            kafka.KindUnavailable,
-	kerr.NotEnoughReplicasAfterAppend: kafka.KindUnavailable,
-	kerr.KafkaStorageError:            kafka.KindUnavailable,
-	kerr.ThrottlingQuotaExceeded:      kafka.KindUnavailable,
+// closedError makes franz-go's "client closed" the libs/kafka one as well
+// (errors.Is with [kafka.ErrClientClosed]).
+func closedError(err error) error {
+	if errors.Is(err, kgo.ErrClientClosed) {
+		return fmt.Errorf("%w: %w", kafka.ErrClientClosed, err)
+	}
 
-	kerr.UnknownTopicOrPartition:            kafka.KindNotProvisioned,
-	kerr.TopicAuthorizationFailed:           kafka.KindNotProvisioned,
-	kerr.ClusterAuthorizationFailed:         kafka.KindNotProvisioned,
-	kerr.SaslAuthenticationFailed:           kafka.KindNotProvisioned,
-	kerr.IllegalSaslState:                   kafka.KindNotProvisioned,
-	kerr.UnsupportedSaslMechanism:           kafka.KindNotProvisioned,
-	kerr.TransactionalIDAuthorizationFailed: kafka.KindNotProvisioned,
-
-	kerr.MessageTooLarge:       kafka.KindRejected,
-	kerr.RecordListTooLarge:    kafka.KindRejected,
-	kerr.InvalidRecord:         kafka.KindRejected,
-	kerr.CorruptMessage:        kafka.KindRejected,
-	kerr.PolicyViolation:       kafka.KindRejected,
-	kerr.InvalidTopicException: kafka.KindRejected,
+	return err
 }
 
-// sendError maps a produce error onto the registry: a protocol error by
-// its code, franz-go's own sentinels by what they say.
+// sendError maps a produce error onto the registry: a broker's answer by its
+// protocol code (the table is libs/kafka's, shared with the librdkafka
+// provider), franz-go's own sentinels by what they say.
 func sendError(err error) error {
 	if err == nil {
 		return nil
 	}
 
+	err = closedError(err)
 	kind, code := kafka.KindUnknown, 0
 
 	var ke *kerr.Error
 	switch {
 	case errors.As(err, &ke):
-		code = int(ke.Code)
-		if k, ok := sendErrorKinds[ke]; ok {
-			kind = k
-		}
+		kind, code = kafka.BrokerSendErrorKind(ke.Code), int(ke.Code)
 	case errors.Is(err, kgo.ErrMaxBuffered):
 		kind = kafka.KindQueueFull
 	case errors.Is(err, kgo.ErrRecordTimeout), errors.Is(err, kgo.ErrRecordRetries), errors.Is(err, kgo.ErrClientClosed):
@@ -199,13 +185,11 @@ func (Driver) NewConsumer(cfg kafka.Config, log *slog.Logger, rb kafka.Rebalance
 	stats := newStats(cfg)
 	cons := &consumer{cfg: cfg, log: log, rb: rb, stats: stats}
 
-	opts, err := commonOpts(cfg, stats)
+	opts, err := consumerClientOpts(cfg, stats) // the dead-letter topic is produced through this client
 	if err != nil {
 		return nil, err
 	}
 
-	opts = append(opts, producerOpts(cfg)...) // the dead-letter topic is produced through this client
-	opts = append(opts, consumerOpts(cfg)...)
 	opts = append(opts,
 		kgo.OnPartitionsAssigned(cons.onAssigned),
 		kgo.OnPartitionsRevoked(cons.onRevoked),

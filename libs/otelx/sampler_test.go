@@ -51,14 +51,14 @@ func sample(s sdktrace.Sampler, ctx context.Context, id trace.TraceID) sdktrace.
 func TestSampler_ARootIsDrawnAtTheRatio(t *testing.T) {
 	t.Parallel()
 
-	half := newSampler(Config{SamplerRatio: 0.5, TrustRemoteParent: true}, false)
+	half := newSampler(Config{SamplerRatio: 0.5}, false)
 	assert.Equal(t, sampled, sample(half, context.Background(), alwaysKept).Decision)
 	assert.Equal(t, dropped, sample(half, context.Background(), neverKept).Decision)
 
-	all := newSampler(Config{SamplerRatio: 1, TrustRemoteParent: true}, false)
+	all := newSampler(Config{SamplerRatio: 1}, false)
 	assert.Equal(t, sampled, sample(all, context.Background(), neverKept).Decision)
 
-	never := newSampler(Config{SamplerRatio: -1, TrustRemoteParent: true}, false)
+	never := newSampler(Config{SamplerRatio: -1}, false)
 	assert.Equal(t, dropped, sample(never, context.Background(), alwaysKept).Decision, "a negative ratio samples no root")
 }
 
@@ -69,7 +69,7 @@ func TestSampler_AChildFollowsItsParent(t *testing.T) {
 
 	for _, ratio := range []float64{-1, 0.5, 1} {
 		for _, remote := range []bool{false, true} {
-			s := newSampler(Config{SamplerRatio: ratio, TrustRemoteParent: true}, false)
+			s := newSampler(Config{SamplerRatio: ratio}, false)
 
 			kept := sample(s, parentContext(t, neverKept, true, remote, vendorState), neverKept)
 			assert.Equal(t, sampled, kept.Decision, "ratio %v remote %v", ratio, remote)
@@ -87,19 +87,19 @@ func TestSampler_AChildFollowsItsParent(t *testing.T) {
 func TestSampler_AnUntrustedRemoteParentIsDrawnAfresh(t *testing.T) {
 	t.Parallel()
 
-	never := newSampler(Config{SamplerRatio: -1, TrustRemoteParent: false}, false)
+	never := newSampler(Config{SamplerRatio: -1, RedrawRemoteParent: true}, false)
 	got := sample(never, parentContext(t, alwaysKept, true, true, vendorState), alwaysKept)
 	assert.Equal(t, dropped, got.Decision, "the client's sampled flag does not force sampling")
 	assert.Zero(t, got.Tracestate.Len(), "the client's tracestate is dropped")
 
-	all := newSampler(Config{SamplerRatio: 1, TrustRemoteParent: false}, false)
+	all := newSampler(Config{SamplerRatio: 1, RedrawRemoteParent: true}, false)
 	got = sample(all, parentContext(t, neverKept, false, true, vendorState), neverKept)
 	assert.Equal(t, sampled, got.Decision, "nor does its unsampled flag prevent it")
 	assert.Zero(t, got.Tracestate.Len())
 
 	// The draw is at the ratio, from an id the client did not choose: an id
 	// built to be kept at any ratio is kept about half of the time at 0.5.
-	half := newSampler(Config{SamplerRatio: 0.5, TrustRemoteParent: false}, false)
+	half := newSampler(Config{SamplerRatio: 0.5, RedrawRemoteParent: true}, false)
 	crafted := parentContext(t, alwaysKept, true, true, "")
 
 	kept := 0
@@ -126,8 +126,8 @@ func TestSampler_AForcedTraceIsSampledAndMarked(t *testing.T) {
 
 	const mark = httpx.DebugTraceStateKey + "=" + httpx.DebugTraceStateValue
 
-	for name, trust := range map[string]bool{"trusting": true, "edge": false} {
-		s := newSampler(Config{SamplerRatio: -1, TrustRemoteParent: trust}, false)
+	for name, redraw := range map[string]bool{"trusting": false, "edge": true} {
+		s := newSampler(Config{SamplerRatio: -1, RedrawRemoteParent: redraw}, false)
 
 		root := sample(s, httpx.ForceTrace(context.Background()), neverKept)
 		assert.Equal(t, sampled, root.Decision, name)
@@ -140,7 +140,7 @@ func TestSampler_AForcedTraceIsSampledAndMarked(t *testing.T) {
 		remote := sample(s, httpx.ForceTrace(parentContext(t, neverKept, false, true, vendorState)), neverKept)
 		assert.Equal(t, sampled, remote.Decision, name)
 
-		if trust {
+		if !redraw {
 			assert.Equal(t, mark+","+vendorState, remote.Tracestate.String())
 		} else {
 			assert.Equal(t, mark, remote.Tracestate.String(), "the edge keeps nothing of the client's tracestate")
@@ -148,7 +148,7 @@ func TestSampler_AForcedTraceIsSampledAndMarked(t *testing.T) {
 	}
 
 	// The mark alone — a tracestate a client made up — forces nothing on the edge.
-	edge := newSampler(Config{SamplerRatio: -1, TrustRemoteParent: false}, false)
+	edge := newSampler(Config{SamplerRatio: -1, RedrawRemoteParent: true}, false)
 	spoofed := sample(edge, parentContext(t, alwaysKept, true, true, mark), alwaysKept)
 	assert.Equal(t, dropped, spoofed.Decision)
 	assert.Zero(t, spoofed.Tracestate.Len())
@@ -159,14 +159,14 @@ func TestSampler_AForcedTraceIsSampledAndMarked(t *testing.T) {
 func TestSampler_RecordsUnsampledSpansForTheBuffer(t *testing.T) {
 	t.Parallel()
 
-	s := newSampler(Config{SamplerRatio: 0.5, TrustRemoteParent: true}, true)
+	s := newSampler(Config{SamplerRatio: 0.5}, true)
 
 	assert.Equal(t, recorded, sample(s, context.Background(), neverKept).Decision, "a root the ratio dropped")
 	assert.Equal(t, recorded, sample(s, parentContext(t, alwaysKept, false, true, ""), alwaysKept).Decision, "a child of an unsampled parent")
 	assert.Equal(t, sampled, sample(s, context.Background(), alwaysKept).Decision, "a sampled span is sampled as before")
 	assert.Equal(t, sampled, sample(s, parentContext(t, neverKept, true, true, ""), neverKept).Decision)
 
-	edge := newSampler(Config{SamplerRatio: -1, TrustRemoteParent: false}, true)
+	edge := newSampler(Config{SamplerRatio: -1, RedrawRemoteParent: true}, true)
 	assert.Equal(t, recorded, sample(edge, parentContext(t, alwaysKept, true, true, ""), alwaysKept).Decision)
 }
 
@@ -174,9 +174,9 @@ func TestSampler_Description(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, "ParentBased{root:TraceIDRatioBased{0.5}}",
-		newSampler(Config{SamplerRatio: 0.5, TrustRemoteParent: true}, false).Description())
+		newSampler(Config{SamplerRatio: 0.5}, false).Description())
 	assert.Equal(t, "ParentBased{root:AlwaysOffSampler,remote:redrawn,unsampled:recorded}",
-		newSampler(Config{SamplerRatio: -1, TrustRemoteParent: false}, true).Description())
+		newSampler(Config{SamplerRatio: -1, RedrawRemoteParent: true}, true).Description())
 }
 
 func TestRandomTraceID(t *testing.T) {

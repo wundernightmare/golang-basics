@@ -23,8 +23,8 @@ func (c *halfStarted) Terminate(context.Context, ...testcontainers.TerminateOpti
 	return nil
 }
 
-// stopsHere is a testing.TB whose Skipf and Fatalf end the call, as the real
-// ones do, without ending the test that looks at the outcome.
+// stopsHere is a testing.TB whose Skipf, Fatalf and FailNow end the call, as
+// the real ones do, without ending the test that looks at the outcome.
 type stopsHere struct {
 	testing.TB
 
@@ -37,15 +37,37 @@ func (s *stopsHere) Skipf(string, ...any) { s.skipped = true; panic(stopped{}) }
 
 func (s *stopsHere) Fatalf(string, ...any) { s.failed = true; panic(stopped{}) }
 
+func (s *stopsHere) Errorf(string, ...any) { s.failed = true }
+
+func (s *stopsHere) FailNow() { s.failed = true; panic(stopped{}) }
+
+// run calls f and reports whether it ended through the fake's Skipf, Fatalf
+// or FailNow.
+func (s *stopsHere) run(f func()) (ended bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			_, ended = r.(stopped)
+			require.True(s.TB, ended, "unexpected panic: %v", r)
+		}
+	}()
+
+	f()
+
+	return false
+}
+
+func healthy(context.Context) error { return nil }
+
+func noRuntime(context.Context) error { return errors.New("cannot connect to the daemon") }
+
+func neverStarts(context.Context) (string, testcontainers.Container, error) {
+	return "", nil, errors.New("did not come up")
+}
+
 // A starter that fails hands the container back with the error, and use
-// removes it after every attempt: without Ryuk nothing else would. No Docker
-// is involved — the container is a fake.
+// removes it after every attempt: without Ryuk nothing else would.
 func TestUseRemovesAHalfStartedContainer(t *testing.T) {
 	t.Parallel()
-
-	if testing.Short() {
-		t.Skip("use skips every caller under -short")
-	}
 
 	var (
 		holder shared[string]
@@ -55,22 +77,98 @@ func TestUseRemovesAHalfStartedContainer(t *testing.T) {
 	fake := &stopsHere{TB: t}
 	attempts := 0
 
-	func() {
-		defer func() {
-			_, ok := recover().(stopped)
-			require.True(t, ok, "use ends through Skipf or Fatalf when the start fails")
-		}()
-
-		use(fake, &holder, "fake", func(context.Context) (string, testcontainers.Container, error) {
+	require.True(t, fake.run(func() {
+		useIn(fake, &holder, "fake", func(context.Context) (string, testcontainers.Container, error) {
 			attempts++
 
 			return "", &ctr, errors.New("did not come up")
-		})
-	}()
+		}, false, healthy)
+	}))
 
 	assert.Equal(t, 3, attempts)
 	assert.Equal(t, attempts, ctr.terminated, "each half-started container was removed")
 	assert.Nil(t, holder.container, "and none is kept for Main or the chaos helpers")
 	assert.Nil(t, holder.terminate)
-	assert.True(t, fake.skipped || fake.failed)
+}
+
+// A fixture that did not start is skipped in one case only: outside CI, on a
+// machine whose container runtime does not answer.
+func TestUseSkipsOnlyWithoutAContainerRuntime(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		inCI    bool
+		runtime func(context.Context) error
+		skipped bool
+	}{
+		"locally, no runtime":      {runtime: noRuntime, skipped: true},
+		"locally, runtime healthy": {runtime: healthy},
+		"in CI, no runtime":        {inCI: true, runtime: noRuntime},
+		"in CI, runtime healthy":   {inCI: true, runtime: healthy},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var holder shared[string]
+
+			fake := &stopsHere{TB: t}
+
+			require.True(t, fake.run(func() { useIn(fake, &holder, "fake", neverStarts, tc.inCI, tc.runtime) }))
+			assert.Equal(t, tc.skipped, fake.skipped)
+			assert.Equal(t, !tc.skipped, fake.failed)
+		})
+	}
+}
+
+// A starter that fails the test instead of returning its error leaves through
+// runtime.Goexit; the fixture's other callers must not take that for a start.
+func TestUseFailsEveryCallerAfterAStarterThatDidNotReturn(t *testing.T) {
+	t.Parallel()
+
+	var holder shared[string]
+
+	first := &stopsHere{TB: t}
+
+	require.True(t, first.run(func() {
+		useIn(first, &holder, "fake", func(context.Context) (string, testcontainers.Container, error) {
+			first.FailNow()
+
+			return "localhost:1", nil, nil
+		}, false, healthy)
+	}))
+
+	second := &stopsHere{TB: t}
+
+	require.True(t, second.run(func() { useIn(second, &holder, "fake", neverStarts, false, healthy) }),
+		"the second caller got a value from a fixture that never started")
+	assert.True(t, second.failed)
+}
+
+// Running out of spare ports fails the test that asked; the next ProxyTo in
+// the binary must still get to the lock.
+func TestSparePortsStayUsableAfterRunningOut(t *testing.T) {
+	t.Parallel()
+
+	var ports sparePorts
+
+	for i := range sparePortCount {
+		assert.Equal(t, sparePortFirst+i, ports.port(t, string(rune('a'+i))))
+	}
+
+	assert.Equal(t, sparePortFirst, ports.port(t, "a"), "a name keeps its port")
+
+	fake := &stopsHere{TB: t}
+
+	require.True(t, fake.run(func() { ports.port(fake, "one too many") }))
+	assert.True(t, fake.failed)
+	require.True(t, ports.mu.TryLock(), "the lock was left held")
+	ports.mu.Unlock()
+}
+
+func TestAnEmptyCIVariableIsNotCI(t *testing.T) {
+	t.Setenv("CI", "")
+	assert.False(t, inCI())
+
+	t.Setenv("CI", "true")
+	assert.True(t, inCI())
 }

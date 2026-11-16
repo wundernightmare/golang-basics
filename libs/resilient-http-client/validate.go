@@ -3,6 +3,7 @@ package resilient
 import (
 	"errors"
 	"fmt"
+	"math"
 )
 
 // Validate reports every problem in c at once (joined), or nil.
@@ -54,15 +55,17 @@ func (t *TargetConfig) validate() []error {
 		bad("timeouts must not be negative")
 	}
 
-	if t.RateLimit < 0 || t.RateBurst < 0 {
-		bad("rate_limit and rate_burst must not be negative")
+	// Written so that NaN fails: every comparison with it is false, and a
+	// limiter or a budget built from one never limits.
+	if !(t.RateLimit >= 0) || math.IsInf(t.RateLimit, 1) || t.RateBurst < 0 {
+		bad("rate_limit must be a finite number, and neither it nor rate_burst negative")
 	}
 
 	if t.MaxConcurrent < 0 {
 		bad("max_concurrent must not be negative")
 	}
 
-	for _, err := range t.Breaker.Validate() {
+	for _, err := range problems(t.Breaker.Validate()) {
 		bad("breaker: " + err.Error())
 	}
 
@@ -74,7 +77,7 @@ func (t *TargetConfig) validate() []error {
 		bad("retry delays must satisfy 0 ≤ retry_base_delay ≤ retry_max_delay")
 	}
 
-	if t.RetryBudgetRatio < 0 || t.RetryBudgetRatio > 1 {
+	if !(t.RetryBudgetRatio >= 0 && t.RetryBudgetRatio <= 1) {
 		bad("retry_budget_ratio must be in [0, 1]")
 	}
 
@@ -83,4 +86,19 @@ func (t *TargetConfig) validate() []error {
 	}
 
 	return errs
+}
+
+// problems is the list an errors.Join error was made of, so each gets a line
+// that names its target; any other error is a list of one, nil of none.
+func problems(err error) []error {
+	var joined interface{ Unwrap() []error }
+	if errors.As(err, &joined) {
+		return joined.Unwrap()
+	}
+
+	if err == nil {
+		return nil
+	}
+
+	return []error{err}
 }

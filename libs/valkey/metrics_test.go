@@ -29,21 +29,28 @@ func TestMetricsAreLintClean(t *testing.T) {
 	testx.LintMetrics(t, reg)
 }
 
-func TestJitterStaysWithinTenPercent(t *testing.T) {
+// One line per interval, and the next one says how many it stands for.
+func TestWarnGatePassesOnePerInterval(t *testing.T) {
 	t.Parallel()
 
-	const ttl = time.Minute
+	var gate warnGate
 
-	seen := map[time.Duration]bool{}
+	start := time.Now()
 
-	for range 1000 {
-		j := Jitter(ttl)
-		assert.GreaterOrEqual(t, j, 54*time.Second)
-		assert.LessOrEqual(t, j, 66*time.Second)
-		seen[j] = true
+	dropped, ok := gate.pass(start)
+	assert.True(t, ok)
+	assert.Zero(t, dropped)
+
+	for _, later := range []time.Duration{time.Millisecond, warnInterval - time.Nanosecond} {
+		_, ok = gate.pass(start.Add(later))
+		assert.False(t, ok, "%s after a logged warning", later)
 	}
 
-	assert.Greater(t, len(seen), 100, "the TTL is actually spread")
-	assert.Equal(t, time.Duration(0), Jitter(0))
-	assert.Equal(t, 5*time.Nanosecond, Jitter(5*time.Nanosecond), "too small to spread")
+	dropped, ok = gate.pass(start.Add(warnInterval))
+	assert.True(t, ok)
+	assert.Equal(t, 2, dropped)
+
+	dropped, ok = gate.pass(start.Add(2 * warnInterval))
+	assert.True(t, ok)
+	assert.Zero(t, dropped, "the count starts over")
 }

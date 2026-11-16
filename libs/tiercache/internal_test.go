@@ -3,9 +3,11 @@ package tiercache
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,7 +18,6 @@ import (
 	"pgregory.net/rapid"
 
 	"github.com/wundernightmare/golang-basics/libs/resilience"
-	"github.com/wundernightmare/golang-basics/libs/testx"
 )
 
 func TestEnvelopeRoundTrip(t *testing.T) {
@@ -95,6 +96,102 @@ func TestConfig(t *testing.T) {
 
 	cfg.Breaker.FailureRatio = 1.5
 	require.ErrorContains(t, cfg.Validate(), "breaker: failure_ratio")
+
+	// Validate answers for the configuration as New would run it: a field
+	// left at zero is its default there too.
+	partial := Config{Name: "c", HardTTL: time.Minute, Breaker: resilience.BreakerConfig{FailureRatio: 0.3}}
+	require.NoError(t, partial.Validate())
+}
+
+// An invalidation is about its key: a lookup of another key that is in
+// flight meanwhile still fills L1. And a key the source does not have is not
+// an invalidation at all — not for the lookups in flight, not in the metric.
+func TestALookupIsUndisturbedByWhatHappensToOtherKeys(t *testing.T) {
+	t.Parallel()
+
+	var (
+		loads   atomic.Int64
+		stalled = make(chan struct{})
+		release = make(chan struct{})
+	)
+
+	cache, err := New(Config{Name: "keys", HardTTL: time.Minute}, newMapStore, byteCodec{},
+		func(_ context.Context, key string) ([]byte, error) {
+			switch key {
+			case "a":
+				if loads.Add(1) == 1 {
+					close(stalled)
+					<-release
+				}
+
+				return []byte("row"), nil
+			default:
+				return nil, ErrNotFound
+			}
+		}, nil, nil)
+	require.NoError(t, err)
+	t.Cleanup(cache.Close)
+
+	// The epochs are shared by the keys of a shard: take a key of another.
+	other := "b"
+	for i := 0; cache.shard(other) == cache.shard("a"); i++ {
+		other = fmt.Sprint("b", i)
+	}
+
+	got := make(chan error, 1)
+
+	go func() { _, err := cache.Get(context.Background(), "a"); got <- err }()
+
+	<-stalled
+	require.NoError(t, cache.Invalidate(t.Context(), other))
+
+	_, err = cache.Get(t.Context(), "absent")
+	require.ErrorIs(t, err, ErrNotFound)
+
+	close(release)
+	require.NoError(t, <-got)
+
+	_, err = cache.Get(t.Context(), "a")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), loads.Load(), "the first load stayed in L1")
+	assert.InDelta(t, 1, testutil.ToFloat64(cache.metrics.invalidatedKey), 0, "the one Invalidate")
+}
+
+// What L1 holds from before the clock was stepped back has a deadline this
+// process could not have set now: its age is unknown, and it is no more a
+// StaleIfError fallback than such an entry from L2.
+func TestAnL1EntryFromAClockAheadIsNoStaleFallback(t *testing.T) {
+	t.Parallel()
+
+	cache := newByteCache(t, nil, func(cfg *Config) { cfg.StaleIfError = time.Hour })
+	now := time.Now()
+
+	cache.local.Set("ahead", append(appendHeader(nil, now.Add(-time.Hour).UnixMilli(), now.Add(time.Hour).UnixMilli()), "v"...))
+	cache.local.Set("expired", append(appendHeader(nil, now.Add(-time.Hour).UnixMilli(), now.Add(-time.Minute).UnixMilli()), "v"...))
+
+	_, ok := cache.staleFallback("ahead", nil, 0, false)
+	assert.False(t, ok)
+
+	value, ok := cache.staleFallback("expired", nil, 0, false)
+	require.True(t, ok)
+	assert.Equal(t, "v", string(value))
+}
+
+// A stale read that races Close starts no refresh behind it: nothing would
+// wait for it.
+func TestNoRefreshStartsOnceTheCacheIsClosed(t *testing.T) {
+	t.Parallel()
+
+	var loads atomic.Int64
+
+	cache, err := New(Config{Name: "closed", HardTTL: time.Minute}, newMapStore, byteCodec{},
+		func(context.Context, string) ([]byte, error) { loads.Add(1); return nil, nil }, nil, nil)
+	require.NoError(t, err)
+
+	cache.Close()
+	cache.refresh(t.Context(), "k")
+	cache.wg.Wait()
+	assert.Zero(t, loads.Load())
 }
 
 func TestMetricsAreLintClean(t *testing.T) {
@@ -106,7 +203,10 @@ func TestMetricsAreLintClean(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(cache.Collectors()...)
-	testx.LintMetrics(t, reg)
+
+	problems, err := testutil.GatherAndLint(reg)
+	require.NoError(t, err)
+	assert.Empty(t, problems)
 }
 
 // mapStore is the L1 of the tests in this package, which are about the
@@ -241,7 +341,7 @@ func TestTheLargestEntryIsOfferedToL1AndNoLarger(t *testing.T) {
 	limit := cache.local.MaxEntry()
 
 	for _, key := range []string{"k", KeyOf("largest"), strings.Repeat("k", MaxKeyLen)} {
-		cache.fill(cache.epoch.Load(), key, make([]byte, limit-len(key)))
+		cache.fill(cache.epochOf(key), key, make([]byte, limit-len(key)))
 
 		held, found := cache.local.Get(nil, key)
 		require.True(t, found, "an entry of MaxEntry bytes is in L1")
@@ -250,7 +350,7 @@ func TestTheLargestEntryIsOfferedToL1AndNoLarger(t *testing.T) {
 
 	assert.Zero(t, testutil.ToFloat64(cache.metrics.oversize))
 
-	cache.fill(cache.epoch.Load(), "over", make([]byte, limit-len("over")+1))
+	cache.fill(cache.epochOf("over"), "over", make([]byte, limit-len("over")+1))
 
 	_, found := cache.local.Get(nil, "over")
 	assert.False(t, found)

@@ -10,9 +10,12 @@
 # Efficacy = killed / (killed + lived); mutant coverage = mutants any test
 # reaches. Ratchet them up when the numbers improve, never down without a
 # reason in the commit message.
-# Known survivor, equivalent — anything else is a gap:
-#   backoff.go  delay < maxDelay in the doubling loop  (at the cap one more
-#               doubling is undone by the min that follows)
+# Known survivors, equivalent — anything else is a gap:
+#   backoff.go  Jitter: spread <= 0  (a spread of 0 adds rand.Int64N(1) = 0)
+#   backoff.go  Jitter: ttl + …      (the spread is symmetric around 0)
+# TIMED OUT is a kill here: a mutated loop condition in Backoff (delay > 0,
+# delay < maxDelay) no longer stops at 0 or at the cap and counts to the
+# attempt number, which the edge-input test sets to math.MaxInt.
 unleash:
   workers: 4
   timeout-coefficient: 8

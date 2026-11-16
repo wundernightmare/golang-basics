@@ -123,7 +123,7 @@ func (pipe *pipeline) work(body func(ctx context.Context)) string {
 	return carrier.Get("traceparent")
 }
 
-func never() Config { return Config{SamplerRatio: -1, TrustRemoteParent: true} }
+func never() Config { return Config{SamplerRatio: -1} }
 
 func TestRetro_AWarnLineExportsTheWholeTraceOfTheProcess(t *testing.T) {
 	t.Parallel()
@@ -193,7 +193,7 @@ func TestRetro_WithoutTheBufferAWarnLineExportsNothing(t *testing.T) {
 func TestRetro_ASampledTraceNeverReachesTheBuffer(t *testing.T) {
 	t.Parallel()
 
-	pipe := newPipeline(t, Config{SamplerRatio: 1, TrustRemoteParent: true})
+	pipe := newPipeline(t, Config{SamplerRatio: 1})
 	traceparent := pipe.work(func(ctx context.Context) {
 		pipe.log.InfoContext(ctx, "stored")
 		pipe.log.WarnContext(ctx, "slow store")
@@ -286,13 +286,13 @@ func (pipe *pipeline) service(name string, cfg httpx.Config, handle func(srv *ht
 func TestDebugTrace_TravelsFromTheEdgeToTheServiceBehindIt(t *testing.T) {
 	t.Parallel()
 
-	backend := newPipeline(t, Config{SamplerRatio: -1, TrustRemoteParent: true})
-	behind := backend.service("backend", httpx.Config{}, func(srv *httpx.Server, w http.ResponseWriter, r *http.Request) {
+	backend := newPipeline(t, Config{SamplerRatio: -1})
+	behind := backend.service("backend", httpx.Config{DebugTraceTrustRemote: true}, func(srv *httpx.Server, w http.ResponseWriter, r *http.Request) {
 		srv.Logger().DebugContext(r.Context(), "backend detail")
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	edge := newPipeline(t, Config{SamplerRatio: -1, TrustRemoteParent: false})
+	edge := newPipeline(t, Config{SamplerRatio: -1, RedrawRemoteParent: true})
 	front := edge.service("edge", httpx.Config{DebugToken: secret.New(debugToken)}, func(srv *httpx.Server, w http.ResponseWriter, r *http.Request) {
 		srv.Logger().DebugContext(r.Context(), "edge detail")
 

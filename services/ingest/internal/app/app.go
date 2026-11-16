@@ -7,7 +7,6 @@ package app
 import (
 	"context"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -268,21 +267,18 @@ func newBreakerMetrics(reg prometheus.Registerer) *breakerMetrics {
 // gauge, the counter and a log line that is never sampled away — a sink
 // going down or coming back is the event an operator reads the log for.
 func (m *breakerMetrics) breaker(cfg resilience.BreakerConfig, sink string, log *slog.Logger) *resilience.Breaker {
-	var (
-		mu      sync.Mutex
-		breaker *resilience.Breaker
-	)
+	var breaker *resilience.Breaker
 
-	m.state.WithLabelValues(sink).Set(float64(resilience.StateClosed))
+	set := func(s resilience.State) { m.state.WithLabelValues(sink).Set(float64(s)) }
 
 	breaker = resilience.NewBreaker(cfg, time.Now, func(from, to resilience.State) {
 		m.transitions.WithLabelValues(sink, to.String()).Inc()
-		// State(), not `to`, and under the lock: see resilience.NewBreaker.
-		mu.Lock()
-		m.state.WithLabelValues(sink).Set(float64(breaker.State()))
-		mu.Unlock()
+		// Mirror, not `to`: hooks of concurrent transitions may run out of
+		// order, and the gauge must end on the latest state.
+		breaker.Mirror(set)
 		log.Warn("sink circuit breaker changed state", "sink", sink, "from", from.String(), "to", to.String())
 	})
+	breaker.Mirror(set)
 
 	return breaker
 }

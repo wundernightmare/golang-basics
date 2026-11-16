@@ -8,19 +8,23 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"testing/synctest"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/goleak"
 
+	"github.com/wundernightmare/golang-basics/libs/resilience"
 	resilient "github.com/wundernightmare/golang-basics/libs/resilient-http-client"
 	"github.com/wundernightmare/golang-basics/libs/testx"
 )
@@ -91,16 +95,42 @@ func status(code int) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(code) }
 }
 
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+const scriptedURL = "http://scripted.test"
+
+// scripted answers by the request path, with no network: /panic panics, /cut
+// is a 200 whose body fails, /<code> is that status. A test in a synctest
+// bubble uses it to move the breaker's and the limiters' clock itself.
+func scripted() resilient.Option {
+	return resilient.WithHTTPClient(&http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+		resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody, Request: r}
+
+		switch r.URL.Path {
+		case "/panic":
+			panic("the transport blew up")
+		case "/cut":
+			resp.Body = io.NopCloser(iotest.ErrReader(io.ErrUnexpectedEOF))
+		default:
+			resp.StatusCode, _ = strconv.Atoi(r.URL.Path[1:])
+		}
+
+		return resp, nil
+	})})
+}
+
 func TestSend_SuccessTracesAndMeters(t *testing.T) {
 	t.Parallel()
 
 	spans := testx.Recorder(t)
 
-	var traceparent atomic.Value
+	var traceparent, userAgent atomic.Value
 
 	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request) {
 		traceparent.Store(r.Header.Get("Traceparent"))
-		assert.Equal(t, "svc/1", r.UserAgent())
+		userAgent.Store(r.UserAgent())
 
 		_, _ = io.WriteString(w, "hello")
 	})
@@ -113,7 +143,10 @@ func TestSend_SuccessTracesAndMeters(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, client.Shutdown(t.Context())) }()
 
-	resp, err := client.Send("api", get(t, t.Context(), srv.URL+"/x"))
+	req := get(t, t.Context(), srv.URL+"/x?token=s3cr3t")
+	req.URL.User = url.UserPassword("svc", "s3cr3t")
+
+	resp, err := client.Send("api", req)
 	require.NoError(t, err)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
@@ -121,13 +154,22 @@ func TestSend_SuccessTracesAndMeters(t *testing.T) {
 	assert.Equal(t, "hello", string(body))
 
 	assert.NotEmpty(t, traceparent.Load(), "traceparent is injected")
+	assert.Equal(t, "svc/1", userAgent.Load())
 
 	ended := spans.Ended()
 	require.Len(t, ended, 1)
 	assert.Equal(t, "GET api", ended[0].Name())
+	assert.Contains(t, ended[0].Attributes(), attribute.String("url.full", srv.URL+"/x"), "no query string, no user info")
 
-	assert.InDelta(t, 1, metric(t, client, "http_client_requests_total", map[string]string{"target": "api", "method": "GET", "outcome": "2xx"}), 0)
-	assert.InDelta(t, 1, metric(t, client, "http_client_request_duration_seconds", map[string]string{"target": "api", "method": "GET"}), 0)
+	own := get(t, t.Context(), srv.URL)
+	own.Header.Set("User-Agent", "caller/2")
+	resp, err = client.Send("api", own)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, "caller/2", userAgent.Load(), "the request's own User-Agent wins")
+
+	assert.InDelta(t, 2, metric(t, client, "http_client_requests_total", map[string]string{"target": "api", "method": "GET", "outcome": "2xx"}), 0)
+	assert.InDelta(t, 2, metric(t, client, "http_client_request_duration_seconds", map[string]string{"target": "api", "method": "GET"}), 0)
 	assert.InDelta(t, 0, metric(t, client, "http_client_circuit_breaker_state", map[string]string{"target": "api"}), 0)
 	testx.LintMetrics(t, client.Registry())
 }
@@ -218,6 +260,30 @@ func TestNew_RejectsInvalidConfigAndDuplicateRegistration(t *testing.T) {
 	assert.InDelta(t, 0, testx.Metric(t, reg, "http_client_circuit_breaker_state", map[string]string{"target": "a"}), 0)
 	_, err = resilient.New(resilient.DefaultConfig("a"), resilient.WithRegisterer(reg))
 	require.Error(t, err, "a second client on the same registerer collides")
+
+	// Each of two clients on one registry gets a label of the caller's: one
+	// metric name must carry one set of label names, so both are wrapped.
+	shared := prometheus.NewRegistry()
+	for _, name := range []string{"first", "second"} {
+		_, err = resilient.New(resilient.DefaultConfig("a"),
+			resilient.WithRegisterer(prometheus.WrapRegistererWith(prometheus.Labels{"client": name}, shared)))
+		require.NoError(t, err, name)
+		assert.InDelta(t, 0, testx.Metric(t, shared, "http_client_circuit_breaker_state", map[string]string{"target": "a", "client": name}), 0)
+	}
+}
+
+// New builds a transport of its own: http.DefaultTransport is a variable, and
+// a process that replaced it with a wrapper must still get a client. Not
+// parallel: it swaps that variable.
+func TestNew_DoesNotReadTheDefaultTransport(t *testing.T) { //nolint:paralleltest // swaps http.DefaultTransport
+	std := http.DefaultTransport
+	http.DefaultTransport = roundTrip(std.RoundTrip)
+
+	defer func() { http.DefaultTransport = std }()
+
+	client, err := resilient.New(resilient.DefaultConfig("api"))
+	require.NoError(t, err)
+	require.NoError(t, client.Shutdown(t.Context()))
 }
 
 func TestSend_StatusErrorKeepsBodyAndRetryAfter(t *testing.T) {
@@ -455,6 +521,7 @@ func TestSend_TimeoutIsABreakerFailure(t *testing.T) {
 	assert.Equal(t, resilient.StateOpen, st)
 	_, err = client.Send("api", get(t, t.Context(), srv.URL))
 	require.ErrorIs(t, err, resilient.KindCircuitOpen)
+	require.ErrorIs(t, err, resilience.ErrOpen, "the sentinel every breaker-backed client shares")
 
 	assert.InDelta(t, 2, metric(t, client, "http_client_requests_total", map[string]string{"outcome": "timeout"}), 0)
 	assert.InDelta(t, 1, metric(t, client, "http_client_requests_total", map[string]string{"outcome": "circuit_open"}), 0)
@@ -473,7 +540,10 @@ func TestSend_CallerCancellationDoesNotTripBreaker(t *testing.T) {
 		<-r.Context().Done()
 	})
 
-	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }))
+	buf := &testx.LogBuffer{}
+	client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }),
+		resilient.WithLogger(slog.New(slog.NewJSONHandler(buf, nil))))
+
 	for range 5 {
 		ctx, cancel := context.WithCancel(t.Context())
 
@@ -490,6 +560,7 @@ func TestSend_CallerCancellationDoesNotTripBreaker(t *testing.T) {
 	st, _ := client.BreakerState("api")
 	assert.Equal(t, resilient.StateClosed, st, "the caller walking away says nothing about the dependency")
 	assert.InDelta(t, 5, metric(t, client, "http_client_requests_total", map[string]string{"outcome": "canceled"}), 0)
+	assert.Empty(t, buf.String(), "and is not worth a warning")
 }
 
 // A caller whose own deadline is shorter than the target's timeout must not
@@ -757,11 +828,14 @@ func TestSend_UpgradedBodyStaysWritable(t *testing.T) {
 func TestSend_4xxDoesNotTripBreaker(t *testing.T) {
 	t.Parallel()
 
-	srv, _ := server(t, status(http.StatusTooManyRequests))
+	srv, _ := server(t, func(w http.ResponseWriter, r *http.Request) {
+		code, _ := strconv.Atoi(r.URL.Path[1:])
+		w.WriteHeader(code)
+	})
 
 	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests = 1 }))
-	for range 5 {
-		_, err := c.Send("api", get(t, t.Context(), srv.URL))
+	for _, path := range []string{"/400", "/404", "/429", "/499"} {
+		_, err := c.Send("api", get(t, t.Context(), srv.URL+path))
 		require.ErrorIs(t, err, resilient.KindStatus)
 	}
 
@@ -938,8 +1012,6 @@ func TestSend_Redirects(t *testing.T) {
 			switch r.URL.Path {
 			case "/away":
 				http.Redirect(w, r, other.URL+"/", http.StatusFound)
-			case "/loop":
-				http.Redirect(w, r, "/loop", http.StatusFound)
 			case "/hop":
 				http.Redirect(w, r, "/done", http.StatusFound)
 			default:
@@ -978,12 +1050,18 @@ func TestSend_Redirects(t *testing.T) {
 	t.Run("too many", func(t *testing.T) {
 		t.Parallel()
 
-		srv, _ := servers(t)
+		srv, hits := server(t, func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/loop", http.StatusFound) })
 
-		c := newClient(t, target(nil))
-		_, err := c.Send("api", get(t, t.Context(), srv.URL+"/loop"))
+		cfg := resilient.DefaultConfig()
+		cfg.MaxRedirects = 2
+		cfg.Targets = []resilient.TargetConfig{target(nil)}
+		c, err := resilient.New(cfg)
+		require.NoError(t, err)
+		_, err = c.Send("api", get(t, t.Context(), srv.URL+"/loop"))
 		require.ErrorIs(t, err, resilient.KindRedirect)
-		assert.Contains(t, err.Error(), "10 redirects")
+		assert.Contains(t, err.Error(), "2 redirects")
+		assert.Equal(t, int32(3), hits.Load(), "the request and max_redirects redirects, not one more")
+		require.NoError(t, c.Shutdown(t.Context()))
 	})
 	t.Run("zero means return the 3xx", func(t *testing.T) {
 		t.Parallel()
@@ -1047,10 +1125,14 @@ func TestWithHTTPClient_DoesNotMutateCallersClient(t *testing.T) {
 	assert.Equal(t, int32(1), callerRedirects.Load(), "the caller's CheckRedirect still runs after the policy")
 }
 
-func TestSend_ReusesConnectionsAfterDrain(t *testing.T) {
+// The connection of an error response goes back to the pool (statusError
+// closes the body; net/http reads off the unread rest), and Shutdown closes
+// it. One connection per host is allowed, so a request that follows an error
+// response waits for that connection instead of racing net/http for it.
+func TestSend_ErrorResponseGivesItsConnectionBackAndShutdownClosesIt(t *testing.T) {
 	t.Parallel()
 
-	var conns atomic.Int32
+	var opened, closed atomic.Int32
 
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1064,38 +1146,219 @@ func TestSend_ReusesConnectionsAfterDrain(t *testing.T) {
 		}
 	}))
 	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
-		if s == http.StateNew {
-			conns.Add(1)
+		switch s { //nolint:exhaustive // only the two ends of a connection's life are counted
+		case http.StateNew:
+			opened.Add(1)
+		case http.StateClosed:
+			closed.Add(1)
 		}
 	}
 	srv.Start()
 	t.Cleanup(srv.Close)
 
-	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.FailureRatio = 0 }))
+	cfg := resilient.DefaultConfig()
+	cfg.MaxConnsPerHost = 1
+	cfg.Targets = []resilient.TargetConfig{target(func(tc *resilient.TargetConfig) { tc.Breaker.FailureRatio = 0 })}
+	client, err := resilient.New(cfg)
+	require.NoError(t, err)
+
 	for _, path := range []string{"/ok", "/500", "/404", "/ok", "/500"} {
-		resp, err := c.Send("api", get(t, t.Context(), srv.URL+path))
+		resp, err := client.Send("api", get(t, t.Context(), srv.URL+path))
 		if err == nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			require.NoError(t, resp.Body.Close())
+
+			continue
+		}
+
+		var oe *resilient.OutboundError
+		require.ErrorAs(t, err, &oe)
+		require.Equal(t, resilient.KindStatus, oe.Kind, "%s: %v", path, err)
+
+		if path == "/500" {
+			assert.Len(t, oe.Body, 4<<10, "the head of the body is kept, no more")
 		}
 	}
 
-	assert.Equal(t, int32(1), conns.Load(), "error bodies are drained, so one keep-alive connection serves all")
+	assert.Equal(t, int32(1), opened.Load(), "one keep-alive connection served all")
+
+	require.NoError(t, client.Shutdown(t.Context()))
+	assert.Eventually(t, func() bool { return closed.Load() == 1 }, 5*time.Second, 5*time.Millisecond, "Shutdown closes the idle connection")
 }
 
-func TestSend_LogsWithoutQueryString(t *testing.T) {
+// What goes to the log and into the error text names scheme, host and path:
+// a query string or user info carries credentials. A transport failure is the
+// case that matters most — net/http's own error quotes the whole URL.
+func TestSend_LogsAndErrorsWithoutQueryStringOrUserInfo(t *testing.T) {
 	t.Parallel()
 
-	buf := &testx.LogBuffer{}
 	srv, _ := server(t, status(http.StatusInternalServerError)) // 500: the lowest status logged at warn
-	c := newClient(t, target(nil), resilient.WithLogger(slog.New(slog.NewJSONHandler(buf, nil))))
-	_, err := c.Send("api", get(t, t.Context(), srv.URL+"/v1/items?token=s3cr3t"))
-	require.Error(t, err)
 
-	line := buf.Find(t, map[string]any{"level": "WARN", "target": "api", "msg": "resilient: server error"})
-	require.NotNil(t, line, buf.String())
-	assert.Equal(t, srv.URL+"/v1/items", line["url"])
-	assert.NotContains(t, buf.String(), "s3cr3t")
+	gone := httptest.NewServer(nil)
+	gone.Close() // its port refuses connections
+
+	for name, tc := range map[string]struct{ base, msg string }{
+		"status":            {srv.URL, "resilient: server error"},
+		"transport failure": {gone.URL, "resilient: request failed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			buf := &testx.LogBuffer{}
+			c := newClient(t, target(nil), resilient.WithLogger(slog.New(slog.NewJSONHandler(buf, nil))))
+
+			req := get(t, t.Context(), tc.base+"/v1/items?token=s3cr3t")
+			req.URL.User = url.UserPassword("svc", "s3cr3t")
+
+			_, err := c.Send("api", req)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), "s3cr3t")
+
+			line := buf.Find(t, map[string]any{"level": "WARN", "target": "api", "msg": tc.msg})
+			require.NotNil(t, line, buf.String())
+			assert.Equal(t, tc.base+"/v1/items", line["url"])
+			assert.NotContains(t, buf.String(), "s3cr3t")
+		})
+	}
+}
+
+// Warnings are bounded per target: a dependency that fails every request
+// must not flood the log. The burst and the rate are warn's.
+func TestSend_WarningsAreRateLimited(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		buf := &testx.LogBuffer{}
+		client := newClient(t, target(func(tc *resilient.TargetConfig) { tc.Breaker.FailureRatio = 0 }),
+			scripted(), resilient.WithLogger(slog.New(slog.NewJSONHandler(buf, nil))))
+
+		fail := func(n int) {
+			for range n {
+				_, err := client.Send("api", get(t, t.Context(), scriptedURL+"/500"))
+				require.ErrorIs(t, err, resilient.KindStatus)
+			}
+		}
+
+		fail(25)
+		assert.Len(t, buf.Lines(t), 10, "a burst, then silence")
+
+		time.Sleep(time.Second)
+		fail(25)
+		assert.Len(t, buf.Lines(t), 11, "then one line a second")
+	})
+}
+
+// A RoundTripper that panics costs the target nothing past that request: the
+// half-open probe it was is recorded as failed — an unrecorded probe keeps
+// its slot and the target stays cut off for good — and its bulkhead slot
+// comes back.
+func TestSend_APanickingTransportReleasesTheProbeAndTheBulkheadSlot(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		tc := target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests, tc.MaxConcurrent = 1, 1 })
+		client := newClient(t, tc, scripted())
+
+		_, err := client.Send("api", get(t, t.Context(), scriptedURL+"/500"))
+		require.ErrorIs(t, err, resilient.KindStatus)
+		time.Sleep(tc.Breaker.OpenTimeout)
+
+		require.PanicsWithValue(t, "the transport blew up", func() {
+			_, _ = client.Send("api", get(t, t.Context(), scriptedURL+"/panic"))
+		})
+		assert.Equal(t, resilient.StateOpen, mustState(t, client), "the probe that panicked failed")
+		time.Sleep(tc.Breaker.OpenTimeout)
+
+		resp, err := client.Send("api", get(t, t.Context(), scriptedURL+"/200"))
+		require.NoError(t, err, "the next probe is admitted and finds a free slot")
+		require.NoError(t, resp.Body.Close())
+		assert.Equal(t, resilient.StateClosed, mustState(t, client))
+	})
+}
+
+// A probe that a local limit turns away gives its half-open slot back: the
+// request after it is a probe again. With the slot kept, half-open would
+// admit nothing more and the target would stay cut off until a restart.
+func TestSend_AProbeRejectedLocallyReleasesItsHalfOpenSlot(t *testing.T) {
+	t.Parallel()
+
+	send := func(t *testing.T, client *resilient.Client, path string) error {
+		t.Helper()
+
+		resp, err := client.Send("api", get(t, t.Context(), scriptedURL+path))
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+
+		return err
+	}
+
+	t.Run("rate limiter", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			tc := target(func(tc *resilient.TargetConfig) {
+				tc.Breaker.MinRequests = 1
+				tc.RateLimit, tc.RateBurst = 0.001, 1 // one token: the request that trips the breaker takes it
+			})
+			client := newClient(t, tc, scripted())
+
+			require.ErrorIs(t, send(t, client, "/500"), resilient.KindStatus)
+			time.Sleep(tc.Breaker.OpenTimeout)
+
+			require.ErrorIs(t, send(t, client, "/200"), resilient.KindRateLimited)
+			require.ErrorIs(t, send(t, client, "/200"), resilient.KindRateLimited, "a probe again, not circuit_open")
+		})
+	})
+
+	t.Run("bulkhead", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			tc := target(func(tc *resilient.TargetConfig) {
+				tc.Breaker.MinRequests, tc.MaxConcurrent = 1, 1
+				tc.Timeout = 0 // the body below keeps its slot until it is closed
+			})
+			client := newClient(t, tc, scripted())
+
+			// A body that fails trips the breaker and still holds the only slot.
+			held, err := client.Send("api", get(t, t.Context(), scriptedURL+"/cut"))
+			require.NoError(t, err)
+
+			_, err = held.Body.Read(make([]byte, 1))
+			require.ErrorIs(t, err, resilient.KindConnection)
+			time.Sleep(tc.Breaker.OpenTimeout)
+
+			require.ErrorIs(t, send(t, client, "/200"), resilient.KindBulkheadFull)
+			require.ErrorIs(t, send(t, client, "/200"), resilient.KindBulkheadFull, "a probe again, not circuit_open")
+			require.NoError(t, held.Body.Close())
+		})
+	})
+
+	t.Run("a body that cannot be replayed", func(t *testing.T) {
+		t.Parallel()
+
+		synctest.Test(t, func(t *testing.T) {
+			tc := target(func(tc *resilient.TargetConfig) { tc.Breaker.MinRequests, tc.Breaker.HalfOpenProbes = 1, 2 })
+			client := newClient(t, tc, scripted())
+
+			require.ErrorIs(t, send(t, client, "/500"), resilient.KindStatus)
+			time.Sleep(tc.Breaker.OpenTimeout)
+
+			// The first probe is answered 429 (retried, a success for the
+			// breaker); the retry is the second probe and fails before it is sent.
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, scriptedURL+"/429", strings.NewReader("payload"))
+			require.NoError(t, err)
+
+			req.GetBody = func() (io.ReadCloser, error) { return nil, errNoReplay }
+
+			_, err = client.SendWithRetry("api", req)
+			require.ErrorIs(t, err, resilient.KindInvalid)
+
+			require.NoError(t, send(t, client, "/200"), "the second probe's slot is free again")
+			assert.Equal(t, resilient.StateClosed, mustState(t, client))
+		})
+	})
 }
 
 // Every way an attempt can fail leaves a warning: a failed body, a failed
@@ -1151,6 +1414,7 @@ func TestShutdown_WaitsForInFlightThenRejects(t *testing.T) {
 
 	_, err = client.Send("api", get(t, t.Context(), srv.URL))
 	require.ErrorIs(t, err, resilient.KindShutdown)
+	require.ErrorIs(t, err, resilient.ErrClosed)
 	assert.InDelta(t, 1, metric(t, client, "http_client_requests_total", map[string]string{"outcome": "shutdown"}), 0)
 
 	done := make(chan error, 1)

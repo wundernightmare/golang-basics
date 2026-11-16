@@ -159,7 +159,7 @@ func fromRequest(p Problem, r *http.Request) Problem {
 }
 
 // WriteError answers with err in problem shape: a [Problem] (possibly
-// wrapped) is written as is; a context deadline is a 504; a cancellation
+// wrapped, by value or by pointer) is written as is; a context deadline is a 504; a cancellation
 // because the client went away is a 499 (nobody reads it, but the access log
 // and http_requests_total show the client left instead of counting a 5xx);
 // anything else is a 500 with err as the cause, so no error is ever swallowed
@@ -168,6 +168,7 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	var p Problem
 	switch {
 	case errors.As(err, &p):
+	case asProblemPointer(err, &p):
 	case errors.Is(err, context.DeadlineExceeded):
 		p = NewProblem(http.StatusGatewayTimeout, "the request took too long").WithCause(err)
 	case errors.Is(err, context.Canceled) && r != nil && errors.Is(r.Context().Err(), context.Canceled):
@@ -177,6 +178,20 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 
 	WriteProblem(w, r, p)
+}
+
+// asProblemPointer is errors.As for a *Problem: Problem's methods are on the
+// value, so a pointer to one is an error too, and one errors.As into a
+// Problem does not find.
+func asProblemPointer(err error, p *Problem) bool {
+	ptr, ok := errors.AsType[*Problem](err)
+	if !ok || ptr == nil {
+		return false
+	}
+
+	*p = *ptr
+
+	return true
 }
 
 // reportFailure logs a 5xx with its cause and marks the span, with the
@@ -269,6 +284,12 @@ func DecodeJSON(r *http.Request, v any) error {
 	}
 
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		// The limit can run out after the value too: on padding, or on a
+		// second value.
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			return NewProblem(http.StatusRequestEntityTooLarge, "request body is too large").WithCause(err)
+		}
+
 		return NewProblem(http.StatusBadRequest, "request body must contain a single JSON value")
 	}
 

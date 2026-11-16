@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"log/slog"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/wundernightmare/golang-basics/libs/otelx/retro"
 	"github.com/wundernightmare/golang-basics/libs/testx"
 )
 
@@ -58,7 +60,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	assert.Empty(t, cfg.Headers)
 	assert.Equal(t, 10*time.Second, cfg.ExportTimeout)
 	assert.InDelta(t, 1.0, cfg.SamplerRatio, 1e-9)
-	assert.True(t, cfg.TrustRemoteParent)
+	assert.False(t, cfg.RedrawRemoteParent)
 	assert.Equal(t, 5*time.Second, cfg.BatchTimeout)
 	assert.Equal(t, 2048, cfg.MaxQueueSize)
 	assert.Equal(t, 512, cfg.MaxExportBatchSize)
@@ -74,6 +76,11 @@ func TestLoadConfig_ReadsTheProcessEnvironment(t *testing.T) {
 	cfg, err := LoadConfig(envPrefix)
 	require.NoError(t, err)
 	assert.Equal(t, "from-env", cfg.ServiceName, "LoadConfig reads the process environment")
+
+	t.Setenv(envPrefix+"OTEL_TRACES_TRUST_REMOTE_PARENT", "false")
+
+	_, err = LoadConfig(envPrefix)
+	require.ErrorContains(t, err, "is no longer read", "the retired key is looked up in the process environment too")
 }
 
 func TestLoadConfig_FromEnv(t *testing.T) {
@@ -81,16 +88,16 @@ func TestLoadConfig_FromEnv(t *testing.T) {
 
 	environ := map[string]string{}
 	for k, v := range map[string]string{
-		"OTEL_ENABLED":                    "true",
-		"OTEL_SERVICE_NAME":               "tasks",
-		"OTEL_SERVICE_VERSION":            "1.2.3",
-		"OTEL_DEPLOYMENT_ENVIRONMENT":     "staging",
-		"OTEL_EXPORTER_OTLP_ENDPOINT":     "collector:4318",
-		"OTEL_EXPORTER_OTLP_INSECURE":     "true",
-		"OTEL_EXPORTER_OTLP_HEADERS":      "authorization=Bearer x,x-tenant=acme",
-		"OTEL_TRACES_SAMPLER_RATIO":       "0.25",
-		"OTEL_TRACES_TRUST_REMOTE_PARENT": "false",
-		"OTEL_BSP_MAX_QUEUE_SIZE":         "100",
+		"OTEL_ENABLED":                     "true",
+		"OTEL_SERVICE_NAME":                "tasks",
+		"OTEL_SERVICE_VERSION":             "1.2.3",
+		"OTEL_DEPLOYMENT_ENVIRONMENT":      "staging",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":      "collector:4318",
+		"OTEL_EXPORTER_OTLP_INSECURE":      "true",
+		"OTEL_EXPORTER_OTLP_HEADERS":       "authorization=Bearer x,x-tenant=acme",
+		"OTEL_TRACES_SAMPLER_RATIO":        "0.25",
+		"OTEL_TRACES_REDRAW_REMOTE_PARENT": "true",
+		"OTEL_BSP_MAX_QUEUE_SIZE":          "100",
 	} {
 		environ[envPrefix+k] = v
 	}
@@ -105,12 +112,72 @@ func TestLoadConfig_FromEnv(t *testing.T) {
 	assert.True(t, cfg.Insecure)
 	assert.Equal(t, map[string]string{"authorization": "Bearer x", "x-tenant": "acme"}, cfg.Headers)
 	assert.InDelta(t, 0.25, cfg.SamplerRatio, 1e-9)
-	assert.False(t, cfg.TrustRemoteParent)
+	assert.True(t, cfg.RedrawRemoteParent)
 	assert.Equal(t, 100, cfg.MaxQueueSize)
+
+	environ[envPrefix+"OTEL_BSP_MAX_QUEUE_SIZE"] = "-7"
+	_, err = LoadConfigFrom(envPrefix, environ)
+	require.ErrorContains(t, err, "OTEL_BSP_MAX_QUEUE_SIZE must not be negative", "a loaded config is a validated one")
 
 	environ[envPrefix+"OTEL_TRACES_SAMPLER_RATIO"] = "most"
 	_, err = LoadConfigFrom(envPrefix, environ)
 	require.ErrorContains(t, err, "otelx: parse config")
+}
+
+// The retired key meant the opposite of the one that replaced it, so a
+// deployment still setting it must not start as if it had said nothing.
+func TestLoadConfig_RefusesTheRetiredTrustRemoteParentKey(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"false", "true", ""} {
+		_, err := LoadConfigFrom(envPrefix, map[string]string{envPrefix + "OTEL_TRACES_TRUST_REMOTE_PARENT": value})
+		require.ErrorContains(t, err, envPrefix+"OTEL_TRACES_TRUST_REMOTE_PARENT", "value %q", value)
+		require.ErrorContains(t, err, envPrefix+"OTEL_TRACES_REDRAW_REMOTE_PARENT", "the error names the key to set instead")
+	}
+
+	_, err := LoadConfigFrom(envPrefix, map[string]string{"OTHER_OTEL_TRACES_TRUST_REMOTE_PARENT": "false"})
+	require.NoError(t, err, "another service's key is not this one's")
+}
+
+func TestConfig_Validate(t *testing.T) {
+	t.Parallel()
+
+	for name, cfg := range map[string]Config{
+		"zero":                 {},
+		"host and port":        {Endpoint: "collector:4318"},
+		"host alone":           {Endpoint: "collector"},
+		"IPv6":                 {Endpoint: "[::1]:4318"},
+		"never sample":         {SamplerRatio: -1},
+		"buffer off":           {Retro: retro.Config{BufferMiB: -1}},
+		"TLS files unread off": {CACert: "absent.pem", ClientCert: "absent.pem"},
+		"plaintext reads none": {Enabled: true, Insecure: true, CACert: "absent.pem"},
+	} {
+		require.NoError(t, cfg.Validate(), name)
+	}
+
+	for name, tc := range map[string]struct {
+		cfg  Config
+		want string
+	}{
+		"URL":              {Config{Endpoint: "https://collector:4318"}, "OTEL_EXPORTER_OTLP_ENDPOINT must be host:port"},
+		"path":             {Config{Endpoint: "collector:4318/v1/traces"}, "OTEL_EXPORTER_OTLP_ENDPOINT"},
+		"credentials":      {Config{Endpoint: "user:pass@collector:4318"}, "OTEL_EXPORTER_OTLP_ENDPOINT"},
+		"port":             {Config{Endpoint: "collector:otlp"}, "OTEL_EXPORTER_OTLP_ENDPOINT"},
+		"export timeout":   {Config{ExportTimeout: -time.Second}, "OTEL_EXPORTER_OTLP_TIMEOUT must not be negative"},
+		"batch timeout":    {Config{BatchTimeout: -time.Second}, "OTEL_BSP_SCHEDULE_DELAY must not be negative"},
+		"queue":            {Config{MaxQueueSize: -1}, "OTEL_BSP_MAX_QUEUE_SIZE must not be negative, got -1"},
+		"batch":            {Config{MaxExportBatchSize: -1}, "OTEL_BSP_MAX_EXPORT_BATCH_SIZE must not be negative, got -1"},
+		"ratio":            {Config{SamplerRatio: math.NaN()}, "OTEL_TRACES_SAMPLER_RATIO"},
+		"cert without key": {Config{Enabled: true, ClientCert: "client.pem"}, "must both be set"},
+	} {
+		err := tc.cfg.Validate()
+		require.ErrorContains(t, err, tc.want, name)
+		assert.NotContains(t, err.Error(), "pass", name)
+	}
+
+	err := Config{MaxQueueSize: -1, MaxExportBatchSize: -1}.Validate()
+	require.ErrorContains(t, err, "QUEUE")
+	assert.ErrorContains(t, err, "BATCH", "every problem at once")
 }
 
 func TestConfig_WithDefaultsFillsAHandBuiltConfig(t *testing.T) {
@@ -151,16 +218,37 @@ func TestInit_DisabledInstallsPropagatorsOnly(t *testing.T) {
 
 	// Stop is Shutdown for a defer: safe to call, again and after Shutdown.
 	tel.Stop()
+}
 
-	stopped := false
+// The flush is bounded whatever the caller passes, and a cancelled context
+// does not cancel it.
+func TestFlushContext(t *testing.T) {
+	t.Parallel()
 
-	Telemetry{Shutdown: func(ctx context.Context) error {
-		_, hasDeadline := ctx.Deadline()
-		stopped = hasDeadline
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
 
-		return nil
-	}}.Stop()
-	assert.True(t, stopped, "Stop shuts down under a deadline of its own")
+	soon, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+
+	want, _ := soon.Deadline()
+
+	for name, tc := range map[string]struct {
+		ctx      context.Context //nolint:containedctx // the input of the table
+		deadline time.Time
+	}{
+		"no deadline: the budget":      {context.Background(), time.Now().Add(shutdownBudget)},
+		"cancelled: the budget":        {cancelled, time.Now().Add(shutdownBudget)},
+		"a deadline: the caller's own": {soon, want},
+	} {
+		flush, cancel := flushContext(tc.ctx)
+		t.Cleanup(cancel)
+
+		got, ok := flush.Deadline()
+		require.True(t, ok, name)
+		assert.WithinDuration(t, tc.deadline, got, time.Second, name)
+		assert.NoError(t, flush.Err(), name)
+	}
 }
 
 //nolint:paralleltest // serial: otelx.Init installs the OpenTelemetry globals; this test checks exactly that
@@ -183,6 +271,10 @@ func TestInit_EnabledInstallsAnSDKProvider(t *testing.T) {
 	require.NotNil(t, line)
 	assert.Equal(t, "127.0.0.1:1", line["endpoint"])
 	assert.Equal(t, true, line["insecure"])
+	assert.Equal(t, "svc", line["service_name"])
+	assert.Equal(t, false, line["redraw_remote_parent"])
+	assert.InDelta(t, 1, line["sampler_ratio"], 0, "the ratio in effect, not the zero of the Config")
+	assert.InDelta(t, retro.DefaultBufferMiB, line["retro_buffer_mib"], 0, "the buffer allocated, not the zero of the Config")
 	assert.NotContains(t, buf.String(), "acme", "headers (credentials) are never logged")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -192,10 +284,17 @@ func TestInit_EnabledInstallsAnSDKProvider(t *testing.T) {
 }
 
 //nolint:paralleltest // serial: otelx.Init installs the OpenTelemetry globals; this test checks exactly that
-func TestInit_TLSConfigErrorIsReturned(t *testing.T) {
+func TestInit_RefusesAnInvalidConfig(t *testing.T) {
 	restoreGlobals(t)
+
 	_, err := Init(context.Background(), Config{Enabled: true, CACert: filepath.Join(t.TempDir(), "absent.pem")}, nil)
 	require.ErrorContains(t, err, "OTLP CA certificate: open ")
+
+	_, err = Init(context.Background(), Config{Enabled: true, MaxQueueSize: -1}, nil)
+	require.ErrorContains(t, err, "OTEL_BSP_MAX_QUEUE_SIZE")
+
+	_, err = Init(context.Background(), Config{Enabled: true, Endpoint: "http://127.0.0.1:4318"}, nil)
+	require.ErrorContains(t, err, "OTEL_EXPORTER_OTLP_ENDPOINT")
 }
 
 func TestTLSConfig(t *testing.T) {
@@ -287,8 +386,7 @@ func TestErrorHandler_ThrottlesAndCountsSuppressed(t *testing.T) {
 	t.Parallel()
 
 	buf := &testx.LogBuffer{}
-	handler, ok := newErrorHandler(slog.New(slog.NewJSONHandler(buf, nil))).(*errorHandler)
-	require.True(t, ok)
+	handler := &errorHandler{log: slog.New(slog.NewJSONHandler(buf, nil))}
 
 	handler.Handle(nil) // ignored
 

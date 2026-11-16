@@ -1,34 +1,34 @@
 package tiercache_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
-	"github.com/wundernightmare/golang-basics/libs/testx/containers"
 	"github.com/wundernightmare/golang-basics/libs/tiercache"
-	"github.com/wundernightmare/golang-basics/libs/tiercache/credential"
 	"github.com/wundernightmare/golang-basics/libs/tiercache/offheap"
 	"github.com/wundernightmare/golang-basics/libs/tiercache/onheap"
 )
 
-// One Valkey per test binary for the integration and chaos suites; the leak
-// check behind it covers the unit tests too.
 func TestMain(m *testing.M) {
 	fullPropertyChecks()
-	os.Exit(containers.Main(m))
+	goleak.VerifyTestMain(m)
 }
 
 // The unit tests run in synctest bubbles: time is virtual, so TTLs of
@@ -570,7 +570,7 @@ func written(t *testing.T, key string, version int, at time.Time) string {
 	env = binary.BigEndian.AppendUint64(env, uint64(at.Add(softTTL).UnixMilli()))
 	env = binary.BigEndian.AppendUint64(env, uint64(at.Add(hardTTL).UnixMilli()))
 
-	env, err := credential.Codec{}.Append(env, record(key, version, 0))
+	env, err := rowCodec{}.Append(env, record(key, version, 0))
 	require.NoError(t, err)
 
 	return string(env)
@@ -825,47 +825,25 @@ func TestCallerDeadlineBoundsTheLoad(t *testing.T) {
 	})
 }
 
-func TestCloseStopsARunningRefresh(t *testing.T) {
-	t.Parallel()
-	synctest.Test(t, func(t *testing.T) {
-		src, key := newSource(), tiercache.KeyOf("a")
-		src.set(key, 1)
-
-		rig := newHarness(t, newFakeRemote(), src, nil)
-
-		synctest.Wait()
-		require.Equal(t, "v1", rig.version(t, key))
-
-		time.Sleep(20 * time.Second)
-		t.Cleanup(src.hold())
-		require.Equal(t, "v1", rig.version(t, key))
-		synctest.Wait()
-		require.Equal(t, int64(1), src.inFlight.Load())
-
-		rig.cache.Close() // returns: the refresh is cancelled, not waited out for RefreshTimeout
-		assert.Zero(t, src.inFlight.Load())
-	})
-}
-
 func TestNewRejectsWhatItCannotRunWith(t *testing.T) {
 	t.Parallel()
 
 	load := newSource().load
 	good := tiercache.Config{Name: "c", HardTTL: time.Minute}
 
-	_, err := tiercache.New(tiercache.Config{HardTTL: time.Minute}, offheap.New, credential.Codec{}, load, nil, nil)
+	_, err := tiercache.New(tiercache.Config{HardTTL: time.Minute}, offheap.New, rowCodec{}, load, nil, nil)
 	require.ErrorContains(t, err, "Name")
 
-	_, err = tiercache.New[credential.Credential](good, offheap.New, nil, load, nil, nil)
+	_, err = tiercache.New[row](good, offheap.New, nil, load, nil, nil)
 	require.ErrorContains(t, err, "store, codec and loader")
 
-	_, err = tiercache.New(good, offheap.New, credential.Codec{}, nil, nil, nil)
+	_, err = tiercache.New(good, offheap.New, rowCodec{}, nil, nil, nil)
 	require.ErrorContains(t, err, "store, codec and loader")
 
-	_, err = tiercache.New(good, nil, credential.Codec{}, load, nil, nil)
+	_, err = tiercache.New(good, nil, rowCodec{}, load, nil, nil)
 	require.ErrorContains(t, err, "store, codec and loader")
 
-	_, err = tiercache.New(good, func(int) tiercache.Store { return nil }, credential.Codec{}, load, nil, nil)
+	_, err = tiercache.New(good, func(int) tiercache.Store { return nil }, rowCodec{}, load, nil, nil)
 	require.ErrorContains(t, err, "returned no store")
 }
 
@@ -882,7 +860,7 @@ func TestTheStoreIsBuiltWithTheConfiguredCapacity(t *testing.T) {
 				asked = maxBytes
 
 				return onheap.New(maxBytes)
-			}, credential.Codec{}, newSource().load, nil, nil)
+			}, rowCodec{}, newSource().load, nil, nil)
 		require.NoError(t, err)
 		cache.Close()
 
@@ -898,7 +876,7 @@ func TestTheStoreIsBuiltWithTheConfiguredCapacity(t *testing.T) {
 // one store and not on the other fails here. (What a store itself owes is
 // storetest's, run by each provider.)
 //
-//nolint:paralleltest // serial: a second suite beside this one would have both wait on each other's Valkey and CPU
+//nolint:paralleltest // serial: a second suite beside this one would have both wait on each other's CPU
 func TestTheSuiteHoldsOnTheHeapStore(t *testing.T) {
 	if onTheHeap() {
 		t.Skip("this is the second run")
@@ -921,7 +899,7 @@ func TestTheSuiteHoldsOnTheHeapStore(t *testing.T) {
 }
 
 // The budget of the hot path: a fresh read allocates what Decode returns —
-// three strings for a credential — and nothing of the cache's own.
+// three strings for a row — and nothing of the cache's own.
 //
 //nolint:paralleltest // serial: testing.AllocsPerRun refuses to run in a parallel test
 func TestFreshReadAllocatesOnlyTheDecodedValue(t *testing.T) {
@@ -1167,7 +1145,7 @@ func BenchmarkGetFresh(b *testing.B) {
 	src, key := newSource(), tiercache.KeyOf("a")
 	src.set(key, 1)
 
-	cache, err := tiercache.New(tiercache.Config{Name: "bench", HardTTL: time.Hour, MaxBytes: suiteBytes()}, suiteStore(), credential.Codec{}, src.load, nil, nil)
+	cache, err := tiercache.New(tiercache.Config{Name: "bench", HardTTL: time.Hour, MaxBytes: suiteBytes()}, suiteStore(), rowCodec{}, src.load, nil, nil)
 	require.NoError(b, err)
 	b.Cleanup(cache.Close)
 
@@ -1182,5 +1160,372 @@ func BenchmarkGetFresh(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
+	})
+}
+
+// Read your own write, in the window the write itself opens: Invalidate has
+// dropped the key from L1 and its tombstone is still on the way to L2, where
+// a reader of this process finds the old value. Nothing but Invalidate can
+// take it out of L1 again when no message of its own comes back.
+func TestAReadDuringInvalidateLeavesNoOldValueBehind(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		tune           func(*tiercache.Config)
+		publishFailure error
+	}{
+		"invalidation disabled": {tune: func(cfg *tiercache.Config) { cfg.DisableInvalidation = true }},
+		"the publish fails":     {publishFailure: errRemoteDown},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				remote, src, key := newFakeRemote(), newSource(), tiercache.KeyOf("a")
+				src.set(key, 1)
+
+				rig := newHarness(t, remote, src, tc.tune)
+
+				synctest.Wait()
+				require.Equal(t, "v1", rig.version(t, key))
+
+				src.set(key, 2)
+
+				remote.mu.Lock()
+				remote.publishFailure = tc.publishFailure
+				remote.beforeTombstone = func() {
+					version, err := rig.read(key)
+					require.NoError(t, err)
+					assert.Equal(t, "v1", version, "L2 still holds the old value: this reader asked before Invalidate returned")
+				}
+				remote.mu.Unlock()
+
+				err := rig.cache.Invalidate(t.Context(), key)
+				if tc.publishFailure != nil {
+					require.ErrorIs(t, err, tc.publishFailure)
+				} else {
+					require.NoError(t, err)
+				}
+
+				assert.Equal(t, "v2", rig.version(t, key))
+			})
+		})
+	}
+}
+
+// A fill that L2 refused is not kept in L1 either: the tombstone of a write
+// this process heard nothing else of (its message was lost) is the only
+// thing that says the loaded row is the old one.
+func TestAFillRefusedByL2IsNotKeptInL1(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		remote, src, key := newFakeRemote(), newSource(), tiercache.KeyOf("a")
+		src.set(key, 1)
+
+		rig := newHarness(t, remote, src, func(cfg *tiercache.Config) { cfg.DisableInvalidation = true })
+		release := src.hold()
+		racing := make(chan string, 1)
+
+		go func() {
+			version, _ := rig.read(key)
+			racing <- version
+		}()
+
+		synctest.Wait() // the reader has read v1 and is stalled
+
+		src.set(key, 2)
+		require.NoError(t, remote.Tombstone(t.Context(), "tc:"+rig.name+":"+key, 5*time.Second))
+		release()
+
+		assert.Equal(t, "v1", <-racing)
+		assert.Equal(t, "v2", rig.version(t, key))
+	})
+}
+
+// A panic in the code a lookup calls is that lookup's failure: every caller
+// gets an error, and the process — which no recover of theirs could have
+// saved, the lookup runs in a goroutine of the cache — goes on.
+func TestAPanicInALookupIsAnErrorNotACrash(t *testing.T) {
+	t.Parallel()
+
+	for name, breakIt := range map[string]func(*fakeRemote, *source){
+		"in the loader": func(_ *fakeRemote, src *source) { src.bug = "loader bug" },
+		"in the remote": func(remote *fakeRemote, _ *source) { remote.beforeGetReturns = func() { panic("remote bug") } },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				remote, src, key := newFakeRemote(), newSource(), tiercache.KeyOf("a")
+				src.set(key, 1)
+
+				rig := newHarness(t, remote, src, func(cfg *tiercache.Config) { cfg.DisableInvalidation = true })
+				require.Equal(t, "v1", rig.version(t, key))
+
+				// Past the soft deadline: served, and refreshed behind — by a
+				// lookup that panics after the read has returned.
+				time.Sleep(20 * time.Second)
+				breakIt(remote, src)
+				require.Equal(t, "v1", rig.version(t, key))
+				synctest.Wait()
+				assert.InDelta(t, 1, rig.metric(t, "tiercache_refreshes_total", map[string]string{"result": "error"}), 0)
+
+				// Past the hard one the read waits for the lookup itself.
+				time.Sleep(70 * time.Second)
+
+				_, err := rig.cache.Get(t.Context(), key)
+				require.ErrorIs(t, err, tiercache.ErrPanic)
+				require.ErrorContains(t, err, "bug")
+
+				remote.beforeGetReturns, src.bug = nil, nil
+
+				assert.Equal(t, "v1", rig.version(t, key), "the cache, and its breaker, work on")
+				assert.Zero(t, rig.metric(t, "tiercache_l2_bypassed_total", nil))
+			})
+		})
+	}
+}
+
+// The deadline of the caller that started a lookup is that caller's: one
+// that joined with time left gets the value, not somebody else's timeout.
+func TestAJoinerIsNotFailedByTheFirstCallersDeadline(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		src, key := newSource(), tiercache.KeyOf("a")
+		src.set(key, 1)
+
+		rig := newHarness(t, nil, src, nil)
+		release := src.hold()
+
+		hurried, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+
+		first, second := make(chan error, 1), make(chan error, 1)
+
+		go func() { _, err := rig.cache.Get(hurried, key); first <- err }()
+
+		synctest.Wait()
+
+		go func() { _, err := rig.cache.Get(t.Context(), key); second <- err }()
+
+		require.ErrorIs(t, <-first, context.DeadlineExceeded)
+		synctest.Wait()
+
+		select {
+		case err := <-second:
+			require.NoError(t, err, "the joiner was handed the first caller's deadline")
+		default:
+		}
+
+		release()
+		require.NoError(t, <-second)
+		assert.InDelta(t, 1, rig.reads(t, "error"), 0, "the first caller's alone")
+	})
+}
+
+// The breaker is told about L2, not about the callers: a lookup whose own
+// context is done — cancelled, or out of time — says nothing of L2's health,
+// while L2 failing a call that still had time is its failure, a timeout
+// included.
+func TestTheBreakerCountsFailuresOfL2NotOfTheCallers(t *testing.T) {
+	t.Parallel()
+
+	gone := func(ctx context.Context) context.Context {
+		ctx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		return ctx
+	}
+	late := func(ctx context.Context) context.Context {
+		ctx, cancel := context.WithDeadline(ctx, time.Now())
+		_ = cancel // expired as it is
+
+		return ctx
+	}
+	inTime := func(ctx context.Context) context.Context { return ctx }
+
+	for name, tc := range map[string]struct {
+		caller   func(context.Context) context.Context
+		failure  error
+		bypassed bool
+	}{
+		"callers that had gone away":         {caller: gone},
+		"callers whose deadline had passed":  {caller: late},
+		"L2 timing out on callers with time": {caller: inTime, failure: context.DeadlineExceeded, bypassed: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				var logged bytes.Buffer
+
+				remote, src := newFakeRemote(), newSource()
+				rig := newLoggedHarness(t, remote, src, nil, slog.New(slog.NewTextHandler(&logged, nil)))
+
+				synctest.Wait()
+				remote.fail(tc.failure)
+
+				for i := range 20 {
+					key := fmt.Sprint("k", i)
+					src.set(key, 1)
+
+					_, _ = rig.cache.Get(tc.caller(t.Context()), key)
+
+					synctest.Wait() // the lookup goes on without its caller
+				}
+
+				remote.fail(nil)
+				src.set("healthy", 1)
+				require.Equal(t, "v1", rig.version(t, "healthy"))
+
+				assert.Equal(t, tc.bypassed, rig.metric(t, "tiercache_l2_bypassed_total", nil) > 0)
+				assert.Equal(t, tc.bypassed, strings.Contains(logged.String(), "L2 is failing"), "the breaker opening is what is logged")
+			})
+		})
+	}
+}
+
+// SoftTTL equal to HardTTL (the default) is plain cache-aside: no value is
+// served stale and refreshed behind, at any age up to its hard deadline.
+func TestWithoutASoftTTLNothingIsServedStale(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		src := newSource()
+		rig := newHarness(t, nil, src, func(cfg *tiercache.Config) { cfg.SoftTTL = 0 })
+		keys := make([]string, 200)
+
+		for i := range keys {
+			keys[i] = fmt.Sprint("k", i)
+			src.set(keys[i], 1)
+			require.Equal(t, "v1", rig.version(t, keys[i]))
+		}
+
+		time.Sleep(hardTTL - 3*time.Second) // inside the ±10% the deadlines are spread over
+
+		for _, key := range keys {
+			require.Equal(t, "v1", rig.version(t, key))
+		}
+
+		synctest.Wait()
+		assert.Zero(t, rig.reads(t, "stale"))
+		assert.Zero(t, rig.metric(t, "tiercache_refreshes_total", map[string]string{"result": "ok"}))
+	})
+}
+
+// A refresh that does not come back is given up after RefreshTimeout, and
+// not before.
+func TestARefreshIsBoundedByItsTimeout(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		src, key := newSource(), tiercache.KeyOf("a")
+		src.set(key, 1)
+
+		rig := newHarness(t, nil, src, func(cfg *tiercache.Config) { cfg.RefreshTimeout = 3 * time.Second })
+		require.Equal(t, "v1", rig.version(t, key))
+
+		time.Sleep(20 * time.Second)
+		t.Cleanup(src.hold())
+		require.Equal(t, "v1", rig.version(t, key))
+
+		time.Sleep(3*time.Second - time.Millisecond)
+		synctest.Wait()
+		require.Equal(t, int64(1), src.inFlight.Load())
+
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+		assert.Zero(t, src.inFlight.Load())
+		assert.InDelta(t, 1, rig.metric(t, "tiercache_refreshes_total", map[string]string{"result": "error"}), 0)
+	})
+}
+
+// resetCounter is a store that counts how often it was emptied.
+type resetCounter struct {
+	tiercache.Store
+
+	resets atomic.Int64
+}
+
+func (s *resetCounter) Reset() {
+	s.resets.Add(1)
+	s.Store.Reset()
+}
+
+// Close cancels what the cache has in flight — a refresh and a lookup whose
+// caller has left — at once, returns only when both have ended, empties L1,
+// and leaves a cache that answers ErrClosed.
+func TestCloseEndsWhatIsInFlightAndWaitsForIt(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var (
+			store     *resetCounter
+			held      atomic.Bool
+			cancelled = make(chan time.Time, 2)
+			finish    = make(chan struct{})
+		)
+
+		// Once held, a load waits for its context to end, says when it did,
+		// and then still takes its time to return.
+		load := func(ctx context.Context, _ string) (row, error) {
+			if !held.Load() {
+				return row{CRMID: "v1"}, nil
+			}
+
+			<-ctx.Done()
+
+			cancelled <- time.Now()
+
+			<-finish
+
+			return row{}, ctx.Err()
+		}
+
+		cache, err := tiercache.New(tiercache.Config{Name: "closing", SoftTTL: softTTL, HardTTL: hardTTL},
+			func(maxBytes int) tiercache.Store {
+				store = &resetCounter{Store: suiteStore()(maxBytes)}
+
+				return store
+			}, rowCodec{}, load, nil, nil)
+		require.NoError(t, err)
+
+		_, err = cache.Get(t.Context(), "refreshed")
+		require.NoError(t, err)
+
+		time.Sleep(20 * time.Second)
+		held.Store(true)
+
+		_, err = cache.Get(t.Context(), "refreshed") // stale: a refresh starts behind it
+		require.NoError(t, err)
+
+		gone, leave := context.WithCancel(t.Context())
+		abandoned := make(chan error, 1)
+
+		go func() { _, err := cache.Get(gone, "abandoned"); abandoned <- err }()
+
+		synctest.Wait()
+		leave()
+		require.ErrorIs(t, <-abandoned, context.Canceled)
+
+		closedAt, closed := time.Now(), make(chan struct{})
+
+		go func() { cache.Close(); close(closed) }()
+
+		synctest.Wait()
+		require.Len(t, cancelled, 2, "the refresh and the abandoned lookup")
+		assert.Equal(t, closedAt, <-cancelled, "at Close, not at RefreshTimeout")
+		assert.Equal(t, closedAt, <-cancelled)
+
+		select {
+		case <-closed:
+			require.Fail(t, "Close returned while loads were still running")
+		default:
+		}
+
+		close(finish)
+		<-closed
+		assert.Equal(t, int64(1), store.resets.Load())
+
+		_, err = cache.Get(t.Context(), "refreshed")
+		require.ErrorIs(t, err, tiercache.ErrClosed)
+		require.ErrorIs(t, cache.Invalidate(t.Context(), "refreshed"), tiercache.ErrClosed)
+
+		cache.Close() // a second Close is harmless
+		assert.Equal(t, int64(1), store.resets.Load())
 	})
 }

@@ -17,7 +17,8 @@
 // deleted one — lives in the cache for a full TTL. This package closes that
 // window with two rules:
 //
-//  1. fills are SET NX (only when the key is absent), and
+//  1. fills are SET NX (only when the key is absent; over an entry that no
+//     longer decodes, a compare-and-set against exactly that entry), and
 //  2. writers, after their transaction commits, replace the key with a
 //     short-lived tombstone ([Cache.Tombstone]) instead of deleting it.
 //

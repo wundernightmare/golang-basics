@@ -2,6 +2,7 @@ package testx
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"net/netip"
@@ -10,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/dns/dnsmessage"
 )
 
 // DNS is a name server on loopback whose answers a test changes while its
@@ -171,26 +171,17 @@ func (d *DNS) serve() {
 // answer replies to one query, or holds it while the server is silent.
 // count is false for a held query answered late: it was counted on arrival.
 func (d *DNS) answer(query []byte, from net.Addr, count bool) {
-	var parser dnsmessage.Parser
-
-	header, err := parser.Start(query)
-	if err != nil {
+	question, ok := parseQuestion(query)
+	if !ok {
 		return
 	}
-
-	question, err := parser.Question()
-	if err != nil {
-		return
-	}
-
-	name := strings.ToLower(question.Name.String())
 
 	d.mu.Lock()
-	addrs, known := d.records[name]
+	addrs, known := d.records[question.name]
 	mode := d.mode
 
-	if count && question.Type == dnsmessage.TypeA {
-		d.queries[name]++
+	if count && question.qtype == dnsTypeA {
+		d.queries[question.name]++
 	}
 
 	if mode == dnsSilent {
@@ -198,33 +189,118 @@ func (d *DNS) answer(query []byte, from net.Addr, count bool) {
 	}
 	d.mu.Unlock()
 
-	if mode == dnsSilent {
-		return
-	}
-
-	answer := dnsmessage.Message{
-		ID:                 header.ID,
-		Response:           true,
-		RecursionDesired:   header.RecursionDesired,
-		RecursionAvailable: true,
-		Questions:          []dnsmessage.Question{question},
-	}
-
 	switch {
+	case mode == dnsSilent:
+		return
 	case mode == dnsFails:
-		answer.RCode = dnsmessage.RCodeServerFailure
+		_, _ = d.conn.WriteTo(question.reply(dnsServerFailure, nil), from)
 	case !known:
-		answer.RCode = dnsmessage.RCodeNameError
-	case question.Type == dnsmessage.TypeA:
-		for _, addr := range addrs {
-			answer.Answers = append(answer.Answers, dnsmessage.Resource{
-				Header: dnsmessage.ResourceHeader{Name: question.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET},
-				Body:   &dnsmessage.AResource{A: addr.As4()},
-			})
-		}
+		_, _ = d.conn.WriteTo(question.reply(dnsNameError, nil), from)
+	case question.qtype == dnsTypeA:
+		_, _ = d.conn.WriteTo(question.reply(dnsSuccess, addrs), from)
+	default:
+		_, _ = d.conn.WriteTo(question.reply(dnsSuccess, nil), from)
+	}
+}
+
+// The wire format, RFC 1035 section 4, as far as an A-record server needs it.
+// Written out here rather than imported from golang.org/x/net/dns/dnsmessage:
+// for this one file golang.org/x/net would enter the go.mod of every module
+// whose tests use this package.
+const (
+	dnsHeaderLen = 12
+	dnsTypeA     = 1
+	dnsClassINET = 1
+
+	dnsSuccess       = 0
+	dnsServerFailure = 2
+	dnsNameError     = 3
+
+	dnsFlagResponse           = 1 << 15
+	dnsFlagRecursionDesired   = 1 << 8
+	dnsFlagRecursionAvailable = 1 << 7
+)
+
+// dnsQuestion is the first question of a query.
+type dnsQuestion struct {
+	id    uint16
+	flags uint16
+	raw   []byte // the question section as sent: the reply echoes it byte for byte
+	name  string // lower case, with the trailing dot
+	qtype uint16
+}
+
+// parseQuestion reads the header and the first question of a query; what
+// follows it (EDNS options) is ignored.
+func parseQuestion(msg []byte) (dnsQuestion, bool) {
+	if len(msg) < dnsHeaderLen || binary.BigEndian.Uint16(msg[4:]) == 0 {
+		return dnsQuestion{}, false
 	}
 
-	if reply, err := answer.Pack(); err == nil {
-		_, _ = d.conn.WriteTo(reply, from)
+	var name strings.Builder
+
+	at := dnsHeaderLen
+
+	for {
+		if at >= len(msg) {
+			return dnsQuestion{}, false
+		}
+
+		length := int(msg[at])
+		at++
+
+		if length == 0 {
+			break
+		}
+
+		// A length above 63 is a compression pointer, which a question's
+		// only name has nothing to point at.
+		if length > 63 || at+length > len(msg) {
+			return dnsQuestion{}, false
+		}
+
+		name.Write(msg[at : at+length])
+		name.WriteByte('.')
+
+		at += length
 	}
+
+	if at+4 > len(msg) {
+		return dnsQuestion{}, false
+	}
+
+	return dnsQuestion{
+		id:    binary.BigEndian.Uint16(msg),
+		flags: binary.BigEndian.Uint16(msg[2:]),
+		raw:   msg[dnsHeaderLen : at+4],
+		name:  strings.ToLower(name.String()),
+		qtype: binary.BigEndian.Uint16(msg[at:]),
+	}, true
+}
+
+// reply packs the response to q: the question echoed, rcode, and an A record
+// with a TTL of zero per address.
+func (q dnsQuestion) reply(rcode uint16, addrs []netip.Addr) []byte {
+	flags := dnsFlagResponse | dnsFlagRecursionAvailable | q.flags&dnsFlagRecursionDesired | rcode
+
+	out := make([]byte, 0, dnsHeaderLen+len(q.raw)+16*len(addrs))
+	out = binary.BigEndian.AppendUint16(out, q.id)
+	out = binary.BigEndian.AppendUint16(out, flags)
+	out = binary.BigEndian.AppendUint16(out, 1)                  // questions
+	out = binary.BigEndian.AppendUint16(out, uint16(len(addrs))) //nolint:gosec // G115: a test's handful of addresses
+	out = append(out, 0, 0, 0, 0)                                // no authority, no additional records
+	out = append(out, q.raw...)
+
+	for _, addr := range addrs {
+		ip := addr.As4()
+
+		out = append(out, 0xC0, dnsHeaderLen) // the owner name: a pointer to the question's
+		out = binary.BigEndian.AppendUint16(out, dnsTypeA)
+		out = binary.BigEndian.AppendUint16(out, dnsClassINET)
+		out = append(out, 0, 0, 0, 0) // TTL
+		out = binary.BigEndian.AppendUint16(out, uint16(len(ip)))
+		out = append(out, ip[:]...)
+	}
+
+	return out
 }

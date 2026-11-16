@@ -90,3 +90,44 @@ func Rejected(err error) bool {
 	var se *SendError
 	return errors.As(err, &se) && !se.Retryable
 }
+
+// brokerSendErrorKinds is the README "Errors" table for the errors a broker
+// answers with: Kafka protocol error code → kind.
+var brokerSendErrorKinds = map[int16]string{ //nolint:gochecknoglobals // read-only lookup table (Go has no const maps)
+	5:  KindUnavailable, // LEADER_NOT_AVAILABLE
+	6:  KindUnavailable, // NOT_LEADER_OR_FOLLOWER
+	7:  KindUnavailable, // REQUEST_TIMED_OUT
+	13: KindUnavailable, // NETWORK_EXCEPTION
+	19: KindUnavailable, // NOT_ENOUGH_REPLICAS
+	20: KindUnavailable, // NOT_ENOUGH_REPLICAS_AFTER_APPEND
+	56: KindUnavailable, // KAFKA_STORAGE_ERROR
+	89: KindUnavailable, // THROTTLING_QUOTA_EXCEEDED
+
+	3:  KindNotProvisioned, // UNKNOWN_TOPIC_OR_PARTITION
+	29: KindNotProvisioned, // TOPIC_AUTHORIZATION_FAILED
+	31: KindNotProvisioned, // CLUSTER_AUTHORIZATION_FAILED
+	33: KindNotProvisioned, // UNSUPPORTED_SASL_MECHANISM
+	34: KindNotProvisioned, // ILLEGAL_SASL_STATE
+	53: KindNotProvisioned, // TRANSACTIONAL_ID_AUTHORIZATION_FAILED
+	58: KindNotProvisioned, // SASL_AUTHENTICATION_FAILED
+
+	2:  KindRejected, // CORRUPT_MESSAGE
+	10: KindRejected, // MESSAGE_TOO_LARGE
+	17: KindRejected, // INVALID_TOPIC_EXCEPTION
+	18: KindRejected, // RECORD_LIST_TOO_LARGE
+	44: KindRejected, // POLICY_VIOLATION
+	87: KindRejected, // INVALID_RECORD
+}
+
+// BrokerSendErrorKind is the kind of a send that a broker refused with the
+// given Kafka protocol error code, [KindUnknown] for a code the table does
+// not name. Both drivers classify a broker's answer here, so it is the same
+// kind whichever client is linked; a driver's own map holds only the errors
+// its client raises locally.
+func BrokerSendErrorKind(code int16) string {
+	if kind, ok := brokerSendErrorKinds[code]; ok {
+		return kind
+	}
+
+	return KindUnknown
+}

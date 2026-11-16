@@ -9,19 +9,24 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"math"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wundernightmare/golang-basics/libs/s3"
 	"github.com/wundernightmare/golang-basics/libs/secret"
+	"github.com/wundernightmare/golang-basics/libs/testx"
 )
 
 // These tests need no object store: a local HTTP server answers the way a
@@ -78,8 +83,9 @@ func TestNew_Variants(t *testing.T) {
 	client.Close()
 }
 
-func TestNew_CAFile(t *testing.T) {
-	t.Parallel()
+// selfSigned is a CA certificate that signed nothing, as PEM.
+func selfSigned(t *testing.T) []byte {
+	t.Helper()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
@@ -93,22 +99,33 @@ func TestNew_CAFile(t *testing.T) {
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	require.NoError(t, err)
 
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// S3_CA_FILE is the trust store of the endpoint: a store whose certificate
+// the file's CA signed is trusted, any other is not.
+func TestCAFileDecidesWhomToTrust(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "5")
+	}))
+	t.Cleanup(srv.Close)
+
 	dir := t.TempDir()
-	good := filepath.Join(dir, "ca.pem")
-	require.NoError(t, os.WriteFile(good, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600))
+	signer := filepath.Join(dir, "signer.pem")
+	stranger := filepath.Join(dir, "stranger.pem")
 
-	cfg := s3.Config{Bucket: "b", Endpoint: "https://s3.internal:9000", AccessKeyID: "k", SecretAccessKey: secret.New("s"), CAFile: good}
+	require.NoError(t, os.WriteFile(signer, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600))
+	require.NoError(t, os.WriteFile(stranger, selfSigned(t), 0o600))
 
-	client, err := s3.New(context.Background(), cfg, nil)
+	trusting := clientOf(t, srv.URL, nil, func(c *s3.Config) { c.CAFile = signer })
+	_, err := trusting.Head(context.Background(), "k")
 	require.NoError(t, err)
-	client.Close()
 
-	bad := filepath.Join(dir, "not-a-cert.pem")
-	require.NoError(t, os.WriteFile(bad, []byte("hello"), 0o600))
-
-	cfg.CAFile = bad
-	_, err = s3.New(context.Background(), cfg, nil)
-	require.ErrorContains(t, err, "S3_CA_FILE")
+	distrusting := clientOf(t, srv.URL, nil, func(c *s3.Config) { c.CAFile = stranger })
+	_, err = distrusting.Head(context.Background(), "k")
+	require.ErrorContains(t, err, "certificate signed by unknown authority")
 }
 
 // A store that fails every call: each operation reports its own error, named
@@ -135,7 +152,9 @@ func TestClient_StoreFailsEveryCall(t *testing.T) {
 	require.ErrorContains(t, err, "s3: list prefixes")
 
 	require.ErrorContains(t, client.Delete(ctx, []string{"a", "b"}), "s3: delete")
-	require.ErrorContains(t, client.Ensure(ctx), "unreachable", "a failing store is not a missing bucket: nothing is created")
+	err = client.Ensure(ctx)
+	require.ErrorContains(t, err, "unreachable")
+	require.NotErrorIs(t, err, s3.ErrBucketNotFound, "a failing store is not a missing bucket: nothing is created")
 
 	upload := client.NewUpload(ctx, "big", "application/octet-stream")
 	_, err = upload.Write(make([]byte, s3.MinUploadPartBytes))
@@ -144,14 +163,66 @@ func TestClient_StoreFailsEveryCall(t *testing.T) {
 	upload.Abort() // idempotent
 }
 
-// A bare 404 (HEAD has no body to carry an error code) is "not found".
-func TestClient_BareNotFound(t *testing.T) {
+// What "not found" means depends on what was asked and what the store
+// named: a missing key is an answer to get and head, a missing bucket is a
+// failure of any call.
+func TestNotFound_KeyOrBucket(t *testing.T) {
 	t.Parallel()
 
-	client := faulty(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
+	bare := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }
+	bucketGone := func(w http.ResponseWriter, _ *http.Request) { xml(w, http.StatusNotFound, noSuchBucket) }
 
-	_, err := client.Head(context.Background(), "k")
-	require.ErrorIs(t, err, s3.ErrNotFound)
+	for name, tc := range map[string]struct {
+		op     string
+		answer http.HandlerFunc
+		call   func(ctx context.Context, client *s3.Client) error
+		want   error
+		not    error
+	}{
+		"get: no such key": {
+			"get", func(w http.ResponseWriter, _ *http.Request) { xml(w, http.StatusNotFound, noSuchKey) },
+			func(ctx context.Context, client *s3.Client) error { _, err := client.Get(ctx, "k", 10); return err },
+			s3.ErrNotFound, s3.ErrBucketNotFound,
+		},
+		// HEAD has no body to carry an error code.
+		"head: bare 404": {
+			"head", bare,
+			func(ctx context.Context, client *s3.Client) error { _, err := client.Head(ctx, "k"); return err },
+			s3.ErrNotFound, s3.ErrBucketNotFound,
+		},
+		"get: no such bucket": {
+			"get", bucketGone,
+			func(ctx context.Context, client *s3.Client) error { _, err := client.Get(ctx, "k", 10); return err },
+			s3.ErrBucketNotFound, s3.ErrNotFound,
+		},
+		"put: no such bucket": {
+			"put", bucketGone,
+			func(ctx context.Context, client *s3.Client) error { return client.Put(ctx, "k", []byte("x"), "") },
+			s3.ErrBucketNotFound, s3.ErrNotFound,
+		},
+		"ensure: bare 404 on the bucket": {
+			"head_bucket", bare,
+			func(ctx context.Context, client *s3.Client) error { return client.Ensure(ctx) },
+			s3.ErrBucketNotFound, s3.ErrNotFound,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			client := newFakeStore(t).answer(tc.op, tc.answer).client(t)
+
+			reg := prometheus.NewRegistry()
+			reg.MustRegister(client.Collectors()...)
+
+			err := tc.call(context.Background(), client)
+			require.ErrorIs(t, err, tc.want)
+			require.NotErrorIs(t, err, tc.not)
+
+			if errors.Is(tc.want, s3.ErrBucketNotFound) {
+				assert.InDelta(t, 1, testx.Metric(t, reg, "s3_request_errors_total", map[string]string{"operation": tc.op}), 0)
+			}
+		})
+	}
 }
 
 func TestEnsure_CreateBucketOutcomes(t *testing.T) {
@@ -194,6 +265,37 @@ func TestDelete_PartialFailure(t *testing.T) {
 	err := client.Delete(context.Background(), []string{"a", "b"})
 	require.ErrorContains(t, err, "AccessDenied")
 	require.ErrorContains(t, err, `"b"`)
+}
+
+// A batch the store refuses does not stop the ones after it.
+func TestDelete_GoesOnPastAFailedBatch(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore(t).fails("delete")
+
+	keys := make([]string, 1001) // one key more than a batch holds
+	for i := range keys {
+		keys[i] = strconv.Itoa(i)
+	}
+
+	require.Error(t, store.client(t).Delete(context.Background(), keys))
+	assert.Equal(t, 2, store.calls("delete"))
+}
+
+// The limit is the caller's: the largest one reads the whole object, a
+// negative one is the caller's mistake, not an object too large.
+func TestGet_LimitEdges(t *testing.T) {
+	t.Parallel()
+
+	client := newFakeStore(t).client(t)
+
+	body, err := client.Get(context.Background(), "k", math.MaxInt64)
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(body))
+
+	_, err = client.Get(context.Background(), "k", -1)
+	require.ErrorContains(t, err, "negative")
+	require.NotErrorIs(t, err, s3.ErrTooLarge)
 }
 
 // A body with no declared length is still held to the limit.

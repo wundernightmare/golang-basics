@@ -9,6 +9,7 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"sync"
@@ -33,8 +34,19 @@ import (
 // s3_request_errors_total.
 var ErrNotFound = errors.New("s3: object not found")
 
+// ErrBucketNotFound is in the error of any call the store answered with "no
+// such bucket", and of [Client.Ensure] and the readiness probe when the
+// bucket is not there. Unlike [ErrNotFound] it is a failure, and counted as
+// one.
+//
+// [Client.Head] is the exception: the store answers a HEAD without a body,
+// so a missing bucket cannot be told from a missing key there and is
+// [ErrNotFound].
+var ErrBucketNotFound = errors.New("s3: bucket not found")
+
 // ErrTooLarge is what [Client.Get] returns for an object larger than the
-// limit the caller gave.
+// limit the caller gave. The limit is the caller's, so like [ErrNotFound] it
+// is an answer and not counted in s3_request_errors_total.
 var ErrTooLarge = errors.New("s3: object larger than the read limit")
 
 // deleteBatch is the most keys one DeleteObjects call takes.
@@ -191,7 +203,7 @@ func newHTTPClient(cfg Config) (*http.Client, error) {
 	if cfg.CAFile != "" {
 		pool, err := secret.CertPool(cfg.CAFile)
 		if err != nil {
-			return nil, fmt.Errorf("s3: S3_CA_FILE: %w", err)
+			return nil, fmt.Errorf("%w: S3_CA_FILE: %w", ErrConfig, err)
 		}
 
 		tlsCfg.RootCAs = pool
@@ -216,12 +228,16 @@ func newHTTPClient(cfg Config) (*http.Client, error) {
 // Bucket is the bucket the client addresses.
 func (c *Client) Bucket() string { return c.cfg.Bucket }
 
-// Close releases the idle connections.
+// Close releases the idle connections. The client stays usable: a call made
+// after Close opens a new connection, and an [Upload] in progress goes on.
 func (c *Client) Close() { c.http.CloseIdleConnections() }
 
-// call runs one SDK call under timeout, traced and measured. notFoundOK says
-// a missing key is an answer for this operation rather than a failure.
-func (c *Client) call(ctx context.Context, operation, key string, timeout time.Duration, notFoundOK bool, run func(context.Context) error) error {
+// call runs one SDK call under timeout, traced and measured. missing is what
+// the store's "not found" without a bucket in it means for this operation:
+// ErrNotFound (an answer, returned bare and not counted) for a call that
+// reads a key, ErrBucketNotFound for one that asks for the bucket, nil for a
+// call to which it is one more failure.
+func (c *Client) call(ctx context.Context, operation, key string, timeout time.Duration, missing error, run func(context.Context) error) error {
 	ctx, span := c.tracer.Start(ctx, "s3 "+operation,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
@@ -245,12 +261,19 @@ func (c *Client) call(ctx context.Context, operation, key string, timeout time.D
 		return nil
 	}
 
-	if isNotFound(err) {
-		if notFoundOK {
+	switch code := errorCode(err); {
+	case code == "NoSuchBucket":
+		err = fmt.Errorf("%w: %w", ErrBucketNotFound, err)
+	case code == "NoSuchKey" || code == "NotFound":
+		if errors.Is(missing, ErrNotFound) {
 			return ErrNotFound
 		}
 
-		err = fmt.Errorf("%w: %w", ErrNotFound, err)
+		if missing != nil {
+			err = fmt.Errorf("%w: %w", missing, err)
+		}
+	case errors.Is(err, ErrTooLarge):
+		return err
 	}
 
 	c.metrics.errors.WithLabelValues(operation).Inc()
@@ -260,35 +283,22 @@ func (c *Client) call(ctx context.Context, operation, key string, timeout time.D
 	return err
 }
 
-// isNotFound reports a missing key or bucket: the modelled errors, or the
-// bare 404 a HEAD answers with (it has no body to carry a code).
-func isNotFound(err error) bool {
-	var (
-		noKey    *types.NoSuchKey
-		notFound *types.NotFound
-		noBucket *types.NoSuchBucket
-		apiErr   smithy.APIError
-	)
-
-	if errors.As(err, &noKey) || errors.As(err, &notFound) || errors.As(err, &noBucket) {
-		return true
+// errorCode is the S3 error code of err, "" when the store sent none.
+// NotFound is the code the SDK gives the bare 404 of a HEAD, which has no
+// body to carry one.
+func errorCode(err error) string {
+	if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
+		return apiErr.ErrorCode()
 	}
 
-	if errors.As(err, &apiErr) {
-		switch apiErr.ErrorCode() {
-		case "NoSuchKey", "NotFound", "NoSuchBucket":
-			return true
-		}
-	}
-
-	return false
+	return ""
 }
 
 // Put stores body at key, replacing what is there. The call is idempotent:
 // a writer that names its objects deterministically can repeat a put whose
 // answer was lost and still end with one object.
 func (c *Client) Put(ctx context.Context, key string, body []byte, contentType string) error {
-	err := c.call(ctx, opPut, key, c.cfg.OpTimeout, false, func(ctx context.Context) error {
+	err := c.call(ctx, opPut, key, c.cfg.OpTimeout, nil, func(ctx context.Context) error {
 		_, err := c.api.PutObject(ctx, &awss3.PutObjectInput{
 			Bucket:        aws.String(c.cfg.Bucket),
 			Key:           aws.String(key),
@@ -316,11 +326,22 @@ func contentTypeOrNil(contentType string) *string {
 
 // Get reads the whole object at key into memory, refusing one larger than
 // limit bytes with [ErrTooLarge] — the caller decides how much one object may
-// cost it. A missing key is [ErrNotFound].
+// cost it. A missing key is [ErrNotFound]. A negative limit is an error.
 func (c *Client) Get(ctx context.Context, key string, limit int64) ([]byte, error) {
+	if limit < 0 {
+		return nil, fmt.Errorf("s3: get %q: negative read limit %d", key, limit)
+	}
+
+	// One byte past the limit tells "exactly the limit" from "more"; the
+	// largest limit has no byte past it.
+	readUpTo := limit
+	if limit < math.MaxInt64 {
+		readUpTo = limit + 1
+	}
+
 	var body []byte
 
-	err := c.call(ctx, opGet, key, c.cfg.TransferTimeout, true, func(ctx context.Context) error {
+	err := c.call(ctx, opGet, key, c.cfg.TransferTimeout, ErrNotFound, func(ctx context.Context) error {
 		out, err := c.api.GetObject(ctx, &awss3.GetObjectInput{Bucket: aws.String(c.cfg.Bucket), Key: aws.String(key)})
 		if err != nil {
 			return err
@@ -332,8 +353,7 @@ func (c *Client) Get(ctx context.Context, key string, limit int64) ([]byte, erro
 			return fmt.Errorf("%w: %d > %d bytes", ErrTooLarge, *out.ContentLength, limit)
 		}
 
-		// One byte past the limit tells "exactly the limit" from "more".
-		body, err = io.ReadAll(io.LimitReader(out.Body, limit+1))
+		body, err = io.ReadAll(io.LimitReader(out.Body, readUpTo))
 		if err != nil {
 			return err
 		}
@@ -355,11 +375,12 @@ func (c *Client) Get(ctx context.Context, key string, limit int64) ([]byte, erro
 	return body, nil
 }
 
-// Head returns the size of the object at key, or [ErrNotFound].
+// Head returns the size of the object at key, or [ErrNotFound] — also for a
+// bucket that is not there, see [ErrBucketNotFound].
 func (c *Client) Head(ctx context.Context, key string) (int64, error) {
 	var size int64
 
-	err := c.call(ctx, opHead, key, c.cfg.OpTimeout, true, func(ctx context.Context) error {
+	err := c.call(ctx, opHead, key, c.cfg.OpTimeout, ErrNotFound, func(ctx context.Context) error {
 		out, err := c.api.HeadObject(ctx, &awss3.HeadObjectInput{Bucket: aws.String(c.cfg.Bucket), Key: aws.String(key)})
 		if err != nil {
 			return err
@@ -390,7 +411,7 @@ func (c *Client) List(ctx context.Context, prefix string) iter.Seq2[Object, erro
 		for {
 			var page *awss3.ListObjectsV2Output
 
-			err := c.call(ctx, opList, prefix, c.cfg.OpTimeout, false, func(ctx context.Context) error {
+			err := c.call(ctx, opList, prefix, c.cfg.OpTimeout, nil, func(ctx context.Context) error {
 				var err error
 
 				page, err = c.api.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
@@ -434,7 +455,7 @@ func (c *Client) ListPrefixes(ctx context.Context, prefix string) ([]string, err
 	for {
 		var page *awss3.ListObjectsV2Output
 
-		err := c.call(ctx, opList, prefix, c.cfg.OpTimeout, false, func(ctx context.Context) error {
+		err := c.call(ctx, opList, prefix, c.cfg.OpTimeout, nil, func(ctx context.Context) error {
 			var err error
 
 			page, err = c.api.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
@@ -473,7 +494,7 @@ func (c *Client) Delete(ctx context.Context, keys []string) error {
 			ids[i] = types.ObjectIdentifier{Key: aws.String(key)}
 		}
 
-		err := c.call(ctx, opDelete, batch[0], c.cfg.OpTimeout, false, func(ctx context.Context) error {
+		err := c.call(ctx, opDelete, batch[0], c.cfg.OpTimeout, nil, func(ctx context.Context) error {
 			out, err := c.api.DeleteObjects(ctx, &awss3.DeleteObjectsInput{
 				Bucket: aws.String(c.cfg.Bucket),
 				Delete: &types.Delete{Objects: ids, Quiet: aws.Bool(true)},
@@ -503,7 +524,8 @@ func (c *Client) Delete(ctx context.Context, keys []string) error {
 	return nil
 }
 
-// ensureLocks holds one mutex per endpoint + bucket, see [Client.Ensure].
+// ensureLocks holds one lock per endpoint + bucket, see [Client.Ensure]: a
+// channel of one slot, so that waiting for it can end with the caller's ctx.
 // UPSTREAM-WORKAROUND(rustfs 1.0.5): two clients creating one bucket at the
 // same moment leave the store answering NoSuchBucket for it
 // (docs/UPSTREAM-WORKAROUNDS.md).
@@ -518,23 +540,30 @@ var ensureLocks sync.Map //nolint:gochecknoglobals // process-wide by purpose: i
 // answer NoSuchBucket for a bucket that both were just told exists (seen
 // with RustFS). Across processes the race stays — one more reason the option
 // is not for production.
+//
+// A bucket that is missing and not to be created is [ErrBucketNotFound].
 func (c *Client) Ensure(ctx context.Context) error {
-	lock, _ := ensureLocks.LoadOrStore(c.cfg.Endpoint+"\x00"+c.cfg.Bucket, &sync.Mutex{})
+	lock, _ := ensureLocks.LoadOrStore(c.cfg.Endpoint+"\x00"+c.cfg.Bucket, make(chan struct{}, 1))
 
-	mu, _ := lock.(*sync.Mutex)
-	mu.Lock()
-	defer mu.Unlock()
+	turn, _ := lock.(chan struct{})
+
+	select {
+	case turn <- struct{}{}:
+		defer func() { <-turn }()
+	case <-ctx.Done():
+		return fmt.Errorf("s3: bucket %q: waiting for another client's check of it: %w", c.cfg.Bucket, ctx.Err())
+	}
 
 	err := c.headBucket(ctx)
 	if err == nil {
 		return nil
 	}
 
-	if !c.cfg.AutoCreateBucket || !errors.Is(err, ErrNotFound) {
+	if !c.cfg.AutoCreateBucket || !errors.Is(err, ErrBucketNotFound) {
 		return err
 	}
 
-	err = c.call(ctx, opCreateBucket, "", c.cfg.OpTimeout, false, func(ctx context.Context) error {
+	err = c.call(ctx, opCreateBucket, "", c.cfg.OpTimeout, nil, func(ctx context.Context) error {
 		_, err := c.api.CreateBucket(ctx, &awss3.CreateBucketInput{Bucket: aws.String(c.cfg.Bucket)})
 
 		var (
@@ -557,7 +586,7 @@ func (c *Client) Ensure(ctx context.Context) error {
 }
 
 func (c *Client) headBucket(ctx context.Context) error {
-	err := c.call(ctx, opHeadBucket, "", c.cfg.OpTimeout, false, func(ctx context.Context) error {
+	err := c.call(ctx, opHeadBucket, "", c.cfg.OpTimeout, ErrBucketNotFound, func(ctx context.Context) error {
 		_, err := c.api.HeadBucket(ctx, &awss3.HeadBucketInput{Bucket: aws.String(c.cfg.Bucket)})
 
 		return err

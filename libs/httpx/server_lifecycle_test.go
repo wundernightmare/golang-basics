@@ -3,8 +3,10 @@ package httpx_test
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wundernightmare/golang-basics/libs/httpx"
+	"github.com/wundernightmare/golang-basics/libs/testx"
 )
 
 func TestAccessLog_LevelsAndFields(t *testing.T) {
@@ -84,6 +87,63 @@ func TestWithMiddleware_SeesRequestIDAndRoute(t *testing.T) {
 	assert.True(t, hadDeadline, "the per-request deadline is applied before extra middleware")
 	assert.Equal(t, "/tasks/{id}", sawRoute)
 	assert.Empty(t, handlerRoute, "the route is recorded after the handler returns")
+}
+
+// Where the service's middleware sits in the chain (the order of record is
+// the NewServer doc): inside tracing, the access log and the metrics, so
+// what it rejects is still observed; behind the server's rate limit, so what
+// is shed never reaches it; around the handler's panic recovery, so it sees
+// a response and not a panic; and under a recovery of its own, so its own
+// panic is a counted 500 rather than a dropped connection.
+func TestChain_OrderAroundTheServicesMiddleware(t *testing.T) {
+	t.Parallel()
+
+	var entered, returned int
+
+	extra := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			entered++
+
+			switch r.URL.Path {
+			case "/deny":
+				w.WriteHeader(http.StatusUnauthorized)
+			case "/mw-panic":
+				panic("middleware bug")
+			default:
+				next.ServeHTTP(w, r)
+			}
+
+			returned++
+		})
+	}
+
+	spans := testx.Recorder(t)
+	srv, buf := loggedServer(t, httpx.Config{RateLimit: 0.001, RateBurst: 3},
+		httpx.WithMiddleware(extra), httpx.WithTracerProvider(spans.Provider), httpx.WithPropagator(spans.Propagator))
+	srv.Mux().HandleFunc("GET /boom", func(http.ResponseWriter, *http.Request) { panic("handler bug") })
+
+	reg := srv.Metrics.Registry
+	counted := func(status string) float64 {
+		return testx.Metric(t, reg, "http_requests_total", map[string]string{"route": "unmatched", "status": status})
+	}
+
+	assert.Equal(t, http.StatusUnauthorized, get(srv.Handler(), "/deny").Code)
+	assert.Equal(t, 1.0, counted("401"))
+	assert.NotNil(t, buf.Find(t, map[string]any{"msg": "request", "path": "/deny", "status": 401.0}))
+	assert.Len(t, spans.Ended(), 1)
+
+	assert.Equal(t, http.StatusInternalServerError, get(srv.Handler(), "/boom").Code)
+	assert.Equal(t, 2, returned, "the handler's panic was a response by the time it reached the middleware")
+
+	rec := get(srv.Handler(), "/mw-panic")
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, httpx.ProblemContentType, rec.Header().Get("Content-Type"))
+	assert.Equal(t, 1.0, counted("500"))
+	assert.Equal(t, 2.0, testx.Metric(t, reg, "http_unhandled_errors_total", nil))
+	assert.NotNil(t, buf.Find(t, map[string]any{"msg": "request", "path": "/mw-panic", "status": 500.0, "level": "ERROR"}))
+
+	assert.Equal(t, http.StatusTooManyRequests, get(srv.Handler(), "/deny").Code)
+	assert.Equal(t, 3, entered, "a shed request costs no authentication")
 }
 
 func TestRequestTimeout_IsTheHandlersDeadline(t *testing.T) {
@@ -287,6 +347,55 @@ func TestRun_PortInUseIsReturned(t *testing.T) {
 	srv, _ := loggedServer(t, httpx.Config{Addr: busy.Listener.Addr().String(), AdminAddr: "127.0.0.1:0"})
 	err := srv.Run(context.Background())
 	require.ErrorContains(t, err, "bind API listener")
+
+	// The admin port in use: the API listener bound a moment earlier is
+	// given back, not left accepting connections nobody will serve.
+	srv, _ = loggedServer(t, httpx.Config{Addr: "127.0.0.1:0", AdminAddr: busy.Listener.Addr().String()})
+	err = srv.Run(context.Background())
+	require.ErrorContains(t, err, "bind admin listener")
+
+	_, err = net.DialTimeout("tcp", srv.ListenAddr(), time.Second)
+	require.Error(t, err, "the API listener is closed")
+}
+
+// Run evaluates the checks once before it opens the readiness gate, and from
+// then on in the background: a probe never has to pay for a check.
+func TestRun_EvaluatesChecksOnceThenInTheBackground(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		interval time.Duration
+		settles  func(calls *atomic.Int32) bool
+	}{
+		"at start":          {time.Hour, func(calls *atomic.Int32) bool { return calls.Load() == 1 }},
+		"in the background": {20 * time.Millisecond, func(calls *atomic.Int32) bool { return calls.Load() >= 3 }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv, logs := loggedServer(t, httpx.Config{
+				AdminAddr: "127.0.0.1:0", HealthInterval: tc.interval, HealthTimeout: 10 * time.Millisecond, ShutdownTimeout: time.Second,
+			})
+
+			var calls atomic.Int32
+
+			srv.Health.Register("db", func(context.Context) error { calls.Add(1); return nil })
+
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+
+			go func() { done <- srv.Run(ctx) }()
+
+			require.Eventually(t, func() bool { return tc.settles(&calls) }, 5*time.Second, 5*time.Millisecond)
+			cancel()
+			require.NoError(t, <-done)
+			require.NotNil(t, logs.Find(t, map[string]any{"msg": "servers stopped cleanly"}))
+
+			if tc.interval == time.Hour {
+				assert.Equal(t, int32(1), calls.Load(), "one evaluation for the whole start-up")
+			}
+		})
+	}
 }
 
 func status(t testing.TB, url string) int {

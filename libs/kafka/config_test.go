@@ -31,6 +31,19 @@ func TestLoadConfig_ReadsTheProcessEnvironment(t *testing.T) {
 	assert.Equal(t, []string{"env:9092"}, cfg.Brokers, "LoadConfig reads the process environment")
 }
 
+// Zero is a setting of these two keys, not "unset": no batching window, no
+// retries.
+func TestLoadConfig_KeepsAnExplicitZero(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := LoadConfigFrom("", map[string]string{
+		"KAFKA_BROKERS": "localhost:9092", "KAFKA_PRODUCER_LINGER_MS": "0", "KAFKA_CONSUMER_MAX_RETRIES": "0",
+	})
+	require.NoError(t, err)
+	assert.Zero(t, cfg.LingerMs)
+	assert.Zero(t, cfg.MaxRetries)
+}
+
 func TestLoadConfig_Defaults(t *testing.T) {
 	t.Parallel()
 

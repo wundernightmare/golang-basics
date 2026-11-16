@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
 
@@ -27,7 +28,10 @@ type Worker struct {
 //
 // A worker that returns an error stops the server, which drains as above. So
 // does a worker that panics: every worker runs under [Server.Guard]. A worker
-// that returns nil ends alone — the rest keep running.
+// that returns nil ends alone — the rest keep running. Once the server has
+// stopped and the workers were told to, a worker's context.Canceled is the
+// answer to that and not a failure: `return ctx.Err()` ends a clean shutdown
+// cleanly.
 //
 // A worker that must stop *with* the signal rather than after the drain (a
 // consumer loop: nothing in flight depends on it) does not belong here; run
@@ -60,7 +64,14 @@ func (s *Server) RunWith(ctx context.Context, workers ...Worker) error {
 	}
 
 	for _, worker := range workers {
-		wg.Go(func() { fail(s.Guard(worker.Name, working, worker.Run)()) })
+		wg.Go(func() {
+			err := s.Guard(worker.Name, working, worker.Run)()
+			if errors.Is(err, context.Canceled) && working.Err() != nil {
+				return
+			}
+
+			fail(err)
+		})
 	}
 
 	fail(s.Run(serving))

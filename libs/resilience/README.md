@@ -8,8 +8,10 @@ logic: no I/O, no metrics, no logging, an injected clock.
 | Type | What it is |
 | --- | --- |
 | `Breaker` | closed / open / half-open over a sliding failure ratio; CAS transitions, lock-free admission |
-| `RetryBudget` | retries capped at `min_retries + ratio × requests` over a sliding window |
+| `RetryBudget` | retries capped at `min_retries + ratio × requests` over a sliding window. A retry is granted while the retries in the window are *below* that bound, so the bound is rounded up: with a ratio above 0, one request in the window is enough for one retry — at one request per window every request can be retried |
 | `Backoff` | the delay before retry N: exponential from an initial value, capped, with equal jitter (in `[d/2, d]`) — the schedule of the Kafka consumer and of the tasks outbox relay |
+| `Jitter` | a TTL spread uniformly over ±10%, so entries cached together do not expire together |
+| `ErrOpen` | the rejection: what `Breaker.Do` returns, and what a client's own "circuit open" error wraps, so `errors.Is(err, resilience.ErrOpen)` works over any of them |
 
 ```go
 b := resilience.NewBreaker(resilience.DefaultBreakerConfig(), time.Now, onChange) // nil when FailureRatio is 0
@@ -18,6 +20,34 @@ grant, ok := b.Allow()
 if !ok { /* reject: the dependency is down */ }
 // … send …
 b.Record(grant, resilience.OutcomeFailure) // exactly once per granted ticket
+```
+
+`Do` is `Allow` and `Record` in one, and keeps "exactly once" on every way
+out of the request:
+
+```go
+err := b.Do(func() resilience.Outcome {
+	resp, sendErr = send()
+	return classify(resp, sendErr) // Success, Failure or Ignored
+})
+if errors.Is(err, resilience.ErrOpen) { /* rejected: send was not called */ }
+```
+
+If the function panics, the request is recorded as a failure and the panic
+goes on to the caller. With bare `Allow` / `Record` that is the caller's job
+(`defer`): half-open has no deadline, so a probe that is never recorded keeps
+its slot and the breaker admits nothing more until the process restarts.
+
+A state mirrored somewhere (a gauge) is written through `Mirror`, from the
+`onChange` hook and once at start. Transitions notify concurrently and
+possibly out of order, so the hook's `to` may already be stale; `Mirror`
+reads the state and calls the setter under one lock, so the last write is the
+latest state:
+
+```go
+set := func(s resilience.State) { gauge.Set(float64(s)) }
+b = resilience.NewBreaker(cfg, time.Now, func(from, to resilience.State) { b.Mirror(set) })
+b.Mirror(set) // the series exists before the first transition; a nil breaker reports closed
 ```
 
 **Breaker semantics.** Closed counts requests and failures in
@@ -40,6 +70,16 @@ a field of that type — `Breaker resilience.BreakerConfig` under
 client, the cache and the ingest sinks all read the same five keys under
 their own name (`breaker.failure_ratio`, `…_BREAKER_FAILURE_RATIO`). The
 tags carry no defaults: each owner sets its own policy before loading.
+
+`BreakerConfig.Validate() error` reports every problem at once
+(`errors.Join`), named by key; `NaN` is not a ratio. In this package
+`failure_ratio: 0` means "no breaker": `Validate` accepts it and `NewBreaker`
+returns nil. An owner may read the key differently before it gets here —
+require a breaker, or substitute a default of its own — and says so in its
+own documentation.
+
+The clocks are injected and must not be nil. Any instant works, before 1970
+included.
 
 ## Tests
 

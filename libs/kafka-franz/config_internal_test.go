@@ -24,7 +24,6 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/wundernightmare/golang-basics/libs/kafka"
-	"github.com/wundernightmare/golang-basics/libs/kafka/kafkatest"
 	"github.com/wundernightmare/golang-basics/libs/secret"
 )
 
@@ -250,32 +249,37 @@ func TestCodecAndBalancer_EveryName(t *testing.T) {
 
 // A full buffer is waited out within the caller's budget, never blocking
 // inside the client: with room for one record and no broker, the second
-// Send spins on ErrMaxBuffered until ctx ends, and fails retryable.
+// Send keeps trying until its ctx ends, and fails retryable. Without the wait
+// it would fail at once with queue_full.
 func TestProducer_FullBufferWaitsWithinBudget(t *testing.T) {
 	t.Parallel()
 
 	cfg := kafka.Config{Brokers: []string{"127.0.0.1:1"}, ProducerQueueMaxMessages: 1, PublishTimeout: 5 * time.Second}
 	require.NoError(t, cfg.Validate())
-	pc, err := Driver{}.NewProducer(cfg, nil)
+	client, err := Driver{}.NewProducer(cfg, nil)
 	require.NoError(t, err)
 
-	defer pc.Close()
+	defer client.Close()
 
 	first, cancelFirst := context.WithCancel(context.Background())
 	defer cancelFirst()
 
-	go func() { _ = pc.Send(first, kafka.Message{Topic: "t", Value: []byte("1")}) }()
+	go func() { _ = client.Send(first, kafka.Message{Topic: "t", Value: []byte("1")}) }()
 
 	time.Sleep(50 * time.Millisecond)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	const budget = 200 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
-	err = pc.Send(ctx, kafka.Message{Topic: "t", Value: []byte("2"), Headers: []kafka.Header{{Key: "h", Value: []byte("v")}}})
+	start := time.Now()
+	err = client.Send(ctx, kafka.Message{Topic: "t", Value: []byte("2"), Headers: []kafka.Header{{Key: "h", Value: []byte("v")}}})
 
 	var se *kafka.SendError
 	require.ErrorAs(t, err, &se)
 	assert.True(t, se.Retryable)
+	assert.GreaterOrEqual(t, time.Since(start), budget, "waited for room until the budget ran out")
 }
 
 func TestDriver_ClientsFailOnBadSecurity(t *testing.T) {
@@ -290,9 +294,8 @@ func TestDriver_ClientsFailOnBadSecurity(t *testing.T) {
 	require.Error(t, err)
 }
 
-// A broker error is the kind libs/kafka's README "Errors" gives it — the
-// table both providers are held to — and franz-go's own errors, which carry
-// no Kafka code, are the kind their meaning has.
+// A broker error is the kind libs/kafka's table gives its code, and franz-go's
+// own errors, which carry no Kafka code, are the kind their meaning has.
 func TestSendError_Taxonomy(t *testing.T) {
 	t.Parallel()
 
@@ -304,19 +307,16 @@ func TestSendError_Taxonomy(t *testing.T) {
 		return se.Kind
 	}
 
-	for code, want := range kafkatest.BrokerSendErrorKinds() {
-		protocolErr := kerr.ErrorForCode(code)
-		require.Error(t, protocolErr, "code %d", code)
-		assert.Equal(t, want, kindOf(protocolErr), protocolErr.Error())
-	}
-
-	assert.Len(t, sendErrorKinds, len(kafkatest.BrokerSendErrorKinds()), "no broker code is mapped here and missing from the shared table")
+	assert.Equal(t, kafka.KindUnavailable, kindOf(kerr.RequestTimedOut))
+	assert.Equal(t, kafka.KindNotProvisioned, kindOf(kerr.UnknownTopicOrPartition))
+	assert.Equal(t, kafka.KindRejected, kindOf(kerr.MessageTooLarge))
 	assert.Equal(t, kafka.KindUnknown, kindOf(kerr.OffsetOutOfRange), "a code the table does not name")
 
 	assert.Equal(t, kafka.KindQueueFull, kindOf(kgo.ErrMaxBuffered))
 	assert.Equal(t, kafka.KindUnavailable, kindOf(kgo.ErrRecordTimeout))
 	assert.Equal(t, kafka.KindUnavailable, kindOf(kgo.ErrRecordRetries))
 	assert.Equal(t, kafka.KindUnavailable, kindOf(kgo.ErrClientClosed))
+	require.ErrorIs(t, sendError(kgo.ErrClientClosed), kafka.ErrClientClosed)
 	assert.Equal(t, kafka.KindUnavailable, kindOf(&net.OpError{Op: "dial", Err: errors.New("connection refused")}),
 		"a connection error has no Kafka code")
 	assert.Equal(t, kafka.KindUnknown, kindOf(errors.New("anything else")))

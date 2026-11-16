@@ -387,8 +387,8 @@ kafka-sasl-ssl-test:
     export KAFKA_SASL_SSL_BROKERS=localhost:29094 KAFKA_SASL_SSL_USERNAME=app \
       KAFKA_SASL_SSL_CA_LOCATION="$PWD/examples/kafka-sasl-ssl/certs/ca.crt" \
       KAFKA_SASL_SSL_PASSWORD_FILE="$PWD/examples/kafka-sasl-ssl/certs/app.password"
-    (cd libs/kafka-rdkafka && go test -count=1 -run TestSASLSSL -v ./...)
-    (cd libs/kafka-franz && CGO_ENABLED=0 go test -count=1 -run TestSASLSSL -v ./...)
+    (cd libs/kafka-rdkafka/integration && go test -count=1 -run TestSASLSSL -v ./...)
+    (cd libs/kafka-franz/integration && CGO_ENABLED=0 go test -count=1 -run TestSASLSSL -v ./...)
 
 # Deps + all four service images (built with the stamp), waiting for every /readyz
 stack-up: infra-up

@@ -2,6 +2,7 @@ package valkey
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
@@ -24,6 +25,10 @@ import (
 // PING of [Cache.ReadyCheck] has a timeout of its own, a subscription
 // ([Cache.Subscribe]) lives as long as its context, and what goes through
 // [Cache.Client] is the caller's to bound.
+//
+// After [Cache.Close] every method fails with an error that wraps
+// [ErrClosed]; [Aside] still answers from its loader. What goes through
+// [Cache.Client] fails with the library's own valkeygo.ErrClosing.
 type Cache struct {
 	client    valkeygo.Client
 	log       *slog.Logger
@@ -31,11 +36,29 @@ type Cache struct {
 	opTimeout time.Duration
 	closed    atomic.Bool // Close was called: a subscription must not come back
 	flight    singleflight.Group
+
+	// One gate per kind of failure, so that a failing fill is not hidden
+	// behind a failing lookup.
+	lookupWarn, fillWarn warnGate
+}
+
+// ErrClosed is wrapped by the error of every [Cache] method called after
+// [Cache.Close], and of a call or subscription that Close interrupted.
+var ErrClosed = errors.New("valkey: cache is closed")
+
+// closedErr adds [ErrClosed] to the library's error for a closed client.
+func closedErr(err error) error {
+	if errors.Is(err, valkeygo.ErrClosing) {
+		return fmt.Errorf("%w: %w", ErrClosed, err)
+	}
+
+	return err
 }
 
 // New builds a client from cfg, verifies connectivity with a single PING (so a
 // misconfigured cache fails fast at boot) and returns a ready [Cache]. The
-// caller owns it and must call [Cache.Close].
+// caller owns it and must call [Cache.Close]. A cfg that [Config.Validate]
+// rejects is rejected here with the same error, before any dial.
 func New(cfg Config, log *slog.Logger, opts ...Option) (*Cache, error) {
 	var applied options
 	for _, opt := range opts {
@@ -73,7 +96,7 @@ func New(cfg Config, log *slog.Logger, opts ...Option) (*Cache, error) {
 	}
 
 	// The resolved address (the URL's, when one is set), not the discrete field.
-	log.Info("valkey cache ready", "addr", opt.InitAddress, "db", opt.SelectDB, "op_timeout", cfg.OpTimeout.String(),
+	log.Info("valkey cache ready", "addr", opt.InitAddress, "db", opt.SelectDB, "tls", opt.TLSConfig != nil, "op_timeout", cfg.OpTimeout.String(),
 		"pipeline_conns", cfg.PipelineConns, "pool_size", cfg.PoolSize, "conn_lifetime", cfg.ConnLifetime.String())
 
 	return &Cache{client: newBounded(client, cfg.PoolSize), log: log, metrics: newMetrics(), opTimeout: cfg.OpTimeout}, nil
@@ -98,6 +121,10 @@ func (c *Cache) do(ctx context.Context, op string, cmd valkeygo.Completed) valke
 
 	if err := res.Error(); err != nil && !valkeygo.IsValkeyNil(err) {
 		c.metrics.errors.WithLabelValues(op).Inc()
+
+		if errors.Is(err, valkeygo.ErrClosing) {
+			return valkeygo.NewErrorResult(closedErr(err))
+		}
 	}
 
 	return res
@@ -192,14 +219,15 @@ func (c *Cache) ReadyCheck() func(ctx context.Context) error {
 		defer cancel()
 
 		if err := c.client.Do(ctx, c.client.B().Ping().Build()).Error(); err != nil {
-			return fmt.Errorf("valkey unreachable: %w", err)
+			return fmt.Errorf("valkey unreachable: %w", closedErr(err))
 		}
 
 		return nil
 	}
 }
 
-// Close releases the client's connection pool.
+// Close releases the client's connections and ends every subscription. What
+// is called afterwards fails with [ErrClosed].
 func (c *Cache) Close() {
 	c.closed.Store(true)
 	c.client.Close()

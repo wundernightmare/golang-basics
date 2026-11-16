@@ -1,6 +1,5 @@
 # gremlins — mutation testing of the two-level cache: the envelope, the
-# deadlines (fresh / stale / expired / stale-if-error), what L1 accepts, the
-# credential codec.
+# deadlines (fresh / stale / expired / stale-if-error), what L1 accepts.
 #
 #   just mutate libs/tiercache
 #
@@ -24,9 +23,8 @@
 #                                                   the equal millisecond is not reachable; the
 #                                                   same comparisons are exact in usable(), which
 #                                                   takes the time and is tested to the millisecond)
-#                      to == StateOpen             (which breaker transition is logged)
-#       credential.go  tagLen / skip / valueLen < 0  (protowire never returns 0 for a
-#                                                   non-empty input)
+#   - TIMED OUT is a kill: the unit tests run in synctest bubbles, where a
+#     lookup that never answers is a deadlock the run waits out.
 unleash:
   workers: 4
   timeout-coefficient: 8
@@ -34,6 +32,8 @@ unleash:
   exclude-files:
     - "doc\\.go$"
     - "^storetest/" # the store conformance suite: test code in a non-_test file
+    - "^credential/" # a module of its own, with its own .gremlins.yaml
+    - "^integration/" # a module of its own: the container-backed suite
   threshold:
     efficacy: 88
     mutant-coverage: 80

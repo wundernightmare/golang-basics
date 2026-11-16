@@ -201,7 +201,7 @@ func (d *diagnostics) run(ctx context.Context) {
 func (d *diagnostics) armCrashCapture(ctx context.Context) {
 	dir := d.cfg.DiagDumpDir
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		d.log.WarnContext(ctx, "diagnostics: dump directory is not usable, crash capture is off", "dir", dir, "error", err.Error())
+		d.log.WarnContext(ctx, "diagnostics: dump directory is not usable, crash capture is off", "dir", dir, "err", err.Error())
 		return
 	}
 
@@ -209,12 +209,12 @@ func (d *diagnostics) armCrashCapture(ctx context.Context) {
 
 	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600) //nolint:gosec // G304: the directory is the operator's configuration
 	if err != nil {
-		d.log.WarnContext(ctx, "diagnostics: cannot create the crash file, crash capture is off", "dir", dir, "error", err.Error())
+		d.log.WarnContext(ctx, "diagnostics: cannot create the crash file, crash capture is off", "dir", dir, "err", err.Error())
 		return
 	}
 
 	if err := debug.SetCrashOutput(file, debug.CrashOptions{}); err != nil {
-		d.log.WarnContext(ctx, "diagnostics: the runtime refused the crash file, crash capture is off", "error", err.Error())
+		d.log.WarnContext(ctx, "diagnostics: the runtime refused the crash file, crash capture is off", "err", err.Error())
 
 		_ = file.Close()
 		_ = os.Remove(file.Name())
@@ -426,7 +426,7 @@ func (d *diagnostics) deliver(ctx context.Context, art artifact) {
 
 	if d.cfg.DiagDumpDir == "" {
 		d.dumps.WithLabelValues(art.kind, dumpFailed).Inc()
-		d.log.ErrorContext(ctx, "diagnostics: artifact lost: upload failed and there is no dump directory", "kind", art.kind, "name", art.name, "error", err.Error())
+		d.log.ErrorContext(ctx, "diagnostics: artifact lost: upload failed and there is no dump directory", "kind", art.kind, "name", art.name, "err", err.Error())
 
 		return
 	}
@@ -435,7 +435,7 @@ func (d *diagnostics) deliver(ctx context.Context, art artifact) {
 	if writeErr := os.WriteFile(path, art.body, 0o600); writeErr != nil {
 		d.dumps.WithLabelValues(art.kind, dumpFailed).Inc()
 		d.log.ErrorContext(ctx, "diagnostics: artifact lost: neither uploaded nor written", "kind", art.kind, "name", art.name,
-			"upload_error", err.Error(), "error", writeErr.Error())
+			"upload_error", err.Error(), "err", writeErr.Error())
 
 		return
 	}
@@ -486,7 +486,7 @@ func (d *diagnostics) flushSpool(ctx context.Context) {
 		}
 
 		if err := d.upload(ctx, art); err != nil {
-			d.log.WarnContext(ctx, "diagnostics: spooled artifact not uploaded yet", "name", name, "error", err.Error())
+			d.log.WarnContext(ctx, "diagnostics: spooled artifact not uploaded yet", "name", name, "err", err.Error())
 			break // the sink is down: the rest would fail the same way
 		}
 

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -41,6 +40,9 @@ import (
 //	                                                    the completion of a multipart upload           (default "60s")
 //	INGEST_S3_MAX_ATTEMPTS        [max_attempts]        tries per call inside its deadline (1 = none)  (default 3)
 //	INGEST_S3_RETRY_MAX_BACKOFF   [retry_max_backoff]   cap of the jittered backoff between tries      (default "2s")
+//
+// The deadline is of the call: there is no timeout of one attempt, so a try
+// the store never answers takes all of it and is not repeated.
 //
 // Memory and connections — bounded by named keys, never a client default:
 //
@@ -110,9 +112,15 @@ const (
 	ChecksumWhenSupported = "when_supported"
 )
 
+// ErrConfig is in every error [Config.Validate] returns — and so in those of
+// [LoadConfig] and [New] that come from it.
+var ErrConfig = errors.New("s3 config")
+
 // LoadConfig parses a [Config] from the environment using the given key prefix
 // (use "" for no prefix). Every field but the bucket, the endpoint and the
-// credentials is defaulted.
+// credentials is defaulted. A config with a bucket is validated
+// ([Config.Validate]); one without is returned as it is — object storage is
+// off ([Config.Configured]).
 func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, nil) }
 
 // LoadConfigFrom is [LoadConfig] reading environ instead of the process
@@ -122,6 +130,14 @@ func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	var cfg Config
 	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix, Environment: environ}); err != nil {
 		return Config{}, fmt.Errorf("s3: parse config (prefix %q): %w", prefix, err)
+	}
+
+	if !cfg.Configured() {
+		return cfg, nil
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
 	}
 
 	return cfg, nil
@@ -166,8 +182,10 @@ func setDuration(d *time.Duration, def time.Duration) {
 
 // Validate applies the defaults and rejects a config the client could not
 // work with, or could only work with unsafely: no bucket, half a credential
-// pair, a plaintext endpoint that was not asked for, an unreadable CA bundle,
-// non-positive budgets, a part size S3 refuses.
+// pair, a plaintext endpoint that was not asked for, a CA file that cannot be
+// read or holds no certificate, non-positive budgets, a part size S3 refuses.
+// Whatever [New] refuses for the config alone, Validate refuses, so a
+// service's --check-config sees it. The error wraps [ErrConfig].
 func (c *Config) Validate() error {
 	c.withDefaults()
 
@@ -183,7 +201,7 @@ func (c *Config) Validate() error {
 	errs = append(errs, c.validateEndpoint()...)
 
 	if c.CAFile != "" {
-		if err := readableFile(c.CAFile); err != nil {
+		if _, err := secret.CertPool(c.CAFile); err != nil {
 			errs = append(errs, fmt.Errorf("S3_CA_FILE: %w", err))
 		}
 	}
@@ -209,29 +227,7 @@ func (c *Config) Validate() error {
 	}
 
 	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("s3 config: %w", err)
-	}
-
-	return nil
-}
-
-// readableFile reports why path cannot be read as a file — missing, no
-// permission, a directory — so a CA mount that is not there fails the boot
-// and --check-config with the key's name, not the first TLS handshake.
-func readableFile(path string) error {
-	f, err := os.Open(path) //nolint:gosec // G304: an operator-supplied config path, opened only to check it
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	st, err := f.Stat()
-	if err != nil {
-		return err
-	}
-
-	if st.IsDir() {
-		return fmt.Errorf("%s is a directory", path)
+		return fmt.Errorf("%w: %w", ErrConfig, err)
 	}
 
 	return nil

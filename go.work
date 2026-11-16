@@ -11,20 +11,28 @@
 //   libs/grpcx                  — policy-per-target outbound gRPC connections (service config, CB, metrics, tracing)
 //   libs/grpcx/integration      — its integration suite: a real gRPC server (Jaeger), TLS, an HTTP gateway, Toxiproxy (_test only)
 //   libs/httpx                  — shared HTTP server scaffolding (the example common lib)
-//   libs/resilience             — circuit breaker + retry budget shared by the outbound clients (HTTP, gRPC)
+//   libs/resilience             — circuit breaker + retry budget shared by the outbound clients (HTTP, gRPC), Backoff and Jitter for the data libraries
 //   libs/resilient-http-client  — policy-per-target outbound HTTP client (rate limit, CB, retry…)
 //   libs/resilient-http-client/integration — its integration suite: real servers (Caddy, Redpanda, Postgres), HTTP/1.1–3, TLS, Toxiproxy (_test only)
 //   libs/pgx                    — shared PostgreSQL pool (pgx)
+//   libs/pgx/integration        — its integration suite: a real Postgres, PgBouncer in both pooling modes, Toxiproxy (_test only)
 //   libs/valkey                 — shared Valkey cache (valkey-go)
+//   libs/valkey/integration     — its integration suite: a real Valkey (pool, Pub/Sub, IFEQ), Toxiproxy (_test only)
 //   libs/kafka                  — shared Kafka producer/consumer, provider-neutral (no cgo)
+//   libs/kafka/kafkatest        — its conformance suite, which every provider's integration suite runs (_test only)
 //   libs/kafka-rdkafka          — Kafka provider: librdkafka via confluent-kafka-go (cgo; the default)
+//   libs/kafka-rdkafka/integration — its integration suite: the conformance suite and the provider's own cases against a real Kafka (_test only)
 //   libs/kafka-franz            — Kafka provider: franz-go (pure Go)
+//   libs/kafka-franz/integration — its integration suite: the conformance suite against a real Kafka (_test only)
 //   libs/secret                 — secret.String: a config value no formatter, logger or marshaller prints; Expose() is the only way out
 //   libs/secret/compat          — libs/secret against YAML, caarlos0/env and mapstructure (_test only)
 //   libs/s3                     — shared S3 client (aws-sdk-go-v2): bounded calls, streaming uploads
+//   libs/s3/integration         — its integration suite: the client against RustFS, behind Toxiproxy (_test only)
 //   libs/otelx                  — shared OpenTelemetry tracing setup
 //   libs/otelx/integration      — its integration suite: the shipped collector config (tail sampling) in a real collector, in front of Jaeger (_test only)
-//   libs/tiercache              — two-level cache: off-heap fastcache L1 + Valkey L2 (SWR, Pub/Sub invalidation)
+//   libs/tiercache              — two-level cache: an L1 behind a store contract (offheap: fastcache, onheap: freecache) + an L2 (SWR, Pub/Sub invalidation)
+//   libs/tiercache/credential   — its worked example of a value: a protobuf codec (keeps google.golang.org/protobuf out of tiercache's go.mod)
+//   libs/tiercache/integration  — its integration suite: the cache against a real Valkey (libs/valkey), behind Toxiproxy (_test only)
 //   libs/testx                  — shared test harness (signal helpers, unique names; _test only, no Docker)
 //   libs/testx/containers       — shared containers + chaos helpers (testcontainers, Toxiproxy; _test only)
 //   libs/testx/contract         — OpenAPI / JSON Schema validation of exchanges (_test only)
@@ -43,21 +51,29 @@ use (
 	./libs/httpx
 	./libs/kafka
 	./libs/kafka-franz
+	./libs/kafka-franz/integration
 	./libs/kafka-rdkafka
+	./libs/kafka-rdkafka/integration
+	./libs/kafka/kafkatest
 	./libs/otelx
 	./libs/otelx/integration
 	./libs/pgx
+	./libs/pgx/integration
 	./libs/resilience
 	./libs/resilient-http-client
 	./libs/resilient-http-client/integration
 	./libs/s3
+	./libs/s3/integration
 	./libs/secret
 	./libs/secret/compat
 	./libs/testx
 	./libs/testx/containers
 	./libs/testx/contract
 	./libs/tiercache
+	./libs/tiercache/credential
+	./libs/tiercache/integration
 	./libs/valkey
+	./libs/valkey/integration
 	./services/consumer
 	./services/heartbeat
 	./services/ingest

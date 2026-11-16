@@ -1,6 +1,7 @@
 package valkey
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"math/bits"
@@ -22,15 +23,21 @@ import (
 // an address is set):
 //
 //  1. A connection URL in <PREFIX>VALKEY_URL (e.g. "valkey://:pw@host:6379/0"
-//     or the redis:// scheme). When set, the discrete fields are ignored.
-//  2. The discrete Addr/Password/DB fields.
+//     or the redis:// scheme; valkeys:// and rediss:// are TLS). When set,
+//     the discrete fields are ignored.
+//  2. The discrete Addr/Username/Password/DB fields.
+//
+// TLS and CAFile apply to both.
 //
 // Keys (with the "TASKS_" prefix as an example):
 //
 //	TASKS_VALKEY_URL           [url]           connection URL; overrides discrete fields  (default "")
 //	TASKS_VALKEY_ADDR          [addr]          host:port                                  (default "")
+//	TASKS_VALKEY_USERNAME      [username]      ACL user                                   (default "": the server's default user)
 //	TASKS_VALKEY_PASSWORD      [password]      auth password                              (default "")
 //	TASKS_VALKEY_DB            [db]            logical database number                    (default 0)
+//	TASKS_VALKEY_TLS           [tls]           connect over TLS                           (default false)
+//	TASKS_VALKEY_CA_FILE       [ca_file]       PEM bundle that signs the server's cert    (default "": system roots)
 //	TASKS_VALKEY_DIAL_TIMEOUT  [dial_timeout]  connection dial timeout                    (default "5s")
 //	TASKS_VALKEY_OP_TIMEOUT    [op_timeout]    per-command deadline                       (default "500ms")
 //
@@ -43,10 +50,20 @@ import (
 //	TASKS_VALKEY_CONN_WRITE_TIMEOUT [conn_write_timeout] a connection silent for this long is dead      (default "10s")
 //	TASKS_VALKEY_CONN_LIFETIME      [conn_lifetime]      recycle a pipelined connection after; 0 = never (default "1h")
 type Config struct {
-	URL         string        `env:"VALKEY_URL" yaml:"url"`
-	Addr        string        `env:"VALKEY_ADDR" yaml:"addr"`
-	Password    secret.String `env:"VALKEY_PASSWORD" yaml:"password"`
-	DB          int           `env:"VALKEY_DB" envDefault:"0" yaml:"db"`
+	// URL holds the password, hence the type: no formatter or logger prints it.
+	URL      secret.String `env:"VALKEY_URL" yaml:"url"`
+	Addr     string        `env:"VALKEY_ADDR" yaml:"addr"`
+	Username string        `env:"VALKEY_USERNAME" yaml:"username"`
+	Password secret.String `env:"VALKEY_PASSWORD" yaml:"password"`
+	DB       int           `env:"VALKEY_DB" envDefault:"0" yaml:"db"`
+	// TLS turns TLS on, for the URL form too: a valkey:// URL is then dialled
+	// as valkeys:// would be. The server's name is verified against the host
+	// of the address.
+	TLS bool `env:"VALKEY_TLS" envDefault:"false" yaml:"tls"`
+	// CAFile is the trust store of the TLS connection — it replaces the
+	// system roots, it does not add to them. Set without TLS (the flag or a
+	// TLS scheme in the URL) it is a config error, not an ignored key.
+	CAFile      string        `env:"VALKEY_CA_FILE" yaml:"ca_file"`
 	DialTimeout time.Duration `env:"VALKEY_DIAL_TIMEOUT" envDefault:"5s" yaml:"dial_timeout"`
 	// OpTimeout bounds every command [Cache] sends through its own methods
 	// (the readiness PING and a subscription aside, see [Cache]). Without it a cache that
@@ -109,17 +126,17 @@ const (
 	maxPipelineConns        = 1 << valkeygo.MaxPipelineMultiplex
 )
 
-// ErrConfig marks a Config that cannot be used; [New] returns it wrapped,
-// naming the field.
+// ErrConfig marks a Config that cannot be used; [Config.Validate],
+// [LoadConfigFrom] and [New] return it wrapped, naming the field.
 var ErrConfig = errors.New("valkey: invalid config")
 
 // withDefaults fills the zero fields that have no meaningful zero.
 func (c Config) withDefaults() Config {
-	if c.DialTimeout <= 0 {
+	if c.DialTimeout == 0 {
 		c.DialTimeout = defaultDialTimeout
 	}
 
-	if c.OpTimeout <= 0 {
+	if c.OpTimeout == 0 {
 		c.OpTimeout = defaultOpTimeout
 	}
 
@@ -138,11 +155,28 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+// Validate reports why [New] would reject the Config without dialling, or
+// nil: everything New checks before it connects is checked here, the URL and
+// the CA file (which is read) included. A Config without an address is
+// rejected like any other — a service that treats the cache as optional asks
+// [Config.Configured] first.
+func (c Config) Validate() error {
+	_, err := c.clientOption()
+
+	return err
+}
+
 // validate rejects what the library would silently reinterpret: a negative
 // pool size means "1024" to it, a multiplex above its limit is an error only
 // at connect, and a negative duration means "off".
 func (c Config) validate() error {
 	switch {
+	case c.DB < 0:
+		return fmt.Errorf("%w: db must not be negative, got %d", ErrConfig, c.DB)
+	case c.DialTimeout < 0:
+		return fmt.Errorf("%w: dial_timeout must be positive, got %s", ErrConfig, c.DialTimeout)
+	case c.OpTimeout < 0:
+		return fmt.Errorf("%w: op_timeout must be positive, got %s", ErrConfig, c.OpTimeout)
 	case c.PipelineConns < 1 || c.PipelineConns > maxPipelineConns || bits.OnesCount(uint(c.PipelineConns)) != 1:
 		return fmt.Errorf("%w: pipeline_conns must be a power of two from 1 to %d, got %d", ErrConfig, maxPipelineConns, c.PipelineConns)
 	case c.PoolSize < 1:
@@ -161,7 +195,9 @@ func (c Config) validate() error {
 }
 
 // LoadConfig parses a [Config] from the environment using the given key prefix
-// (use "" for no prefix). Every field but the address is defaulted.
+// (use "" for no prefix). Every field but the address is defaulted. A Config
+// with an address is validated ([Config.Validate]); one without is returned
+// as read — it means "no Valkey" ([Config.Configured]).
 func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, nil) }
 
 // LoadConfigFrom is [LoadConfig] reading environ instead of the process
@@ -170,7 +206,13 @@ func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, n
 func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	var cfg Config
 	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix, Environment: environ}); err != nil {
-		return Config{}, fmt.Errorf("valkey: parse config (prefix %q): %w", prefix, err)
+		return Config{}, fmt.Errorf("%w: parse (prefix %q): %w", ErrConfig, prefix, err)
+	}
+
+	if cfg.Configured() {
+		if err := cfg.Validate(); err != nil {
+			return Config{}, fmt.Errorf("%w (prefix %q)", err, prefix)
+		}
 	}
 
 	return cfg, nil
@@ -178,14 +220,14 @@ func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 
 // Configured reports whether an address is set (VALKEY_URL or VALKEY_ADDR):
 // the switch for a service that runs without a cache when there is none.
-func (c Config) Configured() bool { return c.URL != "" || c.Addr != "" }
+func (c Config) Configured() bool { return !c.URL.IsZero() || c.Addr != "" }
 
 // clientOption translates the Config into a valkey-go ClientOption, preferring
 // the URL form when present. The connection settings apply to both forms and
 // win over a URL's own dial_timeout / write_timeout parameters.
 func (c Config) clientOption() (valkeygo.ClientOption, error) {
 	if !c.Configured() {
-		return valkeygo.ClientOption{}, errors.New("valkey: VALKEY_URL or VALKEY_ADDR must be set")
+		return valkeygo.ClientOption{}, fmt.Errorf("%w: VALKEY_URL or VALKEY_ADDR must be set", ErrConfig)
 	}
 
 	c = c.withDefaults()
@@ -195,15 +237,38 @@ func (c Config) clientOption() (valkeygo.ClientOption, error) {
 
 	opt := valkeygo.ClientOption{
 		InitAddress: []string{c.Addr},
+		Username:    c.Username,
 		Password:    c.Password.Expose(),
 		SelectDB:    c.DB,
 	}
 
-	if c.URL != "" {
+	if !c.URL.IsZero() {
 		var err error
-		if opt, err = valkeygo.ParseURL(c.URL); err != nil {
-			return valkeygo.ClientOption{}, fmt.Errorf("valkey: parse url: %w", err)
+		// The parser's message is withheld whole: net/url quotes the URL in
+		// it, and what fails to parse is, as a rule, a password with an
+		// unescaped character.
+		if opt, err = valkeygo.ParseURL(c.URL.Expose()); err != nil {
+			return valkeygo.ClientOption{}, fmt.Errorf("%w: url is not usable: want valkey[s]://[user:password@]host:port[/db] "+
+				"with the special characters of the password percent-encoded (the parser's message is withheld: it quotes the URL)", ErrConfig)
 		}
+	}
+
+	if c.TLS && opt.TLSConfig == nil {
+		// No ServerName: the dialer takes it from the address.
+		opt.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+
+	if c.CAFile != "" {
+		if opt.TLSConfig == nil {
+			return valkeygo.ClientOption{}, fmt.Errorf("%w: ca_file is set but TLS is off: set tls or use a valkeys:// URL", ErrConfig)
+		}
+
+		pool, err := secret.CertPool(c.CAFile)
+		if err != nil {
+			return valkeygo.ClientOption{}, fmt.Errorf("%w: ca_file: %w", ErrConfig, err)
+		}
+
+		opt.TLSConfig.RootCAs = pool
 	}
 
 	opt.Dialer.Timeout = c.DialTimeout

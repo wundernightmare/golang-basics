@@ -2,6 +2,7 @@ package httpx_test
 
 import (
 	"encoding/json"
+	"net/netip"
 	"net/url"
 	"testing"
 	"time"
@@ -99,22 +100,65 @@ func TestRedact_SecretFieldNames(t *testing.T) {
 		ClientCert string `yaml:"client_cert"`
 		DBPwd      string `yaml:"db_pwd"`
 		Secret     []byte `yaml:"secret"`
+		Keystore   string `yaml:"keystore"`
+		Phrase     string `yaml:"passphrase"`
+		Tokens     []string
 		Credential struct {
 			User string `yaml:"user"`
 		} `yaml:"credential"`
 		Host string `yaml:"host"`
 	}
 
-	in := cfg{DSN: "host=db password=x", Auth: "Basic abc", BasicAuth: "u:p", ClientCert: "/etc/tls.crt", DBPwd: "p", Secret: []byte("k"), Host: "db"}
+	in := cfg{DSN: "host=db password=x", Auth: "Basic abc", BasicAuth: "u:p", ClientCert: "/etc/tls.crt", DBPwd: "p", Secret: []byte("k"), Keystore: "/etc/ks.p12", Phrase: "p", Tokens: []string{"t1"}, Host: "db"}
 	in.Credential.User = "app"
 
 	m, _ := redactJSON(t, in)
-	for _, k := range []string{"dsn", "auth", "basic_auth", "client_cert", "db_pwd", "secret"} {
+	for _, k := range []string{"dsn", "auth", "basic_auth", "client_cert", "db_pwd", "secret", "keystore", "passphrase"} {
 		assert.Equal(t, "[redacted]", m[k], k)
 	}
 
+	assert.Equal(t, []any{"[redacted]"}, m["Tokens"], "the elements of a secret list are secret")
+
 	assert.Equal(t, map[string]any{"user": "[redacted]"}, m["credential"], "a secret struct redacts every non-empty leaf")
 	assert.Equal(t, "db", m["host"])
+}
+
+// A secret is recognised by the name the operator reads — the yaml or json
+// tag — as well as by the Go name; a value that has a text form of its own
+// (an address, a URL) is shown in it, credentials masked, not field by field.
+func TestRedact_TagNamesAndSelfRenderingTypes(t *testing.T) {
+	t.Parallel()
+
+	type cfg struct {
+		Pass     string       `yaml:"password"`
+		Key      string       `json:"api_key"`
+		Addr     netip.Addr   `yaml:"addr"`
+		Net      netip.Prefix `yaml:"net"`
+		Upstream *url.URL     `yaml:"upstream"`
+		Mirror   url.URL      `yaml:"mirror"`
+		Hook     *url.URL     `yaml:"hook_secret"`
+	}
+
+	upstream, err := url.Parse("https://u:url-pass@api.example/v1?token=url-token&page=2")
+	require.NoError(t, err)
+
+	m, raw := redactJSON(t, cfg{
+		Pass: "hunter2", Key: "sk_live_1",
+		Addr: netip.MustParseAddr("10.0.0.7"), Net: netip.MustParsePrefix("10.0.0.0/8"),
+		Upstream: upstream, Mirror: *upstream, Hook: upstream,
+	})
+
+	assert.Equal(t, "[redacted]", m["password"])
+	assert.Equal(t, "[redacted]", m["api_key"])
+	assert.Equal(t, "10.0.0.7", m["addr"])
+	assert.Equal(t, "10.0.0.0/8", m["net"])
+	assert.Equal(t, "https://u:xxxxx@api.example/v1?token=[redacted]&page=2", m["upstream"])
+	assert.Equal(t, m["upstream"], m["mirror"])
+	assert.Equal(t, "[redacted]", m["hook_secret"])
+
+	for _, leaked := range []string{"hunter2", "sk_live_1", "url-pass", "url-token"} {
+		assert.NotContains(t, raw, leaked)
+	}
 }
 
 func TestRedact_KeywordDSN(t *testing.T) {
@@ -166,6 +210,27 @@ func TestRedact_SecretQueryParameters(t *testing.T) {
 	assert.Equal(t, "https://h/x?b=2&a=1", httpx.Redact("https://h/x?b=2&a=1"))
 }
 
+// A URL is masked wherever it stands in a text — an error's text is the usual
+// carrier — and what is not a credential comes out byte for byte.
+func TestRedact_URLsInsideText(t *testing.T) {
+	t.Parallel()
+
+	for in, want := range map[string]string{
+		`Get "http://127.0.0.1:1/v1/charge?api_key=sk_live&x=1": dial tcp 127.0.0.1:1: connect: connection refused`: `Get "http://127.0.0.1:1/v1/charge?api_key=[redacted]&x=1": dial tcp 127.0.0.1:1: connect: connection refused`,
+		"pgx: connect postgres://app:s3cret@db:5432/app failed":                                                     "pgx: connect postgres://app:xxxxx@db:5432/app failed",
+		"store: open redis://default:s3cret@cache:6379/0: i/o timeout":                                              "store: open redis://default:xxxxx@cache:6379/0: i/o timeout",
+		"amqp://guest:s3cret@mq:5672/ timed out: retry postgres://x:y@z/":                                           "amqp://guest:xxxxx@mq:5672/ timed out: retry postgres://x:xxxxx@z/",
+		"callback https://h/cb#access_token=t&state=1 rejected":                                                     "callback https://h/cb#access_token=[redacted]&state=1 rejected",
+		"connect https://h/x?page=2 failed: host=db password=p":                                                     "connect https://h/x?page=2 failed: host=db password=[redacted]",
+		"see https://unpkg.example:443/react@18/x and mailto bob@example.com":                                       "see https://unpkg.example:443/react@18/x and mailto bob@example.com",
+		"dial tcp://u:p@h1 then tcp://u:q@h2":                                                                       "dial tcp://u:xxxxx@h1 then tcp://u:xxxxx@h2",
+		"open file:///var/run/x?token=t failed":                                                                     "open file:///var/run/x?token=[redacted] failed",
+		`GET "https://h/x?tok%65n=t": 502`:                                                                          `GET "https://h/x?tok%65n=[redacted]": 502`,
+	} {
+		assert.Equal(t, want, httpx.Redact(in), in)
+	}
+}
+
 func TestRedact_PassesScalarsAndNilThrough(t *testing.T) {
 	t.Parallel()
 
@@ -181,6 +246,7 @@ func TestRedact_PassesScalarsAndNilThrough(t *testing.T) {
 		"http://u:p%zz@h/":                 "http://u:xxxxx@h/",
 		"kafka://u:pa ss@b:9092,b2:9092":   "kafka://u:xxxxx@b:9092,b2:9092",
 		"redis://:p@ss w@cache:6379/0":     "redis://:xxxxx@cache:6379/0",
+		"postgres://u:pa/ss@db:5432/app":   "postgres://u:xxxxx@db:5432/app",
 		"http://host:port-is-not-a-number": "http://host:port-is-not-a-number",
 	} {
 		assert.Equal(t, want, httpx.Redact(in), in)

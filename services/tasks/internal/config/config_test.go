@@ -144,10 +144,10 @@ func TestLibKeysKeepTheirDocumentedNames(t *testing.T) {
 		"TASKS_HTTP_ADDR":                   ":1234",
 	}))
 	require.NoError(t, err)
-	assert.Equal(t, "postgres://u:p@db:5432/app", cfg.Postgres.URL)
+	assert.Equal(t, "postgres://u:p@db:5432/app", cfg.Postgres.URL.Expose())
 	assert.Equal(t, int32(33), cfg.Postgres.MaxConns)
 	assert.Equal(t, 7*time.Second, cfg.Postgres.StatementTimeout)
-	assert.Equal(t, "valkey://cache:6379", cfg.Valkey.URL)
+	assert.Equal(t, "valkey://cache:6379", cfg.Valkey.URL.Expose())
 	assert.Equal(t, 250*time.Millisecond, cfg.Valkey.OpTimeout)
 	assert.Equal(t, []string{"k1:9092", "k2:9092"}, cfg.Kafka.Brokers)
 	assert.Equal(t, "custom.events", cfg.Kafka.Topic)
@@ -183,7 +183,7 @@ outbox:
 	require.NoError(t, err)
 	assert.Equal(t, ":9999", cfg.Addr, "from YAML")
 	assert.Equal(t, ":9082", cfg.AdminAddr, "service default: not in YAML or env")
-	assert.Equal(t, "postgres://app:app@yaml-db:5432/app", cfg.Postgres.URL)
+	assert.Equal(t, "postgres://app:app@yaml-db:5432/app", cfg.Postgres.URL.Expose())
 	assert.Equal(t, 2*time.Second, cfg.Postgres.LockTimeout)
 	assert.Equal(t, 30*time.Second, cfg.Postgres.StatementTimeout, "lib default for what YAML left out")
 	assert.Equal(t, []string{"k1:9092", "k2:9092"}, cfg.Kafka.Brokers)
@@ -201,6 +201,9 @@ func TestLoadRejectsUnknownYAMLKeysAndBadValues(t *testing.T) {
 
 	_, err = config.LoadFrom(writeYAML(t, "outbox:\n  batch_size: 5000\n"), env)
 	require.ErrorContains(t, err, "OUTBOX_BATCH_SIZE")
+
+	_, err = config.LoadFrom(writeYAML(t, "otel:\n  max_queue_size: -1\n"), env)
+	require.ErrorContains(t, err, "OTEL_BSP_MAX_QUEUE_SIZE")
 
 	env["TASKS_ADMIN_TOKEN"] = ""
 

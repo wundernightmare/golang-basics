@@ -80,7 +80,8 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 	return instruments, nil
 }
 
-// methodLabel bounds the method label to the standard methods.
+// methodLabel bounds the method label to the standard methods. An empty
+// method is GET: that is what net/http sends for a client request without one.
 func methodLabel(m string) string {
 	switch m {
 	case "":

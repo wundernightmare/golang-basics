@@ -4,13 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/prometheus/client_golang/prometheus/testutil/promlint"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -53,9 +55,10 @@ func Recorder(tb testing.TB) *TraceRecorder {
 }
 
 // Metric gathers g and returns the value of the first series of name whose
-// labels include every pair in labels: a counter's or gauge's value, a
-// histogram's sample count. A missing series returns -1, so "the error series
-// does not exist" is an assertion, not a crash.
+// labels include every pair in labels: a counter's, gauge's or untyped
+// metric's value, a histogram's or summary's sample count. A missing series
+// returns -1 — and so does a metric name or label key that does not exist:
+// assert that a series is absent with [NoMetric], which tells the two apart.
 func Metric(tb testing.TB, g prometheus.Gatherer, name string, labels map[string]string) float64 {
 	tb.Helper()
 
@@ -68,25 +71,61 @@ func Metric(tb testing.TB, g prometheus.Gatherer, name string, labels map[string
 		}
 
 	next:
-		for _, m := range mf.GetMetric() {
+		for _, series := range mf.GetMetric() {
 			for k, v := range labels {
-				if !hasLabel(m, k, v) {
+				if !hasLabel(series, k, v) {
 					continue next
 				}
 			}
 
 			switch {
-			case m.GetCounter() != nil:
-				return m.GetCounter().GetValue()
-			case m.GetGauge() != nil:
-				return m.GetGauge().GetValue()
-			case m.GetHistogram() != nil:
-				return float64(m.GetHistogram().GetSampleCount())
+			case series.GetCounter() != nil:
+				return series.GetCounter().GetValue()
+			case series.GetGauge() != nil:
+				return series.GetGauge().GetValue()
+			case series.GetHistogram() != nil:
+				return float64(series.GetHistogram().GetSampleCount())
+			case series.GetSummary() != nil:
+				return float64(series.GetSummary().GetSampleCount())
+			case series.GetUntyped() != nil:
+				return series.GetUntyped().GetValue()
 			}
 		}
 	}
 
 	return -1
+}
+
+// NoMetric fails the test unless the series is absent from a metric family
+// that is there. [Metric] answers -1 to a misspelt metric name or label key
+// as well, so an "== -1" assertion keeps passing after a rename; NoMetric
+// requires the family to be gathered and every key of labels to be one of its
+// label names. A family is gathered only once it has a series: record another
+// one (the success beside the error) before asserting that one is missing.
+func NoMetric(tb testing.TB, gatherer prometheus.Gatherer, name string, labels map[string]string) {
+	tb.Helper()
+
+	mfs, err := gatherer.Gather()
+	require.NoError(tb, err)
+
+	i := slices.IndexFunc(mfs, func(mf *dto.MetricFamily) bool { return mf.GetName() == name })
+	if i < 0 || len(mfs[i].GetMetric()) == 0 {
+		tb.Errorf("testx: metric family %q is not gathered: an absent series cannot be told from a misspelt name", name)
+
+		return
+	}
+
+	// client_golang gives every series of a family the same label names.
+	known := mfs[i].GetMetric()[0].GetLabel()
+	for k := range labels {
+		if !slices.ContainsFunc(known, func(l *dto.LabelPair) bool { return l.GetName() == k }) {
+			tb.Errorf("testx: metric %q has no label %q", name, k)
+		}
+	}
+
+	if v := Metric(tb, gatherer, name, labels); v >= 0 {
+		tb.Errorf("testx: series %s%v exists (value %v)", name, labels, v)
+	}
 }
 
 func hasLabel(m *dto.Metric, k, v string) bool {
@@ -104,7 +143,10 @@ func hasLabel(m *dto.Metric, k, v string) bool {
 func LintMetrics(tb testing.TB, g prometheus.Gatherer) {
 	tb.Helper()
 
-	problems, err := testutil.GatherAndLint(g)
+	mfs, err := g.Gather()
+	require.NoError(tb, err)
+
+	problems, err := promlint.NewWithMetricFamilies(mfs).Lint()
 	require.NoError(tb, err)
 	require.Empty(tb, problems, "promlint findings")
 }
@@ -151,13 +193,15 @@ func (l *LogBuffer) Lines(tb testing.TB) []map[string]any {
 }
 
 // Find returns the first parsed line whose fields match every pair in want.
+// Values compare as testify's EqualValues does: encoding/json decodes every
+// number as float64, so want may say 500 for the field 500.
 func (l *LogBuffer) Find(tb testing.TB, want map[string]any) map[string]any {
 	tb.Helper()
 
 next:
 	for _, m := range l.Lines(tb) {
 		for k, v := range want {
-			if m[k] != v {
+			if !assert.ObjectsAreEqualValues(v, m[k]) {
 				continue next
 			}
 		}

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -73,22 +75,36 @@ func use(t *testing.T, c *fakeConsumer, p *fakeProducer, newErr error) {
 }
 
 type fakeProducer struct {
-	mu      sync.Mutex
-	sendErr error
-	pingErr error
-	sent    []Message
-	closed  bool
+	mu        sync.Mutex
+	sendErr   error // every Send fails with it while set
+	failFirst int   // the first failFirst Sends fail as an outage
+	pingErr   error
+	attempts  int
+	budgets   []time.Duration // what each Send's ctx had left
+	sent      []Message
+	closed    bool
+	closes    int
 }
 
-func (p *fakeProducer) Send(_ context.Context, m Message) error {
+func (p *fakeProducer) Send(ctx context.Context, msg Message) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	p.attempts++
+
+	if deadline, ok := ctx.Deadline(); ok {
+		p.budgets = append(p.budgets, time.Until(deadline))
+	}
 
 	if p.sendErr != nil {
 		return p.sendErr
 	}
 
-	p.sent = append(p.sent, m)
+	if p.attempts <= p.failFirst {
+		return NewSendError(KindUnavailable, 0, errors.New("brokers away"))
+	}
+
+	p.sent = append(p.sent, msg)
 
 	return nil
 }
@@ -97,7 +113,15 @@ func (*fakeProducer) Stats() ClientStats           { return ClientStats{} }
 func (p *fakeProducer) Close() {
 	p.mu.Lock()
 	p.closed = true
+	p.closes++
 	p.mu.Unlock()
+}
+
+func (p *fakeProducer) sends() (attempts int, sent []Message) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.attempts, slices.Clone(p.sent)
 }
 
 // fakeConsumer hands out its batches once each, then blocks until ctx ends.
@@ -109,15 +133,25 @@ type fakeConsumer struct {
 
 	mu        sync.Mutex
 	commits   [][]Offset
-	commitErr error // every Commit fails with it while set
-	pollErr   error // every Poll returns it while set
+	commitErr error   // every Commit fails with it while set
+	pollErr   error   // every Poll returns it while set
+	pollErrs  []error // returned once each, before the batches
 	closed    bool
+	closes    int
 }
 
 func (c *fakeConsumer) Poll(ctx context.Context, _ int) ([]Message, error) {
 	c.mu.Lock()
 	if c.pollErr != nil {
 		err := c.pollErr
+		c.mu.Unlock()
+
+		return nil, err
+	}
+
+	if len(c.pollErrs) > 0 {
+		err := c.pollErrs[0]
+		c.pollErrs = c.pollErrs[1:]
 		c.mu.Unlock()
 
 		return nil, err
@@ -136,12 +170,16 @@ func (c *fakeConsumer) Poll(ctx context.Context, _ int) ([]Message, error) {
 	return nil, nil
 }
 
-func (c *fakeConsumer) Commit(_ context.Context, offsets []Offset) error {
+func (c *fakeConsumer) Commit(ctx context.Context, offsets []Offset) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.commitErr != nil {
 		return c.commitErr
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	c.commits = append(c.commits, offsets)
@@ -154,8 +192,9 @@ func (*fakeConsumer) AllowRebalance()              {}
 func (c *fakeConsumer) DeadLetter() ProducerClient { return c.dlq }
 func (c *fakeConsumer) Ping(context.Context) error { return c.pingErr }
 func (*fakeConsumer) Stats() ClientStats           { return ClientStats{} }
-func (c *fakeConsumer) Close()                     { c.mu.Lock(); c.closed = true; c.mu.Unlock() }
-func (c *fakeConsumer) committed() [][]Offset      { c.mu.Lock(); defer c.mu.Unlock(); return c.commits }
+func (c *fakeConsumer) Close()                     { c.mu.Lock(); c.closed = true; c.closes++; c.mu.Unlock() }
+
+func (c *fakeConsumer) committed() [][]Offset { c.mu.Lock(); defer c.mu.Unlock(); return c.commits }
 
 func testConfig() Config {
 	return Config{
@@ -238,6 +277,13 @@ func TestConsumer_LostDropsPendingRevokedCommitsOnlyItsOwn(t *testing.T) {
 	assert.False(t, consumer.owns(Message{Topic: "t", Partition: 1}))
 	assert.True(t, consumer.owns(Message{Topic: "t", Partition: 2}))
 	assert.Equal(t, map[TopicPartition]int64{p2: 9}, consumer.pending)
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(consumer.Collectors()...)
+
+	for _, event := range []string{"assigned", "revoked", "lost"} {
+		assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_consumer_rebalances_total", map[string]string{"event": event}), event)
+	}
 }
 
 // A revoke whose commit fails still forgets the revoked partitions' offsets:
@@ -339,6 +385,9 @@ func TestConsumer_DeadLetterRefusedStopsTheLoop(t *testing.T) {
 	require.ErrorContains(t, err, "bad record")
 	require.ErrorContains(t, err, "dlq down")
 	assert.Empty(t, fc.committed(), "the record stays for redelivery")
+
+	attempts, _ := dlq.sends()
+	assert.Equal(t, 2, attempts, "the publish and MaxRetries retries of it")
 }
 
 // A dead-lettered record carries the dlq_* headers (replacing stale ones
@@ -434,10 +483,26 @@ func TestConfig_ValidateRejects(t *testing.T) {
 		"is below KAFKA_CONSUMER_RETRY":      func(c *Config) { c.RetryBackoff, c.RetryBackoffMax = time.Second, time.Millisecond },
 		"KAFKA_CONSUMER_MAX_POLL_RECORDS":    func(c *Config) { c.MaxPollRecords = -1 },
 		"surrounding spaces":                 func(c *Config) { c.DeadLetterTopic = " {topic}.dlq" },
+		`"t" is a topic the consumer reads`:  func(c *Config) { c.DeadLetterTopic = "{topic}" },
+		`"b" is a topic the consumer reads`:  func(c *Config) { c.Topics, c.DeadLetterTopic = []string{"a", "b"}, "b" },
+		"needs a fixed name":                 func(c *Config) { c.Topics = []string{"^t\\..*"} },
+		`matches the subscription "^t`:       func(c *Config) { c.Topics, c.DeadLetterTopic = []string{"^t\\..*"}, "t.parked" },
 	} {
 		cfg := testConfig()
 		mutate(&cfg)
 		assert.ErrorContains(t, cfg.Validate(), name, name)
+	}
+}
+
+// A ^regex subscription is accepted with a dead-letter topic it cannot match,
+// or with none.
+func TestConfig_ValidateRegexSubscription(t *testing.T) {
+	t.Parallel()
+
+	for _, dlq := range []string{"parked", DeadLetterDisabled} {
+		cfg := testConfig()
+		cfg.Topics, cfg.DeadLetterTopic = []string{"^t\\..*", "plain"}, dlq
+		assert.NoError(t, cfg.Validate(), dlq)
 	}
 }
 

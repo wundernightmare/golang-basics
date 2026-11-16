@@ -28,8 +28,8 @@
 // a failed commit or a lost partition, so handlers are idempotent (see
 // services/consumer's dedupe by event_id).
 //
-// libs/kafka/kafkatest is the conformance suite every provider runs against
-// a real broker: the same tests, the same expectations.
+// libs/kafka/kafkatest (a module of its own) is the conformance suite every
+// provider runs against a real broker: the same tests, the same expectations.
 //
 // services/tasks publishes task events through its outbox with the
 // [Producer]; services/consumer drains the same topic with the [Consumer].

@@ -65,7 +65,7 @@ func TestRunWith_WorkersOutliveTheSignalUntilTheServerHasDrained(t *testing.T) {
 		stoppedAt.Store(time.Now().UnixNano())
 		sawDrained.Store(logs.Find(t, map[string]any{"msg": "servers stopped cleanly"}) != nil)
 
-		return nil
+		return ctx.Err() // the usual idiom: being told to stop is not a failure
 	}}
 
 	ctx, cancel := context.WithCancel(context.Background())

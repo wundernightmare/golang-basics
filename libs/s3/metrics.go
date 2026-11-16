@@ -18,7 +18,7 @@ func newMetrics() *metrics {
 		}, []string{"operation"}),
 		errors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "s3_request_errors_total",
-			Help: "S3 calls that failed (timeouts included; a missing key on get/head is not a failure) by operation.",
+			Help: "S3 calls that failed (timeouts included; a missing key on get/head and an object over the caller's read limit are not failures) by operation.",
 		}, []string{"operation"}),
 	}
 }

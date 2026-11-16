@@ -2,9 +2,16 @@
 // every provider (libs/kafka-rdkafka, libs/kafka-franz) must show against a
 // real broker — delivery with headers and trace context, retries,
 // Permanent, the dead-letter topic, commit-after-handle across restarts,
-// graceful drain, rebalances without loss, the error taxonomy and the
-// client metrics. A provider's test calls [Run] with a [Harness] built from
-// its own admin client; the expectations are the same for both.
+// graceful drain, rebalances without loss, Close during Run, ^regex
+// subscriptions, the error taxonomy, sends that do not fail each other, a
+// validated config that builds its clients, and the client metrics. A
+// provider's integration suite calls [Run] with a [Harness] built from its
+// own admin client; the expectations are the same for both.
+//
+// It is a module of its own: [TrustStore] starts a broker container, and
+// that stack (testcontainers, the Docker client) must not reach the go.mod
+// of libs/kafka or of a provider. A provider's go.mod therefore never
+// requires this module — its integration module does.
 //
 // Test-only code: import it from _test.go files.
 package kafkatest
@@ -15,9 +22,11 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,6 +64,10 @@ func Run(t *testing.T, h Harness) {
 	t.Run("Consumer_GracefulShutdownCommitsProcessed", func(t *testing.T) { gracefulShutdown(t, h) })
 	t.Run("Consumer_RebalanceNoLossBoundedDuplicates", func(t *testing.T) { rebalance(t, h) })
 	t.Run("Consumer_StopsOnContextCancel", func(t *testing.T) { stopsOnCancel(t, h) })
+	t.Run("Consumer_CloseDuringRunStopsIt", func(t *testing.T) { closeDuringRun(t, h) })
+	t.Run("Consumer_RegexSubscription", func(t *testing.T) { regexSubscription(t, h) })
+	t.Run("Producer_CancelledSendFailsNoOtherSend", func(t *testing.T) { cancelledSend(t, h) })
+	t.Run("Config_ValidatedConfigBuildsItsClients", func(t *testing.T) { validatedConfigBuilds(t, h) })
 	t.Run("Producer_ErrorTaxonomy", func(t *testing.T) { errorTaxonomy(t, h) })
 	t.Run("Producer_LazyConnectStartsWithoutBrokers", func(t *testing.T) { lazyConnect(t, h) })
 }
@@ -64,7 +77,7 @@ func Run(t *testing.T, h Harness) {
 func newProducer(t testing.TB, h Harness, topic string) *kafka.Producer {
 	t.Helper()
 	p, err := kafka.NewProducer(t.Context(), kafka.Config{
-		Brokers: h.Brokers(t), Topic: topic, ClientID: testx.Unique("prod"),
+		Brokers: h.Brokers(t), Topic: topic, ClientID: testx.Unique("prod"), LingerMs: 5,
 	}, nil)
 	require.NoError(t, err)
 	t.Cleanup(p.Close)
@@ -78,7 +91,7 @@ func consumerConfig(t testing.TB, h Harness, topic string) kafka.Config {
 
 	return kafka.Config{
 		Brokers: h.Brokers(t), Topics: []string{topic}, Group: testx.Unique("group"),
-		ClientID: testx.Unique("cons"), StatisticsInterval: -1,
+		ClientID: testx.Unique("cons"), StatisticsInterval: -1, MaxRetries: 5,
 		RetryBackoff: 10 * time.Millisecond, RetryBackoffMax: 50 * time.Millisecond,
 		DrainTimeout: 5 * time.Second, SessionTimeoutMs: 10_000,
 	}
@@ -330,7 +343,7 @@ func produceConsume(t *testing.T, harness Harness) {
 	require.NoError(t, run.wait(t))
 	assert.Equal(t, float64(sent), testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "ok"}))
 	assert.Equal(t, float64(sent), testx.Metric(t, run.reg, "kafka_consumer_handler_duration_seconds", map[string]string{"topic": topic}))
-	assert.Equal(t, -1.0, testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "failed"}), "no failure series")
+	testx.NoMetric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": topic, "result": "failed"})
 	assert.Equal(t, 0.0, testx.Metric(t, run.reg, "kafka_consumer_commit_errors_total", nil))
 	testx.LintMetrics(t, run.reg)
 	testx.LintMetrics(t, preg)
@@ -670,6 +683,189 @@ func stopsOnCancel(t *testing.T, h Harness) {
 	}, 30*time.Second, 50*time.Millisecond, "joined the group")
 	r.cancel()
 	require.NoError(t, r.wait(t), "a cancelled context is a clean shutdown, not an error")
+}
+
+// Close from another goroutine, while the loop waits in a poll on an idle
+// topic, ends Run cleanly — whatever the client does under a poll.
+func closeDuringRun(t *testing.T, h Harness) {
+	t.Helper()
+
+	topic := testx.Unique("close")
+	h.CreateTopic(t, 1, topic)
+
+	c, err := kafka.NewConsumer(t.Context(), consumerConfig(t, h, topic), nil)
+	require.NoError(t, err)
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(c.Collectors()...)
+
+	done := make(chan error, 1)
+	go func() { done <- c.Run(context.Background(), func(context.Context, kafka.Message) error { return nil }) }()
+
+	require.Eventually(t, func() bool {
+		return testx.Metric(t, reg, "kafka_consumer_assigned_partitions", nil) == 1
+	}, 30*time.Second, 50*time.Millisecond, "joined the group")
+	time.Sleep(500 * time.Millisecond) // nothing to fetch: the loop is inside the client's poll
+
+	c.Close()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run did not return after Close")
+	}
+}
+
+// A topic that starts with "^" is a regular expression: records of every
+// topic it matches arrive, next to those of a topic subscribed by name, and
+// the metrics label them "other", not by their name.
+func regexSubscription(t *testing.T, h Harness) {
+	t.Helper()
+
+	prefix, plain := testx.Unique("regex"), testx.Unique("plain")
+	matched := []string{prefix + "-a", prefix + "-b"}
+	h.CreateTopic(t, 1, append([]string{plain, prefix + "x"}, matched...)...)
+
+	prod := newProducer(t, h, plain)
+	for _, topic := range append([]string{plain, prefix + "x"}, matched...) {
+		require.NoError(t, prod.Send(t.Context(), kafka.Message{Topic: topic, Value: []byte(topic)}))
+	}
+
+	cfg := consumerConfig(t, h, plain)
+	cfg.Topics = []string{"^" + regexp.QuoteMeta(prefix) + "-.*", plain}
+	cfg.DeadLetterTopic = testx.Unique("parked")
+
+	var got seen
+
+	run := start(t, cfg, func(ctx context.Context, m kafka.Message) error { got.add(ctx, m); return nil })
+	require.Eventually(t, func() bool { return got.len() >= 3 }, 60*time.Second, 50*time.Millisecond)
+
+	var topics []string
+	for _, m := range got.snapshot() {
+		topics = append(topics, m.Topic)
+	}
+
+	assert.ElementsMatch(t, append([]string{plain}, matched...), topics, "the matched topics and the named one, nothing else")
+	assert.Equal(t, 2.0, testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": "other", "result": "ok"}))
+	assert.Equal(t, 1.0, testx.Metric(t, run.reg, "kafka_consumer_records_total", map[string]string{"topic": plain, "result": "ok"}))
+}
+
+// A Send whose caller gives up (its context ends while the record waits in a
+// batch) fails that Send only: the sends of other callers to the same
+// partition go through.
+func cancelledSend(t *testing.T, h Harness) {
+	t.Helper()
+
+	topic := testx.Unique("cancel")
+	h.CreateTopic(t, 1, topic)
+	prod := newProducer(t, h, topic)
+
+	stop := make(chan struct{})
+	impatient := make(chan struct{})
+
+	go func() {
+		defer close(impatient)
+
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(i%4)*time.Millisecond)
+			_ = prod.Send(ctx, kafka.Message{Value: []byte("impatient")})
+
+			cancel()
+		}
+	}()
+
+	const senders, each = 4, 50
+
+	var (
+		wg       sync.WaitGroup
+		failures atomic.Int64
+		sample   atomic.Pointer[error]
+	)
+
+	for range senders {
+		wg.Go(func() {
+			for range each {
+				if err := prod.Send(context.Background(), kafka.Message{Value: []byte("patient")}); err != nil {
+					failures.Add(1)
+					sample.Store(&err)
+				}
+			}
+		})
+	}
+
+	wg.Wait()
+	close(stop)
+	<-impatient
+
+	if n := failures.Load(); n > 0 {
+		t.Errorf("%d of %d sends with a live context failed, e.g.: %v", n, senders*each, *sample.Load())
+	}
+}
+
+// A config that passes Validate builds a producer and a consumer: what a
+// provider's client refuses on the config alone — each has its own ranges —
+// Validate refuses first. The cases sit on the edges the two clients do not
+// share.
+func validatedConfigBuilds(t *testing.T, harness Harness) {
+	t.Helper()
+
+	topic := testx.Unique("edges")
+	harness.CreateTopic(t, 1, topic)
+
+	built := 0
+
+	for name, edge := range map[string]func(*kafka.Config){
+		"dial timeout below a second":     func(c *kafka.Config) { c.DialTimeout = 500 * time.Millisecond },
+		"publish timeout below a second":  func(c *kafka.Config) { c.PublishTimeout = 500 * time.Millisecond },
+		"publish timeout below a ms":      func(c *kafka.Config) { c.PublishTimeout = 500 * time.Microsecond },
+		"publish timeout within linger":   func(c *kafka.Config) { c.PublishTimeout, c.LingerMs = time.Second, 2000 },
+		"linger of minutes":               func(c *kafka.Config) { c.LingerMs, c.PublishTimeout = 120_000, time.Hour },
+		"group timeouts of a millisecond": func(c *kafka.Config) { c.SessionTimeoutMs, c.MaxPollIntervalMs = 1, 1 },
+		"group timeouts of days":          func(c *kafka.Config) { c.SessionTimeoutMs, c.MaxPollIntervalMs = 4_000_000, 90_000_000 },
+		"smallest record bound":           func(c *kafka.Config) { c.MessageMaxBytes = 600 },
+		"largest record bound": func(c *kafka.Config) {
+			c.MessageMaxBytes, c.ProducerQueueMaxKBytes, c.ConsumerFetchMaxBytes = 1<<30+1, 4<<20, 1<<30+1
+		},
+		"prefetch of gigabytes":            func(c *kafka.Config) { c.ConsumerQueueMaxKBytes = 4 << 20 },
+		"partition fetch above a gigabyte": func(c *kafka.Config) { c.ConsumerPartitionFetchMaxBytes, c.ConsumerFetchMaxBytes = 1<<30+1, 1<<30+1 },
+		"statistics every two days":        func(c *kafka.Config) { c.StatisticsInterval = 172_800_000 },
+		"CA location probe":                func(c *kafka.Config) { c.SecurityProtocol, c.SSLCALocation = "ssl", "probe" },
+		"CA location a directory":          func(c *kafka.Config) { c.SecurityProtocol, c.SSLCALocation = "ssl", t.TempDir() },
+	} {
+		cfg := consumerConfig(t, harness, topic)
+		edge(&cfg)
+
+		if err := cfg.Validate(); err != nil {
+			continue // refused with the key's name: the constructors are never reached
+		}
+
+		built++
+
+		// Lazy: the plaintext test broker does not answer a TLS client, and
+		// building the client is what is being checked.
+		p, err := kafka.NewProducer(t.Context(), cfg, nil, kafka.WithLazyConnect())
+		if assert.NoError(t, err, "%s: Validate passed, NewProducer did not", name) {
+			p.Close()
+		}
+
+		if cfg.SecurityProtocol != "" {
+			continue // NewConsumer pings, and the test broker is plaintext
+		}
+
+		c, err := kafka.NewConsumer(t.Context(), cfg, nil)
+		if assert.NoError(t, err, "%s: Validate passed, NewConsumer did not", name) {
+			c.Close()
+		}
+	}
+
+	assert.Positive(t, built, "a provider that refuses every edge has checked nothing here")
 }
 
 // A missing topic is the deployment's problem (retryable); a record over

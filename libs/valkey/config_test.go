@@ -1,7 +1,11 @@
 package valkey_test
 
 import (
+	"context"
+	"fmt"
 	"io"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,8 +13,40 @@ import (
 	"github.com/stretchr/testify/require"
 	valkeygo "github.com/valkey-io/valkey-go"
 
+	"github.com/wundernightmare/golang-basics/libs/secret"
 	"github.com/wundernightmare/golang-basics/libs/valkey"
 )
+
+// The process-environment path of LoadConfig (LoadConfigFrom with nil);
+// everything else reads a map through LoadConfigFrom. Serial: t.Setenv
+// cannot run in a parallel test.
+func TestLoadConfig_ReadsTheProcessEnvironment(t *testing.T) {
+	t.Setenv("TASKS_VALKEY_ADDR", "cache.from-env:6380")
+
+	cfg, err := valkey.LoadConfig("TASKS_")
+	require.NoError(t, err)
+	assert.Equal(t, "cache.from-env:6380", cfg.Addr, "LoadConfig reads the process environment")
+}
+
+func TestLoadConfigDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := valkey.LoadConfigFrom("TASKS_", map[string]string{})
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Addr, "no default address: unset means no Valkey")
+	assert.False(t, cfg.Configured())
+	assert.Equal(t, 0, cfg.DB)
+	assert.Equal(t, 500*time.Millisecond, cfg.OpTimeout)
+
+	cfg, err = valkey.LoadConfigFrom("TASKS_", map[string]string{
+		"TASKS_VALKEY_ADDR": "cache:6380",
+		"TASKS_VALKEY_DB":   "3",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "cache:6380", cfg.Addr)
+	assert.Equal(t, 3, cfg.DB)
+	assert.True(t, cfg.Configured())
+}
 
 func TestConnectionSettingsDefaultFromTheEnvironment(t *testing.T) {
 	t.Parallel()
@@ -70,7 +106,7 @@ func TestConfigTranslatesToClientOptions(t *testing.T) {
 
 	// The URL form gets the same settings, and they win over the URL's own
 	// parameters: one place decides the timeouts.
-	cfg.Addr, cfg.URL = "", "valkey://:pw@other:6380/5?write_timeout=1m&dial_timeout=1m"
+	cfg.Addr, cfg.URL = "", secret.New("valkey://:pw@other:6380/5?write_timeout=1m&dial_timeout=1m")
 	opt, err = cfg.ClientOption()
 	require.NoError(t, err)
 	assert.Equal(t, []string{"other:6380"}, opt.InitAddress)
@@ -113,13 +149,28 @@ func TestInvalidConnectionSettingsAreRejected(t *testing.T) {
 		"negative idle timeout":  {valkey.Config{PoolIdleTimeout: -time.Second}, "pool_idle_timeout"},
 		"negative write timeout": {valkey.Config{ConnWriteTimeout: -time.Second}, "conn_write_timeout"},
 		"negative lifetime":      {valkey.Config{ConnLifetime: -time.Second}, "conn_lifetime"},
+		"negative op timeout":    {valkey.Config{OpTimeout: -time.Second}, "op_timeout"},
+		"negative dial timeout":  {valkey.Config{DialTimeout: -time.Second}, "dial_timeout"},
+		"negative db":            {valkey.Config{DB: -5}, "db"},
+		"ca file without tls":    {valkey.Config{CAFile: "ca.pem"}, "ca_file"},
+		"ca file that is absent": {valkey.Config{TLS: true, CAFile: "no-such-ca.pem"}, "ca_file"},
+		"no address":             {valkey.Config{Addr: "-"}, "VALKEY_URL or VALKEY_ADDR"},
+		"url of another scheme":  {valkey.Config{URL: secret.New("http://cache:6379")}, "url"},
+		"url with a bad db":      {valkey.Config{URL: secret.New("valkey://cache:6379/zz")}, "url"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
 			// 192.0.2.1 is TEST-NET-1: were the config dialled rather than
 			// rejected, this would take the dial timeout, not microseconds.
-			tc.cfg.Addr = "192.0.2.1:6379"
+			if tc.cfg.Addr == "" {
+				tc.cfg.Addr = "192.0.2.1:6379"
+			} else {
+				tc.cfg.Addr = ""
+			}
+
+			require.ErrorIs(t, tc.cfg.Validate(), valkey.ErrConfig)
+
 			start := time.Now()
 			_, err := valkey.New(tc.cfg, nil)
 			require.ErrorIs(t, err, valkey.ErrConfig)
@@ -138,6 +189,109 @@ func TestInvalidConnectionSettingsAreRejected(t *testing.T) {
 		_, err := cfg.ClientOption()
 		require.NoError(t, err, "%+v", cfg)
 	}
+}
+
+// The loader validates what it read, when there is an address to validate
+// for; its errors are config errors like the constructor's.
+func TestLoadConfigRejectsWhatNewWould(t *testing.T) {
+	t.Parallel()
+
+	for name, environ := range map[string]map[string]string{
+		"a value New rejects":  {"TASKS_VALKEY_ADDR": "cache:6379", "TASKS_VALKEY_PIPELINE_CONNS": "3"},
+		"a value env rejects":  {"TASKS_VALKEY_ADDR": "cache:6379", "TASKS_VALKEY_OP_TIMEOUT": "soon"},
+		"a url that is no url": {"TASKS_VALKEY_URL": "cache:6379"},
+	} {
+		_, err := valkey.LoadConfigFrom("TASKS_", environ)
+		require.ErrorIs(t, err, valkey.ErrConfig, name)
+	}
+
+	cfg, err := valkey.LoadConfigFrom("TASKS_", map[string]string{"TASKS_VALKEY_PIPELINE_CONNS": "3"})
+	require.NoError(t, err, "without an address there is no cache to validate for")
+	assert.False(t, cfg.Configured())
+}
+
+// A URL that does not parse is, as a rule, a password with an unescaped
+// character: nothing of the URL may reach the error.
+func TestUnparsableURLDoesNotLeakThePassword(t *testing.T) {
+	t.Parallel()
+
+	for _, url := range []string{
+		"valkey://:Sup3r%S3cret@cache:6379/0",  // a bare percent sign
+		"valkey://:Sup3rS3cret\n@cache:6379/0", // a newline, as read from a file
+		"valkey://:Sup3r#S3cret@cache:6379/0",  // the rest becomes a fragment
+		"valkey://:Sup3rS3cret@cache:port/0",
+		"valkey://:12/Sup3rS3cret@cache:6379", // the rest becomes the path
+	} {
+		_, err := valkey.New(valkey.Config{URL: secret.New(url)}, nil)
+		require.ErrorIs(t, err, valkey.ErrConfig, url)
+		assert.NotContains(t, err.Error(), "Sup3r", url)
+		assert.NotContains(t, err.Error(), "S3cret", url)
+	}
+}
+
+// TLS, the CA file and the user reach the library from the discrete keys,
+// and TLS and the CA file from next to a URL as well.
+func TestTLSAndUserTranslateToClientOptions(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := valkey.LoadConfigFrom("TASKS_", map[string]string{
+		"TASKS_VALKEY_ADDR": "cache:6379", "TASKS_VALKEY_USERNAME": "tasks", "TASKS_VALKEY_TLS": "true",
+	})
+	require.NoError(t, err)
+
+	opt, err := cfg.ClientOption()
+	require.NoError(t, err)
+	assert.Equal(t, "tasks", opt.Username)
+	require.NotNil(t, opt.TLSConfig)
+	assert.Nil(t, opt.TLSConfig.RootCAs, "no CA file: the system roots")
+
+	opt, err = valkey.Config{Addr: "cache:6379"}.ClientOption()
+	require.NoError(t, err)
+	assert.Nil(t, opt.TLSConfig, "TLS is off unless asked for")
+
+	opt, err = valkey.Config{URL: secret.New("valkey://cache:6379"), TLS: true}.ClientOption()
+	require.NoError(t, err)
+	assert.NotNil(t, opt.TLSConfig, "the flag turns TLS on for a plain-scheme URL")
+}
+
+// A pipeline long enough for a dedicated connection waits for a slot like a
+// blocking command; one command shorter, it is pipelined and never waits.
+func TestLongPipelineWaitsForADedicatedConnection(t *testing.T) {
+	t.Parallel()
+
+	inner := &countingClient{}
+	client := valkey.NewBounded(inner, 1)
+
+	_, giveBack := client.Dedicate() // the only slot
+	defer giveBack()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	long := make([]valkeygo.Completed, valkeygo.DefaultBlockingPipeline)
+	for _, res := range client.DoMulti(ctx, long...) {
+		require.ErrorIs(t, res.Error(), context.DeadlineExceeded)
+	}
+
+	assert.Zero(t, inner.multis, "the library never saw the pipeline that had no slot")
+
+	client.DoMulti(t.Context(), long[1:]...)
+	assert.Equal(t, 1, inner.multis)
+}
+
+// countingClient is the library's client as far as bounded calls it here.
+type countingClient struct {
+	valkeygo.Client
+
+	multis int
+}
+
+func (c *countingClient) Dedicate() (valkeygo.DedicatedClient, func()) { return nil, func() {} }
+
+func (c *countingClient) DoMulti(context.Context, ...valkeygo.Completed) []valkeygo.ValkeyResult {
+	c.multis++
+
+	return nil
 }
 
 // A streaming call would hold a connection of the library's second pool,
@@ -172,4 +326,20 @@ func TestResubscribeDelayDoublesToOneSecond(t *testing.T) {
 	}
 
 	assert.Equal(t, time.Second, valkey.ResubscribeDelay(1_000), "no overflow however long the server stays down")
+}
+
+// The URL carries the password, so printing the Config must not show it.
+func TestPrintingAConfigDoesNotShowTheURL(t *testing.T) {
+	t.Parallel()
+
+	cfg := valkey.Config{URL: secret.New("valkey://app:Sup3rS3cret@cache:6379/0")}
+
+	var logged strings.Builder
+	slog.New(slog.NewJSONHandler(&logged, nil)).Info("config", "valkey", cfg)
+
+	for form, printed := range map[string]string{
+		"%v": fmt.Sprintf("%v", cfg), "%+v": fmt.Sprintf("%+v", cfg), "%#v": fmt.Sprintf("%#v", cfg), "slog": logged.String(),
+	} {
+		assert.NotContains(t, printed, "Sup3rS3cret", form)
+	}
 }

@@ -51,7 +51,7 @@ func (d *diagnostics) startFlight(ctx context.Context) (stop func()) {
 		MaxBytes: uint64(d.cfg.DiagFlightMaxBytes), //nolint:gosec // G115: Validate rejects a negative DIAG_FLIGHT_MAX_BYTES
 	})
 	if err := recorder.Start(); err != nil {
-		d.log.WarnContext(ctx, "diagnostics: flight recorder not started", "error", err.Error())
+		d.log.WarnContext(ctx, "diagnostics: flight recorder not started", "err", err.Error())
 
 		return func() {}
 	}
@@ -101,7 +101,7 @@ func (d *diagnostics) snapshotFlight(ctx context.Context, reason string) {
 	var window bytes.Buffer
 	if _, err := d.flight.WriteTo(&window); err != nil {
 		d.dumps.WithLabelValues(dumpKindFlight, dumpFailed).Inc()
-		d.log.ErrorContext(ctx, "diagnostics: flight recorder snapshot failed", "reason", reason, "error", err.Error())
+		d.log.ErrorContext(ctx, "diagnostics: flight recorder snapshot failed", "reason", reason, "err", err.Error())
 
 		return
 	}

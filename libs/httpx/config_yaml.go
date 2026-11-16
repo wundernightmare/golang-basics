@@ -26,19 +26,25 @@ import (
 // container. A path that is set must name a readable file: a typo in it (or
 // a ConfigMap that was not mounted) is an error, not a silent fall-back to
 // the defaults. Unknown YAML keys are an error too: a typo must not silently
-// become a default.
+// become a default. So is a second YAML document ("---"): only the first
+// would be read.
 //
 // Defaults come from the envDefault tags, so a service config can embed the
-// libs' Config structs directly instead of copying fields by hand:
+// libs' Config structs directly instead of copying fields by hand — with no
+// envPrefix on the field: the keys of a lib config carry their own namespace
+// (DB_HOST), and a prefix would be added in front of it (DB_DB_HOST).
 //
 //	type Config struct {
 //		httpx.Config `yaml:",inline"`
-//		Postgres pgx.Config `yaml:"postgres" envPrefix:"DB_"`
+//		Postgres pgx.Config `yaml:"postgres"`
 //	}
 //
-// An explicit zero in the file or the environment is kept ("shutdown_delay:
-// 0s" is zero, not the default); only a key that is absent from both takes
-// the default. A value dst already holds before the call (a service's own
+// An explicit zero in the file or the environment is kept by this function
+// ("shutdown_delay: 0s" is zero, not the default); only a key that is absent
+// from both takes the default. What a zero then means is the business of the
+// struct's own validation: [Config.Validate], which [NewServer] runs, keeps
+// it for the fields whose zero is a setting and takes it as "not set" for the
+// rest (see [Config]). A value dst already holds before the call (a service's own
 // default for a lib field, e.g. its admin port) counts as the default for
 // that field: the tag default does not replace it, the file and the
 // environment do.
@@ -70,6 +76,10 @@ func LoadYAMLFrom[T any](path, prefix string, environ map[string]string, dst *T)
 
 		if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) { // an empty file is an empty config
 			return fmt.Errorf("httpx: parse yaml %q: %w", path, err)
+		}
+
+		if err := dec.Decode(new(yaml.Node)); !errors.Is(err, io.EOF) {
+			return fmt.Errorf("httpx: parse yaml %q: want one YAML document, found another after it", path)
 		}
 	}
 
