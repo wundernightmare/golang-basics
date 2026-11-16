@@ -203,8 +203,6 @@ func TestUpstreamAttachmentWithoutATypeIsLostAcrossFilesystems(t *testing.T) {
 			"drop the workaround in attachOutput and this test")
 }
 
-// differentDevices reports whether the two paths exist on different
-// filesystems.
 func differentDevices(a, b string) bool {
 	var sa, sb syscall.Stat_t
 	if syscall.Stat(a, &sa) != nil || syscall.Stat(b, &sb) != nil {

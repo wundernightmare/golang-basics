@@ -238,7 +238,6 @@ func (d *diagnostics) disarmCrashCapture() {
 	d.crashFile, d.ownPending = nil, ""
 }
 
-// crashReport is the JSON a crash is shipped as.
 type crashReport struct {
 	Service   string    `json:"service"`
 	Version   string    `json:"version"`

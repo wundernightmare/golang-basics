@@ -31,11 +31,11 @@ type fakeRemote struct {
 	subs    map[int]fakeSub
 	nextSub int
 	failure error // every call fails with it while set
-
-	gets, writes atomic.Int64
 	// beforeGetReturns runs after a Get has read its answer and before it
 	// returns it: the window in which a racing invalidation lands.
 	beforeGetReturns func()
+
+	gets, writes atomic.Int64
 }
 
 type fakeEntry struct {

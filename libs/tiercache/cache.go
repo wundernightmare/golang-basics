@@ -83,9 +83,8 @@ type Cache[T any] struct {
 	fillMu sync.RWMutex
 	epoch  atomic.Uint64
 
-	// refreshMu guards refreshing and closed. A refresh is added to wg under
-	// it, and Close sets closed under it before it waits: no refresh starts
-	// behind Close's back.
+	// A refresh is added to wg under refreshMu, and Close sets closed under
+	// it before it waits: no refresh starts behind Close's back.
 	refreshMu  sync.Mutex
 	refreshing map[string]struct{}
 	closed     bool

@@ -507,7 +507,7 @@ func (c *Config) validateFiles() []error {
 // readable reports why path cannot be read: missing, unreadable, or a
 // directory where a file is wanted.
 func readable(path string, dirOK bool) error {
-	f, err := os.Open(path) //nolint:gosec // operator-supplied config path
+	f, err := os.Open(path) //nolint:gosec // G304: the path is operator-supplied configuration, not user input
 	if err != nil {
 		return err
 	}

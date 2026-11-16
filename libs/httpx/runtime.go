@@ -84,7 +84,6 @@ func (m *memoryLimiter) sync(ctx context.Context) {
 		"container_limit_bytes", limit, "ratio", m.ratio, "memory_limit_bytes", target)
 }
 
-// run re-reads the cgroup every interval until ctx is done.
 func (m *memoryLimiter) run(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

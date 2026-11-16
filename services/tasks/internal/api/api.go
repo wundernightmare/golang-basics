@@ -92,7 +92,6 @@ const (
 // (maxLength of the header in api/tsp/tasks.tsp).
 const maxIdempotencyKeyLength = 255
 
-// toWire converts the internal model to the contract's Task.
 func toWire(t domain.Task) tasksapi.Task {
 	return tasksapi.Task{Id: t.ID, Title: t.Title, Done: t.Done, Version: t.Version, CreatedAt: t.CreatedAt.UTC()}
 }

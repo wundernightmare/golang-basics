@@ -65,7 +65,6 @@ func (Driver) NewProducer(cfg kafka.Config, _ *slog.Logger) (kafka.ProducerClien
 	return &producer{cl: cl, stats: st}, nil
 }
 
-// producer is a franz-go client used for producing.
 type producer struct {
 	cl    *kgo.Client
 	stats *stats
@@ -224,7 +223,6 @@ func (Driver) NewConsumer(cfg kafka.Config, log *slog.Logger, rb kafka.Rebalance
 	return cons, nil
 }
 
-// consumer is a franz-go consumer-group member.
 type consumer struct {
 	cl    *kgo.Client
 	cfg   kafka.Config

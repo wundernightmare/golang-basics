@@ -66,13 +66,13 @@ type Writer struct {
 	metrics  *writerMetrics
 	now      func() time.Time
 
-	// mu guards cur — and, while a batch is cur, that batch's fields — seq
-	// and closed. A batch taken out of cur belongs to its flush alone. wake,
-	// slots and flushes synchronise themselves.
-	mu      sync.Mutex
-	cur     *batch
-	seq     uint64
-	closed  bool
+	// mu also guards the fields of the batch that is cur; a batch taken out
+	// of cur belongs to its flush alone.
+	mu     sync.Mutex
+	cur    *batch
+	seq    uint64
+	closed bool
+
 	wake    chan struct{}
 	slots   chan struct{}
 	flushes sync.WaitGroup

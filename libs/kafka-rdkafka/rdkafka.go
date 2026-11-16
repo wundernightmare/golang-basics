@@ -153,7 +153,11 @@ type producer struct {
 	mu     sync.RWMutex
 	cl     *ckafka.Producer
 	closed bool
-	wg     sync.WaitGroup // event and log pumps, replacements under way
+
+	// wg counts the event and log pumps and the replacements under way. Add
+	// runs before the producer is shared or with mu held for writing and
+	// closed false (see newClient, startReplace), so not after Close's Wait.
+	wg sync.WaitGroup
 }
 
 // testHookNewClient, when set (tests), sees every client the producer
@@ -298,7 +302,6 @@ func (p *producer) Send(ctx context.Context, msg kafka.Message) error {
 	}
 }
 
-// produce enqueues m on the current client, under the read lock.
 func (p *producer) produce(m *ckafka.Message, delivery chan ckafka.Event) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -392,13 +395,15 @@ type consumer struct {
 	logsDone chan struct{}
 	failed   atomic.Pointer[error] // the fatal error that ended the client
 
-	// Calls into the client from outside the loop (Ping from readiness,
-	// Commit, whose wait ctx may end before librdkafka returns) are counted
-	// in calls, so Close destroys the client only once none is inside it.
 	mu      sync.Mutex
 	closing bool // Close has begun: no new Ping; a Commit runs to the end
 	closed  bool // the client is gone (or abandoned): nothing may call it
-	calls   sync.WaitGroup
+
+	// Calls into the client from outside the loop (Ping from readiness,
+	// Commit, whose wait ctx may end before librdkafka returns) are counted
+	// in calls, so Close destroys the client only once none is inside it.
+	// calls.Add runs with mu held, next to the closing / closed check.
+	calls sync.WaitGroup
 }
 
 // closeWait bounds how long Close waits for a call still inside librdkafka

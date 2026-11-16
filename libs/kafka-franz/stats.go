@@ -16,8 +16,8 @@ type stats struct {
 	cfg kafka.Config
 	cl  *kgo.Client
 
-	// mu guards conns and reqErrors: franz-go calls the hooks from its own
-	// goroutines, a scrape reads them from another.
+	// franz-go calls the hooks from its own goroutines, a scrape reads from
+	// another.
 	mu        sync.Mutex
 	conns     map[int32]int // open connections per broker node id
 	reqErrors int64

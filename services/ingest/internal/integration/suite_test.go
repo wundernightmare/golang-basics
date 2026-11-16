@@ -87,7 +87,6 @@ func ensureBucket(t testing.TB, backend containers.S3Store) {
 	}, time.Minute, 250*time.Millisecond, "the bucket becomes reachable")
 }
 
-// service is one running instance.
 type service struct {
 	t      testing.TB
 	base   string // http://127.0.0.1:port
@@ -331,7 +330,6 @@ func (s *service) archived() map[string]int {
 	return out
 }
 
-// waitArchived waits until every id is in the archive.
 func (s *service) waitArchived(want []string) {
 	s.t.Helper()
 

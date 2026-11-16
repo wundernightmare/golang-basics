@@ -126,7 +126,6 @@ func wires() []wire {
 	}
 }
 
-// client builds the wire's client over tc.
 func (w wire) client(tb testing.TB, tc resilient.TargetConfig) *resilient.Client {
 	tb.Helper()
 

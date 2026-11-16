@@ -52,7 +52,6 @@ func TestProducer_FatalErrorReplacesClient(t *testing.T) {
 	assert.Same(t, replaced, p.current())
 }
 
-// current is the client in use.
 func (p *producer) current() *ckafka.Producer {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

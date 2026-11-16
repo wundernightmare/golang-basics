@@ -91,9 +91,9 @@ func AppendRecord(dst []byte, rec Record) ([]byte, error) {
 	dst = binary.LittleEndian.AppendUint32(dst, uint32(bodyLen)) // checked against MaxUint32 just above
 	dst = append(dst, 0, 0, 0, 0)                                // checksum, filled in below
 	dst = binary.LittleEndian.AppendUint64(dst, uint64(rec.ReceivedAt.UnixMilli()))
-	dst = append(dst, byte(len(rec.ID))) //nolint:gosec // 1..MaxFieldBytes, checked above
+	dst = append(dst, byte(len(rec.ID))) //nolint:gosec // G115: 1..MaxFieldBytes, checked above
 	dst = append(dst, rec.ID...)
-	dst = append(dst, byte(len(rec.Type))) //nolint:gosec // at most MaxFieldBytes, checked above
+	dst = append(dst, byte(len(rec.Type))) //nolint:gosec // G115: at most MaxFieldBytes, checked above
 	dst = append(dst, rec.Type...)
 	dst = append(dst, rec.Event...)
 
@@ -194,7 +194,7 @@ func (r *Reader) readHeader() error {
 // checked: a checksum proves the bytes are the writer's, not that the writer
 // was right.
 func decodeBody(body []byte) (Record, error) {
-	millis := int64(binary.LittleEndian.Uint64(body[:8])) //nolint:gosec // the bit pattern AppendRecord wrote from an int64
+	millis := int64(binary.LittleEndian.Uint64(body[:8])) //nolint:gosec // G115: the bit pattern AppendRecord wrote from an int64
 	rest := body[8:]
 
 	idLen := int(rest[0])

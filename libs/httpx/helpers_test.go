@@ -37,12 +37,10 @@ func loggedServer(t testing.TB, cfg httpx.Config, opts ...httpx.Option) (*httpx.
 	return srv, buf
 }
 
-// get serves a GET for target on h.
 func get(h http.Handler, target string) *httptest.ResponseRecorder {
 	return do(h, httptest.NewRequest(http.MethodGet, target, http.NoBody))
 }
 
-// decode parses a JSON object body.
 func decode(t testing.TB, rec *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 
@@ -66,7 +64,6 @@ func histogram(t testing.TB, g prometheus.Gatherer, name string, labels map[stri
 	return nil
 }
 
-// series returns every series of the metric family name.
 func series(t testing.TB, g prometheus.Gatherer, name string) []*dto.Metric {
 	t.Helper()
 

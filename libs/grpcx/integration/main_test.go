@@ -14,10 +14,10 @@ var certs *pki
 
 // TestMain issues the certificates and makes the suite's CA the process's
 // system trust store. SSL_CERT_FILE is read once, at the first certificate
-// verification, so it is set before anything dials: that way the client's own
-// transport — built by resilient.New from Config, with no test hook in it —
-// trusts the test servers, and the suite exercises the transport the client
-// really ships instead of one handed in through WithHTTPClient.
+// verification, so it is set before anything dials: that way the client's
+// default credentials — built by grpcx.New from Config, with no test hook in
+// them — trust the test servers, and the suite exercises the credentials the
+// client really ships instead of ones handed in through WithDialOptions.
 func TestMain(m *testing.M) {
 	os.Exit(run(m))
 }

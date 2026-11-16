@@ -45,7 +45,6 @@ type secured struct {
 	caPEM  []byte // the authority that signed the broker's certificate
 }
 
-// authority is a throwaway certificate authority.
 type authority struct {
 	cert *x509.Certificate
 	key  *ecdsa.PrivateKey

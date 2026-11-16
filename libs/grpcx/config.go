@@ -293,7 +293,6 @@ func (t *TargetConfig) keepalive() (params keepalive.ClientParameters, ok bool) 
 	return keepalive.ClientParameters{Time: t.KeepaliveTime, Timeout: t.KeepaliveTimeout}, true
 }
 
-// retries reports whether the target retries at all.
 func (t *TargetConfig) retries() bool { return t.RetryMaxAttempts > 1 }
 
 // splitMethod splits "pkg.Service" or "pkg.Service/Method" (a leading slash

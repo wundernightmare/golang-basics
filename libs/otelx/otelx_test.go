@@ -263,7 +263,6 @@ func TestTLSConfig(t *testing.T) {
 	}
 }
 
-// selfSigned returns a throwaway certificate and key in PEM.
 func selfSigned(t *testing.T) (certPEM, keyPEM []byte) {
 	t.Helper()
 

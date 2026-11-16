@@ -53,7 +53,7 @@ const (
 // sees them, and never forgets one. Looking a known value up takes no lock:
 // readers load an immutable snapshot, a new value replaces the snapshot.
 type table[K comparable] struct {
-	mu    sync.Mutex
+	mu    sync.Mutex // held to replace state; state is read without it
 	state atomic.Pointer[tableState[K]]
 }
 

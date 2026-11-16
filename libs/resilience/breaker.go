@@ -152,9 +152,9 @@ func (c BreakerConfig) Validate() []error {
 type Breaker struct {
 	cur atomic.Pointer[snapshot]
 
-	mu     sync.Mutex // guards win / winGen
-	win    window     // closed state: a = requests, b = failures
-	winGen uint64     // the generation win counts for
+	mu     sync.Mutex
+	win    window // closed state: a = requests, b = failures
+	winGen uint64 // the generation win counts for
 
 	ratio       float64
 	minRequests int
