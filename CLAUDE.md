@@ -330,9 +330,8 @@ README; this file is only the high-signal, easy-to-miss bits.
   whether the code has an unkillable branch (rewrite with `min`/`max`, inject
   the clock) before adding a test. Nightly/manual in CI, not per PR.
 - **A workaround for a dependency's defect is marked and listed**:
-  `UPSTREAM-WORKAROUND(<dependency>)` in the comment (with the version it was
-  seen in), a row in `docs/UPSTREAM-WORKAROUNDS.md`, and — where one can be
-  written — a `TestUpstream…` test that asserts the defect and fails when an
+  `UPSTREAM-WORKAROUND(<dependency> <version>)` in the comment, a row in
+  `docs/UPSTREAM-WORKAROUNDS.md`, and — where one can be written — a `TestUpstream…` test that asserts the defect and fails when an
   upgrade fixes it. Removing the workaround removes all three.
 - **Chaos before trusting resilience code**: a code path written for a
   failing dependency (optional readiness, the outbox relay, cache
@@ -391,13 +390,9 @@ README; this file is only the high-signal, easy-to-miss bits.
   It covers Go's crypto only, so both build lines refuse it with the rdkafka
   provider — keep that refusal. `/version` reports `fips140` from
   `crypto/fips140.Enabled()`; never a `build_info` label.
-- **Comments answer "why"** (CONTRIBUTING "Comments"): the failure the code
-  prevents, the invariant, the trade-off — never what the name or the next
-  lines already say. One home per fact (a list, an order, a default is
-  written once and pointed to); a claim like "never" / "only" / "first" must
-  be checkable where it stands; a literal wait or size and every mutex gets
-  its reason; a `//nolint` reason is checkable and a suppression whose cause
-  is gone is deleted. Comments on configuration and exported API stay
-  detailed — the reader there has no code to read.
+- **Comments carry what the code in front of the reader does not** — a
+  reason, an invariant, a contract — and never restate a name or the next
+  lines. The rules are CONTRIBUTING "Comments"; read them before writing or
+  reviewing a comment.
 - Every service binary uses the `run() error` + `os.Exit` pattern in `main` so deferred
   cleanup runs before exit (golangci-lint `gocritic:exitAfterDefer` enforces it).
