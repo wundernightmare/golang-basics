@@ -107,61 +107,68 @@ git hooks use it: `--all` (lint / test / vuln matrices), `--integration`
 
 ## Comments
 
-A comment is for what the code cannot say: **why** it is the way it is. What
-it does and how are read from the code, and a comment repeating them is one
-more thing to keep in step.
+A comment carries what the reader cannot get from the code in front of them:
+the **reason** (the failure prevented, the trade-off taken, a consequence
+that is not obvious), an **invariant**, or a **contract** — what a caller may
+rely on without opening the body. What the name or the next lines already
+say is not repeated: a comment that restates them is one more thing to keep
+in step.
 
-Two audiences are served differently, on purpose:
+For every comment:
 
-- **Configuration and exported API** — a `Config` field, an environment key,
-  a default, an exported identifier, a package doc. The reader turns a knob
-  or calls a function without reading the code: say what it does, the unit,
-  the default, what zero means, what breaks at the edges. Detail is welcome
-  here; only a wrong or stale sentence is a defect.
-- **Everything else** — the reader has the code open. The rules below apply.
-
-Rules:
-
-1. **Say why.** The failure the code prevents, the invariant it keeps, the
-   trade-off taken, a consequence that is not obvious. Not the name restated
-   (`// release frees a slot`), not the next lines narrated, not a bare
-   `// Close implements io.Closer` on an unexported type.
-2. **One home per fact.** A list, an order, a default, a number taken from a
-   dependency is written in one place — next to the code that makes it true —
-   and other comments point there (`see newAdminMux`). Copies drift: every
-   list of admin endpoints but the real one had lost an entry.
-3. **Name the criterion, not the members**: "the services with
-   `internal/kafkaprovider`", not "tasks and consumer".
-4. **"Never", "only", "first", "every" are claims.** Write one where the
-   reader can check it in the same function; otherwise scope it ("first
-   within `tuneRuntime`"). A comment on a returned bool describes the
-   condition the code tests, not the intent behind it.
-5. **Text in shared code is true for every implementation behind it** (both
-   Kafka providers, both L1 stores, both HTTP and gRPC clients). What holds
-   for one lives in that one.
-6. **Constants and locks carry their reason.** A literal wait or size
-   outside configuration has a name or a clause saying why this value; a
-   mutex says which fields it guards and against whom; a helper that needs a
-   lock held says `x.mu must be held`.
-7. **A suppression is a claim too.** `//nolint:<linter> // <why>` and
+1. **One home per fact.** A list, an order, a number taken from a dependency
+   is written in one place — next to the code that makes it true — and other
+   comments point there (`see newAdminMux`); a copy drifts. The home of a
+   default is its `Config` field (the tag and the comment beside it):
+   elsewhere name the key, not the value. Where a list is unavoidable, name
+   the criterion, not the members: "the services with
+   `internal/kafkaprovider`", not "tasks and consumer". Text in shared code
+   holds for every implementation behind it (both Kafka providers, both L1
+   stores); what holds for one lives in that one.
+2. **A suppression is a claim.** `//nolint:<linter> // <why>` and
    `// nosemgrep: <rule> -- <why>` give a reason that stands on its own (no
    "same", no "as above") and can be checked (name the function that bounds
    the value); gosec reasons carry the rule (`// G115: …`). When the cause
    goes, the directive goes — and a directive for a linter that is disabled
    in `.golangci.yml` is not written.
-8. **A claim about a dependency or the OS** carries the version it was seen
+3. **A claim about a dependency or the OS** carries the version it was seen
    in or the test that pins it. A workaround for a defect is
    `UPSTREAM-WORKAROUND(<dependency> <version>): <what> (docs/UPSTREAM-WORKAROUNDS.md)`
    with its row there.
-9. **History lives in the commit.** "The old code…", "was removed", "as
+4. **History lives in the commit.** "The old code…", "was removed", "as
    before" describe something the reader cannot see; say what the code
    guarantees now.
-10. **A doc comment sits on the declaration it describes.** A design note
-    longer than its identifier deserves goes in a block of its own after the
-    imports (or in `doc.go`), and the identifier keeps one line.
-11. **No invented reasons.** If the reason for a value cannot be established
-    from the code, its tests or its history, leave it uncommented and ask —
-    a plausible guess is worse than nothing.
+5. **No invented reasons.** If a reason cannot be established from the code,
+   its tests or its history, leave the comment out and ask — a plausible
+   guess is worse than nothing. This outranks rule 8.
+
+**Configuration and exported API** — a `Config` field, an environment key,
+an exported identifier, a package doc — are read by someone who turns a knob
+or calls a function without the code open. Say what it does, the unit, what
+zero means, what breaks at the edges, at whatever length that takes.
+
+**Everything else** is read with the code open, so additionally:
+
+6. **No restating.** Not the name (`// release frees a slot`,
+   `// len is the number of ids`), not the next lines narrated, not a bare
+   `// Close implements io.Closer`. An unexported identifier whose name and
+   signature say it all has no comment.
+7. **A contract earns its line** when the signature does not show it: what a
+   returned bool or nil means, the order of a result, who owns a buffer,
+   that a lock must be held (`x.mu must be held`), which edge is accepted.
+   Describe the condition the code tests, not the intent behind it.
+8. **A literal wait or size outside configuration** has a name or a clause
+   saying why this value.
+9. **A mutex guards the fields below it, up to the next blank line**; it is
+   declared that way and needs no comment. A comment is owed only when it
+   guards something else (a field elsewhere, a call order, another lock's
+   ordering).
+10. **"Never", "only", "first", "every" are claims.** Write one where the
+    reader can check it in the same function; otherwise scope it ("first
+    within `tuneRuntime`").
+11. **A design note longer than its identifier deserves** goes in a block of
+    its own after the imports (or in `doc.go`); the identifier keeps its
+    contract.
 
 Tests follow the same rules: the comment on a test states the rule it
-proves, not the steps it takes.
+proves when the test's name does not, never the steps it takes.
