@@ -28,6 +28,7 @@ type rateLimiter struct {
 
 	mu      sync.Mutex
 	clients map[string]*rate.Limiter
+	walked  time.Time // when a full table was last searched for forgettable clients
 
 	limited *prometheus.CounterVec
 }
@@ -40,7 +41,8 @@ const (
 
 // retryAfterUnknown is the Retry-After of a refusal that has no bucket to
 // compute one from: the client table is full, or the limiter says it can
-// never grant the token.
+// never grant the token. A full table is not searched for room more often
+// than this either (see client).
 const retryAfterUnknown = time.Second
 
 func bucketDepth(limit float64, burst int) int {
@@ -78,7 +80,10 @@ func newRateLimiter(cfg Config, reg prometheus.Registerer) *rateLimiter {
 
 // client returns the bucket of one client address, or nil when the table is
 // full of clients that are all in use — then the request is shed: a table
-// that grows with the number of addresses is the attack.
+// that grows with the number of addresses is the attack. So is a walk over
+// the whole table, under the lock every request takes, for each new address
+// of a flood: a table found full is walked again only retryAfterUnknown
+// later, which is when the shed clients were told to come back.
 func (l *rateLimiter) client(key string, now time.Time) *rate.Limiter {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -88,6 +93,12 @@ func (l *rateLimiter) client(key string, now time.Time) *rate.Limiter {
 	}
 
 	if len(l.clients) >= l.maxKeys {
+		if !l.walked.IsZero() && now.Sub(l.walked) < retryAfterUnknown {
+			return nil
+		}
+
+		l.walked = now
+
 		// A bucket that has refilled is indistinguishable from a new one:
 		// forgetting it changes nothing for its client.
 		for k, lim := range l.clients {

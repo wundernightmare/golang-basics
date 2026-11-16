@@ -93,7 +93,7 @@ func container(limit, usage, inactiveFile string) fstest.MapFS {
 func testDiagnostics(t *testing.T, dir string, sink DumpSink) *diagnostics {
 	t.Helper()
 
-	cfg := Config{Service: "svc", Addr: "127.0.0.1:0", DiagDumpDir: dir}
+	cfg := Config{Service: "svc", Addr: "127.0.0.1:0", DiagDumpDir: dir, DiagMemoryCooldown: 10 * time.Minute}
 	require.NoError(t, cfg.Validate())
 
 	diag := newDiagnostics(cfg, BuildInfo{Service: "svc", Version: "v1", Revision: "abc"}, slog.New(slog.DiscardHandler))

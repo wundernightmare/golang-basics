@@ -9,6 +9,8 @@
 //     lock_timeout and idle_in_transaction_session_timeout (see [New]),
 //     read back after connecting so that a pooler which accepts and drops
 //     them cannot leave a pool without guard rails ([ErrGuardRailOff]);
+//   - an optional client-side deadline on every call made through [DB.Conn]
+//     (DB_OP_TIMEOUT), for the waits no server-side timeout sees;
 //   - a readiness check that plugs straight into libs/httpx ([DB.ReadyCheck]);
 //   - tracing (a client span per query via otelpgx) and metrics: pool
 //     statistics plus query latency and errors by operation ([DB.Collectors],

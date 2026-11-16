@@ -61,14 +61,15 @@ func TestLogger_MasksPrivateDataInAttributes(t *testing.T) {
 
 	secrets := []string{
 		"hunter2", "tok-9f8e7d", "dsn-pass", "url-pass", "q-secret", "err-pass", "bearer-abc", "sid=42", "map-pass",
-		"struct-pass", "grp-pass", "typed-pass", "a@b.example", "+15550100", "hdr-key",
+		"struct-pass", "grp-pass", "typed-pass", "list-pass", "under-pass", "composite-pass", "a@b.example", "+15550100", "hdr-key",
 	}
 
 	log.Info("user signed in with password hunter (the message is the caller's business)",
 		"password", "hunter2",
 		"api_key", "tok-9f8e7d",
-		"email", "a@b.example",
+		"Email", "a@b.example",
 		"phone", "+15550100",
+		"api_keys", map[string]string{"primary": "composite-pass"},
 		"database", "host=db user=app password=dsn-pass sslmode=disable",
 		"upstream", "https://svc:url-pass@billing.internal/v1?token=q-secret&page=2",
 		"err", fmt.Errorf("dial postgres://app:err-pass@db:5432/app: %w", errors.New("refused")),
@@ -77,6 +78,8 @@ func TestLogger_MasksPrivateDataInAttributes(t *testing.T) {
 		"account", account{Login: "app", Password: "struct-pass", Endpoint: "https://api.example/v1"},
 		slog.Group("db", slog.String("password", "grp-pass"), slog.String("host", "db-1")),
 		"credential", secret.New("typed-pass"),
+		"peers", []string{"nats://u:list-pass@n1:4222", "n2:4222"},
+		slog.Group("credentials", slog.String("value", "under-pass"), slog.Int("version", 2)),
 		// Not secrets, whatever their names suggest:
 		"debug_token", true,
 		"max_tokens", 4096,
@@ -93,10 +96,11 @@ func TestLogger_MasksPrivateDataInAttributes(t *testing.T) {
 
 	assert.Equal(t, "[redacted]", got["password"])
 	assert.Equal(t, "[redacted]", got["api_key"])
-	assert.Equal(t, "[redacted]", got["email"], "a key from LOG_REDACT_KEYS")
-	assert.Equal(t, "[redacted]", got["phone"], "matched without regard to case")
+	assert.Equal(t, "[redacted]", got["Email"], "a key from LOG_REDACT_KEYS, matched without regard to case")
+	assert.Equal(t, "[redacted]", got["phone"], "on either side")
+	assert.Equal(t, "[redacted]", got["api_keys"], "a composite value under a secret key is hidden whole")
 	assert.Equal(t, "host=db user=app password=[redacted] sslmode=disable", got["database"])
-	assert.Equal(t, "https://svc:xxxxx@billing.internal/v1?page=2&token=%5Bredacted%5D", got["upstream"])
+	assert.Equal(t, "https://svc:xxxxx@billing.internal/v1?token=[redacted]&page=2", got["upstream"])
 	assert.Equal(t, "dial postgres://app:xxxxx@db:5432/app: refused", got["err"])
 	assert.Equal(t, map[string]any{
 		"Authorization": []any{"[redacted]"}, "Cookie": []any{"[redacted]"}, "X-Api-Key": []any{"[redacted]"},
@@ -106,6 +110,8 @@ func TestLogger_MasksPrivateDataInAttributes(t *testing.T) {
 	assert.Equal(t, map[string]any{"login": "app", "password": "[redacted]", "endpoint": "https://api.example/v1"}, got["account"])
 	assert.Equal(t, map[string]any{"password": "[redacted]", "host": "db-1"}, got["db"])
 	assert.Equal(t, "[redacted]", got["credential"])
+	assert.Equal(t, []any{"nats://u:xxxxx@n1:4222", "n2:4222"}, got["peers"])
+	assert.Equal(t, map[string]any{"value": "[redacted]", "version": 2.0}, got["credentials"], "a group under a secret name hides what a secret key would")
 
 	assert.Equal(t, true, got["debug_token"], "a boolean carries no secret")
 	assert.InDelta(t, 4096, got["max_tokens"], 0)

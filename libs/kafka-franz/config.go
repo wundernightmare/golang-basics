@@ -5,6 +5,9 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -38,13 +41,47 @@ func brokerMaxReadBytes(cfg kafka.Config) int32 {
 	return int32(min(n, maxBrokerReadBytes))
 }
 
-// validate rejects what franz-go cannot express.
+// Ranges franz-go's option validation (kgo/config.go) puts on the named
+// keys; validate reports them with the key's name.
+const (
+	minRecordTimeout  = time.Second
+	maxLinger         = time.Minute
+	minGroupTimeoutMs = 100
+	minBatchBytes     = 512
+	maxBatchBytes     = 1 << 30
+)
+
+// validate rejects what franz-go cannot express: everything NewProducer and
+// NewConsumer would refuse. The keys with a known range are named; whatever
+// else the option validation or the TLS and SASL setup refuses comes last, in
+// franz-go's own words.
 func validate(cfg kafka.Config) []error {
 	var errs []error
 
 	if cfg.ConsumerFetchMaxBytes > maxBrokerReadBytes {
 		errs = append(errs, fmt.Errorf("KAFKA_CONSUMER_FETCH_MAX_BYTES (%d) is above %d, the most franz-go reads from a broker in one response",
 			cfg.ConsumerFetchMaxBytes, maxBrokerReadBytes))
+	}
+
+	if cfg.PublishTimeout < minRecordTimeout {
+		errs = append(errs, fmt.Errorf("KAFKA_PUBLISH_TIMEOUT (%s) is below %s, the shortest delivery timeout franz-go takes", cfg.PublishTimeout, minRecordTimeout))
+	}
+
+	if msDuration(cfg.LingerMs) > maxLinger {
+		errs = append(errs, fmt.Errorf("KAFKA_PRODUCER_LINGER_MS (%d) is above %d, the longest batching window franz-go takes", cfg.LingerMs, maxLinger.Milliseconds()))
+	}
+
+	if cfg.SessionTimeoutMs < minGroupTimeoutMs || cfg.MaxPollIntervalMs < minGroupTimeoutMs {
+		errs = append(errs, fmt.Errorf("KAFKA_CONSUMER_SESSION_TIMEOUT_MS (%d) and KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS (%d) may not be below %d with franz-go",
+			cfg.SessionTimeoutMs, cfg.MaxPollIntervalMs, minGroupTimeoutMs))
+	}
+
+	if cfg.MessageMaxBytes < minBatchBytes || cfg.MessageMaxBytes > maxBatchBytes {
+		errs = append(errs, fmt.Errorf("KAFKA_MESSAGE_MAX_BYTES (%d) is outside %d..%d, the batch sizes franz-go takes", cfg.MessageMaxBytes, minBatchBytes, maxBatchBytes))
+	}
+
+	if cfg.SSLCALocation == "probe" {
+		errs = append(errs, errors.New(`KAFKA_SSL_CA_LOCATION "probe" is a librdkafka keyword: franz-go reads a PEM file, and uses the system roots when the key is empty`))
 	}
 
 	for name, props := range map[string]kafka.Properties{
@@ -59,7 +96,33 @@ func validate(cfg kafka.Config) []error {
 		}
 	}
 
+	if len(errs) > 0 {
+		return errs
+	}
+
+	opts, err := consumerClientOpts(cfg, newStats(cfg))
+	if err == nil {
+		err = kgo.ValidateOpts(opts...)
+	}
+
+	if err != nil {
+		errs = append(errs, fmt.Errorf("franz-go refuses this configuration: %w", err))
+	}
+
 	return errs
+}
+
+// consumerClientOpts are the options of a consumer's client, which also
+// produces (the dead-letter topic): the superset of what a producer's has.
+func consumerClientOpts(cfg kafka.Config, hooks kgo.Hook) ([]kgo.Opt, error) {
+	opts, err := commonOpts(cfg, hooks)
+	if err != nil {
+		return nil, err
+	}
+
+	opts = append(opts, producerOpts(cfg)...)
+
+	return append(opts, consumerOpts(cfg)...), nil
 }
 
 // commonOpts are the options every client shares: seeds, identity, dial
@@ -139,9 +202,9 @@ func consumerOpts(cfg kafka.Config) []kgo.Opt {
 	// least one).
 	fetches := max(cfg.ConsumerQueueMaxKBytes*1024/cfg.ConsumerFetchMaxBytes, 1)
 
-	return []kgo.Opt{
+	opts := []kgo.Opt{
 		kgo.ConsumerGroup(cfg.Group),
-		kgo.ConsumeTopics(cfg.Topics...),
+		kgo.ConsumeTopics(subscription(cfg.Topics)...),
 		kgo.DisableAutoCommit(),
 		// Rebalances wait until the loop has processed and committed the
 		// batch it polled (AllowRebalance), so a partition is never handed
@@ -156,6 +219,34 @@ func consumerOpts(cfg kafka.Config) []kgo.Opt {
 		kgo.ConsumeResetOffset(reset),
 		kgo.MaxConcurrentFetches(fetches),
 	}
+	if slices.ContainsFunc(cfg.Topics, isPattern) {
+		opts = append(opts, kgo.ConsumeRegex())
+	}
+
+	return opts
+}
+
+// isPattern: a subscribed topic that starts with "^" is a regular expression
+// (librdkafka's rule, which libs/kafka documents for both providers).
+func isPattern(topic string) bool { return strings.HasPrefix(topic, "^") }
+
+// subscription is what ConsumeTopics gets. franz-go reads either every topic
+// as a regular expression (ConsumeRegex) or none, so next to a pattern a
+// plain name becomes the expression that matches that name and nothing else.
+func subscription(topics []string) []string {
+	if !slices.ContainsFunc(topics, isPattern) {
+		return topics
+	}
+
+	out := make([]string, len(topics))
+	for i, topic := range topics {
+		out[i] = topic
+		if !isPattern(topic) {
+			out[i] = "^" + regexp.QuoteMeta(topic) + "$"
+		}
+	}
+
+	return out
 }
 
 func codec(name string) kgo.CompressionCodec {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/tracehubmmp/golang-basics/libs/resilience"
 )
 
 // Kind classifies an [OutboundError]. A Kind is itself an error, so
@@ -72,6 +74,11 @@ func (k Kind) String() string {
 	return fmt.Sprintf("kind(%d)", int(k))
 }
 
+// ErrClosed matches the error of a request refused because [Client.Shutdown]
+// was called: errors.Is(err, resilient.ErrClosed). It is [KindShutdown] under
+// the name the workspace's other clients give "closed".
+var ErrClosed error = KindShutdown
+
 // Error makes a Kind usable as an errors.Is target.
 func (k Kind) Error() string { return "resilient: " + k.String() }
 
@@ -91,7 +98,9 @@ type OutboundError struct {
 	// Body is the start (at most 4 KiB) of a KindStatus response body, for
 	// diagnostics. It is never part of Error().
 	Body []byte
-	// Err is the underlying cause, if any.
+	// Err is the underlying cause, if any. For a failed request it is what
+	// net/http's *url.Error wraps, not that error: its text quotes the URL,
+	// query string included.
 	Err error
 }
 
@@ -112,10 +121,15 @@ func (e *OutboundError) Error() string {
 // Unwrap returns the cause.
 func (e *OutboundError) Unwrap() error { return e.Err }
 
-// Is matches a [Kind]: errors.Is(err, resilient.KindTimeout).
+// Is matches a [Kind]: errors.Is(err, resilient.KindTimeout). A
+// [KindCircuitOpen] error also matches resilience.ErrOpen, the sentinel
+// shared by every client built on that breaker.
 func (e *OutboundError) Is(target error) bool {
-	k, ok := target.(Kind)
-	return ok && k == e.Kind
+	if k, ok := target.(Kind); ok {
+		return k == e.Kind
+	}
+
+	return e.Kind == KindCircuitOpen && target == resilience.ErrOpen
 }
 
 // Retryable reports whether err is an [OutboundError] that

@@ -3,35 +3,52 @@ package resilient
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
-// newTransport clones http.DefaultTransport — proxy from the environment,
-// HTTP/2, dial and TLS timeouts — and overrides only the pool settings, the
-// response-header timeout and the HTTP/2 health check.
+// newTransport builds the client's own transport. It does not clone
+// http.DefaultTransport: that is a variable a process may have replaced —
+// tracing agents wrap it — and New must not depend on what it holds. Proxy,
+// dialer, HTTP/2 and the TLS and 100-continue timeouts are set as net/http
+// sets them on its default transport (go1.27); the rest comes from cfg.
 func newTransport(cfg *Config) *http.Transport {
-	t := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // the stdlib's documented type
-	t.MaxIdleConns = cfg.MaxIdleConns
-	t.MaxIdleConnsPerHost = cfg.MaxIdleConnsPerHost
-	t.MaxConnsPerHost = cfg.MaxConnsPerHost
-	t.IdleConnTimeout = cfg.IdleConnTimeout
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 
-	t.ResponseHeaderTimeout = cfg.ResponseHeaderTimeout
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+
+		MaxIdleConns:          cfg.MaxIdleConns,
+		MaxIdleConnsPerHost:   cfg.MaxIdleConnsPerHost,
+		MaxConnsPerHost:       cfg.MaxConnsPerHost,
+		IdleConnTimeout:       cfg.IdleConnTimeout,
+		ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
+	}
 	if cfg.HTTP2PingInterval > 0 {
-		t.HTTP2 = &http.HTTP2Config{SendPingTimeout: cfg.HTTP2PingInterval, PingTimeout: cfg.HTTP2PingTimeout}
+		transport.HTTP2 = &http.HTTP2Config{SendPingTimeout: cfg.HTTP2PingInterval, PingTimeout: cfg.HTTP2PingTimeout}
 	}
 
-	return t
+	return transport
 }
 
 // instrument wraps base so every attempt injects traceparent and records a
 // client span named "METHOD target". A nil tp / prop leaves otelhttp's
 // default: the global provider / propagator.
+//
+// otelhttp v0.72.0 has no option to redact the span's url.full and strips
+// only the user info from it, so spanURL, which runs inside the span,
+// replaces the attribute.
 func instrument(base http.RoundTripper, tp trace.TracerProvider, prop propagation.TextMapPropagator) http.RoundTripper {
 	if base == nil {
 		base = http.DefaultTransport
@@ -49,7 +66,17 @@ func instrument(base http.RoundTripper, tp trace.TracerProvider, prop propagatio
 		opts = append(opts, otelhttp.WithPropagators(prop))
 	}
 
-	return otelhttp.NewTransport(base, opts...)
+	return otelhttp.NewTransport(spanURL{base}, opts...)
+}
+
+// spanURL sets url.full of the client span it runs in to what a log line
+// gets (logURL): a query string carries credentials.
+type spanURL struct{ base http.RoundTripper }
+
+func (t spanURL) RoundTrip(r *http.Request) (*http.Response, error) {
+	trace.SpanFromContext(r.Context()).SetAttributes(attribute.String("url.full", logURL(r.URL)))
+
+	return t.base.RoundTrip(r)
 }
 
 // targetKey carries the target name to the span-name formatter.

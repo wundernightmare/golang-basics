@@ -3,7 +3,6 @@ package tiercache_test
 import (
 	"context"
 	"flag"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -14,7 +13,6 @@ import (
 	"pgregory.net/rapid"
 
 	"github.com/tracehubmmp/golang-basics/libs/tiercache"
-	"github.com/tracehubmmp/golang-basics/libs/tiercache/credential"
 )
 
 // fullPropertyChecks keeps rapid at its full number of checks under -short,
@@ -69,9 +67,9 @@ func TestReadsAreNeverStalerThanTheCachePromises(t *testing.T) {
 			remote, src := newFakeRemote(), newSource()
 			name := "prop-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 
-			open := func() *tiercache.Cache[credential.Credential] {
+			open := func() *tiercache.Cache[row] {
 				cache, err := tiercache.New(tiercache.Config{Name: name, SoftTTL: softTTL, HardTTL: hardTTL, MaxBytes: suiteBytes()}, suiteStore(),
-					credential.Codec{}, src.load, remote, nil)
+					rowCodec{}, src.load, remote, nil)
 				if err != nil {
 					t.Fatalf("new cache: %v", err)
 				}
@@ -79,7 +77,7 @@ func TestReadsAreNeverStalerThanTheCachePromises(t *testing.T) {
 				return cache
 			}
 
-			processes := []*tiercache.Cache[credential.Credential]{open(), open()}
+			processes := []*tiercache.Cache[row]{open(), open()}
 			defer processes[0].Close()
 			defer processes[1].Close()
 
@@ -171,49 +169,4 @@ func currentAt(history []commit, at time.Time) int {
 	}
 
 	return version
-}
-
-// The codec is the cache's wire format: whatever the three strings hold —
-// empty, long, arbitrary bytes — decoding what was encoded gives them back,
-// appending never disturbs what the buffer already held, and the result
-// shares nothing with the buffer it was decoded from.
-func TestCredentialCodecRoundTripsAnyValue(t *testing.T) {
-	t.Parallel()
-
-	rapid.Check(t, func(t *rapid.T) {
-		want := credential.Credential{
-			ID:           rapid.String().Draw(t, "id"),
-			CRMID:        rapid.String().Draw(t, "crm id"),
-			KeyEncrypted: string(rapid.SliceOfN(rapid.Byte(), 0, 4096).Draw(t, "key")),
-		}
-		prefix := rapid.SliceOfN(rapid.Byte(), 0, 64).Draw(t, "what the buffer held")
-
-		encoded, err := credential.Codec{}.Append(append([]byte(nil), prefix...), want)
-		if err != nil {
-			t.Fatalf("append: %v", err)
-		}
-
-		if string(encoded[:len(prefix)]) != string(prefix) {
-			t.Fatalf("Append rewrote the bytes before it")
-		}
-
-		payload := encoded[len(prefix):]
-
-		got, err := credential.Codec{}.Decode(payload)
-		if err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-
-		for i := range payload {
-			payload[i] = 0xFF // the cache reuses the buffer
-		}
-
-		if got != want {
-			t.Fatalf("round trip changed the value:\n got %s\nwant %s", describe(got), describe(want))
-		}
-	})
-}
-
-func describe(c credential.Credential) string {
-	return fmt.Sprintf("{ID:%q CRMID:%q KeyEncrypted:%d bytes}", c.ID, c.CRMID, len(c.KeyEncrypted))
 }

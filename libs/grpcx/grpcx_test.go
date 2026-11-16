@@ -247,6 +247,58 @@ func TestNew_RejectsInvalidConfigAndDuplicateRegistration(t *testing.T) {
 	require.ErrorContains(t, err, "register metrics")
 }
 
+// Two clients share a registry when each registers through a view of it
+// with a label of its own — each, because one metric name has one label set.
+func TestNew_TwoClientsOnOneRegistry(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+
+	for _, name := range []string{"billing", "search"} {
+		client, err := grpcx.New(grpcx.DefaultConfig(target("127.0.0.1:1", nil)),
+			grpcx.WithRegisterer(prometheus.WrapRegistererWith(prometheus.Labels{"client": name}, reg)))
+		require.NoError(t, err)
+
+		defer func() { require.NoError(t, client.Close()) }()
+
+		assert.InDelta(t, 0, testx.Metric(t, reg, "grpc_client_circuit_breaker_state", map[string]string{"client": name, "target": "api"}), 0)
+	}
+}
+
+// A registerer of the caller's outlives a client: a new one is built on it
+// after Close (a reloaded config), and after a New that failed half-way.
+func TestNew_TheRegistererIsFreeAfterCloseAndAfterAFailedNew(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	cfg := grpcx.DefaultConfig(target("127.0.0.1:1", nil))
+
+	_, err := grpcx.New(cfg, grpcx.WithRegisterer(reg), grpcx.WithDialOptions(grpc.WithDefaultServiceConfig("{")))
+	require.ErrorContains(t, err, "service config", "gRPC refuses the dial option after the metrics were registered")
+
+	for range 2 {
+		client, err := grpcx.New(cfg, grpcx.WithRegisterer(reg))
+		require.NoError(t, err)
+		require.NoError(t, client.Close())
+	}
+
+	// A metric already there stops the registration half-way: what New had
+	// registered by then goes, what was there stays.
+	taken := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "grpc_client_retries_total",
+		Help: "Attempts sent after a call's first (gRPC retries, transparent ones included).",
+	}, []string{"target"})
+	require.NoError(t, reg.Register(taken))
+
+	_, err = grpcx.New(cfg, grpcx.WithRegisterer(reg))
+	require.ErrorContains(t, err, "register metrics")
+	require.True(t, reg.Unregister(taken))
+
+	client, err := grpcx.New(cfg, grpcx.WithRegisterer(reg))
+	require.NoError(t, err)
+	require.NoError(t, client.Close())
+}
+
 func TestConn_UnknownTargetAndClosed(t *testing.T) {
 	t.Parallel()
 
@@ -265,7 +317,10 @@ func TestConn_UnknownTargetAndClosed(t *testing.T) {
 
 	_, err = client.Conn("api")
 	require.ErrorIs(t, err, grpcx.ErrClosed)
-	assert.Equal(t, codes.Canceled, status.Code(check(t.Context(), conn)), "a closed connection fails its calls")
+
+	err = check(t.Context(), conn)
+	require.ErrorIs(t, err, grpcx.ErrClosed, "a call on a connection taken before Close")
+	assert.Equal(t, codes.Canceled, status.Code(err), "which reads as gRPC's own answer on a closed connection")
 }
 
 func TestCall_TargetTimeoutIsTheDefaultDeadline(t *testing.T) {

@@ -40,6 +40,12 @@ const (
 	// removed — a record in the arena may name any of them — so the count
 	// bounds its memory.
 	dictionaryMax = 4096
+	// valuesMax is where attribute values stop getting a number, and
+	// namesMax where span and event names do: both may carry data after
+	// all, and the first to fill the dictionary must not be the values — a
+	// name saves more bytes per span — nor either of them before the keys.
+	valuesMax = dictionaryMax / 4
+	namesMax  = dictionaryMax / 2
 	// internedLenMax: a longer string is written inline.
 	internedLenMax = 128
 	// scopesMax is the most instrumentation scopes remembered; a span of a
@@ -119,20 +125,26 @@ func newCodec() *codec {
 	return &codec{strings: newTable[string](), scopes: newTable[instrumentation.Scope]()}
 }
 
-// hasStaticValue reports whether the string value of key comes from a closed
-// set — the code or the deployment — rather than from data.
+// hasStaticValue reports whether the string value of key is expected to come
+// from a closed set — the code or the deployment — rather than from data.
+// The prefixes are a guess about keys this list has not met: a key under one
+// of them that carries data costs numbers of the dictionary up to
+// valuesMax, and no more.
 func hasStaticValue(key attribute.Key) bool {
 	k := string(key)
 
 	switch k {
 	case "http.request.method", "http.route", "url.scheme", "error.type", "server.address", "peer.service":
 		return true
+	case "db.query.text", "db.statement", "messaging.message.id", "messaging.kafka.message.key", "network.peer.address":
+		// A statement, a message id or key, an address: data under a prefix
+		// of closed sets.
+		return false
 	}
 
 	for _, prefix := range [...]string{"messaging.", "db.", "rpc.", "network.", "code.", "otel."} {
 		if strings.HasPrefix(k, prefix) {
-			// A statement or a message id is data.
-			return k != "db.query.text" && k != "messaging.message.id"
+			return true
 		}
 	}
 
@@ -169,11 +181,10 @@ func (c *codec) putInterned(dst []byte, text string, room int) []byte {
 	return putString(dst, text)
 }
 
-// putRepeating is putInterned for text the code may format data into (a span
-// name with a path in it): it gets a number only while the dictionary is
-// less than half full, so that it cannot crowd out the keys.
-func (c *codec) putRepeating(dst []byte, text string) []byte {
-	return c.putInterned(dst, text, dictionaryMax/2)
+// putName is putInterned for text the code may format data into (a span
+// name with a path in it); see namesMax.
+func (c *codec) putName(dst []byte, text string) []byte {
+	return c.putInterned(dst, text, namesMax)
 }
 
 func putTime(dst []byte, at time.Time) []byte {
@@ -218,7 +229,7 @@ func (c *codec) putValue(dst []byte, value attribute.Value, repeats bool, depth 
 		dst = binary.LittleEndian.AppendUint64(dst, math.Float64bits(value.AsFloat64()))
 	case attribute.STRING:
 		if repeats {
-			dst = c.putRepeating(dst, value.AsString())
+			dst = c.putInterned(dst, value.AsString(), valuesMax)
 		} else {
 			dst = putString(dst, value.AsString())
 		}
@@ -311,7 +322,7 @@ func (c *codec) encode(dst []byte, span sdktrace.ReadOnlySpan) ([]byte, bool) {
 	}
 
 	dst = binary.AppendUvarint(dst, uint64(scope))
-	dst = c.putRepeating(dst, span.Name())
+	dst = c.putName(dst, span.Name())
 	dst = putContext(dst, span.SpanContext())
 	dst = putContext(dst, span.Parent())
 	dst = putUvarint(dst, int(span.SpanKind()))
@@ -326,7 +337,7 @@ func (c *codec) encode(dst []byte, span sdktrace.ReadOnlySpan) ([]byte, bool) {
 	dst = putUvarint(dst, len(events))
 
 	for i := range events {
-		dst = c.putRepeating(dst, events[i].Name)
+		dst = c.putName(dst, events[i].Name)
 		dst = putTime(dst, events[i].Time)
 
 		if dst, ok = c.putAttributes(dst, events[i].Attributes, 0); !ok {

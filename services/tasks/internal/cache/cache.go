@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/tracehubmmp/golang-basics/libs/resilience"
 	"github.com/tracehubmmp/golang-basics/libs/valkey"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/domain"
 )
@@ -83,7 +84,7 @@ func (t *Tasks) Warm(ctx context.Context, task domain.Task) {
 
 	b, err := json.Marshal(e)
 	if err == nil {
-		_, err = t.c.SetNX(ctx, Key(task.ID), string(b), valkey.Jitter(t.ttl))
+		_, err = t.c.SetNX(ctx, Key(task.ID), string(b), resilience.Jitter(t.ttl))
 	}
 
 	if err != nil {

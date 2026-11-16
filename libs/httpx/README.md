@@ -89,20 +89,23 @@ so that it times the whole request):
 3. **tracing** — a server span per request (see *Traces* below);
 4. **access log** — one line per request;
 5. **metrics** — count, latency, in-flight;
-6. **rate limit** — when `HTTP_RATE_LIMIT` or `HTTP_RATE_LIMIT_PER_CLIENT` is
+6. **recovery** — for the two below: a panic in the service's own middleware
+   is the same counted 500 as a panic in a handler (see 9), not a dropped
+   connection;
+7. **rate limit** — when `HTTP_RATE_LIMIT` or `HTTP_RATE_LIMIT_PER_CLIENT` is
    set: a token bucket for all requests and one per client address; over it
    → 429 problem with `Retry-After`, a tick of
    `http_rate_limited_total{scope}`. It is the service's last line — an
    ingress should shed first — and it sits outside the extras below, so what
    is shed costs no authentication;
-7. **`WithMiddleware(...)` extras** — an authenticator, a tenant resolver, a
+8. **`WithMiddleware(...)` extras** — an authenticator, a tenant resolver, a
    per-tenant quota; they see the request id and the deadline, the handler sees
    what they add to the context, and a request they reject (401, 429) is
    still traced, logged and counted like any other;
-8. **recovery** — a panic becomes a 500 problem, an error log with the stack,
+9. **recovery** — a panic becomes a 500 problem, an error log with the stack,
    an error span and a tick of `http_unhandled_errors_total`;
-9. **body limit** — `HTTP_MAX_BODY_BYTES`; `DecodeJSON` turns an overrun into 413;
-10. **routing** — unknown path → 404, known path with the wrong method → 405
+10. **body limit** — `HTTP_MAX_BODY_BYTES`; `DecodeJSON` turns an overrun into 413;
+11. **routing** — unknown path → 404, known path with the wrong method → 405
    with `Allow`, both as `problem+json`; the matched pattern becomes the
    `route` of the logs, metrics and span (`httpx.RouteFromContext`).
 
@@ -121,7 +124,9 @@ g.Go(srv.Guard("outbox-relay", ctx, relay.Run))
 A service whose requests depend on a background worker (a relay, a batch
 writer) runs both with `srv.RunWith`: the server drains first, the workers —
 each under `Guard` — are stopped only after it has, and the first failure of
-any of them stops the rest in that order:
+any of them stops the rest in that order. A worker that answers the stop with
+`return ctx.Err()` has not failed: once the server has stopped, a worker's
+`context.Canceled` is not an error of `RunWith`.
 
 ```go
 err := srv.RunWith(ctx,
@@ -150,9 +155,11 @@ line is written:
   the private data of your domain) is logged as `[redacted]`;
 - by shape: a URL with credentials or a secret query parameter, and a keyword
   DSN with a password, are masked wherever they appear — under any key, and
-  inside an error's text;
+  anywhere inside an error's text (`Get "https://api/x?token=[redacted]": dial
+  tcp …`);
 - headers (`Authorization`, `Cookie`, `Set-Cookie`, anything named like a
-  secret), string maps and structs are masked entry by entry.
+  secret), string maps, lists and structs are masked entry by entry, and every
+  attribute of a group whose name says it is a secret is hidden like one.
 
 Numbers, booleans and durations pass whatever their key (`max_tokens: 4096`
 is not a secret). The **message is not rewritten**: do not format secrets
@@ -167,7 +174,7 @@ or `token_type` is hidden too; name it otherwise if it must be read.
 | `httpx.Internal(detail, cause)`    | A 500 with a cause                                                   |
 | `p.WithCause(err)`                 | Attach the underlying error: logged (5xx) and recorded on the span, never sent |
 | `httpx.WriteProblem(w, r, p)`      | Write it; fills `instance` (the path) and the `request_id` extension |
-| `httpx.WriteError(w, r, err)`      | `Problem` (also wrapped) → itself; `context.DeadlineExceeded` → 504; `context.Canceled` on a request whose own context is cancelled (the client left) → 499; anything else → 500 with `err` as the cause |
+| `httpx.WriteError(w, r, err)`      | `Problem` (also wrapped, also `*Problem`) → itself; `context.DeadlineExceeded` → 504; `context.Canceled` on a request whose own context is cancelled (the client left) → 499; anything else → 500 with `err` as the cause |
 | `httpx.DecodeJSON(r, &v)`          | Decode one JSON value; returns a 413 / 400 `Problem` ready for `WriteError` |
 | `httpx.WriteJSON(w, status, v)`    | A plain JSON response                                                |
 
@@ -211,7 +218,7 @@ scraper call them without credentials.
 An empty `ADMIN_TOKEN` leaves the guarded routes open, which `Config.Validate`
 only allows when `ADMIN_ADDR` is loopback (`127.0.0.1:9080`, `localhost:9080`,
 `[::1]:9080`) or `ADMIN_INSECURE=true` is set explicitly. The "admin server
-listening" log line says `auth=bearer` or `auth=off`.
+listening" log line says `guard=bearer` or `guard=off`.
 
 ## Runtime debugging
 
@@ -255,9 +262,17 @@ of `libs/otelx`) and its `tracestate` carries the mark `dbg=1`. The sampled
 flag makes every service behind this one export its spans; the mark makes
 them log that request — or that Kafka record — from debug up
 (`httpx.FollowDebugTrace`, called by the server and by the Kafka consumer
-right after they start their span). The mark cannot be sent from outside:
-a service with `OTEL_TRACES_TRUST_REMOTE_PARENT=false` drops a remote
-`tracestate`.
+right after they start their span).
+
+The mark is two request headers, so a server follows it only when told that
+its callers are its own services: `DEBUG_TRACE_TRUST_REMOTE=true`. Without
+that — the default, and the only setting for a service reachable from outside
+— the server drops the mark from the incoming trace context before its span
+starts, with tracing on or off, and passes none on; its own `DEBUG_TOKEN`
+still starts a debug trace. A service behind the edge that should log a
+debugged request from debug up needs the key set; a Kafka consumer follows
+the mark of a record without it, since the headers of a record are written
+by the producing service.
 
 **`trace_id` is a link.** A log line carries `trace_id` when its trace is
 exported — sampled, or triggered by a warn / error line through the
@@ -270,7 +285,8 @@ with — after YAML, env and defaults — through `httpx.Redact`:
 
 - fields and map keys named like a secret (`password`, `passwd`, `pwd`,
   `secret`, `token`, `api_key`, `private_key`, `credential`, `dsn`, `auth`,
-  `cert`) or tagged `secret:"true"` become `[redacted]` (an empty value stays
+  `cert`, `keystore`, `passphrase` — in the Go name or in the yaml / json
+  name) or tagged `secret:"true"` become `[redacted]` (an empty value stays
   empty); a struct, slice or map under such a name is redacted as a whole;
   `secret:"false"` opts a false positive out;
 - the libs' own credentials are that type — `ADMIN_TOKEN`, `DEBUG_TOKEN`,
@@ -285,7 +301,9 @@ with — after YAML, env and defaults — through `httpx.Redact`:
   (`postgres://app:xxxxx@db/app`, also when `net/url` cannot parse it), secret-looking query parameters
   (`?sslpassword=`, `?token=`, `?api_key=`) become `[redacted]`, and so does
   the password pair of a libpq keyword DSN (`host=db password=[redacted]`);
-- durations read as `10s`; fields are named by their yaml tag.
+- durations read as `10s`, a `url.URL` and a type with a text form of its own
+  (`netip.Addr`) as that text, masked like any other string; fields are named
+  by their yaml tag.
 
 Pass your service's config with `httpx.WithConfig(cfg)`; without it the
 endpoint shows the `httpx.Config` the server was built with.
@@ -339,6 +357,7 @@ latency histogram carry its `trace_id` as an exemplar.
 request from the *global* tracer provider, continuing an inbound
 `traceparent`. It is renamed to `GET /tasks/{id}` after routing and carries
 `http.request.method`, `http.route`, `http.response.status_code`, `url.path`,
+`url.query` (the values of secret-looking parameters masked, as in the logs),
 `client.address` and friends; a 5xx marks it as an error. Without a provider
 (`libs/otelx` not initialised, or tracing disabled) the spans are no-ops. The
 OTel meter is never installed.
@@ -354,7 +373,9 @@ kills the process immediately):
    the readiness change takes to propagate;
 3. the API listener drains within `HTTP_SHUTDOWN_TIMEOUT`; requests still
    running after that have their contexts cancelled and their connections
-   closed, and `Run` returns an error;
+   closed, `Run` waits up to two seconds for their handlers to return (so
+   that what `main` closes next is not in use by a handler rolling back) and
+   returns an error;
 4. the admin listener stops last, so probes answer throughout.
 
 A clean shutdown returns nil. A port in use is returned by `Run` directly.
@@ -363,18 +384,26 @@ A clean shutdown returns nil. A port in use is returned by `Run` directly.
 
 `LoadConfig(prefix)` reads the environment; `LoadYAML(path, prefix, &cfg)`
 reads an optional YAML file and overlays the environment, with the precedence
-**env > yaml > envDefault > zero**. Unknown YAML keys are an error. A service
-config embeds the lib configs instead of copying fields:
+**env > yaml > envDefault > zero**. Unknown YAML keys are an error, and so is a
+second YAML document in the file. A service config embeds the lib configs
+instead of copying fields — without an `envPrefix`: the keys of a lib config
+carry their own namespace (`DB_HOST`, `KAFKA_BROKERS`), and a prefix on the
+field would be added to it (`TASKS_DB_DB_HOST`):
 
 ```go
 type Config struct {
     httpx.Config `yaml:",inline"`
-    Postgres     pgx.Config `yaml:"postgres" envPrefix:"DB_"`
+    Postgres     pgx.Config `yaml:"postgres"`
 }
 ```
 
 Either way `Config.Validate` (also run by `NewServer`) rejects a config the
 server cannot run safely with, reporting every problem at once.
+
+**Zero.** A key that is not set takes its default. A zero is a setting of its
+own only where the table says what it means (`0` = none / off / no limit); for
+every other key a zero — in the environment, in YAML or in a hand-built
+`Config` — is "not set" and takes the default.
 
 ### The command line every binary shares
 
@@ -404,11 +433,12 @@ With prefix `PING_`:
 | Variable                         | YAML key                | Default          | Meaning                                                    |
 | -------------------------------- | ----------------------- | ---------------- | ---------------------------------------------------------- |
 | `PING_SERVICE_NAME`              | `service_name`          | executable name  | `service` in logs, `build_info`, spans                     |
-| `PING_HTTP_ADDR`                 | `http_addr`             | `:8080`          | API listen address (empty = no API listener, worker shape) |
+| `PING_HTTP_ADDR`                 | `http_addr`             | `:8080`          | API listen address; `http_addr: ""` in YAML (or `Addr = ""` in code) = no API listener, the worker shape — an empty environment variable counts as not set |
 | `PING_ADMIN_ADDR`                | `admin_addr`            | `:9080`          | admin listen address                                       |
 | `PING_ADMIN_TOKEN`               | `admin_token`           | *(empty)*        | bearer token for `/admin/*` and `/debug/*`                 |
 | `PING_ADMIN_INSECURE`            | `admin_insecure`        | `false`          | allow an empty token on a non-loopback admin address       |
 | `PING_DEBUG_TOKEN`               | `debug_token`           | *(empty)*        | `X-Debug-Token` value for one-request debug logging; empty = off |
+| `PING_DEBUG_TRACE_TRUST_REMOTE`  | `debug_trace_trust_remote` | `false`       | follow the debug mark (`tracestate: dbg=1`) of an incoming trace; only where every caller is a service of yours |
 | `PING_HTTP_READ_HEADER_TIMEOUT`  | `read_header_timeout`   | `5s`             | time to read the request headers                           |
 | `PING_HTTP_READ_TIMEOUT`         | `read_timeout`          | `30s`            | time to read the whole request                             |
 | `PING_HTTP_WRITE_TIMEOUT`        | `write_timeout`         | `30s`            | time to write the response                                 |
@@ -417,7 +447,12 @@ With prefix `PING_`:
 | `PING_HTTP_REQUEST_TIMEOUT_MIN`  | `request_timeout_min`   | `1s`             | floor for a deadline shortened by `X-Request-Timeout-Ms` (0 = none) |
 | `PING_HTTP_MAX_HEADER_BYTES`     | `max_header_bytes`      | `1048576`        | request header limit                                       |
 | `PING_HTTP_MAX_BODY_BYTES`       | `max_body_bytes`        | `1048576`        | request body limit (larger → 413)                          |
-| `PING_HTTP_SHUTDOWN_DELAY`       | `shutdown_delay`        | `2s`             | serve on after readiness flips, before draining            |
+| `PING_HTTP_RATE_LIMIT`           | `rate_limit`            | `0`              | requests per second the API accepts, all clients together; over it → 429 (`0` = no limit) |
+| `PING_HTTP_RATE_BURST`           | `rate_burst`            | `0`              | depth of that token bucket (`0` = the rate, rounded up)    |
+| `PING_HTTP_RATE_LIMIT_PER_CLIENT` | `rate_limit_per_client` | `0`             | requests per second per client address (`0` = no limit)    |
+| `PING_HTTP_RATE_BURST_PER_CLIENT` | `rate_burst_per_client` | `0`             | depth of a client's bucket (`0` = the rate, rounded up)    |
+| `PING_HTTP_RATE_CLIENTS_MAX`     | `rate_clients_max`      | `10000`          | client buckets kept; when all are in use a new client is shed |
+| `PING_HTTP_SHUTDOWN_DELAY`       | `shutdown_delay`        | `2s`             | serve on after readiness flips, before draining (`0` = none) |
 | `PING_HTTP_SHUTDOWN_TIMEOUT`     | `shutdown_timeout`      | `10s`            | drain budget                                               |
 | `PING_HTTP_SLOW_REQUEST`         | `slow_request`          | `1s`             | log a request at warn above this latency (`0` = off)       |
 | `PING_HTTP_TRUSTED_PROXIES`      | `trusted_proxies`       | *(none)*         | comma-separated CIDRs / IPs of the proxies in front        |
@@ -425,22 +460,27 @@ With prefix `PING_`:
 | `PING_HEALTH_CHECK_TIMEOUT`      | `health_check_timeout`  | `3s`             | per-check timeout (must be shorter than the interval)      |
 | `PING_LOG_LEVEL`                 | `log_level`             | `info`           | `debug`/`info`/`warn`/`error` — the base level             |
 | `PING_LOG_LEVEL_MAX_TTL`         | `log_level_max_ttl`     | `24h`            | cap (and default) for a runtime level change               |
-| `PING_LOG_FORMAT`                | `log_format`            | `json`           | `json` or `text`                                           |
+| `PING_LOG_FORMAT`                | `log_format`            | `json`           | `json`, `text` or `ecs` (JSON under Elastic Common Schema names) |
+| `PING_LOG_REDACT_KEYS`           | `log_redact_keys`       | *(none)*         | comma-separated attribute keys logged as `[redacted]`, on top of the built-in secret names |
 | `PING_LOG_SAMPLE_INITIAL`        | `log_sample_initial`    | `100`            | per message per second: pass the first N (`0` = no sampling) |
 | `PING_LOG_SAMPLE_THEREAFTER`     | `log_sample_thereafter` | `100`            | … then every M-th                                          |
 | `PING_RUNTIME_MEMORY_LIMIT_RATIO` | `runtime_memory_limit_ratio` | `0.85`     | Go memory limit as a share of the container's memory limit (negative = leave the runtime alone; a `GOMEMLIMIT` in the environment wins) |
 | `PING_RUNTIME_MEMORY_LIMIT_REFRESH` | `runtime_memory_limit_refresh` | `30s`  | how often the container limit is re-read, for in-place resizes (negative = only at start) |
 | `PING_RUNTIME_TRACEBACK`         | `runtime_traceback`     | `all`            | `none`/`single`/`all`/`system`/`crash`: goroutines printed when the process dies |
-
 | `PING_DIAG_DUMP_DIR`             | `diag_dump_dir`         | *(none)*         | directory (an `emptyDir`) for crash capture and artifacts not uploaded yet |
 | `PING_DIAG_KEY_PREFIX`           | `diag_key_prefix`       | `diagnostics`    | first segment of the object keys in the dump sink          |
 | `PING_DIAG_MEMORY_THRESHOLD`     | `diag_memory_threshold` | `0.9`            | share of the container's memory limit at which profiles are captured (negative = never) |
-| `PING_DIAG_MEMORY_COOLDOWN`      | `diag_memory_cooldown`  | `10m`            | shortest time between two memory captures                  |
+| `PING_DIAG_MEMORY_COOLDOWN`      | `diag_memory_cooldown`  | `10m`            | shortest time between two memory captures (`0` = none)     |
 | `PING_DIAG_CHECK_INTERVAL`       | `diag_check_interval`   | `5s`             | how often container memory is read                         |
 | `PING_DIAG_UPLOAD_TIMEOUT`       | `diag_upload_timeout`   | `15s`            | one upload to the dump sink                                |
 | `PING_DIAG_SPOOL_RETRY`          | `diag_spool_retry`      | `1m`             | how often the dump directory is re-sent                    |
 | `PING_DIAG_SPOOL_MAX_FILES`      | `diag_spool_max_files`  | `20`             | files kept in the dump directory                           |
 | `PING_DIAG_CRASH_MAX_BYTES`      | `diag_crash_max_bytes`  | `8388608`        | longest crash report shipped                               |
+| `PING_DIAG_FLIGHT_RECORDER`      | `diag_flight_recorder`  | `false`          | keep the last seconds of the execution trace in memory and ship a snapshot on an anomaly |
+| `PING_DIAG_FLIGHT_MIN_AGE`       | `diag_flight_min_age`   | `10s`            | how far back the window reaches                            |
+| `PING_DIAG_FLIGHT_MAX_BYTES`     | `diag_flight_max_bytes` | `8388608`        | upper bound of the window in memory                        |
+| `PING_DIAG_FLIGHT_SLOW_REQUEST`  | `diag_flight_slow_request` | `0s`          | a request this slow triggers a snapshot (`0` = requests never do) |
+| `PING_DIAG_FLIGHT_COOLDOWN`      | `diag_flight_cooldown`  | `5m`             | shortest time between two snapshots (`0` = none)           |
 
 The `DIAG_` keys do nothing until the service calls `srv.SetDumpSink(sink)`
 (libs/s3's client is one) or sets `DIAG_DUMP_DIR`: crash reports and

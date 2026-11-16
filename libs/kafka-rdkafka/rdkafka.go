@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,47 +47,25 @@ const queueFullRetry = 20 * time.Millisecond
 // flushOnClose bounds how long Close waits for queued records.
 const flushOnClose = 5 * time.Second
 
-// sendErrorKinds maps librdkafka codes onto the libs/kafka kinds. The table
-// of record is libs/kafka's README "Errors"; a broker code (the non-negative
-// ones) is the same kind in the franz-go provider's map, the negative ones
-// are librdkafka's own.
-var sendErrorKinds = map[ckafka.ErrorCode]string{ //nolint:gochecknoglobals // read-only lookup table (Go has no const maps)
+// localSendErrorKinds maps librdkafka's own error codes (the negative ones,
+// raised by the client without a broker's answer) onto the libs/kafka kinds.
+// A broker's answer is classified by [kafka.BrokerSendErrorKind]. The table
+// of record is libs/kafka's README "Errors".
+var localSendErrorKinds = map[ckafka.ErrorCode]string{ //nolint:gochecknoglobals // read-only lookup table (Go has no const maps)
 	ckafka.ErrQueueFull: kafka.KindQueueFull,
 
-	ckafka.ErrMsgTimedOut:                  kafka.KindUnavailable,
-	ckafka.ErrTimedOut:                     kafka.KindUnavailable,
-	ckafka.ErrRequestTimedOut:              kafka.KindUnavailable,
-	ckafka.ErrTransport:                    kafka.KindUnavailable,
-	ckafka.ErrAllBrokersDown:               kafka.KindUnavailable,
-	ckafka.ErrLeaderNotAvailable:           kafka.KindUnavailable,
-	ckafka.ErrNotLeaderForPartition:        kafka.KindUnavailable,
-	ckafka.ErrNetworkException:             kafka.KindUnavailable,
-	ckafka.ErrNotEnoughReplicas:            kafka.KindUnavailable,
-	ckafka.ErrNotEnoughReplicasAfterAppend: kafka.KindUnavailable,
-	ckafka.ErrKafkaStorageError:            kafka.KindUnavailable,
-	ckafka.ErrThrottlingQuotaExceeded:      kafka.KindUnavailable,
+	ckafka.ErrMsgTimedOut:    kafka.KindUnavailable,
+	ckafka.ErrTimedOut:       kafka.KindUnavailable,
+	ckafka.ErrTransport:      kafka.KindUnavailable,
+	ckafka.ErrAllBrokersDown: kafka.KindUnavailable,
 
-	ckafka.ErrUnknownTopicOrPart:         kafka.KindNotProvisioned,
-	ckafka.ErrUnknownTopic:               kafka.KindNotProvisioned,
-	ckafka.ErrUnknownPartition:           kafka.KindNotProvisioned,
-	ckafka.ErrTopicAuthorizationFailed:   kafka.KindNotProvisioned,
-	ckafka.ErrClusterAuthorizationFailed: kafka.KindNotProvisioned,
-	ckafka.ErrAuthentication:             kafka.KindNotProvisioned,
-	ckafka.ErrSaslAuthenticationFailed:   kafka.KindNotProvisioned,
-	ckafka.ErrIllegalSaslState:           kafka.KindNotProvisioned,
-	ckafka.ErrUnsupportedSaslMechanism:   kafka.KindNotProvisioned,
-
-	ckafka.ErrTransactionalIDAuthorizationFailed: kafka.KindNotProvisioned,
+	ckafka.ErrUnknownTopic:     kafka.KindNotProvisioned,
+	ckafka.ErrUnknownPartition: kafka.KindNotProvisioned,
+	ckafka.ErrAuthentication:   kafka.KindNotProvisioned,
 
 	ckafka.ErrFatal: kafka.KindFatal,
 
-	ckafka.ErrMsgSizeTooLarge:    kafka.KindRejected,
-	ckafka.ErrRecordListTooLarge: kafka.KindRejected,
-	ckafka.ErrInvalidMsg:         kafka.KindRejected,
-	ckafka.ErrInvalidRecord:      kafka.KindRejected,
-	ckafka.ErrPolicyViolation:    kafka.KindRejected,
-	ckafka.ErrBadMsg:             kafka.KindRejected,
-	ckafka.ErrTopicException:     kafka.KindRejected,
+	ckafka.ErrBadMsg: kafka.KindRejected,
 }
 
 // sendError maps a produce error onto the registry. A fatal error wins over
@@ -96,12 +75,19 @@ func sendError(err error) error {
 		return nil
 	}
 
+	if errors.Is(err, kafka.ErrClientClosed) {
+		return kafka.NewSendError(kafka.KindUnavailable, 0, err)
+	}
+
 	kind, code := kafka.KindUnknown, 0
 
 	if kerr, ok := errors.AsType[ckafka.Error](err); ok {
 		code = int(kerr.Code())
-		if k, ok := sendErrorKinds[kerr.Code()]; ok {
-			kind = k
+
+		if local, ok := localSendErrorKinds[kerr.Code()]; ok {
+			kind = local
+		} else if code >= 0 && code <= math.MaxInt16 {
+			kind = kafka.BrokerSendErrorKind(int16(code))
 		}
 
 		if kerr.IsFatal() {
@@ -246,9 +232,6 @@ func (p *producer) replace(failed *ckafka.Producer) {
 	failed.Close() // no call is inside it: each one took the read lock and found the new client
 }
 
-// errProducerClosed is a Send or Ping after Close.
-var errProducerClosed = ckafka.NewError(ckafka.ErrState, "producer closed", false)
-
 // Send implements kafka.ProducerClient: enqueue (waiting out a full local
 // queue within ctx), then await the delivery report. librdkafka fails the
 // record itself at message.timeout.ms (KAFKA_PUBLISH_TIMEOUT).
@@ -307,7 +290,7 @@ func (p *producer) produce(m *ckafka.Message, delivery chan ckafka.Event) error 
 	defer p.mu.RUnlock()
 
 	if p.closed {
-		return errProducerClosed
+		return kafka.ErrClientClosed
 	}
 
 	return p.cl.Produce(m, delivery)
@@ -318,7 +301,7 @@ func (p *producer) Ping(ctx context.Context) error {
 	defer p.mu.RUnlock()
 
 	if p.closed {
-		return errProducerClosed
+		return kafka.ErrClientClosed
 	}
 
 	return ping(ctx, p.cl)
@@ -356,6 +339,10 @@ func (Driver) NewConsumer(cfg kafka.Config, log *slog.Logger, rb kafka.Rebalance
 		return nil, err
 	}
 
+	if err := probeProducer(cfg); err != nil {
+		return nil, fmt.Errorf("the dead-letter producer cannot be built: %w", err)
+	}
+
 	cl, err := ckafka.NewConsumer(&props)
 	if err != nil {
 		return nil, err
@@ -380,7 +367,8 @@ func (Driver) NewConsumer(cfg kafka.Config, log *slog.Logger, rb kafka.Rebalance
 // consumer is a librdkafka group member. Group changes are only delivered
 // from within Poll or Close (the rebalance callback), so the loop's batch is
 // never interrupted by one; what was polled for a partition revoked during
-// the same Poll is dropped.
+// the same Poll is dropped. Close waits for a Poll in progress, so the two
+// never run their callbacks at once.
 type consumer struct {
 	cl    *ckafka.Consumer
 	cfg   kafka.Config
@@ -399,9 +387,9 @@ type consumer struct {
 	closing bool // Close has begun: no new Ping; a Commit runs to the end
 	closed  bool // the client is gone (or abandoned): nothing may call it
 
-	// Calls into the client from outside the loop (Ping from readiness,
-	// Commit, whose wait ctx may end before librdkafka returns) are counted
-	// in calls, so Close destroys the client only once none is inside it.
+	// Calls into the client (the loop's Poll, Ping from readiness, Commit,
+	// whose wait ctx may end before librdkafka returns) are counted in
+	// calls, so Close destroys the client only once none is inside it.
 	// calls.Add runs with mu held, next to the closing / closed check.
 	calls sync.WaitGroup
 }
@@ -450,17 +438,28 @@ func (c *consumer) rebalance(cl *ckafka.Consumer, ev ckafka.Event) error {
 	return nil
 }
 
+// maxPollErrors bounds the fetch errors one Poll returns next to its records.
+const maxPollErrors = 8
+
 // Poll implements kafka.ConsumerClient: wait (in short slices, to notice
-// ctx) for a first record, then take whatever is already queued up to
-// maxRecords.
+// ctx and Close) for a first record, then take whatever is already queued up
+// to maxRecords. An error with nothing fetched yet ends the call: with the
+// brokers away librdkafka reports errors and no records, and a Poll that
+// kept waiting would hold them back for as long as the outage lasts.
+//
+// It is counted in calls like the calls from outside the loop, so a Close
+// from another goroutine waits for it to leave librdkafka.
 func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, error) {
 	c.mu.Lock()
-	closing := c.closing
-	c.mu.Unlock()
-
-	if closing {
+	if c.closing {
+		c.mu.Unlock()
 		return nil, kafka.ErrClientClosed
 	}
+
+	c.calls.Add(1)
+	c.mu.Unlock()
+
+	defer c.calls.Done()
 
 	c.revoked = map[kafka.TopicPartition]struct{}{}
 	defer func() { c.revoked = nil }()
@@ -470,8 +469,21 @@ func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, e
 		errs []error
 	)
 
+	fetchError := func(err error) {
+		if len(errs) < maxPollErrors {
+			errs = append(errs, err)
+		}
+	}
+
 	timeoutMs := 100
+
 	for len(out) < maxRecords && ctx.Err() == nil {
+		if c.isClosing() {
+			// What was polled is not handed out: nothing of it is
+			// committed, so the group's next owner gets it.
+			return nil, kafka.ErrClientClosed
+		}
+
 		ev := c.cl.Poll(timeoutMs)
 		if ev == nil {
 			if len(out) > 0 {
@@ -484,8 +496,8 @@ func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, e
 		switch event := ev.(type) {
 		case *ckafka.Message:
 			if event.TopicPartition.Error != nil {
-				errs = append(errs, event.TopicPartition.Error)
-				continue
+				fetchError(event.TopicPartition.Error)
+				break
 			}
 
 			out = append(out, toMessage(event))
@@ -502,24 +514,44 @@ func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, e
 				return nil, err
 			}
 
-			errs = append(errs, event)
+			fetchError(event)
 		}
 
-		if len(c.revoked) > 0 {
-			kept := out[:0]
-			for _, m := range out {
-				if _, gone := c.revoked[kafka.TopicPartition{Topic: m.Topic, Partition: m.Partition}]; !gone {
-					kept = append(kept, m)
-				}
-			}
-
-			out = kept
-
-			clear(c.revoked)
+		if len(errs) > 0 && len(out) == 0 {
+			break
 		}
+
+		out = c.dropRevoked(out)
 	}
 
 	return out, errors.Join(errs...)
+}
+
+// dropRevoked removes from a batch being polled the records of partitions
+// revoked since the last call (the rebalance callback ran inside this Poll).
+func (c *consumer) dropRevoked(out []kafka.Message) []kafka.Message {
+	if len(c.revoked) == 0 {
+		return out
+	}
+
+	kept := out[:0]
+
+	for _, m := range out {
+		if _, gone := c.revoked[kafka.TopicPartition{Topic: m.Topic, Partition: m.Partition}]; !gone {
+			kept = append(kept, m)
+		}
+	}
+
+	clear(c.revoked)
+
+	return kept
+}
+
+func (c *consumer) isClosing() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.closing
 }
 
 func toMessage(e *ckafka.Message) kafka.Message {
@@ -600,9 +632,35 @@ func commitOffsets(cl *ckafka.Consumer, tps []ckafka.TopicPartition) error {
 // only within Poll, so there is nothing to release.
 func (c *consumer) AllowRebalance() {}
 
+// probeProducer builds the producer the dead-letter topic would get and
+// closes it again. librdkafka checks properties only when a client is
+// created, and the dead-letter producer is created on the first parked
+// record: without the probe a wrong KAFKA_PRODUCER_EXTRA_PROPERTIES of a
+// consuming service would stop it at its first poison record, not at boot.
+func probeProducer(cfg kafka.Config) error {
+	props, err := producerProperties(cfg)
+	if err != nil {
+		return err
+	}
+
+	cl, err := ckafka.NewProducer(&props)
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		for range cl.Logs() { // the probe's log lines are dropped; the channel closes with the client
+		}
+	}()
+
+	cl.Close()
+
+	return nil
+}
+
 // DeadLetter implements kafka.ConsumerClient: a librdkafka consumer cannot
 // produce, so the dead-letter topic gets its own producer, created on first
-// use with the same settings.
+// use with the same settings (NewConsumer has checked that they build).
 func (c *consumer) DeadLetter() kafka.ProducerClient {
 	c.dlqOnce.Do(func() { c.dlq, c.dlqErr = newProducer(c.cfg, c.log, "dlq_producer") })
 
@@ -637,8 +695,9 @@ func (c *consumer) Ping(ctx context.Context) error {
 
 func (c *consumer) Stats() kafka.ClientStats { return c.stats.clientStats(c.cfg) }
 
-// Close implements kafka.ConsumerClient: no new Ping starts, the calls
-// already inside the client finish (within closeWait), then leaving the group
+// Close implements kafka.ConsumerClient: no new Poll or Ping starts, the
+// calls already inside the client finish (within closeWait; a Poll notices
+// within one of its slices), then leaving the group
 // revokes the partitions through the rebalance callback (committing their
 // processed offsets) before the client is destroyed.
 func (c *consumer) Close() {

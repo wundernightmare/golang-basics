@@ -13,6 +13,12 @@
 // caarlos0/env and flag.TextVar decode through; [DecodeHook] does the same
 // for mapstructure, and with it for viper.
 //
+// "YAML" here is go.yaml.in/yaml/v3, the library the compat suite runs.
+// Rendering goes through MarshalText in any library that honours it; reading
+// an unquoted scalar is the library's business: goccy/go-yaml v1.19.2 hands
+// over `012345` as "5349" and `1.50` as "1.5". With a library other than
+// go.yaml.in/yaml, quote the secret in the document.
+//
 // [ReadFile] and [CertPool] read what a pod mounts instead: a secret in a
 // file, and the CA bundle that usually sits next to it.
 //

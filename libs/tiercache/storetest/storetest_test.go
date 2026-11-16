@@ -42,11 +42,20 @@ func (s *simple) Bytes() int {
 	return s.bytes
 }
 
+// id is what the store knows a key by: the key.
+func (s *simple) id(key string) string {
+	if s.defect == "tells keys apart by their first 64 bytes" {
+		return key[:min(64, len(key))]
+	}
+
+	return key
+}
+
 func (s *simple) Get(dst []byte, key string) ([]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	value, found := s.entries[key]
+	value, found := s.entries[s.id(key)]
 
 	switch {
 	case !found:
@@ -63,6 +72,8 @@ func (s *simple) Get(dst []byte, key string) ([]byte, bool) {
 func (s *simple) Set(key string, value []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	key = s.id(key)
 
 	if len(key)+len(value) > s.MaxEntry() {
 		if s.defect != "a Set it cannot keep leaves the old value" {
@@ -120,7 +131,7 @@ func (s *simple) Delete(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.drop(key)
+	s.drop(s.id(key))
 }
 
 func (s *simple) Reset() {
@@ -147,6 +158,7 @@ var defects = []string{
 	"no bound",
 	"Delete does nothing",
 	"Reset does nothing",
+	"tells keys apart by their first 64 bytes",
 }
 
 const defectEnv = "STORETEST_DEFECT"

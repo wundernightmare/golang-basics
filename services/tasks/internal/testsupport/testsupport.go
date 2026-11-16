@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tracehubmmp/golang-basics/libs/pgx"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 	"github.com/tracehubmmp/golang-basics/services/tasks/migrations"
 )
 
@@ -54,7 +55,7 @@ func exec(t testing.TB, dsn, sql string) {
 
 	ctx := context.Background()
 
-	admin, err := pgx.New(ctx, pgx.Config{URL: dsn, MaxConns: 1}, nil)
+	admin, err := pgx.New(ctx, pgx.Config{URL: secret.New(dsn), MaxConns: 1}, nil)
 	if err != nil {
 		t.Fatalf("testsupport: connect: %v", err)
 	}
@@ -79,7 +80,7 @@ func MigratedDB(t testing.TB, dsn string, opts ...pgx.Option) *pgx.DB {
 
 	ctx := context.Background()
 
-	db, err := pgx.New(ctx, pgx.Config{URL: dsn, ConnectTimeout: 5 * time.Second, MaxConns: 8}, nil, opts...)
+	db, err := pgx.New(ctx, pgx.Config{URL: secret.New(dsn), ConnectTimeout: 5 * time.Second, MaxConns: 8}, nil, opts...)
 	if err != nil {
 		t.Fatalf("testsupport: connect: %v", err)
 	}

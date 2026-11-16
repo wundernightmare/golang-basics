@@ -154,12 +154,23 @@ func (db *DB) unit(ctx context.Context) *unit {
 //		_, err := r.db.Conn(ctx).Exec(ctx, `INSERT INTO tasks …`, t.ID, t.Title)
 //		return err
 //	}
+//
+// With DB_OP_TIMEOUT set, each call on the result runs under that deadline on
+// top of ctx's own: waiting for a connection, the statement, and reading its
+// result — until Rows are closed or exhausted, a Row is scanned, BatchResults
+// are closed. It is what ends a call whose context has no deadline when the
+// pool is exhausted or the server stops answering.
 func (db *DB) Conn(ctx context.Context) Querier {
+	var q Querier = db.pool
 	if u := db.unit(ctx); u != nil {
-		return u.tx
+		q = u.tx
 	}
 
-	return db.pool
+	if db.opTimeout > 0 {
+		return bounded{q: q, timeout: db.opTimeout}
+	}
+
+	return q
 }
 
 // InTx runs work as one unit of work: everything it does through [DB.Conn]
@@ -189,6 +200,10 @@ func (db *DB) Conn(ctx context.Context) Querier {
 //
 // When Commit itself fails because the connection was lost, the outcome is
 // unknown — the server may have committed. Hooks do not run in that case.
+//
+// DB_OP_TIMEOUT bounds the begin (which waits for a connection) and the
+// commit, each on its own, and every statement work runs through [DB.Conn];
+// the unit as a whole lasts as long as ctx and work allow.
 func (db *DB) InTx(ctx context.Context, work func(ctx context.Context) error, opts ...TxOption) error {
 	var applied txOptions
 	for _, opt := range opts {
@@ -261,7 +276,11 @@ func (db *DB) run(
 	begin func(context.Context) (pgx.Tx, error),
 	work func(context.Context) error,
 ) ([]func(context.Context), error) {
-	tx, err := begin(ctx)
+	bctx, cancel := db.bound(ctx)
+	tx, err := begin(bctx)
+
+	cancel()
+
 	if err != nil {
 		return nil, fmt.Errorf("pgx: begin: %w", err)
 	}
@@ -274,7 +293,7 @@ func (db *DB) run(
 		// connection that could not be told to roll back: the server ends
 		// the transaction when it notices, but it is worth a line.
 		if err := tx.Rollback(rctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
-			db.log.WarnContext(ctx, "pgx: rollback failed", "error", err)
+			db.log.WarnContext(ctx, "pgx: rollback failed", "err", err)
 		}
 	}()
 
@@ -284,7 +303,10 @@ func (db *DB) run(
 		return nil, err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
+	cctx, cancel := db.bound(ctx)
+	defer cancel()
+
+	if err := tx.Commit(cctx); err != nil {
 		return nil, fmt.Errorf("pgx: commit: %w", err)
 	}
 

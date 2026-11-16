@@ -18,7 +18,7 @@ import (
 // sampled at the edge stays sampled through every service behind it, and an
 // unsampled one is never sampled again at some other service's ratio.
 //
-// The exception is the public ingress (TrustRemoteParent off): a traceparent
+// The exception is the public ingress (RedrawRemoteParent): a traceparent
 // on a request from the internet is the client's — its sampled flag, and its
 // trace id, whose low bits the ratio sampler keys on. Following either would
 // let any client have 100% of its requests traced through the whole
@@ -49,7 +49,7 @@ func newSampler(cfg Config, recordUnsampled bool) sdktrace.Sampler {
 	}
 
 	description := "ParentBased{root:" + root.Description()
-	if !cfg.TrustRemoteParent {
+	if cfg.RedrawRemoteParent {
 		description += ",remote:redrawn"
 	}
 
@@ -58,7 +58,7 @@ func newSampler(cfg Config, recordUnsampled bool) sdktrace.Sampler {
 	}
 
 	return sampler{
-		root: root, trustRemote: cfg.TrustRemoteParent, recordUnsampled: recordUnsampled,
+		root: root, trustRemote: !cfg.RedrawRemoteParent, recordUnsampled: recordUnsampled,
 		description: description + "}",
 	}
 }

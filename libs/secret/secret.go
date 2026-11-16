@@ -15,8 +15,9 @@ import (
 // fingerprintBytes is how much of the SHA-256 digest a rendering shows.
 const fingerprintBytes = 4
 
-// ErrDecode is returned by [DecodeHook] for a value that is not text. It
-// never carries the value itself.
+// ErrDecode is returned by [DecodeHook] for a value that is not text, and by
+// [String.UnmarshalYAML] for a node that is not a scalar. It never carries
+// the value itself.
 var ErrDecode = errors.New("secret: cannot decode into secret.String")
 
 // String is a secret text value: a password, a token, a key. The zero value
@@ -59,13 +60,15 @@ func (s String) Expose() string {
 	return *s.value
 }
 
-// IsZero reports whether the secret is unset. encoding/json (omitzero) and
-// YAML (omitempty) consult it.
+// IsZero reports whether the secret is unset. encoding/json consults it for
+// `omitzero` and go.yaml.in/yaml for `omitempty` — not the other way round:
+// `json:",omitempty"` keeps an unset secret as "", and go.yaml.in/yaml v3.0.6
+// panics on a tag with `omitzero`.
 func (s String) IsZero() bool { return s.value == nil }
 
 // Equal reports whether the secret is candidate. It compares the SHA-256
-// digests of the two in constant time, so the answer takes as long whether
-// they differ in the first byte, the last, or in length. Hashing itself
+// digests of the two with [subtle.ConstantTimeCompare], so the answer takes
+// as long whether they differ in the first byte, the last, or in length. Hashing itself
 // takes time proportional to each value's own length (per 64-byte block),
 // which is the one thing timing can still tell. An unset secret equals
 // nothing, the empty string included: no credential must not mean "any
@@ -131,10 +134,34 @@ func (s String) LogValue() slog.Value { return slog.StringValue(s.String()) }
 func (s String) MarshalText() ([]byte, error) { return []byte(s.String()), nil }
 
 // UnmarshalText implements [encoding.TextUnmarshaler] — what encoding/json,
-// YAML, caarlos0/env (envDefault included) and flag.TextVar read a String
-// through. The text is taken as is, surrounding whitespace included.
+// caarlos0/env (envDefault included), flag.TextVar and a YAML library
+// without [String.UnmarshalYAML] read a String through. The text is taken as
+// is, surrounding whitespace included — and so is "[redacted:1a2b3c4d]": a
+// marshalled config read back holds the marker as its secret.
 func (s *String) UnmarshalText(text []byte) error {
 	*s = New(string(text))
+
+	return nil
+}
+
+// UnmarshalYAML is what a YAML library calls instead of UnmarshalText when it
+// knows this method (go.yaml.in/yaml v2, v3 and v4 do). It asks the library
+// for the node as a string, so a scalar is taken as its text, and a mapping
+// or a sequence is [ErrDecode]. Through UnmarshalText alone a mapping is no
+// error in v2 and v3 unless the decoder is strict: it is matched against a
+// struct with no exported fields, and the secret stays unset.
+//
+// The library's own error is dropped, not wrapped: goccy/go-yaml v1.19.2
+// quotes the offending lines of the document in it, and a mapping written
+// where a secret belongs is likely to hold the secret.
+func (s *String) UnmarshalYAML(unmarshal func(any) error) error {
+	var text string
+
+	if err := unmarshal(&text); err != nil {
+		return fmt.Errorf("%w: not a YAML scalar", ErrDecode)
+	}
+
+	*s = New(text)
 
 	return nil
 }

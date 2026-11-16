@@ -26,21 +26,37 @@ call that `grep -rn 'Expose()'` finds and a reviewer sees.
 | --- | --- | --- | --- |
 | `fmt` — every verb (`%v %+v %#v %s %q %x %d` …) | `fmt.Formatter` | `[redacted:f52fbd32]` | empty |
 | `log/slog` — attribute, group, inside a logged struct | `slog.LogValuer`, `MarshalText` | `[redacted:f52fbd32]` | empty |
-| `encoding/json`, YAML (`go.yaml.in/yaml/v3`) | `encoding.TextMarshaler` | `"[redacted:f52fbd32]"` | `""`, or absent with `omitzero` / `omitempty` |
+| `encoding/json`, YAML (`go.yaml.in/yaml/v3`) | `encoding.TextMarshaler` | `"[redacted:f52fbd32]"` | `""`, or absent with `json:",omitzero"` / `yaml:",omitempty"` |
 | `httpx.Redact` (`/admin/config`), `--config-reference` | the `Expose` + `IsZero` shape | `[redacted:f52fbd32]` / `(secret)` | `""` / `-` |
 
 An unset secret renders empty on purpose: "the password is missing" is the
 thing an operator looks for in a dumped config.
 
+The two tags are not interchangeable: `json:",omitempty"` leaves an unset
+secret in the output as `""`, and `go.yaml.in/yaml` (v3.0.6) panics on a tag
+that says `omitzero`.
+
+Two shapes render differently from what the table says:
+
+- a nil `*secret.String` passed to `slog` as an attribute of its own is logged
+  as `LogValue panicked` with a stack — no value is shown, there is none;
+  `fmt` prints `<nil>` and JSON `null` for it;
+- a struct that **embeds** `secret.String` takes over its methods, so the
+  whole struct prints and marshals as `[redacted:…]` and its other fields
+  disappear. Give the secret a field name.
+
 Marshalling is redacted too, so the output does **not** round-trip. A config
 that is being marshalled is a config about to be shown; to write a secret out
-(a generated file, a request body) write `Expose()` explicitly.
+(a generated file, a request body) write `Expose()` explicitly. Reading the
+output back is not refused: the secret is then the text `[redacted:f52fbd32]`
+itself.
 
 ## What reads it
 
 | Source | Through |
 | --- | --- |
-| `encoding/json`, YAML, `caarlos0/env` (`env` and `envDefault`), `flag.TextVar` — and with them `httpx.LoadYAML` | `encoding.TextUnmarshaler` |
+| `encoding/json`, `caarlos0/env` (`env` and `envDefault`), `flag.TextVar` | `encoding.TextUnmarshaler` |
+| YAML (`go.yaml.in/yaml/v3`) — and with it `httpx.LoadYAML` | `UnmarshalYAML` |
 | mapstructure, viper | `secret.DecodeHook` |
 
 ```go
@@ -59,6 +75,14 @@ loaded, raw.
 
 The text is taken as is — no trimming.
 
+In YAML a secret is a scalar, read as its text: `password: 012345` is
+`"012345"`. A mapping or a sequence in its place is an error
+(`secret.ErrDecode`) with or without `KnownFields(true)`; the error does not
+say which line, because the library's own message may quote the document.
+That is `go.yaml.in/yaml` (v2, v3, v4). Other YAML libraries resolve an
+unquoted scalar before handing it over — `goccy/go-yaml` (v1.19.2) turns
+`012345` into `"5349"` — so with them quote the secret.
+
 ## Mounted files
 
 What a pod mounts instead of putting it in the environment is read through
@@ -74,7 +98,12 @@ file:
   pool to verify a dependency with. The pool is the file and nothing else:
   a CA file names whom to trust, the system roots are what a client uses
   without one. `KAFKA_SSL_CA_LOCATION` (franz-go), `S3_CA_FILE` and
-  `OTEL_EXPORTER_OTLP_CERTIFICATE` are read with it.
+  `OTEL_EXPORTER_OTLP_CERTIFICATE` are read with it. The file is read whole
+  or not at all: one damaged block — cut short, not base64, a `CERTIFICATE`
+  that does not parse — is `ErrMalformedBundle` even when the other
+  certificates are sound, so a bundle with the old and the new authority
+  does not load with only one of them. Text between the blocks and blocks of
+  another type are passed over; no certificate at all is `ErrNoCertificate`.
 
 ## Fingerprint
 
@@ -96,9 +125,11 @@ nothing; do not use human-chosen passwords as service secrets.
 if !cfg.AdminToken.Equal(presented) { /* 401 */ }
 ```
 
-`Equal` compares SHA-256 digests in constant time: it takes as long whether
-the values differ in the first byte, the last, or in length (hashing a value
-takes time proportional to its own length, nothing more is told). An unset
+`Equal` compares SHA-256 digests with `subtle.ConstantTimeCompare`: it takes
+as long whether the values differ in the first byte, the last, or in length
+(hashing a value takes time proportional to its own length, nothing more is
+told). No test holds this: timing is not something a functional test sees,
+and a plain `==` in its place passes the suite — it is kept by review. An unset
 secret equals nothing, `""` included. `==` on two `String`s
 compares identity, not content — use `Equal`, or `reflect.DeepEqual` /
 `assert.Equal` in tests.
@@ -135,5 +166,6 @@ dependencies, and this module's `go.mod` stays at the standard library (plus
 testify).
 
 `just mutate libs/secret` (from the repo root, nightly in CI) mutates the
-package and expects every mutant to be noticed: a surviving one would be a
-way for a value to leak that no test sees.
+package and expects every mutant gremlins makes to be noticed: a surviving
+one would be a way for a value to leak that no test sees. Its mutators do
+not include swapping the constant-time comparison for `==` (see Comparing).

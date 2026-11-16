@@ -49,7 +49,7 @@ func getJSON[V any](t testing.TB, oas *contract.OpenAPI, srv *httpx.Server, targ
 func TestPing(t *testing.T) {
 	t.Parallel()
 
-	oas := contract.LoadOpenAPI(t, "openapi3/ping.openapi.yaml")
+	oas := contract.LoadOpenAPI(t, "../../../../api/openapi3/ping.openapi.yaml")
 	for _, msg := range []string{"", "hello", "привет мир", "a&b=c"} {
 		t.Run("msg="+msg, func(t *testing.T) {
 			t.Parallel()
@@ -77,7 +77,7 @@ func TestPing(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	t.Parallel()
-	oas := contract.LoadOpenAPI(t, "openapi3/ping.openapi.yaml")
+	oas := contract.LoadOpenAPI(t, "../../../../api/openapi3/ping.openapi.yaml")
 	srv := newServer(t)
 	code, body := getJSON[api.VersionResponse](t, oas, srv, "/version")
 	require.Equal(t, http.StatusOK, code)

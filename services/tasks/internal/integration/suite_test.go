@@ -24,11 +24,13 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/libs/kafka"
 	"github.com/tracehubmmp/golang-basics/libs/pgx"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/libs/testx/containers"
 	"github.com/tracehubmmp/golang-basics/libs/valkey"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/api"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/cache"
+	"github.com/tracehubmmp/golang-basics/services/tasks/internal/config"
 	_ "github.com/tracehubmmp/golang-basics/services/tasks/internal/kafkaprovider" // the Kafka client the binary links
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/outbox"
 	"github.com/tracehubmmp/golang-basics/services/tasks/internal/store"
@@ -93,7 +95,7 @@ func wire(t testing.TB, backends deps) *wired {
 	var taskCache api.Cache = cache.None{}
 
 	if backends.valkey != "" {
-		vk, err := valkey.New(valkey.Config{URL: backends.valkey, DialTimeout: 5 * time.Second, OpTimeout: 300 * time.Millisecond}, log, valkey.WithTracerProvider(provider))
+		vk, err := valkey.New(valkey.Config{URL: secret.New(backends.valkey), DialTimeout: 5 * time.Second, OpTimeout: 300 * time.Millisecond}, log, valkey.WithTracerProvider(provider))
 		require.NoError(t, err)
 		t.Cleanup(vk.Close)
 		srv.Health.Register("valkey", vk.ReadyCheck(), httpx.Optional())
@@ -106,10 +108,16 @@ func wire(t testing.TB, backends deps) *wired {
 	committed := func() {}
 
 	if len(backends.brokers) > 0 {
-		producer, err := kafka.NewProducer(ctx, kafka.Config{
-			Brokers: backends.brokers, Topic: topic, ClientID: testx.Unique("tasks-it"),
-			DialTimeout: 10 * time.Second, PublishTimeout: 2 * time.Second, AllowAutoTopicCreation: true,
-		}, log, kafka.WithTracerProvider(provider), kafka.WithPropagator(propagator))
+		// The service's own defaults (a hand-built kafka.Config has none for
+		// the keys whose zero is a setting), then what the test needs.
+		defaults, err := config.Defaults()
+		require.NoError(t, err)
+
+		kcfg := defaults.Kafka
+		kcfg.Brokers, kcfg.Topic, kcfg.ClientID = backends.brokers, topic, testx.Unique("tasks-it")
+		kcfg.DialTimeout, kcfg.PublishTimeout, kcfg.AllowAutoTopicCreation = 10*time.Second, 2*time.Second, true
+
+		producer, err := kafka.NewProducer(ctx, kcfg, log, kafka.WithTracerProvider(provider), kafka.WithPropagator(propagator))
 		require.NoError(t, err)
 		t.Cleanup(producer.Close)
 		srv.Health.Register("kafka", producer.ReadyCheck(), httpx.Optional())

@@ -98,21 +98,33 @@ func (m *memoryLimiter) run(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// newMemoryLimiter returns nil when the runtime's memory limit is not this
+// package's to set: a negative ratio turns the feature off, and a GOMEMLIMIT
+// in the environment (explicit) is the operator's own answer.
+func newMemoryLimiter(ctx context.Context, ratio float64, explicit string, log *slog.Logger) *memoryLimiter {
+	if ratio < 0 {
+		return nil
+	}
+
+	if explicit != "" {
+		log.InfoContext(ctx, "GOMEMLIMIT is set in the environment, the container limit is not consulted", "gomemlimit", explicit)
+
+		return nil
+	}
+
+	return &memoryLimiter{root: os.DirFS("/"), ratio: ratio, set: debug.SetMemoryLimit, log: log}
+}
+
 // tuneRuntime applies the runtime settings of cfg and, when asked to, keeps
 // the memory limit in step with the container until ctx is done.
 func (s *Server) tuneRuntime(ctx context.Context) {
 	debug.SetTraceback(s.cfg.RuntimeTraceback)
 
-	if s.cfg.RuntimeMemoryLimitRatio < 0 {
+	limiter := newMemoryLimiter(ctx, s.cfg.RuntimeMemoryLimitRatio, os.Getenv("GOMEMLIMIT"), s.log)
+	if limiter == nil {
 		return
 	}
 
-	if explicit := os.Getenv("GOMEMLIMIT"); explicit != "" {
-		s.log.InfoContext(ctx, "GOMEMLIMIT is set in the environment, the container limit is not consulted", "gomemlimit", explicit)
-		return
-	}
-
-	limiter := &memoryLimiter{root: os.DirFS("/"), ratio: s.cfg.RuntimeMemoryLimitRatio, set: debug.SetMemoryLimit, log: s.log}
 	limiter.sync(ctx)
 
 	if limiter.applied == 0 {

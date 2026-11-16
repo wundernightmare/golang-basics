@@ -298,8 +298,9 @@ func TestCodec_DataStaysInline(t *testing.T) {
 }
 
 // A full dictionary does not lose a span: what has no number is written out.
-// Names the code formats data into stop getting numbers at half of it, so
-// that they cannot crowd out the keys.
+// What may turn out to be data stops getting numbers early, so that it
+// cannot crowd out what repeats for certain: values at a quarter of the
+// dictionary, names the code formats data into at half, keys never.
 func TestCodec_AFullDictionaryFallsBackToText(t *testing.T) {
 	t.Parallel()
 
@@ -310,11 +311,28 @@ func TestCodec_AFullDictionaryFallsBackToText(t *testing.T) {
 	}
 
 	for i := range dictionaryMax {
-		_, ok := enc.encode(nil, tracetest.SpanStub{Name: name(i)}.Snapshot())
+		stub := tracetest.SpanStub{Attributes: []attribute.KeyValue{attribute.String("db.operation.name", name(i))}}
+
+		raw, ok := enc.encode(nil, stub.Snapshot())
+		require.True(t, ok)
+
+		got, ok := enc.decode(raw)
+		require.True(t, ok)
+		require.Equal(t, stub, got, "value %d", i)
+	}
+
+	require.Equal(t, valuesMax, enc.strings.len(), "values get numbers while a quarter of it is free")
+
+	_, ok := enc.encode(nil, tracetest.SpanStub{Name: "a name after the values"}.Snapshot())
+	require.True(t, ok)
+	require.Equal(t, valuesMax+1, enc.strings.len(), "and leave numbers for the names")
+
+	for i := range dictionaryMax {
+		_, ok := enc.encode(nil, tracetest.SpanStub{Name: name(i) + " name"}.Snapshot())
 		require.True(t, ok)
 	}
 
-	require.Equal(t, dictionaryMax/2, enc.strings.len(), "names take half of it at most")
+	require.Equal(t, namesMax, enc.strings.len(), "names while half of it is free")
 
 	for i := range dictionaryMax {
 		stub := tracetest.SpanStub{Attributes: []attribute.KeyValue{attribute.Int(name(i)+" key", i)}}
@@ -371,7 +389,8 @@ func TestHasStaticValue(t *testing.T) {
 		"server.address": true, "peer.service": true,
 		"messaging.system": true, "messaging.destination.name": true, "db.system.name": true,
 		"rpc.method": true, "network.protocol.version": true, "code.function.name": true, "otel.status_code": true,
-		"db.query.text": false, "messaging.message.id": false,
+		"db.query.text": false, "db.statement": false, "messaging.message.id": false,
+		"messaging.kafka.message.key": false, "network.peer.address": false,
 		"url.path": false, "url.full": false, "client.address": false, "user_agent.original": false,
 		"http.request.header.x": false, "task.id": false, "": false, "db": false,
 	} {

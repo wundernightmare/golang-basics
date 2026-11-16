@@ -315,18 +315,24 @@ const tracerName = "github.com/tracehubmmp/golang-basics/libs/httpx"
 // context prop finds in the headers, and names it by the matched route once
 // the handler ran. With no SDK provider (otelx.Init not called, or tracing
 // disabled) the spans are non-recording and cost a few allocations; the
-// propagator still forwards context even when nothing is exported.
-func tracing(tp trace.TracerProvider, prop propagation.TextMapPropagator) Middleware {
+// propagator still forwards context even when nothing is exported. The
+// caller's debug mark is kept only when trustDebugMark is set (see
+// Config.DebugTraceTrustRemote).
+func tracing(tp trace.TracerProvider, prop propagation.TextMapPropagator, trustDebugMark bool) Middleware {
 	tracer := tp.Tracer(tracerName)
 
 	return func(next http.Handler) http.Handler {
-		return tracingHandler(tracer, prop, next)
+		return tracingHandler(tracer, prop, trustDebugMark, next)
 	}
 }
 
-func tracingHandler(tracer trace.Tracer, prop propagation.TextMapPropagator, next http.Handler) http.Handler {
+func tracingHandler(tracer trace.Tracer, prop propagation.TextMapPropagator, trustDebugMark bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := prop.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		if !trustDebugMark {
+			ctx = dropRemoteDebugMark(ctx)
+		}
+
 		// A request debugged on purpose (a valid debug token) is traced
 		// whatever the ratio, and marked for the services behind this one.
 		if DebugLogging(ctx) {
@@ -347,7 +353,7 @@ func tracingHandler(tracer trace.Tracer, prop propagation.TextMapPropagator, nex
 		}
 
 		if q := r.URL.RawQuery; q != "" {
-			attrs = append(attrs, semconv.URLQuery(q))
+			attrs = append(attrs, semconv.URLQuery(redactRawQuery(q)))
 		}
 
 		if ua := r.UserAgent(); ua != "" {
@@ -361,7 +367,8 @@ func tracingHandler(tracer trace.Tracer, prop propagation.TextMapPropagator, nex
 		ctx, span := tracer.Start(ctx, method, trace.WithSpanKind(trace.SpanKindServer), trace.WithAttributes(attrs...))
 		defer span.End()
 
-		// A debug trace started upstream: log this request from debug up.
+		// A debug trace started upstream, by a caller this server trusts:
+		// log this request from debug up.
 		ctx = FollowDebugTrace(ctx)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -433,12 +440,13 @@ func accessLog(log *slog.Logger, slow time.Duration) Middleware {
 	}
 }
 
-// recovery turns a panic in a handler into a 500 problem+json (when nothing
-// was written yet), a structured error log with the stack, an error status on
-// the span and one tick of http_unhandled_errors_total. It sits inside the log and
-// metrics middleware so the 500 is logged and counted like any other; both
-// use defer and survive a panic that escapes anyway. http.ErrAbortHandler is
-// re-raised as net/http expects: it means "drop the connection", not "bug".
+// recovery turns a panic below it into a 500 problem+json (when nothing was
+// written yet), a structured error log with the stack, an error status on
+// the span and one tick of http_unhandled_errors_total. NewServer installs it
+// twice — around the handler, and around the service's own middleware — both
+// inside the log and metrics middleware, so the 500 is logged and counted
+// like any other. http.ErrAbortHandler is re-raised as net/http expects: it
+// means "drop the connection", not "bug".
 func (s *Server) recovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {

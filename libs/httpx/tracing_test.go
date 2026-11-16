@@ -1,6 +1,8 @@
 package httpx_test
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -52,7 +54,7 @@ func TestServerSpan_DescribesTheRequest(t *testing.T) {
 	srv, last := tracedServer(t)
 	srv.Mux().HandleFunc("/items/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 
-	req := httptest.NewRequest("BREW", "/items/7?page=2", http.NoBody)
+	req := httptest.NewRequest("BREW", "/items/7?page=2&access_token=t0p", http.NoBody)
 	req.Header.Set("User-Agent", "kettle/1")
 	req.Header.Set("X-Forwarded-For", "203.0.113.9")
 	do(srv.Handler(), req)
@@ -64,7 +66,7 @@ func TestServerSpan_DescribesTheRequest(t *testing.T) {
 	assert.Equal(t, "BREW", attrs["http.request.method_original"])
 	assert.Equal(t, "/items/{id}", attrs["http.route"])
 	assert.Equal(t, "/items/7", attrs["url.path"])
-	assert.Equal(t, "page=2", attrs["url.query"])
+	assert.Equal(t, "page=2&access_token=[redacted]", attrs["url.query"], "a secret parameter is masked as in the logs")
 	assert.Equal(t, "http", attrs["url.scheme"])
 	assert.Equal(t, "kettle/1", attrs["user_agent.original"])
 	assert.Equal(t, "203.0.113.9", attrs["client.address"])
@@ -109,6 +111,28 @@ func TestServerSpan_IsAnErrorFrom500(t *testing.T) {
 	do(srv.Handler(), httptest.NewRequest(http.MethodGet, "/status/500", http.NoBody))
 	assert.Equal(t, codes.Error, last().status)
 	assert.Equal(t, "Internal Server Error", last().description)
+}
+
+// A 5xx written through WriteError leaves its cause on the span — the event
+// a trace viewer shows as the exception — and the client's detail as the
+// status description.
+func TestServerSpan_CarriesTheCauseOfA5xx(t *testing.T) {
+	t.Parallel()
+
+	spans := testx.Recorder(t)
+	srv, _ := loggedServer(t, httpx.Config{}, httpx.WithTracerProvider(spans.Provider), httpx.WithPropagator(spans.Propagator))
+	srv.Mux().HandleFunc("GET /fail", func(w http.ResponseWriter, r *http.Request) {
+		httpx.WriteError(w, r, httpx.Internal("could not persist", errors.New("disk full")))
+	})
+
+	get(srv.Handler(), "/fail")
+
+	ended := spans.Ended()
+	require.Len(t, ended, 1)
+	require.Len(t, ended[0].Events(), 1)
+	assert.Equal(t, "exception", ended[0].Events()[0].Name)
+	assert.Contains(t, fmt.Sprint(ended[0].Events()[0].Attributes), "disk full")
+	assert.Equal(t, codes.Error, ended[0].Status().Code)
 }
 
 // A handler that panics after it started the response: the status is on the

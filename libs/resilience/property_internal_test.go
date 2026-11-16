@@ -46,10 +46,10 @@ type event struct {
 // ones in the last windowSlots slots added up — to compare the ring buffer
 // against.
 func modelSum(events []event, slot time.Duration, now time.Time) (a, b int) {
-	current := now.UnixNano() / int64(slot)
+	current := modelSlot(now, slot)
 
 	for _, e := range events {
-		if current-e.at.UnixNano()/int64(slot) < windowSlots {
+		if current-modelSlot(e.at, slot) < windowSlots {
 			a += e.a
 			b += e.b
 		}
@@ -58,10 +58,22 @@ func modelSum(events []event, slot time.Duration, now time.Time) (a, b int) {
 	return a, b
 }
 
-// epoch is where the generated clocks start: any instant after 1970 — the
-// window indexes its slots by Unix time.
+// modelSlot counts slots from 1970, rounding down on both sides of it.
+func modelSlot(at time.Time, slot time.Duration) int64 {
+	ns := at.UnixNano()
+
+	idx := ns / int64(slot)
+	if idx*int64(slot) > ns {
+		idx--
+	}
+
+	return idx
+}
+
+// epoch is where the generated clocks start: on either side of 1970, where
+// the Unix time the window indexes its slots by changes sign.
 func epoch(t *rapid.T) time.Time {
-	return time.Unix(rapid.Int64Range(0, 4_000_000_000).Draw(t, "start"), 0)
+	return time.Unix(rapid.Int64Range(-4_000_000_000, 4_000_000_000).Draw(t, "start"), 0)
 }
 
 // The ring of ten slots forgets exactly what has left the window: whatever
@@ -249,8 +261,8 @@ func TestBreakerIsAStateMachineThatKeepsItsPromises(t *testing.T) {
 			OpenTimeout:    time.Duration(rapid.Int64Range(int64(time.Millisecond), int64(time.Minute)).Draw(t, "open timeout")),
 			HalfOpenProbes: rapid.IntRange(1, 3).Draw(t, "half-open probes"),
 		}
-		if errs := cfg.Validate(); len(errs) > 0 {
-			t.Fatalf("the generated config is invalid: %v", errs)
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("the generated config is invalid: %v", err)
 		}
 
 		var (

@@ -178,6 +178,8 @@ func TestLogLevel_NotAvailableForForeignLogger(t *testing.T) {
 	}
 }
 
+// Every route of newAdminMux under /admin/ and /debug/ is behind the token;
+// a route added there is added here.
 func TestAdminToken_GuardsAdminAndDebugButNotProbes(t *testing.T) {
 	t.Parallel()
 
@@ -201,12 +203,25 @@ func TestAdminToken_GuardsAdminAndDebugButNotProbes(t *testing.T) {
 			{http.MethodGet, "/admin/log-level"},
 			{http.MethodPut, "/admin/log-level?level=debug"},
 			{http.MethodDelete, "/admin/log-level"},
+			{http.MethodGet, "/admin/debug-subjects"},
+			{http.MethodPut, "/admin/debug-subjects/acme?ttl=1m"},
+			{http.MethodDelete, "/admin/debug-subjects/acme"},
 			{http.MethodGet, "/debug/pprof/"},
 			{http.MethodGet, "/debug/pprof/cmdline"},
+			{http.MethodGet, "/debug/pprof/profile?seconds=1"},
+			{http.MethodGet, "/debug/pprof/symbol"},
+			{http.MethodGet, "/debug/pprof/trace?seconds=1"},
+			{http.MethodGet, "/debug/pprof/heap"},
 		} {
-			code, body := admin(t, srv, tc.method, tc.target, hdr...)
-			assert.Equal(t, http.StatusUnauthorized, code, "%s %s %v", tc.method, tc.target, hdr)
-			assert.Equal(t, float64(401), body["status"])
+			req := httptest.NewRequest(tc.method, tc.target, http.NoBody)
+			for i := 0; i+1 < len(hdr); i += 2 {
+				req.Header.Set(hdr[i], hdr[i+1])
+			}
+
+			rec := do(srv.Admin(), req)
+			assert.Equal(t, http.StatusUnauthorized, rec.Code, "%s %s %v", tc.method, tc.target, hdr)
+			assert.Equal(t, `Bearer realm="admin"`, rec.Header().Get("WWW-Authenticate"))
+			assert.Equal(t, float64(401), decode(t, rec)["status"])
 		}
 	}
 

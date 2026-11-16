@@ -153,8 +153,6 @@ github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0 h1:XsZa4fjE
 github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0/go.mod h1:v59yuxG94bpGrtq6MTMmrH1It+196bg7mtGwtDx1QEY=
 github.com/testcontainers/testcontainers-go/modules/redis v0.45.0 h1:U7GClvzAxLc7pjDfFxw3K6+odTa8NbxEa31svO5gl/Q=
 github.com/testcontainers/testcontainers-go/modules/redis v0.45.0/go.mod h1:06G3YVRf2RHAFNKwtFYhVd4CYgnXLWXmckaJNWI4fGY=
-github.com/testcontainers/testcontainers-go/modules/redpanda v0.45.0 h1:tSSYk8Yk/dfGFxd4Rs3SuJCj0oJy77YMCjLrx0tuSBk=
-github.com/testcontainers/testcontainers-go/modules/redpanda v0.45.0/go.mod h1:jkEQT+ftA2YJ43LbMwUZzUTVYSFn+4cHqzLbkqSzIgE=
 github.com/testcontainers/testcontainers-go/modules/toxiproxy v0.45.0 h1:bzp1LLWbgE5cWpfuR5lW6PuVddRoz7yzgK2zkwXYMQg=
 github.com/testcontainers/testcontainers-go/modules/toxiproxy v0.45.0/go.mod h1:CWGzEsj3+TX1D21EcpY1SLSuNroXiXfnZUlUY9w71Hw=
 github.com/testcontainers/testcontainers-go/modules/valkey v0.45.0 h1:TwMRwLZ3v9VvqZ3ztdHMZ+7J3jMzqS/+bx1t3RqWjig=
@@ -165,8 +163,6 @@ github.com/tklauser/numcpus v0.12.0 h1:NR85qdvHA9pFse3x3weVZ0r0ST8R6l5RHbZrlRaqo
 github.com/tklauser/numcpus v0.12.0/go.mod h1:ABHeXzJnr/qqwguhClkZKT1/8VABcYrsyUiUGobwWJg=
 github.com/twmb/franz-go v1.22.3 h1:RHe35s34pKefMLyL+ZYJ6mQVtfFZz4zHDHVkTyACur0=
 github.com/twmb/franz-go v1.22.3/go.mod h1:OhbFLkvp6GLcN5daC7I4Q2z0W/rFP16HG+gTbe9CDC4=
-github.com/twmb/franz-go/pkg/kadm v1.20.0 h1:Gx9q6UwA1QP0SXHutlT3iNpGC3dfm5DY5XDdUYrC9M8=
-github.com/twmb/franz-go/pkg/kadm v1.20.0/go.mod h1:84WtODAAftpVi1KQIr+rrIaYMjk3TXBmZKv1w1pnD8Y=
 github.com/twmb/franz-go/pkg/kmsg v1.15.1 h1:3sj7ekbH33t73nsBcHS0wtp/PyMIViHLNItZrE8V9zM=
 github.com/twmb/franz-go/pkg/kmsg v1.15.1/go.mod h1:sGkGxKexpRLBThFHJLjjywcyfkK09qB/g+X+wFWZQ/A=
 github.com/valkey-io/valkey-go v1.0.79 h1:dryzYka/oOkSMOcNmOTjQI8zfu/4bUzDZNnFW9NlqNM=

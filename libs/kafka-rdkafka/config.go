@@ -3,6 +3,7 @@ package rdkafka
 import (
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 
@@ -58,12 +59,51 @@ var ownedProperties = map[string]string{ //nolint:gosec,gochecknoglobals // G101
 	"enable.idempotence":                    "nothing: fixed to true by libs/kafka",
 	"enable.auto.commit":                    "nothing: the consumer loop commits",
 	"enable.auto.offset.store":              "nothing: the consumer loop commits",
+	"socket.keepalive.enable":               "nothing: fixed to true by libs/kafka-rdkafka",
+	"delivery.report.only.error":            "nothing: Send waits for the delivery report of every record",
 }
 
-// validate rejects extra properties a named key owns. Only the property
-// names are reported, never the values (one may be a password).
+// validate rejects what librdkafka would refuse when a client is created: a
+// named key outside the range of the property it is written to, and an extra
+// property a named key owns. Only the property names are reported, never the
+// values (one may be a password).
+//
+// librdkafka can check an arbitrary extra property only by creating a
+// client, which validation does not do: NewProducer and NewConsumer report
+// those (NewConsumer also for the dead-letter producer's).
 func validate(cfg kafka.Config) []error {
 	var errs []error
+
+	// The ranges are librdkafka's (CONFIGURATION.md), in the unit of the
+	// property each key is written to.
+	for _, bound := range []struct {
+		key      string
+		value    int64
+		min, max int64
+	}{
+		{"KAFKA_DIAL_TIMEOUT (ms)", cfg.DialTimeout.Milliseconds(), 1000, math.MaxInt32},
+		// 0 would be librdkafka's "no timeout": a duration below 1ms is not that.
+		{"KAFKA_PUBLISH_TIMEOUT (ms)", cfg.PublishTimeout.Milliseconds(), 1, math.MaxInt32},
+		{"KAFKA_PRODUCER_LINGER_MS", int64(cfg.LingerMs), 0, 900_000},
+		{"KAFKA_CONSUMER_SESSION_TIMEOUT_MS", int64(cfg.SessionTimeoutMs), 1, 3_600_000},
+		{"KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS", int64(cfg.MaxPollIntervalMs), 1, 86_400_000},
+		{"KAFKA_STATISTICS_INTERVAL_MS", int64(max(cfg.StatisticsInterval, 0)), 0, 86_400_000},
+		{"KAFKA_PRODUCER_QUEUE_MAX_KBYTES", int64(cfg.ProducerQueueMaxKBytes), 1, math.MaxInt32},
+		{"KAFKA_PRODUCER_QUEUE_MAX_MESSAGES", int64(cfg.ProducerQueueMaxMessages), 0, math.MaxInt32},
+		{"KAFKA_MESSAGE_MAX_BYTES", int64(cfg.MessageMaxBytes), 1000, 1_000_000_000},
+		{"KAFKA_CONSUMER_QUEUE_MAX_KBYTES", int64(cfg.ConsumerQueueMaxKBytes), 1, 2_097_151},
+		{"KAFKA_CONSUMER_FETCH_MAX_BYTES", int64(cfg.ConsumerFetchMaxBytes), 1, math.MaxInt32 - receiveMessageMaxBytesOverhead},
+		{"KAFKA_CONSUMER_PARTITION_FETCH_MAX_BYTES", int64(cfg.ConsumerPartitionFetchMaxBytes), 1, 1_000_000_000},
+	} {
+		if bound.value < bound.min || bound.value > bound.max {
+			errs = append(errs, fmt.Errorf("%s: %d is outside %d..%d, what librdkafka takes", bound.key, bound.value, bound.min, bound.max))
+		}
+	}
+
+	if cfg.PublishTimeout.Milliseconds() <= int64(cfg.LingerMs) {
+		errs = append(errs, fmt.Errorf("KAFKA_PUBLISH_TIMEOUT (%s) must be longer than KAFKA_PRODUCER_LINGER_MS (%d): a record would time out in the batching window",
+			cfg.PublishTimeout, cfg.LingerMs))
+	}
 
 	for _, src := range []struct {
 		name  string

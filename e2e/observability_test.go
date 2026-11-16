@@ -46,7 +46,7 @@ var brokerMetrics = map[string]string{
 // like brokerMetrics.
 var errorOnlyMetrics = map[string]string{
 	"db_query_errors_total":      "libs/pgx/pgx_test.go (a failing query)",
-	"cache_command_errors_total": "libs/valkey/valkey_test.go (Valkey down)",
+	"cache_command_errors_total": "libs/valkey/integration/valkey_test.go (Valkey down)",
 }
 
 // promQLNames returns the metric names a PromQL expression reads: label

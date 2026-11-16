@@ -84,9 +84,9 @@ func TestEndToEnd(t *testing.T) {
 	events := app.readEvents(t, backends.brokers, 3, 30*time.Second)
 	require.Len(t, events, 3)
 	schemas := map[string]*contract.JSONSchema{
-		"task.created": contract.LoadJSONSchema(t, "jsonschema/TaskCreatedEvent.json"),
-		"task.updated": contract.LoadJSONSchema(t, "jsonschema/TaskUpdatedEvent.json"),
-		"task.deleted": contract.LoadJSONSchema(t, "jsonschema/TaskDeletedEvent.json"),
+		"task.created": contract.LoadJSONSchema(t, "../../../../api/jsonschema/TaskCreatedEvent.json"),
+		"task.updated": contract.LoadJSONSchema(t, "../../../../api/jsonschema/TaskUpdatedEvent.json"),
+		"task.deleted": contract.LoadJSONSchema(t, "../../../../api/jsonschema/TaskDeletedEvent.json"),
 	}
 	versions := []float64{1, 2, 2} // a delete carries the last version the task had
 

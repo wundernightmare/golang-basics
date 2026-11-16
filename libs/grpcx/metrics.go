@@ -20,6 +20,9 @@ const outcomeCircuitOpen = "circuit_open"
 // (/pkg.Service/Method), which comes from generated code. The names are the
 // workspace's metrics contract (docs/METRICS.md).
 type metrics struct {
+	// reg is where the instruments are registered, for unregister.
+	reg prometheus.Registerer
+
 	requests     *prometheus.CounterVec
 	duration     *prometheus.HistogramVec
 	retries      *prometheus.CounterVec
@@ -29,6 +32,7 @@ type metrics struct {
 
 func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 	instruments := &metrics{
+		reg: reg,
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "grpc_client_requests_total",
 			Help: "Outbound gRPC calls by target, method and outcome.",
@@ -51,15 +55,29 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 			Help: "Circuit breaker state transitions.",
 		}, []string{"target", "from", "to"}),
 	}
-	for _, c := range []prometheus.Collector{
-		instruments.requests, instruments.duration, instruments.retries, instruments.breakerState, instruments.transitions,
-	} {
+	for i, c := range instruments.collectors() {
 		if err := reg.Register(c); err != nil {
+			// Only the ones registered here: Unregister goes by descriptor,
+			// and the one that collided belongs to whoever registered first.
+			for _, registered := range instruments.collectors()[:i] {
+				reg.Unregister(registered)
+			}
+
 			return nil, err
 		}
 	}
 
 	return instruments, nil
+}
+
+func (m *metrics) collectors() []prometheus.Collector {
+	return []prometheus.Collector{m.requests, m.duration, m.retries, m.breakerState, m.transitions}
+}
+
+func (m *metrics) unregister() {
+	for _, c := range m.collectors() {
+		m.reg.Unregister(c)
+	}
 }
 
 // codeOutcomes are the outcome labels of the status codes gRPC defines: the

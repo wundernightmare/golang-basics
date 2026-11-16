@@ -1,6 +1,7 @@
 package resilience
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -104,6 +105,111 @@ func TestBreaker_Disabled(t *testing.T) {
 	assert.True(t, ok)
 	b.Record(tk, OutcomeFailure) // no panic
 	assert.Equal(t, StateClosed, b.State())
+	b.Mirror(func(s State) { assert.Equal(t, StateClosed, s) })
+
+	ran := false
+
+	require.NoError(t, b.Do(func() Outcome { ran = true; return OutcomeFailure }))
+	assert.True(t, ran, "no breaker: the request runs")
+
+	tc.FailureRatio = -0.5
+	assert.Nil(t, NewBreaker(tc, time.Now, nil), "a ratio below 0 is no breaker either")
+}
+
+func TestBreaker_DoRecordsWhatTheRequestReturns(t *testing.T) {
+	t.Parallel()
+
+	b, clk, _ := testBreaker(t, nil)
+	failing := func() Outcome { return OutcomeFailure }
+
+	for range b.minRequests {
+		require.NoError(t, b.Do(failing))
+	}
+
+	require.Equal(t, StateOpen, b.State())
+	require.ErrorIs(t, b.Do(func() Outcome { panic("a rejected request must not run") }), ErrOpen)
+
+	clk.advance(5 * time.Second)
+	require.NoError(t, b.Do(func() Outcome { return OutcomeIgnored }))
+	assert.Equal(t, StateHalfOpen, b.State(), "an ignored probe gives its slot back")
+	require.NoError(t, b.Do(func() Outcome { return OutcomeSuccess }))
+	assert.Equal(t, StateClosed, b.State())
+}
+
+// A probe that panics is a failed probe: the breaker re-opens and probes
+// again after the open timeout, instead of waiting for a result for good.
+func TestBreaker_DoRecordsAPanickingProbeAsAFailure(t *testing.T) {
+	t.Parallel()
+
+	b, clk, _ := testBreaker(t, nil)
+	trip(t, b)
+	clk.advance(5 * time.Second)
+
+	assert.PanicsWithValue(t, "round tripper blew up", func() {
+		_ = b.Do(func() Outcome { panic("round tripper blew up") })
+	})
+	assert.Equal(t, StateOpen, b.State())
+
+	clk.advance(5 * time.Second)
+	require.NoError(t, b.Do(func() Outcome { return OutcomeSuccess }), "the next probe is admitted")
+	assert.Equal(t, StateClosed, b.State())
+}
+
+// Transitions notify concurrently: a writer that read the state before a
+// transition must not overwrite the one that read it after.
+func TestBreaker_MirrorEndsOnTheLatestState(t *testing.T) {
+	t.Parallel()
+
+	b, _, _ := testBreaker(t, nil)
+
+	var (
+		mirrored        State // written only inside Mirror
+		wg              sync.WaitGroup
+		reading, resume = make(chan struct{}), make(chan struct{})
+	)
+
+	wg.Go(func() {
+		b.Mirror(func(s State) {
+			close(reading)
+			<-resume
+
+			mirrored = s
+		})
+	})
+
+	<-reading
+	trip(t, b)
+	wg.Go(func() { b.Mirror(func(s State) { mirrored = s }) })
+	close(resume)
+	wg.Wait()
+
+	assert.Equal(t, StateOpen, mirrored)
+}
+
+// Results recorded from many goroutines while closed are all counted.
+func TestBreaker_ConcurrentRecordsAreAllCounted(t *testing.T) {
+	t.Parallel()
+
+	const goroutines, each = 8, 2000
+
+	b, clk, _ := testBreaker(t, nil)
+
+	var wg sync.WaitGroup
+
+	for range goroutines {
+		wg.Go(func() {
+			for range each {
+				if tk, ok := b.Allow(); ok {
+					b.Record(tk, OutcomeSuccess)
+				}
+			}
+		})
+	}
+
+	wg.Wait()
+
+	requests, failures := b.win.sum(clk.now())
+	assert.Equal(t, [2]int{goroutines * each, 0}, [2]int{requests, failures})
 }
 
 func TestBreaker_TripsOnRatioAfterMinRequests(t *testing.T) {
@@ -262,6 +368,12 @@ func TestBreaker_StaleResultsDoNotDecide(t *testing.T) {
 
 	b.Record(probe, OutcomeFailure)
 	assert.Equal(t, StateClosed, b.State(), "a probe result after the half-open ended is stale")
+
+	for range b.minRequests {
+		b.Record(old, OutcomeFailure)
+	}
+
+	assert.Equal(t, StateClosed, b.State(), "a ticket of an earlier closed period does not count in this one")
 	run(t, b, OutcomeFailure, 3)
 	assert.Equal(t, StateClosed, b.State(), "and it was not counted in the new window either")
 }
@@ -409,9 +521,9 @@ func TestBreaker_ProbeOfAnEarlierHalfOpenDoesNotDecide(t *testing.T) {
 func TestBreakerConfig_Validate(t *testing.T) {
 	t.Parallel()
 
-	assert.Empty(t, DefaultBreakerConfig().Validate())
-	assert.Empty(t, BreakerConfig{}.Validate(), "no breaker: nothing to validate")
-	assert.Empty(t, BreakerConfig{FailureRatio: 1, MinRequests: 1, Window: 1, OpenTimeout: 1, HalfOpenProbes: 1}.Validate(),
+	require.NoError(t, DefaultBreakerConfig().Validate())
+	require.NoError(t, BreakerConfig{}.Validate(), "no breaker: nothing to validate")
+	require.NoError(t, BreakerConfig{FailureRatio: 1, MinRequests: 1, Window: 1, OpenTimeout: 1, HalfOpenProbes: 1}.Validate(),
 		"the bounds are inclusive")
 
 	for _, tc := range []struct {
@@ -421,6 +533,7 @@ func TestBreakerConfig_Validate(t *testing.T) {
 	}{
 		{"ratio low", func(c *BreakerConfig) { c.FailureRatio = -0.1 }, "failure_ratio"},
 		{"ratio high", func(c *BreakerConfig) { c.FailureRatio = 1.01 }, "failure_ratio"},
+		{"ratio NaN", func(c *BreakerConfig) { c.FailureRatio = math.NaN() }, "failure_ratio"},
 		{"min requests", func(c *BreakerConfig) { c.MinRequests = 0 }, "min_requests"},
 		{"window", func(c *BreakerConfig) { c.Window = 0 }, "window"},
 		{"open timeout", func(c *BreakerConfig) { c.OpenTimeout = 0 }, "window"},
@@ -429,14 +542,58 @@ func TestBreakerConfig_Validate(t *testing.T) {
 		cfg := DefaultBreakerConfig()
 		tc.mut(&cfg)
 
-		errs := cfg.Validate()
-		if assert.Len(t, errs, 1, tc.name) {
-			assert.Contains(t, errs[0].Error(), tc.msg, tc.name)
+		err := cfg.Validate()
+		if assert.Error(t, err, tc.name) {
+			assert.Contains(t, err.Error(), tc.msg, tc.name)
+			assert.NotContains(t, err.Error(), "\n", "%s: one problem", tc.name)
 		}
 	}
 
-	all := BreakerConfig{FailureRatio: 0.5}
-	assert.Len(t, all.Validate(), 3, "every problem is reported")
+	all := BreakerConfig{FailureRatio: 0.5}.Validate()
+	for _, key := range []string{"min_requests", "window", "half_open_probes"} {
+		assert.ErrorContains(t, all, key, "every problem is reported")
+	}
+}
+
+// A Record that read the state, was descheduled while the breaker opened,
+// recovered and started counting again, and only then reached the window,
+// must leave the new period's counts alone.
+func TestBreaker_LateRecordKeepsTheNewWindow(t *testing.T) {
+	t.Parallel()
+
+	var (
+		b     *Breaker
+		clk   = newFakeClock()
+		cycle func()
+	)
+
+	b = NewBreaker(BreakerConfig{FailureRatio: 0.6, MinRequests: 5, Window: 10 * time.Second, OpenTimeout: 5 * time.Second, HalfOpenProbes: 1},
+		func() time.Time {
+			if run := cycle; run != nil {
+				cycle = nil
+
+				run()
+			}
+
+			return clk.now()
+		}, nil)
+
+	late := admit(t, b)
+	// Runs inside the late Record's clock read: after it loaded the state,
+	// before it takes the window's lock.
+	cycle = func() {
+		trip(t, b)
+		clk.advance(5 * time.Second)
+		b.Record(admit(t, b), OutcomeSuccess)
+		require.Equal(t, StateClosed, b.State())
+		run(t, b, OutcomeFailure, 4)
+	}
+
+	b.Record(late, OutcomeSuccess)
+	require.Equal(t, StateClosed, b.State())
+
+	run(t, b, OutcomeFailure, 1)
+	assert.Equal(t, StateOpen, b.State(), "5 failures of 5 in the new period")
 }
 
 func BenchmarkBreaker_AllowRecord(b *testing.B) {

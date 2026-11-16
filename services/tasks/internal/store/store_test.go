@@ -89,7 +89,7 @@ func TestCreate_TaskAndEventCommitTogether(t *testing.T) {
 	e := events[0]
 	assert.Equal(t, outbox.TypeTaskCreated, e.Type)
 	assert.Equal(t, task.ID, e.AggregateID)
-	contract.LoadJSONSchema(t, "jsonschema/TaskCreatedEvent.json").Validate(t, e.Payload)
+	contract.LoadJSONSchema(t, "../../../../api/jsonschema/TaskCreatedEvent.json").Validate(t, e.Payload)
 
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(e.Payload, &payload))
@@ -252,7 +252,7 @@ func TestUpdate_VersionsAndEvents(t *testing.T) {
 	events := outboxRows(t, db)
 	require.Len(t, events, 3, "created + two updates; failed updates write nothing")
 
-	schema := contract.LoadJSONSchema(t, "jsonschema/TaskUpdatedEvent.json")
+	schema := contract.LoadJSONSchema(t, "../../../../api/jsonschema/TaskUpdatedEvent.json")
 	for i, e := range events[1:] {
 		assert.Equal(t, outbox.TypeTaskUpdated, e.Type)
 		schema.Validate(t, e.Payload)
@@ -285,7 +285,7 @@ func TestDelete_VersionsAndEvent(t *testing.T) {
 	events := outboxRows(t, db)
 	require.Len(t, events, 2)
 	assert.Equal(t, outbox.TypeTaskDeleted, events[1].Type)
-	contract.LoadJSONSchema(t, "jsonschema/TaskDeletedEvent.json").Validate(t, events[1].Payload)
+	contract.LoadJSONSchema(t, "../../../../api/jsonschema/TaskDeletedEvent.json").Validate(t, events[1].Payload)
 }
 
 // Keyset pages walk (created_at DESC, id DESC) exactly once each, including

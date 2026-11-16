@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/tracehubmmp/golang-basics/libs/httpx"
 	"github.com/tracehubmmp/golang-basics/libs/testx"
@@ -87,7 +88,7 @@ func TestMetrics_ClientGoneIs499(t *testing.T) {
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"route": "/silent", "status": "499"}))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"route": "/silent", "status": "200"}))
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"route": "/failed", "status": "499"}))
-	assert.Equal(t, -1.0, testx.Metric(t, reg, "http_requests_total", map[string]string{"route": "/failed", "status": "500"}), "no 5xx series")
+	testx.NoMetric(t, reg, "http_requests_total", map[string]string{"route": "/failed", "status": "500"})
 }
 
 // The exposition itself is contract: names, label sets and types are what
@@ -194,12 +195,18 @@ func TestMetrics_ExemplarCarriesTheSampledTraceID(t *testing.T) {
 	assert.True(t, found, "the exemplar is the request's trace id")
 }
 
+// A trace that is not exported is nothing to link to: no exemplar for a
+// request without a span, nor for one whose span is not sampled.
 func TestMetrics_NoExemplarWithoutASampledSpan(t *testing.T) {
 	t.Parallel()
 
-	srv, _ := loggedServer(t, httpx.Config{})
+	srv, _ := loggedServer(t, httpx.Config{}, httpx.WithPropagator(propagation.TraceContext{}))
 	srv.Mux().HandleFunc("GET /x", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	get(srv.Handler(), "/x")
+
+	unsampled := httptest.NewRequest(http.MethodGet, "/x", http.NoBody)
+	unsampled.Header.Set("Traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
+	do(srv.Handler(), unsampled)
 
 	for _, m := range series(t, srv.Metrics.Registry, "http_requests_total") {
 		assert.Nil(t, m.GetCounter().GetExemplar())

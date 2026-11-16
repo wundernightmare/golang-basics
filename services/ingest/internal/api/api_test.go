@@ -94,7 +94,7 @@ func newHarness(t testing.TB, mutate ...func(*httpx.Config)) *harness {
 	})
 	hrn.ts = httptest.NewServer(srv.Handler())
 	t.Cleanup(hrn.ts.Close)
-	hrn.oapi = contract.LoadOpenAPI(t, "openapi3/ingest.openapi.yaml")
+	hrn.oapi = contract.LoadOpenAPI(t, "../../../../api/openapi3/ingest.openapi.yaml")
 
 	return hrn
 }

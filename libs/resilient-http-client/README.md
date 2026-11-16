@@ -9,8 +9,8 @@ policy applies:
 
 | Concern | Implementation |
 | --- | --- |
-| Transport | `http.DefaultTransport` clone (proxy from env, HTTP/2, dial/TLS timeouts) + pool settings + HTTP/2 PING health check (`net/http`'s `HTTP2Config`, no `x/net`) |
-| Tracing | `otelhttp` transport: `traceparent` injected, client span `"METHOD target"` |
+| Transport | its own `http.Transport`, set up as net/http sets up its default one (proxy from env, HTTP/2, dial/TLS timeouts) — never a clone of the `http.DefaultTransport` variable — + pool settings + HTTP/2 PING health check (`net/http`'s `HTTP2Config`, no `x/net`) |
+| Tracing | `otelhttp` transport: `traceparent` injected, client span `"METHOD target"`; its `url.full` is scheme, host and path |
 | Attempt timeout | per target; starts **before** the rate-limiter and bulkhead waits |
 | Rate limit | `golang.org/x/time/rate` token bucket (fractional rates) |
 | Bulkhead | fixed concurrency cap, bounded wait |
@@ -48,7 +48,14 @@ The request's context is the overall deadline; `Send` sends once,
 `*OutboundError` whose `Kind` works with `errors.Is`:
 `KindTimeout`, `KindConnection`, `KindStatus` (≥ 400), `KindCircuitOpen`,
 `KindRateLimited`, `KindBulkheadFull`, `KindShutdown`, `KindCanceled`,
-`KindRedirect`, `KindInvalid` (unknown target, relative URL).
+`KindRedirect`, `KindInvalid` (unknown target, relative URL). Two kinds also
+answer to the names the workspace's other clients use:
+`errors.Is(err, resilience.ErrOpen)` for `KindCircuitOpen` and
+`errors.Is(err, resilient.ErrClosed)` for `KindShutdown`.
+
+`Error()` never contains the request's query string or user info: of a failed
+request it keeps the cause net/http's `*url.Error` wraps, not that error
+(`errors.As(err, &urlErr)` does not match).
 
 ## Semantics
 
@@ -71,9 +78,18 @@ for the life of the process. A failed body is
 not retried (the response was already handed over), and
 `http_client_requests_total` keeps the outcome known at the headers (`2xx`).
 
+An **upgraded connection** (101 Switching Protocols, CONNECT) is such a body:
+it stays writable, and it is cut when the target's `timeout` expires — a
+breaker failure. A long-lived upgrade needs a target with `timeout: 0`.
+
+The body of an **error response** (≥ 400) is closed after its first 4 KiB are
+kept; reading off the rest to keep the connection is left to net/http.
+
 **Half-open** — when open for `breaker.open_timeout`, the breaker admits exactly
 `breaker.half_open_probes` probes; all must succeed to close it, any failure
-re-opens it. A probe rejected locally releases its slot; a request admitted
+re-opens it. A probe rejected locally releases its slot, and a probe whose
+`RoundTripper` panics has failed (the panic reaches the caller; the bulkhead
+slot is released too); a request admitted
 before the breaker opened cannot decide a probe (results carry the generation
 they were admitted in).
 
@@ -137,7 +153,7 @@ user_agent: ""
 targets:
   - name: billing                # required, unique; the metric label
     timeout: 5s                  # per attempt, waits included; 0 = none
-    rate_limit: 0                # req/s, fractions ok; 0 = off
+    rate_limit: 0                # req/s, fractions ok, finite; 0 = off
     rate_burst: 0                # 0 = max(1, ceil(rate_limit))
     max_concurrent: 0            # bulkhead; 0 = off
     max_concurrent_wait: 0s      # 0 = reject at once when full
@@ -157,7 +173,7 @@ targets:
 
 **In a service config.** A service does not call `LoadConfig`: it embeds
 `resilient.Config` under a key of its own config and loads everything with
-the workspace's one loader, `httpx.LoadYAML` (pinned by `embed_test.go`):
+the workspace's one loader, `httpx.LoadYAML` (pinned by `integration/embed_test.go`):
 
 ```go
 type Config struct {
@@ -204,10 +220,22 @@ standard method or `_OTHER`. The names are the workspace's metrics contract
 Without `WithRegisterer` they live on a private registry, `client.Registry()`,
 which no `/metrics` endpoint serves: a service passes
 `resilient.WithRegisterer(srv.Metrics.Registry)` so its outbound calls show up
-next to everything else (one client per registry — a second one collides).
+next to everything else.
 
-Logs (`WithLogger`) carry scheme, host and path only — never the query string
-or user info — and warnings are rate-limited per target.
+**Two clients on one registry** collide — `New` returns the registration
+error. Give each a label of your own; each, because one metric name carries
+one set of label names:
+
+```go
+billing, err := resilient.New(billingCfg, resilient.WithRegisterer(
+    prometheus.WrapRegistererWith(prometheus.Labels{"client": "billing"}, reg)))
+search, err := resilient.New(searchCfg, resilient.WithRegisterer(
+    prometheus.WrapRegistererWith(prometheus.Labels{"client": "search"}, reg)))
+```
+
+Logs (`WithLogger`), error texts and the span's `url.full` carry scheme, host
+and path only — never the query string or user info — and warnings are
+rate-limited per target.
 
 ## What it does not do
 

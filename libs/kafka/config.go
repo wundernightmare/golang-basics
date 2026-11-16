@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,7 +33,8 @@ import (
 //
 //	TASKS_KAFKA_BROKERS                   comma-separated host:port seeds             (required; no default)
 //	TASKS_KAFKA_TOPIC                     default produce topic                       (default "tasks.events")
-//	TASKS_KAFKA_TOPICS                    comma-separated subscribe topics            (default: the Topic value)
+//	TASKS_KAFKA_TOPICS                    comma-separated subscribe topics; one starting
+//	                                      with "^" is a regular expression            (default: the Topic value)
 //	TASKS_KAFKA_GROUP                     consumer group id                           (default "tasks-consumer")
 //	TASKS_KAFKA_CLIENT_ID                 client id advertised to brokers             (default "golang-basics")
 //	TASKS_KAFKA_DIAL_TIMEOUT              broker connection setup; also the boot check (default "10s")
@@ -72,7 +74,7 @@ import (
 // duplicates or reorders a record within a partition):
 //
 //	TASKS_KAFKA_PRODUCER_COMPRESSION_TYPE  none|gzip|snappy|lz4|zstd             (default lz4)
-//	TASKS_KAFKA_PRODUCER_LINGER_MS         batching window                       (default 5)
+//	TASKS_KAFKA_PRODUCER_LINGER_MS         batching window, 0 = none             (default 5)
 //
 // Consumer:
 //
@@ -82,11 +84,13 @@ import (
 //	TASKS_KAFKA_CONSUMER_AUTO_OFFSET_RESET earliest|latest, for a group with no commit yet (default earliest)
 //	TASKS_KAFKA_CONSUMER_MAX_POLL_RECORDS  records processed per batch          (default 100)
 //	TASKS_KAFKA_CONSUMER_HANDLER_TIMEOUT   deadline of one handler attempt      (default "30s")
-//	TASKS_KAFKA_CONSUMER_MAX_RETRIES       retries after the first attempt, negative = none (default 5)
+//	TASKS_KAFKA_CONSUMER_MAX_RETRIES       retries after the first attempt, 0 (or negative) = none (default 5)
 //	TASKS_KAFKA_CONSUMER_RETRY_BACKOFF     first retry delay, doubled per retry, jittered (default "200ms")
 //	TASKS_KAFKA_CONSUMER_RETRY_BACKOFF_MAX cap on one retry delay               (default "30s")
 //	TASKS_KAFKA_DEAD_LETTER_TOPIC          where exhausted records go; "{topic}" is the
-//	                                       source topic; "none" (or "-") disables the DLQ (default "{topic}.dlq")
+//	                                       source topic; "none" (or "-") disables the DLQ (default "{topic}.dlq").
+//	                                       Never a topic the consumer reads; with a "^" subscription
+//	                                       a fixed name the pattern does not match, or none
 //	TASKS_KAFKA_CONSUMER_DRAIN_TIMEOUT     budget to finish the in-flight batch on shutdown (default "10s")
 //
 // Any other librdkafka property (librdkafka provider only — franz-go has no
@@ -102,10 +106,13 @@ import (
 // one source of truth per setting. Secret-looking properties (sasl.password,
 // ssl.key.password, …) are redacted in /admin/config like any other secret.
 //
-// Zero means "unset" throughout (the defaults fill it), which is why the DLQ
-// is disabled with the word "none" rather than an empty string and "no
-// retries" or "no statistics" is a negative number: see httpx.LoadYAML on
-// explicit zeros.
+// Zero means "unset" (the defaults fill it), which is why the DLQ is
+// disabled with the word "none" rather than an empty string and "no
+// statistics" is a negative number. Two keys are the exception, because
+// their zero is a setting: KAFKA_PRODUCER_LINGER_MS=0 sends without a
+// batching window and KAFKA_CONSUMER_MAX_RETRIES=0 does not retry. Their
+// defaults (5 and 5) apply where the key is absent from the environment and
+// the YAML; a Config built in code has 0 in both unless it sets them.
 type Config struct {
 	Brokers                []string      `env:"KAFKA_BROKERS" envSeparator:"," yaml:"brokers"`
 	Topic                  string        `env:"KAFKA_TOPIC" envDefault:"tasks.events" yaml:"topic"`
@@ -210,7 +217,10 @@ const DeadLetterDisabled = "none"
 const deadLetterDisabledAlias = "-"
 
 // Defaults applied by [Config.Validate] (and the constructors) to zero
-// fields of a hand-built Config. They mirror the envDefault tags.
+// fields of a hand-built Config. They mirror the envDefault tags, except
+// for the two keys whose zero is a setting (KAFKA_PRODUCER_LINGER_MS,
+// KAFKA_CONSUMER_MAX_RETRIES): those have a default only where the
+// environment is read.
 const (
 	defaultTopic                  = "tasks.events"
 	defaultGroup                  = "tasks-consumer"
@@ -225,11 +235,9 @@ const (
 	defaultConsumerFetchMaxBytes  = 4 << 20
 	defaultPartitionFetchMaxBytes = 1 << 20
 	defaultCompressionType        = "lz4"
-	defaultLingerMs               = 5
 	defaultAutoOffsetReset        = "earliest"
 	defaultMaxPollRecords         = 100
 	defaultHandlerTimeout         = 30 * time.Second
-	defaultMaxRetries             = 5
 	defaultRetryBackoff           = 200 * time.Millisecond
 	defaultRetryBackoffMax        = 30 * time.Second
 	defaultDeadLetterTopic        = "{topic}.dlq"
@@ -293,9 +301,7 @@ func (c *Config) withDefaults() {
 	setInt(&c.ConsumerQueueMaxKBytes, defaultConsumerQueueMaxKBytes)
 	setInt(&c.ConsumerFetchMaxBytes, defaultConsumerFetchMaxBytes)
 	setInt(&c.ConsumerPartitionFetchMaxBytes, defaultPartitionFetchMaxBytes)
-	setInt(&c.LingerMs, defaultLingerMs)
 	setInt(&c.MaxPollRecords, defaultMaxPollRecords)
-	setInt(&c.MaxRetries, defaultMaxRetries)
 	c.SecurityProtocol = strings.ToLower(strings.TrimSpace(c.SecurityProtocol))
 	c.SASLMechanism = strings.ToUpper(strings.TrimSpace(c.SASLMechanism))
 }
@@ -322,8 +328,10 @@ func setDuration(d *time.Duration, def time.Duration) {
 // run with: no brokers (there is no default address — a service where Kafka
 // is optional checks KAFKA_BROKERS before calling this), an unknown protocol,
 // mechanism, codec or strategy, SASL or TLS keys the protocol does not use,
-// half a client key pair, inconsistent buffer bounds — and whatever the
-// linked provider refuses (see [Driver.Validate]: extra properties).
+// half a client key pair, inconsistent buffer bounds, a dead-letter topic the
+// consumer would read back — and whatever the linked provider refuses (see
+// [Driver.Validate]: a value outside its client's range, extra properties).
+// A binary that links no provider checks only the neutral part.
 func (c *Config) Validate() error {
 	c.withDefaults()
 
@@ -389,7 +397,11 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("KAFKA_DEAD_LETTER_TOPIC %q has surrounding spaces", c.DeadLetterTopic))
 	}
 
-	if d := registered(); d != nil {
+	errs = append(errs, c.validateDeadLetter()...)
+
+	// The provider is asked only about a config that is otherwise sound: it
+	// builds its client's options from it.
+	if d := registered(); d != nil && len(errs) == 0 {
 		errs = append(errs, d.Validate(*c)...)
 	}
 
@@ -565,6 +577,51 @@ func (c *Config) validateBuffers() []error {
 
 	if c.ConsumerPartitionFetchMaxBytes > c.ConsumerFetchMaxBytes {
 		errs = append(errs, fmt.Errorf("KAFKA_CONSUMER_PARTITION_FETCH_MAX_BYTES (%d) is above KAFKA_CONSUMER_FETCH_MAX_BYTES (%d)", c.ConsumerPartitionFetchMaxBytes, c.ConsumerFetchMaxBytes))
+	}
+
+	return errs
+}
+
+// isPattern reports whether a subscribed topic is a regular expression
+// rather than a name: librdkafka's rule, which the franz provider follows.
+func isPattern(topic string) bool { return strings.HasPrefix(topic, "^") }
+
+// validateDeadLetter rejects a dead-letter topic the consumer itself reads:
+// a parked record would come straight back, fail again and be parked again,
+// with nothing but a growing topic to show for it. A name is compared with
+// the subscribed names; under a ^regex subscription the name has to be fixed
+// — one made from the source topic ("{topic}.dlq") usually matches the
+// pattern its source did — and must not match the pattern. The match is
+// Go's: a pattern only librdkafka's dialect can express is not checked here.
+func (c *Config) validateDeadLetter() []error {
+	if c.deadLetterTopic("x") == "" {
+		return nil
+	}
+
+	var errs []error
+
+	fixed := !strings.Contains(c.DeadLetterTopic, "{topic}")
+	looped := map[string]bool{}
+
+	for _, topic := range c.Topics {
+		dlq := c.deadLetterTopic(topic)
+
+		switch {
+		case !isPattern(topic):
+			if slices.Contains(c.Topics, dlq) && !looped[dlq] {
+				looped[dlq] = true
+
+				errs = append(errs, fmt.Errorf("KAFKA_DEAD_LETTER_TOPIC: %q is a topic the consumer reads (KAFKA_TOPICS): a parked record would come straight back", dlq))
+			}
+		case !fixed:
+			errs = append(errs, fmt.Errorf("KAFKA_DEAD_LETTER_TOPIC %q needs a fixed name (or %q) with the subscription %q: "+
+				"a name made from the source topic can match the pattern, and the consumer would read its own dead letters",
+				c.DeadLetterTopic, DeadLetterDisabled, topic))
+		default:
+			if re, err := regexp.Compile(topic); err == nil && re.MatchString(dlq) {
+				errs = append(errs, fmt.Errorf("KAFKA_DEAD_LETTER_TOPIC %q matches the subscription %q: the consumer would read its own dead letters", dlq, topic))
+			}
+		}
 	}
 
 	return errs

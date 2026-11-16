@@ -2,6 +2,7 @@ package valkey
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -44,8 +45,8 @@ func (c *Cache) Publish(ctx context.Context, channel, message string) error {
 
 // Subscribe delivers the messages published on channel to onMessage until ctx
 // is done, and returns ctx's error then (or the error that ended the
-// subscription for good; nil if the channel was unsubscribed on a connection
-// that stayed healthy).
+// subscription for good — [ErrClosed] when that was [Cache.Close]; nil if the
+// channel was unsubscribed on a connection that stayed healthy).
 //
 // Pub/Sub is at most once, and Subscribe reconnects and resubscribes on its
 // own for as long as ctx lives — pausing between attempts as
@@ -93,8 +94,13 @@ func (c *Cache) Subscribe(ctx context.Context, channel string, onMessage func(me
 		// For good: the caller is done, the cache was closed, or the server
 		// answered and said no (ACL, a wrong mode) — asking again changes
 		// nothing.
-		if _, refused := valkeygo.IsValkeyErr(err); refused || ctx.Err() != nil || c.closed.Load() {
-			return fmt.Errorf("valkey: subscribe %q: %w", channel, err)
+		if c.closed.Load() && !errors.Is(err, valkeygo.ErrClosing) {
+			// Close can also surface as the connection's own error.
+			return fmt.Errorf("valkey: subscribe %q: %w: %w", channel, ErrClosed, err)
+		}
+
+		if _, refused := valkeygo.IsValkeyErr(err); refused || ctx.Err() != nil || errors.Is(err, valkeygo.ErrClosing) {
+			return fmt.Errorf("valkey: subscribe %q: %w", channel, closedErr(err))
 		}
 
 		select {

@@ -16,23 +16,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// runBriefly runs a server until it listens, then stops it cleanly.
-func runBriefly(t *testing.T, cfg Config) {
-	t.Helper()
-
-	srv, err := NewServer(cfg, nil)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-
-	go func() { done <- srv.Run(ctx) }()
-
-	require.Eventually(t, func() bool { return srv.ListenAddr() != "" }, 10*time.Second, 5*time.Millisecond)
-	cancel()
-	require.NoError(t, <-done)
-}
-
 func TestConfig_RuntimeAndDiagnosticsValidation(t *testing.T) {
 	t.Parallel()
 
@@ -48,11 +31,14 @@ func TestConfig_RuntimeAndDiagnosticsValidation(t *testing.T) {
 }
 
 // An explicit GOMEMLIMIT, or a negative ratio, leaves the runtime alone.
-func TestServer_MemoryLimitOptOuts(t *testing.T) {
-	runBriefly(t, Config{Service: "svc", Addr: "127.0.0.1:0", RuntimeMemoryLimitRatio: -1})
+func TestMemoryLimiter_OptOuts(t *testing.T) {
+	t.Parallel()
 
-	t.Setenv("GOMEMLIMIT", "1GiB")
-	runBriefly(t, Config{Service: "svc", Addr: "127.0.0.1:0"})
+	log := slog.New(slog.DiscardHandler)
+
+	assert.NotNil(t, newMemoryLimiter(t.Context(), 0.85, "", log))
+	assert.Nil(t, newMemoryLimiter(t.Context(), -1, "", log), "a negative ratio")
+	assert.Nil(t, newMemoryLimiter(t.Context(), 0.85, "1GiB", log), "GOMEMLIMIT in the environment")
 }
 
 func TestMemoryLimiter_RunFollowsUntilCancelled(t *testing.T) {

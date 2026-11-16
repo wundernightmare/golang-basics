@@ -19,7 +19,7 @@ import (
 //	db_pool_acquires_waited_total                           acquires that had to wait for a free conn
 //	db_pool_acquire_wait_seconds_total                      time spent acquiring connections
 //	db_pool_acquires_canceled_total                         acquires cancelled by context while waiting
-//	db_query_duration_seconds{operation}                    Exec / Query / QueryRow latency
+//	db_query_duration_seconds{operation}                    Exec / Query / QueryRow / SendBatch / CopyFrom latency
 //	db_query_errors_total{operation}                        of those, the ones that failed
 //
 // The names are the workspace's metrics contract (docs/METRICS.md), shared
@@ -30,9 +30,22 @@ import (
 // sees (backends, locks, replication) is postgres-exporter's job, not ours.
 //
 // operation is the name the caller put on the context with [WithOperation]
-// ("tasks.create"), or the statement's leading keyword in lower case
-// ("select", "insert", "begin", …) when there is none — bounded either way,
-// never the SQL text.
+// ("tasks.create"), or, when there is none, the statement's leading keyword
+// in lower case ("select", "insert", …), "batch" for a SendBatch and "copy"
+// for a CopyFrom — bounded either way, never the SQL text. The statements
+// that delimit a transaction (begin, commit, rollback, savepoint, release)
+// are always under their keyword: [DB.InTx] sends them with the caller's
+// context, and under its name they would count as that operation's queries.
+//
+// A batch is one observation, from SendBatch to the Close of its results. A
+// call that never got a connection (pool exhausted, pool closed) is in
+// neither metric: it shows in the db_pool_acquires_* counters.
+//
+// Two DBs in one process have the same metric names. To register both on one
+// registry, wrap the registry for each of them — for every one, not only the
+// second:
+//
+//	prometheus.WrapRegistererWith(prometheus.Labels{"pool": "replica"}, reg).MustRegister(replica.Collectors()...)
 func (db *DB) Collectors() []prometheus.Collector {
 	stat := db.pool.Stat
 	gauge := func(name, help string, f func() float64, labels prometheus.Labels) prometheus.Collector {
@@ -62,15 +75,17 @@ func (db *DB) Collectors() []prometheus.Collector {
 
 type operationKey struct{}
 
-// WithOperation names the queries run with ctx for the query metrics
-// (db_query_duration_seconds{operation=name}). Use a constant per call site
-// ("tasks.list"), never anything derived from input: it is a label.
+// WithOperation names the queries, batches and copies run with ctx for the
+// query metrics (db_query_duration_seconds{operation=name}). Use a constant
+// per call site ("tasks.list"), never anything derived from input: it is a
+// label.
 func WithOperation(ctx context.Context, name string) context.Context {
 	return context.WithValue(ctx, operationKey{}, name)
 }
 
-// queryMetrics is a [pgx.QueryTracer] that times every Exec / Query /
-// QueryRow. It runs beside otelpgx through a multitracer.
+// queryMetrics is the pgx tracer ([pgx.QueryTracer], [pgx.BatchTracer],
+// [pgx.CopyFromTracer]) that times every Exec / Query / QueryRow / SendBatch /
+// CopyFrom. It runs beside otelpgx through a multitracer.
 type queryMetrics struct {
 	duration *prometheus.HistogramVec
 	errors   *prometheus.CounterVec
@@ -99,16 +114,57 @@ type queryStartKey struct{}
 
 // TraceQueryStart implements [pgx.QueryTracer].
 func (m *queryMetrics) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	op, _ := ctx.Value(operationKey{}).(string)
-	if op == "" {
-		op = statementKeyword(data.SQL)
+	keyword := statementKeyword(data.SQL)
+	if transactionControl[keyword] {
+		return started(ctx, keyword)
 	}
 
-	return context.WithValue(ctx, queryStartKey{}, queryStart{op: op, start: time.Now()})
+	return started(ctx, operation(ctx, keyword))
 }
 
 // TraceQueryEnd implements [pgx.QueryTracer].
 func (m *queryMetrics) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	m.end(ctx, data.Err)
+}
+
+// TraceBatchStart implements [pgx.BatchTracer].
+func (m *queryMetrics) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	return started(ctx, operation(ctx, "batch"))
+}
+
+// TraceBatchQuery implements [pgx.BatchTracer]. The batch is measured as a
+// whole; the error of a statement in it arrives again at TraceBatchEnd.
+func (m *queryMetrics) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+
+// TraceBatchEnd implements [pgx.BatchTracer].
+func (m *queryMetrics) TraceBatchEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchEndData) {
+	m.end(ctx, data.Err)
+}
+
+// TraceCopyFromStart implements [pgx.CopyFromTracer].
+func (m *queryMetrics) TraceCopyFromStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceCopyFromStartData) context.Context {
+	return started(ctx, operation(ctx, "copy"))
+}
+
+// TraceCopyFromEnd implements [pgx.CopyFromTracer].
+func (m *queryMetrics) TraceCopyFromEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceCopyFromEndData) {
+	m.end(ctx, data.Err)
+}
+
+// operation is the caller's [WithOperation] name, or else fallback.
+func operation(ctx context.Context, fallback string) string {
+	if op, _ := ctx.Value(operationKey{}).(string); op != "" {
+		return op
+	}
+
+	return fallback
+}
+
+func started(ctx context.Context, op string) context.Context {
+	return context.WithValue(ctx, queryStartKey{}, queryStart{op: op, start: time.Now()})
+}
+
+func (m *queryMetrics) end(ctx context.Context, err error) {
 	qs, ok := ctx.Value(queryStartKey{}).(queryStart)
 	if !ok {
 		return
@@ -116,9 +172,15 @@ func (m *queryMetrics) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.
 
 	m.duration.WithLabelValues(qs.op).Observe(time.Since(qs.start).Seconds())
 	// "no rows" is an answer, not a failure (it surfaces at Scan, but guard anyway).
-	if data.Err != nil && !errors.Is(data.Err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		m.errors.WithLabelValues(qs.op).Inc()
 	}
+}
+
+// transactionControl is the statements that delimit a transaction and belong
+// to no operation.
+var transactionControl = map[string]bool{ //nolint:gochecknoglobals // read-only lookup table (Go has no const maps)
+	"begin": true, "commit": true, "rollback": true, "savepoint": true, "release": true,
 }
 
 // knownKeywords bounds the fallback label: anything else is "other".

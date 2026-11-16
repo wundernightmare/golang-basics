@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,9 +29,8 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
-// ShutdownFunc flushes and tears down the tracer provider. Defer it in main so
-// buffered spans are exported before the process exits; a nil-safe no-op is
-// returned when tracing is disabled.
+// ShutdownFunc flushes and tears down the tracer provider; see
+// [Telemetry.Shutdown] for what the one [Init] returns guarantees.
 type ShutdownFunc func(ctx context.Context) error
 
 // Telemetry is what [Init] built. Pass TracerProvider / Propagator to the
@@ -44,7 +44,14 @@ type Telemetry struct {
 	// Propagator is W3C trace context + baggage — always, even when disabled,
 	// so an incoming trace context is still forwarded to the next hop.
 	Propagator propagation.TextMapPropagator
-	// Shutdown flushes and stops the provider; it must be called on shutdown.
+	// Shutdown exports what is buffered and stops the provider; a service
+	// calls it once, on exit, usually as [Telemetry.Stop]. It lasts until
+	// ctx's deadline, or five seconds when ctx has none, and does not stop
+	// when ctx is cancelled: the context of a service is cancelled by the
+	// signal that ends it, and a provider stopped under a cancelled context
+	// drops its spans for good. The error — also logged at warn — says that
+	// spans may have been lost: the time ran out, or the collector did not
+	// take the last export. A no-op when tracing is disabled.
 	Shutdown ShutdownFunc
 	// Retro is the retroactive sampling buffer: nil when tracing is disabled
 	// or the buffer is off (OTEL_RETRO_BUFFER_MIB < 0). A bus between
@@ -63,37 +70,47 @@ func (t *Telemetry) Collectors() []prometheus.Collector {
 	return t.Retro.Collectors()
 }
 
-// shutdownBudget is how long [Telemetry.Stop] gives the last spans to leave.
+// shutdownBudget is how long the last spans have to leave when the caller of
+// Shutdown sets no deadline: below the grace period an orchestrator gives a
+// process by default, whatever the queue holds and the export timeout is.
 const shutdownBudget = 5 * time.Second
 
-// Stop is Shutdown for a defer: it flushes and stops the provider within
-// five seconds of its own — the process is exiting, the caller's context is
-// already cancelled — and drops the error, which the SDK's error handler has
-// logged by then.
+// Stop is [Telemetry.Shutdown] for a defer, within its five seconds; the
+// error is dropped, Shutdown has logged it.
 //
 //	tel, err := otelx.Init(ctx, cfg.OTel, logger)
 //	if err != nil { … }
 //	defer tel.Stop()
 func (t Telemetry) Stop() {
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
-	defer cancel()
+	_ = t.Shutdown(context.Background())
+}
 
-	_ = t.Shutdown(ctx)
+// flushContext is the context of the final flush: ctx without its
+// cancellation, ending at ctx's deadline or, without one, after
+// shutdownBudget.
+func flushContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	flush := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		return context.WithDeadline(flush, deadline)
+	}
+
+	return context.WithTimeout(flush, shutdownBudget)
 }
 
 // Init builds the tracer provider and the W3C trace-context + baggage
 // propagators, installs both globally (see [Telemetry]), and routes the
-// SDK's own errors and diagnostics to log. With
-// cfg.Enabled false it wires only the propagators and leaves the no-op
-// provider — the service still threads context across hops, just without
-// exporting — so the same binary runs with or without a collector.
+// SDK's own errors and diagnostics to log. A cfg that [Config.Validate]
+// refuses is an error. With cfg.Enabled false it installs only the
+// propagators: the global tracer provider is left as it was and the returned
+// one is a no-op — the service still threads context across hops, just
+// without exporting — so the same binary runs with or without a collector.
 //
 // When enabled it builds an OTLP/HTTP exporter to cfg.Endpoint (TLS unless
 // cfg.Insecure; optional CA, mTLS and headers), describes the process in the
 // resource (service name / version / instance, deployment environment, host,
 // container, runtime, plus OTEL_RESOURCE_ATTRIBUTES), and applies
-// parent-based ratio head sampling. [Telemetry.Shutdown] must be called on
-// shutdown. Export failures — a collector that is down, a rejected batch —
+// parent-based ratio head sampling. The service ends with [Telemetry.Stop].
+// Export failures — a collector that is down, a rejected batch —
 // are logged at warn, at most once per errorLogInterval, and never affect the
 // service.
 func Init(ctx context.Context, cfg Config, log *slog.Logger) (*Telemetry, error) {
@@ -103,11 +120,17 @@ func Init(ctx context.Context, cfg Config, log *slog.Logger) (*Telemetry, error)
 
 	cfg.withDefaults()
 
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	exportErrors := &errorHandler{log: log}
+
 	// Propagators are always installed: even an unsampled/disabled service must
 	// forward an incoming trace context to the next hop.
 	prop := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
 	otel.SetTextMapPropagator(prop)
-	otel.SetErrorHandler(newErrorHandler(log))
+	otel.SetErrorHandler(exportErrors)
 	otel.SetLogger(logr.FromSlogHandler(log.Handler()))
 
 	if !cfg.Enabled {
@@ -133,24 +156,44 @@ func Init(ctx context.Context, cfg Config, log *slog.Logger) (*Telemetry, error)
 	tp, buffer := newProvider(cfg, exporter, res)
 	otel.SetTracerProvider(tp)
 
+	bufferMiB := 0
+
 	if buffer != nil {
+		bufferMiB = buffer.Capacity() >> 20 //nolint:mnd // bytes to MiB
+
 		// A warn or error line of an unsampled trace exports it; a logger
 		// that is not httpx's has no such lines, and nothing is bound.
 		httpx.BindTraceTrigger(log, buffer)
 	}
 
+	// "service" is the key httpx's logger puts on every line.
 	log.InfoContext(ctx, "tracing enabled",
 		"endpoint", cfg.Endpoint, "insecure", cfg.Insecure, "sampler_ratio", cfg.SamplerRatio,
-		"trust_remote_parent", cfg.TrustRemoteParent, "service", cfg.ServiceName, "version", cfg.Version,
-		"retro_buffer_mib", max(cfg.Retro.BufferMiB, 0))
+		"redraw_remote_parent", cfg.RedrawRemoteParent, "service_name", cfg.ServiceName, "version", cfg.Version,
+		"retro_buffer_mib", bufferMiB)
 
 	shutdown := func(ctx context.Context) error {
-		if err := tp.Shutdown(ctx); err != nil {
-			log.WarnContext(ctx, "tracing shutdown: spans may have been lost", "err", err)
-			return err
+		if buffer != nil {
+			// A line written from here on cannot export its trace, and so
+			// may not carry trace_id.
+			httpx.BindTraceTrigger(log, nil)
 		}
 
-		return nil
+		flush, cancel := flushContext(ctx)
+		defer cancel()
+
+		// The SDK hands a failed export of the drain to the error handler,
+		// not to the caller of Shutdown.
+		failed := exportErrors.collect()
+		err := tp.Shutdown(flush)
+		exports, exportErr := failed()
+
+		if err = errors.Join(err, exportErr); err != nil {
+			log.WarnContext(ctx, "tracing shutdown: spans may have been lost",
+				"err", err, "failed_exports", exports, "suppressed_since_last", exportErrors.suppressed.Swap(0))
+		}
+
+		return err
 	}
 
 	return &Telemetry{TracerProvider: tp, Propagator: prop, Shutdown: shutdown, Retro: buffer}, nil
@@ -184,27 +227,35 @@ func newProvider(cfg Config, exporter sdktrace.SpanExporter, res *resource.Resou
 // purpose: the same wire protocol, one fewer dependency tree (grpc, its
 // generated protos and gateway are the largest single contributor to a
 // service binary otherwise), and it passes through any HTTP proxy.
+//
+// The exporter applies the unprefixed OTEL_EXPORTER_OTLP_* variables of the
+// process before its options (otlptracehttp v1.47.0,
+// internal/otlpconfig/envconfig.go: endpoint, insecure, certificates,
+// headers, compression, protocol, timeout). Every setting it takes from
+// there has an option here, so that cfg is the only source: a variable meant
+// for another SDK in the pod neither redirects the export nor fails Init.
 func newExporter(ctx context.Context, cfg Config) (*otlptrace.Exporter, error) {
-	opts := []otlptracehttp.Option{
-		otlptracehttp.WithEndpoint(cfg.Endpoint),
-		otlptracehttp.WithTimeout(cfg.ExportTimeout),
-	}
-	if len(cfg.Headers) > 0 {
-		opts = append(opts, otlptracehttp.WithHeaders(cfg.Headers))
-	}
+	scheme, tlsCfg := "http", (*tls.Config)(nil)
 
-	if cfg.Insecure {
-		opts = append(opts, otlptracehttp.WithInsecure())
-	} else {
-		tlsCfg, err := tlsConfig(cfg)
-		if err != nil {
+	if !cfg.Insecure {
+		var err error
+		if tlsCfg, err = tlsConfig(cfg); err != nil {
 			return nil, err
 		}
 
-		opts = append(opts, otlptracehttp.WithTLSClientConfig(tlsCfg))
+		scheme = "https"
 	}
 
-	exporter, err := otlptracehttp.New(ctx, opts...)
+	exporter, err := otlptracehttp.New(ctx,
+		// Host, path and — by the scheme — plaintext or TLS in one option:
+		// the exporter has no option that turns TLS back on.
+		otlptracehttp.WithEndpointURL(scheme+"://"+cfg.Endpoint+"/v1/traces"),
+		otlptracehttp.WithTLSClientConfig(tlsCfg),
+		otlptracehttp.WithHeaders(cfg.Headers),
+		otlptracehttp.WithCompression(otlptracehttp.NoCompression),
+		otlptracehttp.WithEncoding(otlptracehttp.EncodingProtobuf),
+		otlptracehttp.WithTimeout(cfg.ExportTimeout),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("otelx: build otlp exporter: %w", err)
 	}
@@ -303,21 +354,56 @@ func instanceID() string {
 // produces one error per failed batch, every few seconds, per replica.
 const errorLogInterval = 30 * time.Second
 
-// newErrorHandler returns an [otel.ErrorHandler] that logs at warn, at most
-// once per errorLogInterval, with a count of what was suppressed since.
-func newErrorHandler(log *slog.Logger) otel.ErrorHandler {
-	h := &errorHandler{log: log}
-	return h
-}
-
+// errorHandler is the [otel.ErrorHandler] of the SDK: it logs at warn, at
+// most once per errorLogInterval, with a count of what was suppressed since.
 type errorHandler struct {
 	log        *slog.Logger
 	lastLogged atomic.Int64 // unix nanos
 	suppressed atomic.Int64
+
+	mu         sync.Mutex
+	collecting bool
+	first      error
+	collected  int
+}
+
+// collect makes the handler keep the errors it is handed instead of logging
+// them, until the returned function is called: that one gives how many
+// there were and the first of them.
+func (h *errorHandler) collect() (stop func() (count int, first error)) {
+	h.mu.Lock()
+	h.collecting, h.first, h.collected = true, nil, 0
+	h.mu.Unlock()
+
+	return func() (int, error) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		h.collecting = false
+
+		return h.collected, h.first
+	}
+}
+
+func (h *errorHandler) keep(err error) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if !h.collecting {
+		return false
+	}
+
+	if h.first == nil {
+		h.first = err
+	}
+
+	h.collected++
+
+	return true
 }
 
 func (h *errorHandler) Handle(err error) {
-	if err == nil {
+	if err == nil || h.keep(err) {
 		return
 	}
 

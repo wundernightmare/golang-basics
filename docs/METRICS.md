@@ -11,7 +11,13 @@ repo). Where the Go implementation lives is in the last column.
   counters end in `_total`. No milliseconds anywhere.
 - **Label names** come from one list: `method`, `route`, `status`, `target`,
   `outcome`, `topic`, `result`, `operation`, `check`, `critical`, `client`,
-  `state`, `event`, `event_type`, `reason`, `integration`.
+  `state`, `event`, `event_type`, `reason`, `integration`, `scope`, `task`,
+  `kind`, `from`, `to`, `level`, `cache`, `provider`, `version`, `revision`.
+  In Go, a process that puts two instances of one library on one registry
+  adds a const label of its own where it registers them
+  (`prometheus.WrapRegistererWith`, around every instance, not only the
+  second); the libraries' READMEs use `pool` (Postgres), `cache` (Valkey),
+  `store` (S3), `producer` (Kafka) and `client` (the HTTP and gRPC clients).
 - **Bounded label values**, from code or config, never from a request:
   `method` is a standard method or `_OTHER`; `route` the template
   (`/tasks/{id}`), `unmatched` when none matched; `status` the code sent, 499
@@ -89,6 +95,12 @@ method (`/pkg.Service/Method`) — from generated code, so bounded.
 `other`. Go only (pgxpool counts these): `db_pool_acquires_waited_total`,
 `db_pool_acquire_wait_seconds_total`, `db_pool_acquires_canceled_total`.
 
+In Go a `SendBatch` and a `CopyFrom` are one observation each (`batch` /
+`copy` when the call site is not named), and `begin`, `commit`, `rollback`,
+`savepoint`, `release` are always under their keyword, never under the call
+site's name: `operation="tasks.create"` counts the statements of the unit,
+not the transaction around them.
+
 ## Kafka — `libs/kafka` (same names for both Go providers)
 
 | Metric | Type | Labels |
@@ -124,7 +136,8 @@ docker/deps.yml).
 
 The duration is the whole call, the client's retries included — the number
 `S3_OP_TIMEOUT` is set against; buckets as Kafka's (up to 60 s: a multipart
-part). A missing key on `get` / `head` is an answer, not an error.
+part). A missing key on `get` / `head` and an object over the caller's read
+limit on `get` are answers, not errors; a missing bucket is an error.
 
 ## Outbox — `services/tasks/internal/outbox` (computed once per relay pass, never per scrape)
 

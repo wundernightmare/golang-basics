@@ -43,6 +43,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 
 	_, err = s3.LoadConfigFrom("INGEST_", map[string]string{"INGEST_S3_MAX_ATTEMPTS": "many"})
 	require.Error(t, err)
+
+	_, err = s3.LoadConfigFrom("INGEST_", map[string]string{"INGEST_S3_BUCKET": "b", "INGEST_S3_ENDPOINT": "http://s3.internal:9000"})
+	require.ErrorIs(t, err, s3.ErrConfig, "a configured store is validated when it is loaded")
 }
 
 func TestConfigValidate(t *testing.T) {
@@ -61,17 +64,21 @@ func TestConfigValidate(t *testing.T) {
 	require.NoError(t, aws.Validate(), "no endpoint and no keys: AWS with the default credential chain")
 
 	missingCA := filepath.Join(t.TempDir(), "absent.pem")
+	notPEM := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(notPEM, []byte("not a certificate"), 0o600))
 
 	for name, tc := range map[string]struct {
 		mutate func(*s3.Config)
 		want   string
 	}{
-		"half a credential pair": {func(c *s3.Config) { c.SecretAccessKey = secret.New("") }, "go together"},
+		"key id without secret":  {func(c *s3.Config) { c.SecretAccessKey = secret.New("") }, "go together"},
+		"secret without key id":  {func(c *s3.Config) { c.AccessKeyID = "" }, "go together"},
 		"plaintext endpoint":     {func(c *s3.Config) { c.Endpoint = "http://s3.internal:9000" }, "S3_INSECURE=true"},
 		"endpoint without host":  {func(c *s3.Config) { c.Endpoint = "s3.internal" }, "must be a URL"},
 		"endpoint scheme":        {func(c *s3.Config) { c.Endpoint = "ftp://s3.internal" }, "scheme must be https"},
 		"missing CA file":        {func(c *s3.Config) { c.CAFile = missingCA }, "S3_CA_FILE"},
-		"CA file is a directory": {func(c *s3.Config) { c.CAFile = filepath.Dir(missingCA) }, "S3_CA_FILE: " + filepath.Dir(missingCA) + " is a directory"},
+		"CA file is a directory": {func(c *s3.Config) { c.CAFile = filepath.Dir(missingCA) }, "S3_CA_FILE"},
+		"CA file without a cert": {func(c *s3.Config) { c.CAFile = notPEM }, "S3_CA_FILE: " + notPEM + " holds no PEM certificate"},
 		"negative timeout":       {func(c *s3.Config) { c.OpTimeout = -time.Second }, "must be positive"},
 		"no attempts":            {func(c *s3.Config) { c.MaxAttempts = -1 }, "S3_MAX_ATTEMPTS"},
 		"no connections":         {func(c *s3.Config) { c.MaxConnsPerHost = -1 }, "S3_MAX_CONNS_PER_HOST"},
@@ -83,7 +90,9 @@ func TestConfigValidate(t *testing.T) {
 
 			cfg := valid()
 			tc.mutate(&cfg)
-			require.ErrorContains(t, cfg.Validate(), tc.want)
+			err := cfg.Validate()
+			require.ErrorContains(t, err, tc.want)
+			require.ErrorIs(t, err, s3.ErrConfig)
 		})
 	}
 
@@ -91,16 +100,4 @@ func TestConfigValidate(t *testing.T) {
 	insecure.Endpoint = "http://localhost:9000"
 	insecure.Insecure = true
 	require.NoError(t, insecure.Validate())
-}
-
-func TestNewRejectsABadCAFile(t *testing.T) {
-	t.Parallel()
-
-	notPEM := filepath.Join(t.TempDir(), "ca.pem")
-	require.NoError(t, os.WriteFile(notPEM, []byte("not a certificate"), 0o600))
-
-	_, err := s3.New(context.Background(), s3.Config{
-		Bucket: "b", Endpoint: "https://s3.internal", AccessKeyID: "k", SecretAccessKey: secret.New("s"), CAFile: notPEM,
-	}, nil)
-	require.ErrorContains(t, err, "holds no PEM certificate")
 }

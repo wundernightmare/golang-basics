@@ -113,8 +113,12 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// Validate reports the first setting a cache cannot run with.
+// Validate reports the first setting a cache cannot run with, judging the
+// configuration as [New] runs it: with the defaults in place of the optional
+// fields left at zero. What it accepts, New accepts.
 func (c Config) Validate() error {
+	c.applyDefaults()
+
 	switch {
 	case c.Name == "":
 		return errors.New("tiercache: Name is required")
@@ -126,16 +130,19 @@ func (c Config) Validate() error {
 		return errors.New("tiercache: StaleIfError must not be negative")
 	}
 
-	if errs := c.Breaker.Validate(); len(errs) > 0 {
-		return fmt.Errorf("tiercache: breaker: %w", errors.Join(errs...))
+	if err := c.Breaker.Validate(); err != nil {
+		return fmt.Errorf("tiercache: breaker: %w", err)
 	}
 
 	return nil
 }
 
 // Remote is the second level: what [Cache] needs from a shared cache server.
-// *valkey.Cache (libs/valkey) implements it; every method is expected to
-// carry its own deadline, as that one does (VALKEY_OP_TIMEOUT).
+// *valkey.Cache (libs/valkey) implements it, and this module does not import
+// it; every method is expected to carry its own deadline, as that one does
+// (VALKEY_OP_TIMEOUT), and to fail with the context's error on a context
+// that is done — that is how the breaker tells a caller out of time from an
+// L2 that does not answer.
 //
 // Pass a nil Remote — the untyped nil, not a nil *valkey.Cache — to run on
 // L1 and the loader alone.
@@ -165,5 +172,7 @@ type Codec[T any] interface {
 
 // Loader reads a value from the source of truth. It returns [ErrNotFound]
 // (wrapped or not) when there is none; any other error counts as a failure of
-// the source, which is what [Config.StaleIfError] is for.
+// the source, which is what [Config.StaleIfError] is for. Its context ends
+// with the deadline of the caller that started the lookup, with
+// [Config.RefreshTimeout] in a background refresh, and with [Cache.Close].
 type Loader[T any] func(ctx context.Context, key string) (T, error)

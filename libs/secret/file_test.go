@@ -1,6 +1,7 @@
 package secret_test
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,6 +122,40 @@ func TestCertPool_TrustsWhatTheFileNamesAndNothingElse(t *testing.T) {
 	want := x509.NewCertPool()
 	want.AddCert(mine)
 	assert.True(t, only.Equal(want), "exactly the certificates of the file")
+
+	key := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("not a certificate")}))
+
+	annotated, err := secret.CertPool(write(t, "# issued by mine\r\n"+minePEM+key+"trailing note\n"))
+	require.NoError(t, err, "text around the blocks and a block of another type are passed over")
+	assert.True(t, annotated.Equal(want))
+}
+
+// A bundle is read whole or not at all: with one of two authorities damaged
+// the client would start, and fail only when the dependency moves to the
+// certificate signed by the damaged one.
+func TestCertPool_RefusesABundleWithADamagedBlock(t *testing.T) {
+	t.Parallel()
+
+	_, good := authority(t, "good")
+	cert, _ := authority(t, "damaged")
+
+	notDER := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: bytes.Repeat([]byte{0xff}, len(cert.Raw))}))
+	cut := strings.TrimSuffix(good, "-----END CERTIFICATE-----\n")
+	require.NotEqual(t, good, cut)
+
+	for name, content := range map[string]string{
+		"a block that is not a certificate": good + notDER,
+		"a block that is not base64":        good + strings.Replace(good, "\n", "\n!", 1),
+		"a block cut before its end":        good + cut,
+		"a cut block before a whole one":    cut + good,
+	} {
+		path := write(t, content)
+
+		pool, err := secret.CertPool(path)
+		require.ErrorIs(t, err, secret.ErrMalformedBundle, name)
+		require.ErrorContains(t, err, path+" holds a malformed PEM block", name)
+		assert.Nil(t, pool, name)
+	}
 }
 
 func TestCertPool_RefusesAFileWithNoCertificate(t *testing.T) {

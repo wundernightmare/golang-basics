@@ -9,16 +9,11 @@
 // OpenTelemetry dependency tree, while services that genuinely span process
 // boundaries (services/tasks → Kafka → services/consumer) opt in by importing
 // otelx. Tracing is also opt-in at runtime — with OTEL_ENABLED=false (the
-// default) [Init] installs only the propagators and a no-op provider, so the
-// same binary runs with or without a collector.
+// default) [Init] installs only the propagators and returns a no-op provider,
+// so the same binary runs with or without a collector.
 //
-// A service typically does:
-//
-//	otelCfg, _ := otelx.LoadConfig("TASKS_")
-//	tel, _ := otelx.Init(ctx, otelCfg, log)
-//	defer tel.Shutdown(context.Background())
-//	srv, _ := httpx.NewServer(cfg, log,
-//		httpx.WithTracerProvider(tel.TracerProvider), httpx.WithPropagator(tel.Propagator))
+// A service calls [Init] first and defers [Telemetry.Stop]; the package
+// example is its main.
 //
 // Metrics are deliberately not OpenTelemetry: the workspace scrapes Prometheus
 // from the admin listeners (libs/httpx.Metrics and the libs' collectors), so

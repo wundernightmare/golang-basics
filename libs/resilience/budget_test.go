@@ -1,6 +1,9 @@
 package resilience
 
 import (
+	"math"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +38,51 @@ func TestRetryBudget_Disabled(t *testing.T) {
 	require.Nil(t, b)
 	b.Request()
 	assert.Equal(t, 1000, retries(b, 1000))
+
+	assert.Nil(t, NewRetryBudget(0.2, 10, -time.Second, time.Now), "a negative window is no budget either")
+}
+
+// Requests and retries counted from many goroutines are all counted, and
+// the retries granted between them stay within the bound.
+func TestRetryBudget_ConcurrentUseKeepsTheCount(t *testing.T) {
+	t.Parallel()
+
+	const goroutines, each = 8, 2000
+
+	b, clk := testBudget(t, 0.5, 0)
+
+	var (
+		wg      sync.WaitGroup
+		granted atomic.Int64
+	)
+
+	for range goroutines {
+		wg.Go(func() {
+			for range each {
+				b.Request()
+
+				if b.TryRetry() {
+					granted.Add(1)
+				}
+			}
+		})
+	}
+
+	wg.Wait()
+
+	requests, spent := b.w.sum(clk.now())
+	assert.Equal(t, goroutines*each, requests)
+	assert.Equal(t, int64(goroutines*each/2), granted.Load(), "half of the requests, each grant counted once")
+	assert.Equal(t, int(granted.Load()), spent)
+}
+
+// A ratio that is not a number must not turn the budget off.
+func TestRetryBudget_NaNRatioGrantsNothing(t *testing.T) {
+	t.Parallel()
+
+	b, _ := testBudget(t, math.NaN(), 3)
+	b.Request()
+	assert.Equal(t, 0, retries(b, 10))
 }
 
 func TestRetryBudget_MinRetriesWithoutRequests(t *testing.T) {

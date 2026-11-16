@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -29,6 +31,9 @@ type Producer struct {
 	log     *slog.Logger
 	metrics *producerMetrics
 	tel     telemetry
+
+	closed    atomic.Bool
+	closeOnce sync.Once
 }
 
 // NewProducer builds a producer from cfg with the linked provider (see
@@ -81,7 +86,11 @@ func pingBrokers(ctx context.Context, client ProducerClient, timeout time.Durati
 // KAFKA_PUBLISH_TIMEOUT passes (or ctx ends first). An empty msg.Topic falls
 // back to the configured default Topic; msg.Key may be nil and determines
 // the partition (records with the same key keep their relative order).
-// Every error is a *[SendError] (see [Rejected]).
+// Every error is a *[SendError] (see [Rejected]). A ctx that is already over
+// sends nothing; one that ends while Send waits leaves the record with the
+// client, which may still deliver it — a retry of that Send can then
+// duplicate it, as at-least-once allows. After [Producer.Close] the error
+// wraps [ErrClientClosed].
 //
 // Trace context: when msg.Headers carry a traceparent (an outbox relay
 // replaying the context stored with the event), the publish span continues
@@ -93,7 +102,14 @@ func (p *Producer) Send(ctx context.Context, msg Message) error {
 	}
 
 	start := time.Now()
-	err := send(ctx, p.tel, p.cl, p.cfg.PublishTimeout, msg)
+
+	var err error
+	if p.closed.Load() {
+		err = NewSendError(KindUnavailable, 0, ErrClientClosed)
+	} else {
+		err = send(ctx, p.tel, p.cl, p.cfg.PublishTimeout, msg)
+	}
+
 	p.metrics.send.observe(msg.Topic, start, err)
 
 	if err != nil {
@@ -107,7 +123,9 @@ func (p *Producer) Send(ctx context.Context, msg Message) error {
 
 // send is the traced, bounded send both the [Producer] and the consumer's
 // dead-letter publishing use. The wait is bounded by budget plus a second
-// of slack: the client itself fails the record at the budget.
+// of slack: the client itself fails the record at the budget. A ctx that is
+// already over fails here, before the client is handed a record its caller
+// has given up on.
 func send(ctx context.Context, tel telemetry, client ProducerClient, budget time.Duration, msg Message) error {
 	msg.Headers = append([]Header(nil), msg.Headers...) // the caller's slice is not ours to grow
 
@@ -133,7 +151,11 @@ func send(ctx context.Context, tel telemetry, client ProducerClient, budget time
 	ctx, cancel := context.WithTimeout(ctx, budget+time.Second)
 	defer cancel()
 
-	err := client.Send(ctx, msg)
+	err := ctx.Err()
+	if err == nil {
+		err = client.Send(ctx, msg)
+	}
+
 	if err != nil {
 		var se *SendError
 		if !errors.As(err, &se) {
@@ -150,9 +172,18 @@ func send(ctx context.Context, tel telemetry, client ProducerClient, budget time
 }
 
 // ReadyCheck returns a readiness probe (a libs/httpx CheckFunc) that asks
-// the brokers for metadata with a short timeout.
+// the brokers for metadata with a short timeout. After [Producer.Close] it
+// fails with [ErrClientClosed].
 func (p *Producer) ReadyCheck() func(ctx context.Context) error {
-	return readyCheck(p.cl)
+	check := readyCheck(p.cl)
+
+	return func(ctx context.Context) error {
+		if p.closed.Load() {
+			return ErrClientClosed
+		}
+
+		return check(ctx)
+	}
 }
 
 // readyTimeout bounds one readiness probe by itself, whatever deadline the
@@ -176,8 +207,14 @@ func readyCheck(cl interface {
 	}
 }
 
-// Close flushes queued records (briefly) and shuts the client down.
-func (p *Producer) Close() { p.cl.Close() }
+// Close flushes queued records (briefly) and shuts the client down. It is
+// idempotent.
+func (p *Producer) Close() {
+	p.closeOnce.Do(func() {
+		p.closed.Store(true)
+		p.cl.Close()
+	})
+}
 
 // warnPlaintextSASL logs the one insecure combination Validate allows: a
 // password sent over an unencrypted connection.

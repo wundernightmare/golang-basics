@@ -9,7 +9,13 @@ names — and **two client libraries** behind it, picked at build time:
 | [`libs/kafka`](.) | — the provider-neutral core: config, `Send` / `Run`, commit / retry / DLQ / drain policy, trace propagation, metrics, the `Driver` interface | pure Go |
 | [`libs/kafka-rdkafka`](../kafka-rdkafka) | **librdkafka** via [confluent-kafka-go](https://github.com/confluentinc/confluent-kafka-go) — the same engine as nodejs-basics (`@confluentinc/kafka-javascript`) | cgo; static musl binary in the image. **The default** |
 | [`libs/kafka-franz`](../kafka-franz) | **[franz-go](https://github.com/twmb/franz-go)** | pure Go, `CGO_ENABLED=0` |
-| [`libs/kafka/kafkatest`](kafkatest) | the conformance suite both providers run against a real broker | test-only |
+| [`libs/kafka/kafkatest`](kafkatest) | the conformance suite both providers run against a real broker | test-only; a module of its own |
+| `libs/kafka-rdkafka/integration`, `libs/kafka-franz/integration` | each provider's broker-backed suite: the conformance suite with that provider linked | test-only; modules of their own |
+
+The Docker stack the broker tests need (testcontainers, the Docker client)
+is required only by `kafkatest` and the two `integration` modules: the
+`go.mod` of `libs/kafka` and of either provider has none of it. A provider's
+own `go.mod` therefore never requires `kafkatest`.
 
 A provider registers itself when imported, the `database/sql` way. Services
 import it in one file per provider, selected by a build tag
@@ -117,7 +123,21 @@ is written to the client **explicitly** — no setting is left to whatever the
 client library's default happens to be in the version you link. `<service>
 --config-reference` prints them all with their defaults. Zero means "unset"
 (the default fills it), so the DLQ is disabled with `none` (`-` is read the
-same way) and "no retries" / "no statistics" is a negative number.
+same way) and "no statistics" is a negative number. Two keys are the
+exception, because their zero is a setting: `KAFKA_PRODUCER_LINGER_MS=0` (no
+batching window) and `KAFKA_CONSUMER_MAX_RETRIES=0` (no retries) stay 0. Their
+defaults apply where the key is absent from the environment and the YAML; a
+`kafka.Config` built in code has 0 in both unless it sets them.
+
+**`Validate` is the whole check.** `kafka.Config.Validate()` — called by
+`LoadConfig`, by both constructors and by `--check-config` — also asks the
+linked provider (`Driver.Validate`), and each client has its own ranges: a
+config that passes builds a producer and a consumer, a value one client does
+not take is refused with the key's name. The ranges that differ are in the
+tables below. One thing only a constructor can report: with librdkafka, an
+unknown or malformed property in `KAFKA_*_EXTRA_PROPERTIES` — librdkafka
+checks properties when a client is created. `NewProducer` and `NewConsumer`
+do (the consumer for its dead-letter producer too), so it still fails at boot.
 
 **Connection**
 
@@ -125,7 +145,7 @@ same way) and "no retries" / "no statistics" is a negative number.
 | --- | --- | --- | --- | --- |
 | `KAFKA_BROKERS` | `bootstrap.servers` | `SeedBrokers` | **required** | no default address: a service where Kafka is optional is on exactly when it is set |
 | `KAFKA_CLIENT_ID` | `client.id` | `ClientID` | `golang-basics` | shows in broker logs and quotas; set it per service |
-| `KAFKA_DIAL_TIMEOUT` | `socket.connection.setup.timeout.ms` | `DialTimeout` | `10s` | also bounds the boot connectivity check (a metadata request) |
+| `KAFKA_DIAL_TIMEOUT` | `socket.connection.setup.timeout.ms` (at least `1s`) | `DialTimeout` | `10s` | also bounds the boot connectivity check (a metadata request) |
 | `KAFKA_ALLOW_AUTO_TOPIC_CREATION` | `allow.auto.create.topics` | `AllowAutoTopicCreation` | `false` | see [Topics are broker policy](#topics-are-broker-policy) |
 | `KAFKA_STATISTICS_INTERVAL_MS` | `statistics.interval.ms` | — (hooks are live; ≤ 0 turns the client gauges off) | `15000` | client metrics refresh; negative = off |
 | — | `socket.keepalive.enable=true` | Go's default TCP keepalive | fixed | cloud LBs / NAT drop idle connections silently |
@@ -137,7 +157,7 @@ same way) and "no retries" / "no statistics" is a negative number.
 | `KAFKA_SECURITY_PROTOCOL` | `security.protocol` | `DialTLSConfig` + `SASL` | `plaintext` |
 | `KAFKA_SASL_MECHANISM` | `sasl.mechanism` | `plain` / `scram` mechanism | — (`PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`) |
 | `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` / `_FILE` | `sasl.username`, `sasl.password` | `Auth{User, Pass}` | — |
-| `KAFKA_SSL_CA_LOCATION` | `ssl.ca.location` | `tls.Config.RootCAs` (the file alone) | system roots |
+| `KAFKA_SSL_CA_LOCATION` | `ssl.ca.location`: a PEM file, a directory of certificates, or `probe` | `tls.Config.RootCAs`: a PEM file (the file alone); a directory or `probe` is a config error | system roots |
 | `KAFKA_SSL_CERTIFICATE_LOCATION`, `KAFKA_SSL_KEY_LOCATION` | `ssl.certificate.location`, `ssl.key.location` | `tls.Config.Certificates` | — (mTLS) |
 | `KAFKA_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM` | `ssl.endpoint.identification.algorithm` | host name check on / chain-only `VerifyConnection` | `https` |
 
@@ -162,16 +182,16 @@ share is not above the whole fetch.
 | Key | librdkafka | franz-go | Default |
 | --- | --- | --- | --- |
 | `KAFKA_TOPIC` | the record's topic when `Send` gets none | same | `tasks.events` |
-| `KAFKA_PUBLISH_TIMEOUT` | `message.timeout.ms` | `RecordDeliveryTimeout` | `5s` |
+| `KAFKA_PUBLISH_TIMEOUT` | `message.timeout.ms` (at least `1ms`, and longer than the linger) | `RecordDeliveryTimeout` (at least `1s`) | `5s` |
 | `KAFKA_PRODUCER_COMPRESSION_TYPE` | `compression.type` | `ProducerBatchCompression(codec, none)` | `lz4` |
-| `KAFKA_PRODUCER_LINGER_MS` | `linger.ms` | `ProducerLinger` | `5` |
+| `KAFKA_PRODUCER_LINGER_MS` | `linger.ms` (up to 900000) | `ProducerLinger` (up to 60000) | `5`; `0` = no batching window |
 | — | `acks=all`, `enable.idempotence=true` | `RequiredAcks(AllISRAcks)`, idempotent (franz-go's default) | fixed |
 
 **Consumer**
 
 | Key | librdkafka | franz-go | Default |
 | --- | --- | --- | --- |
-| `KAFKA_TOPICS`, `KAFKA_GROUP` | subscription, `group.id` | `ConsumeTopics`, `ConsumerGroup` | the topic, `tasks-consumer` |
+| `KAFKA_TOPICS`, `KAFKA_GROUP` | subscription, `group.id` | `ConsumeTopics` (+ `ConsumeRegex` when a topic starts with `^`), `ConsumerGroup` | the topic, `tasks-consumer` |
 | `KAFKA_CONSUMER_ASSIGNMENT_STRATEGY` | `partition.assignment.strategy` | `Balancers(...)` | `cooperative-sticky` |
 | `KAFKA_CONSUMER_SESSION_TIMEOUT_MS` | `session.timeout.ms` | `SessionTimeout` | `45000` (Kafka's default since 3.0) |
 | `KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS` | `max.poll.interval.ms` | `RebalanceTimeout` (closest: franz-go has no poll interval) | `300000` |
@@ -179,9 +199,23 @@ share is not above the whole fetch.
 | — | `enable.auto.commit=false`, `enable.auto.offset.store=false` | `DisableAutoCommit`, `BlockRebalanceOnPoll` | fixed: the loop commits |
 | `KAFKA_CONSUMER_MAX_POLL_RECORDS` | records per batch (loop) | `PollRecords(max)` | `100` |
 | `KAFKA_CONSUMER_HANDLER_TIMEOUT` | per attempt (loop) | same | `30s` |
-| `KAFKA_CONSUMER_MAX_RETRIES`, `_RETRY_BACKOFF`, `_RETRY_BACKOFF_MAX` | loop | same | `5`, `200ms`, `30s` |
-| `KAFKA_DEAD_LETTER_TOPIC` | loop | same | `{topic}.dlq`; `none` (or `-`) = stop instead |
+| `KAFKA_CONSUMER_MAX_RETRIES`, `_RETRY_BACKOFF`, `_RETRY_BACKOFF_MAX` | loop | same | `5` (`0` = no retries), `200ms`, `30s` |
+| `KAFKA_DEAD_LETTER_TOPIC` | loop | same | `{topic}.dlq`; `none` (or `-`) = stop instead. Never a topic the consumer reads |
 | `KAFKA_CONSUMER_DRAIN_TIMEOUT` | loop | same | `10s` |
+
+**A topic that starts with `^` is a regular expression**, in both providers:
+`KAFKA_TOPICS=^tasks\..*,audit.events` reads every topic the pattern matches
+plus `audit.events`. The pattern is matched from the `^` on and is not
+anchored at the end unless it says so (`$`). The dialects differ at the
+edges — librdkafka has its own regex engine, franz-go uses Go's `regexp`
+(RE2: no backreferences or lookaround), and a pattern Go cannot compile is a
+config error with franz-go — so keep to the common subset. franz-go never
+matches internal topics (`__consumer_offsets`). With a pattern in the
+subscription, `KAFKA_DEAD_LETTER_TOPIC` must be a fixed name the pattern does
+not match (or `none`): the default `{topic}.dlq` would be matched by the
+pattern its source matched, and the consumer would read — and park again —
+its own dead letters. `Validate` refuses that pair, and likewise a dead-letter
+topic that is one of the subscribed names.
 
 **Anything else (librdkafka only)**
 
@@ -195,7 +229,9 @@ They are applied after the named keys, and they **may not** set a property a
 named key owns (`queue.buffering.max.kbytes`, `fetch.message.max.bytes`,
 `partition.assignment.strategy`, `sasl.password`, …) or one the library
 manages (`acks`, `enable.idempotence`, `enable.auto.commit`,
-`enable.auto.offset.store`, `go.*`): one source of truth per setting. The
+`enable.auto.offset.store`, `socket.keepalive.enable`,
+`delivery.report.only.error` — `Send` waits for the report of every record —
+and `go.*`): one source of truth per setting. The
 error names the property and the key to use — never the value, which may be
 a password. Secret-looking properties are redacted in `/admin/config`. With
 franz-go linked, setting any of the three is a config error (exit 78) that
@@ -225,7 +261,9 @@ bound is therefore a named key, always written.
   + the batch the handler holds (`MAX_POLL_RECORDS` records) → ≈ 4 MiB +
   4 MiB × brokers.
 - a consumer also builds a producer for the dead-letter topic on first use —
-  same producer bounds, normally empty.
+  same producer bounds, normally empty. `NewConsumer` builds one and closes
+  it again, so producer properties librdkafka refuses stop the boot, not the
+  first poison record.
 
 **franz-go**
 
@@ -282,6 +320,12 @@ itself.
 - `linger.ms` 5 is the batching trade-off: up to 5 ms of latency per send for
   shared batches and their compression under load. Set 0 for one-at-a-time
   low-latency sends.
+- **A `Send` whose context ends** returns an `unavailable` error for that
+  call only. A context that is already over sends nothing. One that ends
+  while the record waits leaves the record with the client, which may still
+  deliver it (until `KAFKA_PUBLISH_TIMEOUT`): a retry can duplicate it, as
+  at-least-once allows. It never fails the sends of other callers — with
+  either provider.
 - Ordering is per key (= per partition). The outbox relay sends one event at
   a time in id order; a rejected event gives up its place.
 
@@ -299,6 +343,8 @@ only polls, commits and reports group changes).
 | …, DLQ off (`KAFKA_DEAD_LETTER_TOPIC=none`) | **not** committed; `Run` returns the error and the process stops (`result="failed"`). The poison record is redelivered on restart — for streams where skipping is never acceptable |
 | DLQ send itself fails (after retries) | as DLQ off: `Run` returns the error, nothing skipped |
 | handler panics | recovered, treated as an error (retried, then DLQ) |
+| `Run(ctx, nil)` | an error before anything is polled |
+| `Close` from another goroutine while `Run` is polling | `Run` returns `nil`; a record a handler is still working on is not committed |
 | each attempt | its own deadline (`KAFKA_CONSUMER_HANDLER_TIMEOUT`), a `process` span continuing the producer's trace, and `request_id` = the `event_id` header (or a fresh id) |
 
 **Commits.** Up to `KAFKA_CONSUMER_MAX_POLL_RECORDS` records are processed in
@@ -399,8 +445,10 @@ passes) — retryable: it goes through once the topic exists.
 
 Every `Send` error is a `*kafka.SendError{Kind, Retryable, Code}` — the same
 kinds as nodejs-basics' `KAFKA_SEND_ERRORS`, mapped from each client's codes.
-This table is the one both providers' maps are held to (a broker code is the
-same kind in each; a code neither map names is `unknown`):
+A broker's answer is classified once, in this package
+(`kafka.BrokerSendErrorKind`, by Kafka protocol code), so it is the same kind
+whichever client is linked; a provider maps only the errors its client raises
+locally. A code nothing names is `unknown`:
 
 | Kind | Retryable | librdkafka / Kafka codes |
 | --- | --- | --- |
@@ -415,6 +463,11 @@ same kind in each; a code neither map names is `unknown`):
 counts rejections towards `OUTBOX_MAX_ATTEMPTS` and retries everything else.
 The kind is also the `result` label of `kafka_producer_records_total`.
 
+**After `Close`** a producer's `Send` fails with an `unavailable` error that
+wraps `kafka.ErrClientClosed`, and so does its readiness check
+(`errors.Is(err, kafka.ErrClientClosed)`): a closed client is told apart from
+an outage. `Producer.Close` and `Consumer.Close` are idempotent.
+
 **A consumer client that failed for good** (librdkafka's fatal errors — a
 static member, `group.instance.id` via the passthrough, fenced by another
 instance with the same id) ends `Consumer.Run` with an error wrapping
@@ -424,11 +477,11 @@ franz-go provider has no static membership here, so it has no such error.)
 
 **Closing never races a call.** The librdkafka producer replaces a failed
 client and closes the old one only when no call is inside it, and creates
-nothing once `Close` began. The consumer counts the calls made from outside
-its loop (readiness pings, commits whose caller stopped waiting) and destroys
-the client only once they returned; a call stuck past 30 s makes `Close` give
-up and leave the client to the exiting process — destroying it under the
-call would crash it.
+nothing once `Close` began. The consumer counts every call into its client —
+the loop's poll, readiness pings, commits whose caller stopped waiting — and
+destroys the client only once they returned (a poll notices `Close` within
+100 ms); a call stuck past 30 s makes `Close` give up and leave the client to
+the exiting process — destroying it under the call would crash it.
 
 ## Observability
 
@@ -452,11 +505,32 @@ is linked, and the same as nodejs-basics. No partition label anywhere.
 
 The consumer's `topic` is a topic named in `KAFKA_TOPICS`; one matched by a
 `^regex` subscription is labelled `other`, so the series follow the config,
-not whatever the cluster grows. The client gauges are off for both providers
+not whatever the cluster grows (the dead-letter topic of such a consumer is a
+fixed name, so its `topic` label is fixed too). The client gauges are off for both providers
 with a negative `KAFKA_STATISTICS_INTERVAL_MS`. With librdkafka they refresh
 every interval and disappear when the client stops reporting (three missed
 periods, at least a minute), so a stuck client does not show its last healthy
 numbers; with franz-go they are read from the client at scrape time.
+
+`kafka_consumer_fetch_errors_total` counts while the brokers are away, with
+either provider — it is the series to alert on for a consumer that cannot
+fetch. The rates differ (each client reports at its own pace), so alert on
+"increasing", not on a number.
+
+**Two producers in one process** (two clusters, two configurations) have the
+same series. Register each through a registerer that adds a label of your
+choosing — the library adds none. Each, not only the second: one metric name
+carries one set of label names, and a bare producer beside a wrapped one is
+refused just the same:
+
+```go
+events := prometheus.WrapRegistererWith(prometheus.Labels{"producer": "events"}, srv.Metrics.Registry)
+events.MustRegister(eventsProducer.Collectors()...)
+audit := prometheus.WrapRegistererWith(prometheus.Labels{"producer": "audit"}, srv.Metrics.Registry)
+audit.MustRegister(auditProducer.Collectors()...)
+```
+
+A producer and a consumer need none of this: their series differ by `client`.
 
 **Consumer-group lag is the broker's metric, not ours.** The broker knows
 every group's committed offset and every partition's end, once, also while
@@ -487,13 +561,15 @@ unreachable shows in readiness and `kafka_client_brokers_up`.
 
 | Where | What |
 | --- | --- |
-| `libs/kafka` (`go test ./...`, no broker) | config defaults and validation (buffers, security, strategies), the JSON / YAML property maps and their redaction, the error kinds, metric lint, header propagation |
-| `libs/kafka-rdkafka`, `libs/kafka-franz` (unit) | every named key reaches the client (librdkafka accepts the property map; franz-go's option values), the passthrough rules, the code → kind maps, statistics parsing |
-| **conformance** (`libs/kafka/kafkatest`, run by each provider against one Kafka container) | round trip with headers and both trace paths, client gauges, retries, `Permanent` and exhausted records on the DLQ with their headers and the exact committed offset, DLQ off stopping `Run`, shutdown mid-batch committing exactly what finished (checked by restarting a member), a two-member rebalance without loss and with bounded duplicates, the error taxonomy (missing topic, oversized record) |
-| `TestSASLSSL` (both providers) | produce + consume through `examples/kafka-sasl-ssl` — runs when `KAFKA_SASL_SSL_BROKERS` is set (`just kafka-sasl-ssl-test`) |
-| `TestTrustStore` (both providers) | what `KAFKA_SSL_CA_LOCATION` means, against Redpanda with TLS from a private CA and SASL/SCRAM (a container of the suite's own): the CA file connects, the system roots alone do not, another CA's file does not — and, in a child process whose system root *is* the broker's CA, another CA's file still does not (the file replaces the system roots; skipped for librdkafka, which does not read `SSL_CERT_FILE`) |
+| `libs/kafka` (`go test ./...`, no broker) | config defaults and validation (buffers, security, strategies, the dead-letter topic), the JSON / YAML property maps and their redaction, the error kinds, metric lint, header propagation; the loop against a scripted client: handler panics, the retry backoff, dead-letter publish retries, commit and fetch error counters, lost partitions, `Run` misuse, `Send` bounds and `Close` |
+| `libs/kafka-rdkafka`, `libs/kafka-franz` (unit, no broker) | every named key reaches the client (librdkafka accepts the property map; franz-go's option values), the passthrough rules, the local code → kind maps, statistics parsing; librdkafka: `Close` during a poll, a poll during an outage, the dead-letter producer checked at boot |
+| **conformance** (`libs/kafka/kafkatest`, run by `libs/kafka-rdkafka/integration` and `libs/kafka-franz/integration` against one Kafka container each) | round trip with headers and both trace paths, client gauges, retries, `Permanent` and exhausted records on the DLQ with their headers and the exact committed offset, DLQ off stopping `Run`, shutdown mid-batch committing exactly what finished (checked by restarting a member), a two-member rebalance without loss and with bounded duplicates, `Close` during `Run`, a `^regex` subscription, a cancelled `Send` failing no other, a validated config building its clients at each client's range edges, the error taxonomy (missing topic, oversized record) |
+| `TestSASLSSL` (both `integration` modules) | produce + consume through `examples/kafka-sasl-ssl` — runs when `KAFKA_SASL_SSL_BROKERS` is set (`just kafka-sasl-ssl-test`) |
+| `TestTrustStore` (both `integration` modules) | what `KAFKA_SSL_CA_LOCATION` means, against Redpanda with TLS from a private CA and SASL/SCRAM (a container of the suite's own): the CA file connects, the system roots alone do not, another CA's file does not — and, in a child process whose system root *is* the broker's CA, another CA's file still does not (the file replaces the system roots; skipped for librdkafka, which does not read `SSL_CERT_FILE`) |
 | services | the tasks / consumer integration suites and e2e run with the default build; CI runs them with `-tags kafka_franz` too |
 
 On rootless Podman set `TESTCONTAINERS_RYUK_DISABLED=true`. A new provider
 implements `kafka.Driver`, registers itself in `init`, and passes
-`kafkatest.Run` — nothing else in the repo changes.
+`kafkatest.Run` from an `integration` module next to it (own `go.mod`, which
+requires `libs/kafka/kafkatest`; the provider's `go.mod` does not) — nothing
+else in the repo changes.

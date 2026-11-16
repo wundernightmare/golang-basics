@@ -1,4 +1,4 @@
-# kafka-franz justfile — the franz Kafka provider (runs the libs/kafka conformance suite)
+# kafka-franz justfile — the franz-go Kafka provider (its broker-backed suite is libs/kafka-franz/integration)
 #
 # One of the per-module justfiles; every module has the same recipes (plus
 # release/run for services), so `just each <recipe>` from the root works

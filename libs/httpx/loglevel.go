@@ -133,8 +133,13 @@ func (h levelHandler) WithGroup(name string) slog.Handler {
 
 // LogLevelOf returns the runtime level control of a logger built by
 // [NewLogger] (also reachable as [Server].LogLevel), or nil for any other
-// logger. Derived loggers (log.With, log.WithGroup) share their parent's.
+// logger, a nil one included. Derived loggers (log.With, log.WithGroup) share
+// their parent's.
 func LogLevelOf(log *slog.Logger) *LogLevel {
+	if log == nil {
+		return nil
+	}
+
 	if lh, ok := log.Handler().(levelHandler); ok {
 		return lh.level
 	}

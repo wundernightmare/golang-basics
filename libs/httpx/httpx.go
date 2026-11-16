@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +45,65 @@ type Server struct {
 	LogLevel *LogLevel
 
 	subjects debugSubjects // tenants / users under investigation (subjects.go)
+
+	inFlight inFlight // API requests a handler has not returned from (see shutdown)
+}
+
+// inFlight counts the requests of the API listener whose handler is still
+// running, so that a forced close can wait for them: http.Server.Close
+// closes connections and returns, it does not wait for handlers.
+type inFlight struct {
+	mu   sync.Mutex
+	n    int
+	idle chan struct{} // closed when n reaches zero; nil until someone waits
+}
+
+func (f *inFlight) track(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.n++
+		f.mu.Unlock()
+
+		defer func() {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+
+			if f.n--; f.n == 0 && f.idle != nil {
+				close(f.idle)
+				f.idle = nil
+			}
+		}()
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// wait reports whether every tracked handler returned within budget.
+func (f *inFlight) wait(budget time.Duration) bool {
+	f.mu.Lock()
+
+	if f.n == 0 {
+		f.mu.Unlock()
+
+		return true
+	}
+
+	if f.idle == nil {
+		f.idle = make(chan struct{})
+	}
+
+	idle := f.idle
+	f.mu.Unlock()
+
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+
+	select {
+	case <-idle:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // Option customises [NewServer].
@@ -71,10 +131,14 @@ func WithPropagator(p propagation.TextMapPropagator) Option {
 
 // WithMiddleware installs middleware — an authenticator, a tenant resolver, a
 // rate limiter — *inside* the built-in tracing, access log and metrics and
-// outside panic recovery and the body limit. A request it rejects (401, 429)
-// is therefore still traced, logged and counted like any other, and what it
-// adds to the context is visible to the handler; the access-log line is
-// written after it returns. First middleware outermost.
+// outside the handler's panic recovery and the body limit. A request it
+// rejects (401, 429) is therefore still traced, logged and counted like any
+// other, and what it adds to the context is visible to the handler; the
+// access-log line is written after it returns. A handler that panics has
+// become a 500 response by the time control is back in the middleware; a
+// panic of the middleware itself is recovered one level further out, with
+// the same 500, log line and http_unhandled_errors_total tick. First
+// middleware outermost.
 func WithMiddleware(mw ...Middleware) Option {
 	return func(o *serverOptions) { o.outer = append(o.outer, mw...) }
 }
@@ -94,9 +158,9 @@ func WithConfig(v any) Option {
 // The API chain applies, in order: flight-recorder trigger (when
 // Config.DiagFlightRecorder and DiagFlightSlowRequest are set) → request id +
 // deadline → debug token (when Config.DebugToken is set) → tracing → access
-// log → metrics → rate limit (when Config.RateLimit or RateLimitPerClient is
-// set) → [WithMiddleware] extras → panic recovery → body limit → routing
-// (404/405 as problem+json) → the service's mux. The admin handler serves the
+// log → metrics → panic recovery → rate limit (when Config.RateLimit or
+// RateLimitPerClient is set) → [WithMiddleware] extras → panic recovery →
+// body limit → routing (404/405 as problem+json) → the service's mux. The admin handler serves the
 // probes, /metrics, /version, /admin/* and /debug/pprof; its table of routes
 // is on newAdminMux (admin.go).
 func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
@@ -156,9 +220,13 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
 	}
 
 	mws = append(mws,
-		tracing(applied.tp, applied.prop),
+		tracing(applied.tp, applied.prop, cfg.DebugTraceTrustRemote),
 		accessLog(log, cfg.SlowRequest),
 		metrics.Middleware(),
+		// For what the service installs below: without it a panic there
+		// reaches net/http, the client sees a dropped connection, and the
+		// log and the metrics above record a request that wrote nothing.
+		s.recovery,
 	)
 
 	// Inside tracing, the access log and the metrics — a 429 is a request
@@ -226,8 +294,10 @@ func derefString(p *string) string {
 //     served;
 //  3. the API listener drains within Config.ShutdownTimeout; if requests are
 //     still running when the budget is spent, their contexts are cancelled
-//     and the connections closed, so Run returns and main's deferred cleanup
-//     never races a handler;
+//     and the connections closed, and Run waits up to unwindBudget for their
+//     handlers to return, so that main's deferred cleanup does not close a
+//     pool under a handler that is rolling back. A handler that ignores its
+//     context for longer than that outlives Run;
 //  4. the admin listener stops last, so probes answered throughout.
 //
 // A clean shutdown returns nil. Binding happens before anything else, so a
@@ -247,7 +317,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	if s.cfg.Addr != "" {
 		api = &http.Server{
-			Handler:           s.handler,
+			Handler:           s.inFlight.track(s.handler),
 			ReadHeaderTimeout: s.cfg.ReadHeaderTimeout,
 			ReadTimeout:       s.cfg.ReadTimeout,
 			WriteTimeout:      s.cfg.WriteTimeout,
@@ -329,7 +399,7 @@ func (s *Server) Run(ctx context.Context) error {
 	healthCtx, stopHealth := context.WithCancel(ctx)
 	defer stopHealth()
 
-	go s.Health.Run(healthCtx)
+	go s.Health.loop(healthCtx)
 
 	s.tuneRuntime(healthCtx)
 
@@ -363,12 +433,19 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
+// unwindBudget is how long a forced close waits for the handlers it has
+// cancelled: time to notice the cancellation and roll back, not to finish
+// the work — the drain budget was for that, and what is left of the pod's
+// termination grace period is unknown here.
+const unwindBudget = 2 * time.Second
+
 // adminShutdownBudget bounds the admin listener's own drain: probes and
 // scrapes are short, and it must not eat into the API's budget.
 const adminShutdownBudget = 2 * time.Second
 
 // shutdown drains the API listener within the budget, forces it closed past
-// it, then stops the admin listener.
+// it and waits for the cancelled handlers (see unwindBudget), then stops the
+// admin listener.
 func (s *Server) shutdown(api, admin *http.Server, cancelBase context.CancelFunc) error {
 	var first error
 
@@ -384,6 +461,10 @@ func (s *Server) shutdown(api, admin *http.Server, cancelBase context.CancelFunc
 
 			_ = api.Close() // and its connection closed
 			first = fmt.Errorf("httpx: drain: %w", err)
+
+			if !s.inFlight.wait(unwindBudget) {
+				s.log.Warn("handlers still running after the forced close: they ignore their context", "waited", unwindBudget.String())
+			}
 		}
 	}
 

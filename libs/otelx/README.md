@@ -29,14 +29,45 @@ anything.
 otelCfg, err := otelx.LoadConfig("TASKS_")
 if err != nil { … }
 otelCfg.ServiceName, otelCfg.Version = "tasks", httpx.Version
-shutdown, err := otelx.Init(ctx, otelCfg, logger)
+tel, err := otelx.Init(ctx, otelCfg, logger)
 if err != nil { … }
-defer func() { _ = shutdown(context.Background()) }() // flushes buffered spans
+defer tel.Stop() // exports what is buffered, within five seconds
+
+srv, err := httpx.NewServer(cfg, logger,
+    httpx.WithTracerProvider(tel.TracerProvider), httpx.WithPropagator(tel.Propagator))
 ```
+
+(`example_test.go` is this snippet, compiled.)
 
 Call `Init` before building the clients whose instrumentation should record
 spans: the instrumentation libraries capture the global provider when they
 are constructed.
+
+**Shutdown.** `defer tel.Stop()` is the one recipe. It is
+`tel.Shutdown(context.Background())` with the error dropped; `Shutdown`
+itself
+
+- lasts until the deadline of the context it is given, or five seconds when
+  the context has none — not "batches × export timeout";
+- is not cancelled with that context: the context of a service is cancelled
+  by the signal that stops it, and a provider shut down under a cancelled
+  context drops its spans for good;
+- returns an error, and logs `tracing shutdown: spans may have been lost` at
+  warn, when the time ran out or the collector did not take the last export —
+  past the throttle of the export errors, which has no later line to count
+  that failure in;
+- unbinds the logger from the retroactive buffer: a warn line written after
+  it carries `trace_unsampled_id`.
+
+`Config.Validate()` reports what `Init` refuses — a negative queue, batch or
+timeout, an endpoint that is a URL, half of an mTLS pair, a certificate file
+that cannot be read (with export on over TLS) — by the name of the
+environment key. `LoadConfig` and `Init` call it; a service that loads the
+config as a section of its own (`httpx.LoadYAML`) calls it from its
+`Validate`, which is what `--check-config` runs.
+
+A `Config` built in code needs only what differs from the defaults: every
+zero field is "not set".
 
 ## Signals: traces here, metrics in Prometheus
 
@@ -50,7 +81,10 @@ the trace ids in them (see `httpx.NewLogger`).
 
 - **OTLP/HTTP** (`otlptracehttp`) rather than gRPC: the same wire protocol,
   one fewer dependency tree, and it passes through any HTTP proxy. The
-  endpoint is a `host:port` (default `localhost:4318`).
+  endpoint is a `host:port` (default `localhost:4318`) — not a URL, which is
+  what the standard variable of the same name holds: the scheme comes from
+  `…_INSECURE`, the path is `/v1/traces`, and a value with either is refused
+  at start.
 - **TLS by default**, with the system roots; `OTEL_EXPORTER_OTLP_CERTIFICATE`
   replaces them with a CA bundle, `…_CLIENT_CERTIFICATE` + `…_CLIENT_KEY` enable mTLS
   (both or neither). `OTEL_EXPORTER_OTLP_INSECURE=true` is for a local
@@ -64,6 +98,20 @@ the trace ids in them (see `httpx.NewLogger`).
 - **Export failures** — a collector that is down, a rejected batch — are
   logged at warn at most once every 30s, with a count of what was suppressed
   in between. They never affect the service.
+- **The environment of the process** does not configure the exporter:
+  `Config` does. The exporter library reads the standard, unprefixed
+  `OTEL_EXPORTER_OTLP_*` variables (and their `…_TRACES_*` forms) —
+  `ENDPOINT`, `INSECURE`, `CERTIFICATE`, `CLIENT_CERTIFICATE`, `CLIENT_KEY`,
+  `HEADERS`, `COMPRESSION`, `PROTOCOL`, `TIMEOUT` — and `otelx` overrides
+  every one of them, as it does `OTEL_BSP_*` and `OTEL_TRACES_SAMPLER*` of
+  the SDK: a variable an operator or an injector sets for another SDK in the
+  pod changes nothing here. What still acts without a key of `Config`:
+  `OTEL_RESOURCE_ATTRIBUTES` and `OTEL_SERVICE_NAME`
+  ([Resource](#resource)); the SDK's span limits (`OTEL_SPAN_*_LIMIT`,
+  `OTEL_ATTRIBUTE_*_LIMIT`, `OTEL_EVENT_ATTRIBUTE_COUNT_LIMIT`,
+  `OTEL_LINK_ATTRIBUTE_COUNT_LIMIT`); the experimental `OTEL_GO_X_*`
+  switches; and `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`, which the
+  exporter's HTTP client follows.
 
 ## Sampling: head in the service, tail in the collector
 
@@ -79,7 +127,7 @@ root of the trace, and everyone downstream follows it.
 - A span **with a parent** takes the parent's sampled flag, whatever this
   service's ratio: a request sampled at the edge stays sampled in every
   service behind it, and an unsampled one is never sampled again downstream.
-- On an **internet-facing edge** set `OTEL_TRACES_TRUST_REMOTE_PARENT=false`.
+- On an **internet-facing edge** set `OTEL_TRACES_REDRAW_REMOTE_PARENT=true`.
   A `traceparent` on a request from outside is the client's: its sampled
   flag, and its trace id, whose low bits a ratio sampler keys on — following
   either lets any client have all of its requests traced through the whole
@@ -90,8 +138,12 @@ root of the trace, and everyone downstream follows it.
 - A request with the **debug token** (`X-Debug-Token`, see
   [`libs/httpx`](../httpx#runtime-debugging)) is sampled whatever the ratio
   and marked `dbg=1` in its `tracestate`. The flag makes every service behind
-  the edge export its spans; the mark makes them log that request from debug
-  up. A client cannot send the mark: the edge drops remote `tracestate`.
+  the edge export its spans; the mark makes one log that request from debug
+  up when it is told to trust it (`DEBUG_TRACE_TRUST_REMOTE=true`, a key of
+  `libs/httpx`). A client cannot send the mark: an httpx server without that
+  key — the default, and what an edge keeps — removes `dbg` from an incoming
+  `tracestate` before the span starts, whatever the sampler's settings and
+  with tracing on or off.
 
 Head sampling is cheap — an unsampled trace costs no export — and blind: at
 the start nobody knows whether the request will fail or be slow. The
@@ -128,8 +180,9 @@ still found together, and a `trace_id` never opens an empty page.
 **The budget.** The memory is the arena and nothing else: a span is copied
 into it as bytes (attribute keys, span names and the values of closed sets —
 `http.request.method`, `messaging.*`, `db.*` — as numbers in a dictionary of
-at most 4096 strings; a server span of `libs/httpx` takes about 220 bytes,
-so 16 MiB hold some 75 thousand of them), so the heap holds
+at most 4096 strings, of which values may take a quarter and names a half,
+the rest being written out as text; a server span of `libs/httpx` takes
+about 220 bytes, so 16 MiB hold some 75 thousand of them), so the heap holds
 no span after `End`, and the garbage collector has nothing to scan — a ring
 is a `[]byte`. `OTEL_RETRO_TRIGGERS_PER_SECOND` (50) bounds the exports: a
 storm of errors does not become a storm of traces; a trigger above it is
@@ -236,15 +289,15 @@ With prefix `TASKS_` (YAML keys for `httpx.LoadYAML` in brackets):
 | `TASKS_OTEL_SERVICE_NAME` (`service_name`)       | *(service sets)* | resource `service.name`                         |
 | `TASKS_OTEL_SERVICE_VERSION` (`service_version`) | *(service sets)* | resource `service.version`                      |
 | `TASKS_OTEL_DEPLOYMENT_ENVIRONMENT` (`deployment_environment`) | *(empty)* | resource `deployment.environment.name` |
-| `TASKS_OTEL_EXPORTER_OTLP_ENDPOINT` (`endpoint`) | `localhost:4318` | collector `host:port`, OTLP over HTTP           |
+| `TASKS_OTEL_EXPORTER_OTLP_ENDPOINT` (`endpoint`) | `localhost:4318` | collector `host:port`, OTLP over HTTP; a URL is refused |
 | `TASKS_OTEL_EXPORTER_OTLP_INSECURE` (`insecure`) | `false`          | plaintext HTTP instead of TLS                   |
 | `TASKS_OTEL_EXPORTER_OTLP_HEADERS` (`headers`)   | *(none)*         | `k=v,k=v` request headers (secret)              |
 | `TASKS_OTEL_EXPORTER_OTLP_CERTIFICATE` (`ca_certificate`) | system roots | CA bundle (PEM) of the collector       |
 | `TASKS_OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` (`client_certificate`) | *(none)* | client certificate (PEM), mTLS |
 | `TASKS_OTEL_EXPORTER_OTLP_CLIENT_KEY` (`client_key`) | *(none)*     | client key (PEM), mTLS                          |
 | `TASKS_OTEL_EXPORTER_OTLP_TIMEOUT` (`export_timeout`) | `10s`       | per-export request timeout                      |
-| `TASKS_OTEL_TRACES_SAMPLER_RATIO` (`sampler_ratio`) | `1.0`         | head sampling ratio; negative = never; keep 1.0 under tail sampling |
-| `TASKS_OTEL_TRACES_TRUST_REMOTE_PARENT` (`trust_remote_parent`) | `true` | follow a remote parent's sampled flag and keep its `tracestate`; `false` on an internet-facing edge |
+| `TASKS_OTEL_TRACES_SAMPLER_RATIO` (`sampler_ratio`) | `1.0`         | head sampling ratio; negative = never; `0` is read as "not set" and gives 1.0 (the loaded config shows `0`, the `tracing enabled` line `1`); keep 1.0 under tail sampling |
+| `TASKS_OTEL_TRACES_REDRAW_REMOTE_PARENT` (`redraw_remote_parent`) | `false` | `true` on an internet-facing edge: ignore a remote parent's sampled flag (draw at the ratio) and drop its `tracestate`. `LoadConfig` / `LoadConfigFrom` refuse an environment that sets `TASKS_OTEL_TRACES_TRUST_REMOTE_PARENT`, the key this one replaced with the opposite sense; a config loaded through `httpx.LoadYAML` refuses the old key in the file (unknown key) but does not see it in the environment |
 | `TASKS_OTEL_RETRO_BUFFER_MIB` (`retro.buffer_mib`) | `16`          | retroactive sampling buffer, MiB, allocated at start; negative = off (`0` is read as "not set") |
 | `TASKS_OTEL_RETRO_TRIGGERS_PER_SECOND` (`retro.triggers_per_second`) | `50` | traces a warn / error line may export a second |
 | `TASKS_OTEL_BSP_SCHEDULE_DELAY` (`batch_timeout`) | `5s`            | batch flush interval                            |
@@ -252,7 +305,8 @@ With prefix `TASKS_` (YAML keys for `httpx.LoadYAML` in brackets):
 | `TASKS_OTEL_BSP_MAX_EXPORT_BATCH_SIZE` (`max_export_batch_size`) | `512` | spans per export request             |
 
 The standard, unprefixed `OTEL_RESOURCE_ATTRIBUTES` and `OTEL_SERVICE_NAME`
-are honoured for the resource as well.
+are honoured for the resource as well; the unprefixed exporter variables are
+not ([Export](#export) has the list).
 
 ## Tests
 
@@ -262,8 +316,12 @@ the real Prometheus registry, asserting that the span (name, kind, parent,
 `http.route`, `http.response.status_code`, error status on 5xx), the log lines
 (`trace_id`/`span_id`/`request_id`, access-log fields) and the metrics
 (`route` label, `trace_id` exemplar, promlint-clean) describe the same
-request. `otelx_test.go` covers config loading, TLS setup, the resource and
-the throttled error handler; `sampler_test.go` the head-sampling policy
+request. `otelx_test.go` covers config loading and validation, TLS setup,
+the resource and the throttled error handler; `exporter_test.go` runs `Init`
+against an `httptest` collector — the CA file as the trust store, headers,
+queue and batch sizes, the ambient `OTEL_EXPORTER_OTLP_*` variables, and
+shutdown (a refusing collector, a cancelled context);
+`sampler_test.go` the head-sampling policy
 (roots, children, the untrusted remote parent, forced traces);
 `retro_pipeline_test.go` the buffer and the debug trace through the provider
 `Init` builds, the real logger and two real servers. In `retro/`: the rings

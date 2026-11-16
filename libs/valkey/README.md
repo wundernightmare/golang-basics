@@ -28,13 +28,29 @@ _ = c.Tombstone(ctx, "task:v2:"+id, 5*time.Second)
 - **Singleflight**: concurrent misses on one key share a single load — a hot
   key expiring is one query, not N. Each caller still honours its own
   context while it waits; the shared load runs detached from the first
-  caller's cancellation (keeping its deadline and trace).
-- **TTL jitter** of ±10% (`valkey.Jitter`), so keys filled together do not
-  expire together.
+  caller's cancellation (keeping its deadline and trace). That deadline is
+  the first caller's alone: a caller that joined and still has time when it
+  runs out loads again, once, under its own context. One key is one type: a
+  caller that joins a load of another `T` gets an error.
+- **TTL jitter** of ±10% (`resilience.Jitter`), so keys filled together do
+  not expire together.
 - **The fill is `SET NX`**: it never overwrites a value or a tombstone.
 - The cache never turns a readable value into an error: a failed lookup, a
   corrupt entry or a failed fill is a miss or a warning; the loader's own
   error (e.g. not found) is returned as is and nothing is cached.
+- **A corrupt entry is replaced**, not left for its TTL: an entry that does
+  not decode into `T` (the format changed, the key did not) is overwritten
+  with the loaded value by compare-and-set against the bytes that were read
+  — still never over a tombstone or a newer value.
+- **A cache that does not answer costs one `op_timeout` per call**: after a
+  failed lookup the fill is skipped. Its warnings (`lookup failed`, `cache
+  write failed`) are logged once per ten seconds each, with a `suppressed`
+  count; `cache_command_errors_total` has the rate.
+- **A panic in the loader is an error** wrapping `valkey.ErrLoadPanic` for
+  every waiter, logged with its stack. (It would otherwise be re-raised on a
+  goroutine of singleflight's, past any recover of the caller's.)
+- A caller whose context is already over gets its context's error: nothing
+  is loaded for it and nothing is logged as a cache failure.
 
 ## Invalidation that cannot be undone by a racing read
 
@@ -66,8 +82,10 @@ Both are what [`libs/tiercache`](../tiercache) is built on.
 
 | Env (`TASKS_` prefix) | YAML | Default | |
 | --- | --- | --- | --- |
-| `TASKS_VALKEY_URL` | `url` | — | `valkey://[:pw@]host:6379[/db]`; wins over the discrete fields. No default address: `Config.Configured()` is false until URL or ADDR is set |
-| `TASKS_VALKEY_ADDR` / `_PASSWORD` / `_DB` | `addr` / `password` / `db` | — / — / `0` | |
+| `TASKS_VALKEY_URL` | `url` | — | `valkey://[user:pw@]host:6379[/db]` (`valkeys://`: TLS); wins over the discrete fields. No default address: `Config.Configured()` is false until URL or ADDR is set. The field is a `secret.String` (the URL holds the password): hand-built as `secret.New(url)`, never printed by a formatter, a logger or `/admin/config` |
+| `TASKS_VALKEY_ADDR` / `_USERNAME` / `_PASSWORD` / `_DB` | `addr` / `username` / `password` / `db` | — / — / — / `0` | the user is an ACL user; empty is the server's default user |
+| `TASKS_VALKEY_TLS` | `tls` | `false` | connect over TLS; applies to a `valkey://` URL too |
+| `TASKS_VALKEY_CA_FILE` | `ca_file` | — | PEM bundle that verifies the server; it is the trust store (the system roots are not consulted). Needs TLS on — the flag or a TLS scheme — otherwise a config error |
 | `TASKS_VALKEY_DIAL_TIMEOUT` | `dial_timeout` | `5s` | also bounds the boot PING |
 | `TASKS_VALKEY_OP_TIMEOUT` | `op_timeout` | `500ms` | every command of the cache's own methods; past it the caller treats the cache as a miss |
 | `TASKS_VALKEY_PIPELINE_CONNS` | `pipeline_conns` | `4` | shared connections every ordinary command is pipelined over; a power of two, 1–256 |
@@ -76,8 +94,16 @@ Both are what [`libs/tiercache`](../tiercache) is built on.
 | `TASKS_VALKEY_CONN_WRITE_TIMEOUT` | `conn_write_timeout` | `10s` | a connection whose peer is silent this long is dropped and replaced |
 | `TASKS_VALKEY_CONN_LIFETIME` | `conn_lifetime` | `1h` | recycle a pipelined connection at this age (`0`: never) |
 
-A value the library would reinterpret (a negative size, a count that is not a
-power of two) is an error at `New` (`valkey.ErrConfig`), before any dial.
+`Config.Validate()` reports everything `New` rejects before it dials: no
+address, a value the library would reinterpret (a negative size or duration,
+a count that is not a power of two), a URL that does not parse, a CA file
+that cannot be read. `LoadConfig` / `LoadConfigFrom` call it when an address
+is set, `New` always; every such error wraps `valkey.ErrConfig`. The error
+for a URL never quotes the URL — it is where the password is.
+
+After `Close` every method of `Cache` fails with an error wrapping
+`valkey.ErrClosed` (`Aside` still answers from its loader); calls through
+`Cache.Client()` fail with valkey-go's own `ErrClosing`.
 
 ### Connections
 
@@ -119,8 +145,8 @@ once; `Aside` and `tiercache` treat that as a miss.
 `conn_write_timeout` is not `op_timeout`: the second bounds what one caller
 waits, the first how long the client keeps sending into a connection whose
 peer stopped answering (a dropped route — nothing closes the socket). All of
-this is tested against a real server in `pool_test.go`, the silent connection
-through Toxiproxy.
+this is tested against a real server in `integration/pool_test.go`, the
+silent connection through Toxiproxy.
 
 ## Metrics
 
@@ -132,10 +158,28 @@ through Toxiproxy.
 
 Every command is also a client span (valkeyotel) in the caller's trace.
 
+The series carry no label that tells one `Cache` from another. A process
+with two caches registers each through a registerer that adds one — each,
+not only the second: one metric name carries one set of label names, and a
+bare cache beside a wrapped one is refused just the same:
+
+```go
+prometheus.WrapRegistererWith(prometheus.Labels{"cache": "sessions"}, srv.Metrics.Registry).
+	MustRegister(sessions.Collectors()...)
+prometheus.WrapRegistererWith(prometheus.Labels{"cache": "tasks"}, srv.Metrics.Registry).
+	MustRegister(tasks.Collectors()...)
+```
+
 ## Tests
 
-`go test ./...` — container-backed (one Valkey per test binary, keys by
-unique prefix, Toxiproxy for the outage case), skipped under `-short`:
-round trips and TTLs, `SET NX` vs tombstones, singleflight, per-waiter
-contexts, the resurrection race, spans and metrics, fast failure when the
-cache is unreachable.
+`go test ./...` here needs no Docker: configuration, the pool guard, and the
+behaviour of `Cache` and `Aside` that a healthy server never shows — a server
+that stops answering (`op_timeout`, the readiness timeout), a refused
+subscription, a corrupt entry, a panicking loader, `Close`, TLS with a CA
+file — against a RESP3 listener inside the test (`fake_test.go`).
+
+What only Valkey can answer is in [`integration/`](integration) (a module of
+its own, so that testcontainers and the Docker client stay out of this
+`go.mod`): round trips and TTLs, `SET NX` vs tombstones, `IFEQ`, Pub/Sub and
+resubscription, what the server sees of the pool, spans and metrics, the
+outage cases through Toxiproxy.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -19,7 +20,6 @@ type (
 
 	methodConfig struct {
 		Name         []methodName `json:"name"`
-		Timeout      string       `json:"timeout,omitempty"`
 		WaitForReady bool         `json:"waitForReady,omitempty"`
 		RetryPolicy  *retryPolicy `json:"retryPolicy,omitempty"`
 	}
@@ -48,12 +48,11 @@ const backoffMultiplier = 2
 
 // serviceConfigJSON renders target's service config. The entry named {} is the
 // default for every method; with retry_methods a second entry, which gRPC
-// prefers for the methods it names, carries the retry policy.
+// prefers for the methods it names, carries the retry policy. The target's
+// timeout is not here: it is the context deadline the interceptor sets (see
+// policy.timeout).
 func serviceConfigJSON(target *TargetConfig) (string, error) {
 	base := methodConfig{Name: []methodName{{}}, WaitForReady: target.WaitForReady}
-	if target.Timeout > 0 {
-		base.Timeout = protoDuration(target.Timeout)
-	}
 
 	config := serviceConfig{LoadBalancingConfig: []map[string]struct{}{{target.LoadBalancing: {}}}}
 
@@ -98,7 +97,15 @@ func (t *TargetConfig) retryPolicy() *retryPolicy {
 	}
 }
 
-// protoDuration is d in protobuf's JSON form: decimal seconds, "0.1s".
+// protoDuration is d, which is not negative, in protobuf's JSON form: decimal
+// seconds, "0.1s". The digits come from the integer nanoseconds: grpc-go
+// refuses more than nine after the point, and a float's shortest form has
+// more for some durations (4.544s).
 func protoDuration(d time.Duration) string {
-	return strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + "s"
+	seconds := strconv.FormatInt(int64(d/time.Second), 10)
+	if frac := d % time.Second; frac != 0 {
+		seconds += "." + strings.TrimRight(fmt.Sprintf("%09d", frac), "0")
+	}
+
+	return seconds + "s"
 }

@@ -1,10 +1,13 @@
 package tiercache_test
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -14,9 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
-	"github.com/tracehubmmp/golang-basics/libs/testx"
 	"github.com/tracehubmmp/golang-basics/libs/tiercache"
-	"github.com/tracehubmmp/golang-basics/libs/tiercache/credential"
 	"github.com/tracehubmmp/golang-basics/libs/tiercache/offheap"
 	"github.com/tracehubmmp/golang-basics/libs/tiercache/onheap"
 )
@@ -34,6 +35,10 @@ type fakeRemote struct {
 	// beforeGetReturns runs after a Get has read its answer and before it
 	// returns it: the window in which a racing invalidation lands.
 	beforeGetReturns func()
+	// beforeTombstone runs when a Tombstone has been called and has not yet
+	// written: the round trip during which the old value is still in L2.
+	beforeTombstone func()
+	publishFailure  error // Publish alone fails with it while set
 
 	gets, writes atomic.Int64
 }
@@ -74,13 +79,18 @@ func (f *fakeRemote) live(key string) (string, bool) {
 	return entry.value, true
 }
 
-func (f *fakeRemote) Get(_ context.Context, key string) (string, bool, error) {
+// Like a real client, a call whose context is done fails with its error.
+func (f *fakeRemote) Get(ctx context.Context, key string) (string, bool, error) {
 	f.gets.Add(1)
 
 	f.mu.Lock()
 	value, ok := f.live(key)
 	err, hook := f.failure, f.beforeGetReturns
 	f.mu.Unlock()
+
+	if ctx.Err() != nil {
+		return "", false, ctx.Err()
+	}
 
 	if err != nil {
 		return "", false, err
@@ -93,12 +103,16 @@ func (f *fakeRemote) Get(_ context.Context, key string) (string, bool, error) {
 	return value, ok && value != fakeTombstone, nil
 }
 
-func (f *fakeRemote) SetNX(_ context.Context, key, value string, ttl time.Duration) (bool, error) {
+func (f *fakeRemote) SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if f.failure != nil {
 		return false, f.failure
+	}
+
+	if ctx.Err() != nil {
+		return false, ctx.Err()
 	}
 
 	if _, held := f.live(key); held {
@@ -111,12 +125,16 @@ func (f *fakeRemote) SetNX(_ context.Context, key, value string, ttl time.Durati
 	return true, nil
 }
 
-func (f *fakeRemote) Replace(_ context.Context, key, old, value string, ttl time.Duration) (bool, error) {
+func (f *fakeRemote) Replace(ctx context.Context, key, old, value string, ttl time.Duration) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if f.failure != nil {
 		return false, f.failure
+	}
+
+	if ctx.Err() != nil {
+		return false, ctx.Err()
 	}
 
 	if held, ok := f.live(key); !ok || held != old {
@@ -130,6 +148,14 @@ func (f *fakeRemote) Replace(_ context.Context, key, old, value string, ttl time
 }
 
 func (f *fakeRemote) Tombstone(_ context.Context, key string, ttl time.Duration) error {
+	f.mu.Lock()
+	hook := f.beforeTombstone
+	f.mu.Unlock()
+
+	if hook != nil {
+		hook()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -145,10 +171,10 @@ func (f *fakeRemote) Tombstone(_ context.Context, key string, ttl time.Duration)
 func (f *fakeRemote) Publish(_ context.Context, channel, message string) error {
 	f.mu.Lock()
 
-	if f.failure != nil {
+	if err := cmp.Or(f.failure, f.publishFailure); err != nil {
 		defer f.mu.Unlock()
 
-		return f.failure
+		return err
 	}
 
 	var deliver []func(string)
@@ -222,6 +248,7 @@ type source struct {
 	versions map[string]int
 	failure  error
 	gate     chan struct{} // when set, loads wait here
+	bug      any           // when set, loads panic with it
 	payload  int           // extra bytes in KeyEncrypted
 
 	loads    atomic.Int64
@@ -261,7 +288,7 @@ func (s *source) hold() (release func()) {
 	})
 }
 
-func (s *source) load(ctx context.Context, key string) (credential.Credential, error) {
+func (s *source) load(ctx context.Context, key string) (row, error) {
 	s.loads.Add(1)
 
 	now := s.inFlight.Add(1)
@@ -274,30 +301,75 @@ func (s *source) load(ctx context.Context, key string) (credential.Credential, e
 	// which is how a reader ends up holding a value older than a commit.
 	s.mu.Lock()
 	version, found := s.versions[key]
-	err, gate, payload := s.failure, s.gate, s.payload
+	err, gate, payload, bug := s.failure, s.gate, s.payload, s.bug
 	s.mu.Unlock()
+
+	if bug != nil {
+		panic(bug)
+	}
 
 	if gate != nil {
 		select {
 		case <-gate:
 		case <-ctx.Done():
-			return credential.Credential{}, ctx.Err()
+			return row{}, ctx.Err()
 		}
 	}
 
 	switch {
 	case err != nil:
-		return credential.Credential{}, err
+		return row{}, err
 	case !found:
-		return credential.Credential{}, fmt.Errorf("credential %q: %w", key, tiercache.ErrNotFound)
+		return row{}, fmt.Errorf("credential %q: %w", key, tiercache.ErrNotFound)
 	}
 
 	return record(key, version, payload), nil
 }
 
+// row is the value the suite caches: three strings, like the record of the
+// credential example, in a codec of the suite's own.
+type row struct {
+	ID           string
+	CRMID        string
+	KeyEncrypted string
+}
+
+// rowCodec writes each field as its length (uvarint) and its bytes, and
+// refuses anything else: a payload cut short or with bytes left over.
+type rowCodec struct{}
+
+func (rowCodec) Append(dst []byte, value row) ([]byte, error) {
+	for _, field := range [...]string{value.ID, value.CRMID, value.KeyEncrypted} {
+		dst = binary.AppendUvarint(dst, uint64(len(field)))
+		dst = append(dst, field...)
+	}
+
+	return dst, nil
+}
+
+func (rowCodec) Decode(src []byte) (row, error) {
+	var fields [3]string
+
+	for i := range fields {
+		size, width := binary.Uvarint(src)
+		if width <= 0 || size > uint64(len(src)-width) {
+			return row{}, errors.New("rowCodec: truncated")
+		}
+
+		fields[i] = string(src[width : width+int(size)])
+		src = src[width+int(size):]
+	}
+
+	if len(src) != 0 {
+		return row{}, errors.New("rowCodec: trailing bytes")
+	}
+
+	return row{ID: fields[0], CRMID: fields[1], KeyEncrypted: fields[2]}, nil
+}
+
 // record is the value the source holds for key at version: recognisably that
 // key's (so a cross-key mix-up shows) and that version's.
-func record(key string, version, payload int) credential.Credential {
+func record(key string, version, payload int) row {
 	sum := sha256.Sum256([]byte(key))
 	filler := make([]byte, payload)
 
@@ -305,7 +377,7 @@ func record(key string, version, payload int) credential.Credential {
 		filler[i] = 'a' + sum[i%len(sum)]%26
 	}
 
-	return credential.Credential{
+	return row{
 		ID:           fmt.Sprintf("id-%x", sum[8:16]),
 		CRMID:        fmt.Sprintf("v%d", version),
 		KeyEncrypted: fmt.Sprintf("enc-%x-%s", sum[:8], filler),
@@ -338,8 +410,11 @@ func suiteBytes() int {
 	return 0
 }
 
+// harnesses numbers the caches of the suite: each gets a name of its own.
+var harnesses atomic.Int64
+
 type harness struct {
-	cache *tiercache.Cache[credential.Credential]
+	cache *tiercache.Cache[row]
 	src   *source
 	reg   *prometheus.Registry
 	name  string
@@ -356,7 +431,13 @@ const (
 func newHarness(t *testing.T, remote tiercache.Remote, src *source, tune func(*tiercache.Config)) *harness {
 	t.Helper()
 
-	cfg := tiercache.Config{Name: testx.Unique("unit"), SoftTTL: softTTL, HardTTL: hardTTL}
+	return newLoggedHarness(t, remote, src, tune, nil)
+}
+
+func newLoggedHarness(t *testing.T, remote tiercache.Remote, src *source, tune func(*tiercache.Config), log *slog.Logger) *harness {
+	t.Helper()
+
+	cfg := tiercache.Config{Name: fmt.Sprint("unit-", harnesses.Add(1)), SoftTTL: softTTL, HardTTL: hardTTL}
 	if tune != nil {
 		tune(&cfg)
 	}
@@ -365,7 +446,7 @@ func newHarness(t *testing.T, remote tiercache.Remote, src *source, tune func(*t
 		cfg.MaxBytes = suiteBytes()
 	}
 
-	cache, err := tiercache.New(cfg, suiteStore(), credential.Codec{}, src.load, remote, nil)
+	cache, err := tiercache.New(cfg, suiteStore(), rowCodec{}, src.load, remote, log)
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
 
@@ -378,13 +459,38 @@ func newHarness(t *testing.T, remote tiercache.Remote, src *source, tune func(*t
 func (rig *harness) reads(t *testing.T, result string) float64 {
 	t.Helper()
 
-	return max(0, testx.Metric(t, rig.reg, "tiercache_reads_total", map[string]string{"result": result}))
+	return rig.metric(t, "tiercache_reads_total", map[string]string{"result": result})
 }
 
 func (rig *harness) metric(t *testing.T, name string, labels map[string]string) float64 {
 	t.Helper()
 
-	return max(0, testx.Metric(t, rig.reg, name, labels))
+	families, err := rig.reg.Gather()
+	require.NoError(t, err)
+
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+
+	series:
+		for _, metric := range family.GetMetric() {
+			have := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				have[label.GetName()] = label.GetValue()
+			}
+
+			for k, v := range labels {
+				if have[k] != v {
+					continue series
+				}
+			}
+
+			return metric.GetCounter().GetValue() + metric.GetGauge().GetValue()
+		}
+	}
+
+	return 0
 }
 
 // read is version without assertions, for goroutines other than the test's.

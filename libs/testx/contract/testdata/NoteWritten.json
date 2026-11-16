@@ -1,0 +1,10 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "NoteWritten",
+    "type": "object",
+    "properties": {
+        "id": {"type": "string"},
+        "written_at": {"type": "string", "format": "date-time"}
+    },
+    "required": ["id", "written_at"]
+}

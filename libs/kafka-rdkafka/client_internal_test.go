@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -254,28 +257,172 @@ func TestProducer_SendBoundedByContext(t *testing.T) {
 	assert.Equal(t, kafka.KindFatal, se.Kind)
 }
 
-// The dead-letter producer is built on first use; one that cannot be built
-// fails every send with that reason instead of panicking the loop.
+// A full local queue is waited out within the caller's budget: with room for
+// one record and no broker, the second Send keeps trying until its ctx ends.
+// Without the wait it would fail at once with queue_full.
+func TestProducer_FullQueueWaitsWithinBudget(t *testing.T) {
+	t.Parallel()
+
+	cfg := offline(t)
+	cfg.ProducerQueueMaxMessages, cfg.PublishTimeout = 1, 30*time.Second
+	prod, err := newProducer(cfg, slog.New(slog.DiscardHandler), "producer")
+	require.NoError(t, err)
+
+	first, cancelFirst := context.WithCancel(context.Background())
+
+	queued := make(chan struct{})
+	go func() {
+		defer close(queued)
+
+		_ = prod.Send(first, kafka.Message{Topic: "t", Value: []byte("1")})
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	const budget = 200 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	err = prod.Send(ctx, kafka.Message{Topic: "t", Value: []byte("2")})
+
+	var se *kafka.SendError
+	require.ErrorAs(t, err, &se)
+	assert.True(t, se.Retryable)
+	assert.GreaterOrEqual(t, time.Since(start), budget, "waited for room until the budget ran out")
+
+	cancelFirst()
+	<-queued
+	prod.Close()
+}
+
+// The dead-letter producer is built on first use, but a consumer whose
+// producer properties librdkafka refuses does not start; a producer that
+// cannot be built later (the password mount went away) fails every send with
+// that reason instead of panicking the loop.
 func TestConsumer_DeadLetterProducerThatCannotBeBuilt(t *testing.T) {
 	t.Parallel()
 
 	cfg := offline(t)
-	cfg.ProducerExtraProperties = kafka.Properties{"no.such.property": "1"} // producers only: the consumer still builds
+	cfg.ProducerExtraProperties = kafka.Properties{"no.such.property": "1"} // producers only: the consuming client itself builds
+	_, err := Driver{}.NewConsumer(cfg, slog.New(slog.DiscardHandler), kafka.Rebalance{})
+	require.ErrorContains(t, err, "no.such.property")
+
+	password := filepath.Join(t.TempDir(), "password")
+	require.NoError(t, os.WriteFile(password, []byte("p"), 0o600))
+
+	cfg = kafka.Config{
+		Brokers: []string{"127.0.0.1:1"}, Topics: []string{"t"}, Group: "g",
+		SecurityProtocol: "sasl_plaintext", SASLMechanism: "SCRAM-SHA-512", SASLUsername: "u", SASLPasswordFile: password,
+	}
+	require.NoError(t, cfg.Validate())
+
 	cl, err := Driver{}.NewConsumer(cfg, slog.New(slog.DiscardHandler), kafka.Rebalance{})
 	require.NoError(t, err)
 
 	defer cl.Close()
 
+	require.NoError(t, os.Remove(password))
 	cl.AllowRebalance() // librdkafka rebalances inside Poll: nothing to release
 	dlq := cl.DeadLetter()
 	err = dlq.Send(context.Background(), kafka.Message{Topic: "t.dlq"})
 
 	var se *kafka.SendError
 	require.ErrorAs(t, err, &se)
-	require.ErrorContains(t, err, "no.such.property")
+	require.ErrorContains(t, err, "KAFKA_SASL_PASSWORD_FILE")
 	require.Error(t, dlq.Ping(context.Background()))
 	assert.False(t, dlq.Stats().Valid)
 	dlq.Close()
+}
+
+// With the brokers away Poll hands the client's error to the loop instead of
+// waiting out ctx with it, so the outage is counted while it lasts.
+func TestConsumer_PollReportsAnOutage(t *testing.T) {
+	t.Parallel()
+
+	cl, err := Driver{}.NewConsumer(offline(t), slog.New(slog.DiscardHandler), kafka.Rebalance{})
+	require.NoError(t, err)
+
+	defer cl.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	records, err := cl.Poll(ctx, 10)
+	require.Error(t, err)
+	require.NoError(t, ctx.Err(), "returned with the error, not with the deadline")
+	assert.Empty(t, records)
+}
+
+// Close from another goroutine while the loop is inside Poll: Poll returns
+// ErrClientClosed and the client is destroyed only after it left librdkafka.
+func TestConsumer_CloseWhilePolling(t *testing.T) {
+	t.Parallel()
+
+	cfg := offline(t)
+	cfg.Brokers = []string{silentBroker(t)} // accepts and never answers: no error event ends the Poll
+
+	cl, err := Driver{}.NewConsumer(cfg, slog.New(slog.DiscardHandler), kafka.Rebalance{})
+	require.NoError(t, err)
+
+	polled := make(chan error, 1)
+
+	go func() {
+		_, err := cl.Poll(context.Background(), 10)
+		polled <- err
+	}()
+
+	time.Sleep(300 * time.Millisecond) // inside librdkafka's poll by now
+	cl.Close()
+
+	select {
+	case err := <-polled:
+		require.ErrorIs(t, err, kafka.ErrClientClosed)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Poll did not return after Close")
+	}
+}
+
+// silentBroker is a TCP listener that accepts connections and never answers:
+// a broker frozen behind an open port.
+func silentBroker(t *testing.T) string {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+	)
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+
+			mu.Lock()
+
+			conns = append(conns, conn)
+			mu.Unlock()
+		}
+	}()
+
+	t.Cleanup(func() {
+		_ = listener.Close()
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
+
+	return listener.Addr().String()
 }
 
 func TestNewConsumer_Errors(t *testing.T) {

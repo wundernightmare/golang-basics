@@ -34,6 +34,7 @@ import (
 //	PING_ADMIN_TOKEN             bearer token for /admin/* and /debug/*   (default "": see ADMIN_INSECURE)
 //	PING_ADMIN_INSECURE          allow an empty ADMIN_TOKEN on a non-loopback admin address (default false)
 //	PING_DEBUG_TOKEN             X-Debug-Token value that turns on debug logging for one request (default "": off)
+//	PING_DEBUG_TRACE_TRUST_REMOTE follow the debug mark (tracestate dbg=1) of an incoming trace; only behind your own services (default false)
 //	PING_HTTP_READ_HEADER_TIMEOUT time to read the request headers        (default "5s")
 //	PING_HTTP_READ_TIMEOUT       time to read the whole request            (default "30s")
 //	PING_HTTP_WRITE_TIMEOUT      time to write the response                (default "30s")
@@ -47,7 +48,7 @@ import (
 //	PING_HTTP_RATE_LIMIT_PER_CLIENT  requests per second per client address (default 0 = no limit)
 //	PING_HTTP_RATE_BURST_PER_CLIENT  depth of a client's bucket            (default 0 = ceil(rate))
 //	PING_HTTP_RATE_CLIENTS_MAX   client buckets kept; when all are in use a new client is shed (default 10000)
-//	PING_HTTP_SHUTDOWN_DELAY     wait after readiness flips before closing (default "2s")
+//	PING_HTTP_SHUTDOWN_DELAY     wait after readiness flips before closing (default "2s", 0 = none)
 //	PING_HTTP_SHUTDOWN_TIMEOUT   graceful-shutdown budget                  (default "10s")
 //	PING_HTTP_SLOW_REQUEST       log a request at warn above this latency  (default "1s", 0 = off)
 //	PING_HTTP_TRUSTED_PROXIES    CIDRs whose X-Forwarded-For / X-Request-Id are honoured (default: none)
@@ -65,7 +66,7 @@ import (
 //	PING_DIAG_DUMP_DIR           directory (an emptyDir) for crash reports and artifacts not uploaded yet; "" = no crash capture (default "")
 //	PING_DIAG_KEY_PREFIX         first segment of the object keys in the dump sink (default "diagnostics")
 //	PING_DIAG_MEMORY_THRESHOLD   share of the container's memory limit at which profiles are captured; negative = never (default 0.9)
-//	PING_DIAG_MEMORY_COOLDOWN    shortest time between two memory captures (default "10m")
+//	PING_DIAG_MEMORY_COOLDOWN    shortest time between two memory captures (default "10m", 0 = none)
 //	PING_DIAG_CHECK_INTERVAL     how often container memory is looked at     (default "5s")
 //	PING_DIAG_UPLOAD_TIMEOUT     one upload to the dump sink                 (default "15s")
 //	PING_DIAG_SPOOL_RETRY        how often the dump directory is re-sent     (default "1m")
@@ -75,7 +76,13 @@ import (
 //	PING_DIAG_FLIGHT_MIN_AGE     how far back the window reaches             (default "10s")
 //	PING_DIAG_FLIGHT_MAX_BYTES   upper bound of the window in memory         (default 8388608)
 //	PING_DIAG_FLIGHT_SLOW_REQUEST  a request this slow triggers a snapshot; 0 = requests never do (default "0s")
-//	PING_DIAG_FLIGHT_COOLDOWN    shortest time between two snapshots         (default "5m")
+//	PING_DIAG_FLIGHT_COOLDOWN    shortest time between two snapshots         (default "5m", 0 = none)
+//
+// A key that is not set takes its default. A zero is a setting only where
+// the list above says what it means (0 = none, 0 = off, 0 = no limit); for
+// every other key a zero — in the environment, in YAML or in a hand-built
+// Config — is "not set" and takes the default, and where such a key can be
+// turned off, the list says that a negative value does it.
 //
 // The DIAG_ keys do nothing until the service installs a sink
 // ([Server.SetDumpSink]) or sets DIAG_DUMP_DIR (diagnostics.go).
@@ -96,6 +103,14 @@ type Config struct {
 	AdminToken    secret.String `env:"ADMIN_TOKEN" yaml:"admin_token"`
 	AdminInsecure bool          `env:"ADMIN_INSECURE" envDefault:"false" yaml:"admin_insecure"`
 	DebugToken    secret.String `env:"DEBUG_TOKEN" yaml:"debug_token"`
+	// DebugTraceTrustRemote makes the server follow the debug mark of an
+	// incoming trace (tracestate dbg=1 on a sampled traceparent): the request
+	// is logged from debug up, past the log sampler, and the mark travels on
+	// to the services behind. Set it only where every caller that can reach
+	// the API port is a service of yours — the mark is two headers anyone
+	// can send. False drops the mark from the incoming trace context, with
+	// tracing on or off; the server's own DebugToken works either way.
+	DebugTraceTrustRemote bool `env:"DEBUG_TRACE_TRUST_REMOTE" envDefault:"false" yaml:"debug_trace_trust_remote"`
 
 	ReadHeaderTimeout time.Duration `env:"HTTP_READ_HEADER_TIMEOUT" envDefault:"5s" yaml:"read_header_timeout"`
 	ReadTimeout       time.Duration `env:"HTTP_READ_TIMEOUT" envDefault:"30s" yaml:"read_timeout"`
@@ -164,17 +179,22 @@ type Config struct {
 // keepsZero reports whether [Config.withDefaults] leaves the field alone:
 // its zero is a setting of its own — no listener, no deadline and no floor
 // for it, no drain delay, no slow-request warning, no log sampling, no
-// flight-recorder cooldown — so a hand-built Config that leaves it zero means
+// cooldown between two memory captures or two flight-recorder snapshots — so
+// a zero there, written by an operator or left by a hand-built Config, means
 // it. LogSampleThereafter is kept at zero too, though its zero is not a
 // setting: it is read only when LogSampleInitial turns sampling on, and
 // newSamplingHandler then replaces a zero with its own fallback.
+//
+// For every other field zero is "not set": withDefaults gives it the default
+// whether the zero came from a hand-built Config, a YAML file or the
+// environment, and "off", where the field has one, is a negative value.
 func keepsZero(field string) bool {
 	switch field {
 	case "Addr", "AdminAddr",
 		"RequestTimeout", "RequestTimeoutMin",
 		"ShutdownDelay", "SlowRequest",
 		"LogSampleInitial", "LogSampleThereafter",
-		"DiagFlightCooldown":
+		"DiagMemoryCooldown", "DiagFlightCooldown":
 		return true
 	default:
 		return false
@@ -213,11 +233,10 @@ func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	return cfg, nil
 }
 
-// withDefaults fills the zero fields a hand-built Config may leave, so a
-// service that projects its own struct into [Config] gets the same server
-// timeouts and limits as one that used [LoadConfig]: every field still zero
-// takes the value of its envDefault tag, except those in [keepsZero].
-// Negative durations mean "off" where the field allows it and are left alone.
+// withDefaults gives every field still at zero the value of its envDefault
+// tag, except those in [keepsZero], so a hand-built Config gets the same
+// server timeouts and limits as a loaded one. Negative values are left for
+// Validate.
 func (c *Config) withDefaults() {
 	if c.Service == "" {
 		c.Service = defaultServiceName()
@@ -233,9 +252,10 @@ func (c *Config) withDefaults() {
 	}
 }
 
-// Validate applies the defaults and rejects a config the server could not
-// run safely with: a typo in a level or format (which would otherwise fall
-// back silently), non-positive budgets, the two listeners on one address, a
+// Validate applies the defaults (see keepsZero for what a zero means) and
+// rejects a config the server could not run safely with: a typo in a level
+// or format (which would otherwise fall back silently), negative budgets and
+// limits, the two listeners on one address, a
 // readiness check that outlives its interval, an unparsable proxy CIDR, and
 // an unauthenticated admin listener on a routable address (see AdminInsecure).
 func (c *Config) Validate() error {
@@ -260,8 +280,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("HTTP_ADDR and ADMIN_ADDR are both %q", c.Addr))
 	}
 
-	if c.ShutdownTimeout <= 0 {
-		errs = append(errs, errors.New("HTTP_SHUTDOWN_TIMEOUT must be positive"))
+	if c.ShutdownTimeout < 0 {
+		errs = append(errs, errors.New("HTTP_SHUTDOWN_TIMEOUT must not be negative"))
 	}
 
 	if c.RequestTimeoutMin < 0 {
@@ -276,24 +296,24 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("HTTP_SHUTDOWN_DELAY must not be negative"))
 	}
 
-	if c.RateLimit < 0 || c.RateLimitPerClient < 0 || c.RateBurst < 0 || c.RateBurstPerClient < 0 || c.RateClientsMax < 0 {
+	if min(c.RateLimit, c.RateLimitPerClient) < 0 || min(c.RateBurst, c.RateBurstPerClient, c.RateClientsMax) < 0 {
 		errs = append(errs, errors.New("HTTP_RATE_* values must not be negative"))
 	}
 
-	if c.MaxBodyBytes <= 0 {
-		errs = append(errs, errors.New("HTTP_MAX_BODY_BYTES must be positive"))
+	if c.MaxBodyBytes < 0 {
+		errs = append(errs, errors.New("HTTP_MAX_BODY_BYTES must not be negative"))
 	}
 
-	if c.MaxHeaderBytes <= 0 {
-		errs = append(errs, errors.New("HTTP_MAX_HEADER_BYTES must be positive"))
+	if c.MaxHeaderBytes < 0 {
+		errs = append(errs, errors.New("HTTP_MAX_HEADER_BYTES must not be negative"))
 	}
 
 	if c.HealthTimeout >= c.HealthInterval {
 		errs = append(errs, fmt.Errorf("HEALTH_CHECK_TIMEOUT (%s) must be shorter than HEALTH_CHECK_INTERVAL (%s)", c.HealthTimeout, c.HealthInterval))
 	}
 
-	if c.LogLevelMaxTTL <= 0 {
-		errs = append(errs, errors.New("LOG_LEVEL_MAX_TTL must be positive"))
+	if c.LogLevelMaxTTL < 0 {
+		errs = append(errs, errors.New("LOG_LEVEL_MAX_TTL must not be negative"))
 	}
 
 	if c.LogSampleInitial < 0 || c.LogSampleThereafter < 0 {
@@ -325,15 +345,15 @@ func (c *Config) validateRuntime() []error {
 		errs = append(errs, fmt.Errorf("DIAG_MEMORY_THRESHOLD must be at most 1 (negative = off), got %v", c.DiagMemoryThreshold))
 	}
 
-	if c.DiagMemoryCooldown < 0 || c.DiagCheckInterval <= 0 || c.DiagUploadTimeout <= 0 || c.DiagSpoolRetry <= 0 {
-		errs = append(errs, errors.New("DIAG_CHECK_INTERVAL, DIAG_UPLOAD_TIMEOUT and DIAG_SPOOL_RETRY must be positive, DIAG_MEMORY_COOLDOWN not negative"))
+	if min(c.DiagMemoryCooldown, c.DiagCheckInterval, c.DiagUploadTimeout, c.DiagSpoolRetry) < 0 {
+		errs = append(errs, errors.New("DIAG_MEMORY_COOLDOWN, DIAG_CHECK_INTERVAL, DIAG_UPLOAD_TIMEOUT and DIAG_SPOOL_RETRY must not be negative"))
 	}
 
-	if c.DiagSpoolMaxFiles < 1 || c.DiagCrashMaxBytes < 1 {
-		errs = append(errs, errors.New("DIAG_SPOOL_MAX_FILES and DIAG_CRASH_MAX_BYTES must be positive"))
+	if c.DiagSpoolMaxFiles < 0 || c.DiagCrashMaxBytes < 0 {
+		errs = append(errs, errors.New("DIAG_SPOOL_MAX_FILES and DIAG_CRASH_MAX_BYTES must not be negative"))
 	}
 
-	if c.DiagFlightRecorder && (c.DiagFlightMinAge < 0 || c.DiagFlightMaxBytes < 0 || c.DiagFlightSlowRequest < 0 || c.DiagFlightCooldown < 0) {
+	if c.DiagFlightRecorder && (min(c.DiagFlightMinAge, c.DiagFlightSlowRequest, c.DiagFlightCooldown) < 0 || c.DiagFlightMaxBytes < 0) {
 		errs = append(errs, errors.New("DIAG_FLIGHT_* durations and sizes must not be negative"))
 	}
 

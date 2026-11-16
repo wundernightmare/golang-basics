@@ -1,7 +1,12 @@
-// Package contract validates HTTP exchanges against the OpenAPI documents and
-// events against the JSON Schemas emitted from api/tsp — the way a handler or
-// producer test proves it honours the contract, not just its own
-// expectations. Its own module, so only contract tests carry kin-openapi.
+// Package contract validates HTTP exchanges against an OpenAPI document and
+// events against a JSON Schema — the way a handler or producer test proves it
+// honours the contract, not just its own expectations. Its own module, so
+// only contract tests carry kin-openapi.
+//
+// The documents are the caller's and are named by file path. `go test` runs a
+// test in its package's directory, so a relative path is relative to the test
+// file: "../../../../api/openapi3/tasks.openapi.yaml" from a service of this
+// repository, whose contracts are emitted from api/tsp.
 package contract
 
 import (
@@ -10,9 +15,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -23,51 +25,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// workspaceRoot locates the repository root from any module: contracts live
-// under api/ at the root, and tests reference them by that path.
-func workspaceRoot(tb testing.TB) string {
-	tb.Helper()
-
-	_, file, _, ok := runtime.Caller(0)
-	require.True(tb, ok)
-
-	root := filepath.Dir(file) // libs/testx/contract: go.work is three levels up
-	// Bounded: without a go.work above, filepath.Dir stays at "/" and an
-	// open loop would never reach the Fatal below.
-	for range 6 {
-		if _, err := os.Stat(filepath.Join(root, "go.work")); err == nil {
-			return root
-		}
-
-		root = filepath.Dir(root)
-	}
-
-	tb.Fatal("contract: go.work not found above " + file)
-
-	return ""
-}
-
-// Path returns the absolute path of a file under api/ — the
-// TypeSpec-emitted contracts (api/openapi3/…, api/jsonschema/…).
-func Path(tb testing.TB, rel string) string {
-	tb.Helper()
-	return filepath.Join(workspaceRoot(tb), "api", rel)
-}
-
-// OpenAPI validates HTTP exchanges against an OpenAPI document — the way a
-// handler test proves it honours the contract (api/tsp/tasks.tsp), not just
-// its own expectations.
+// OpenAPI validates HTTP exchanges against an OpenAPI document.
 type OpenAPI struct {
 	doc    *openapi3.T
 	router routers.Router
 }
 
-// LoadOpenAPI loads and validates the document at api/<rel>.
-func LoadOpenAPI(tb testing.TB, rel string) *OpenAPI {
+// LoadOpenAPI loads and validates the document at path.
+func LoadOpenAPI(tb testing.TB, path string) *OpenAPI {
 	tb.Helper()
 
 	loader := openapi3.NewLoader()
-	doc, err := loader.LoadFromFile(Path(tb, rel))
+	doc, err := loader.LoadFromFile(path)
 	require.NoError(tb, err)
 	require.NoError(tb, doc.Validate(context.Background()))
 	// Route by path only: the document's `servers` name the deployment
@@ -109,16 +78,19 @@ func (o *OpenAPI) Validate(tb testing.TB, req *http.Request, reqBody []byte, sta
 		"%s %s → %d does not match the contract\n%s", req.Method, req.URL.Path, status, body)
 }
 
-// JSONSchema validates documents against a JSON Schema (draft 2020-12) — the
-// way an event test proves the bytes on the wire match api/tsp/events.tsp.
+// JSONSchema validates documents against a JSON Schema (draft 2020-12).
 type JSONSchema struct{ schema *jsonschema.Schema }
 
-// LoadJSONSchema compiles the schema at api/<rel>.
-func LoadJSONSchema(tb testing.TB, rel string) *JSONSchema {
+// LoadJSONSchema compiles the schema at path.
+func LoadJSONSchema(tb testing.TB, path string) *JSONSchema {
 	tb.Helper()
 
 	c := jsonschema.NewCompiler()
-	s, err := c.Compile(Path(tb, rel))
+	// In draft 2020-12 `format` is an annotation unless the validator is
+	// told to assert it; a contract that says date-time means it.
+	c.AssertFormat()
+
+	s, err := c.Compile(path)
 	require.NoError(tb, err)
 
 	return &JSONSchema{schema: s}

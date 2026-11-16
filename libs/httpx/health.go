@@ -137,7 +137,12 @@ func (h *Health) Collectors() []prometheus.Collector { return []prometheus.Colle
 // Health without a Server.
 func (h *Health) Run(ctx context.Context) {
 	h.refresh(ctx)
+	h.loop(ctx)
+}
 
+// loop is [Health.Run] without the evaluation at the start, for a caller
+// that has just made one.
+func (h *Health) loop(ctx context.Context) {
 	t := time.NewTicker(h.interval)
 	defer t.Stop()
 
@@ -155,7 +160,8 @@ func (h *Health) Run(ctx context.Context) {
 // the results. A check whose previous evaluation is still running (it
 // ignored its context and is stuck on the dependency) is skipped: its last
 // result — the timeout — stands, and no second goroutine piles onto the
-// same hung call.
+// same hung call. A result of a check that was replaced or removed meanwhile
+// is dropped: it would bring back the series Register has just deleted.
 func (h *Health) refresh(ctx context.Context) {
 	h.mu.RLock()
 	names := make([]string, 0, len(h.checks))
@@ -195,8 +201,8 @@ func (h *Health) refresh(ctx context.Context) {
 			continue // skipped: still running
 		}
 
-		if _, still := h.checks[name]; !still {
-			continue // unregistered while we were running
+		if h.checks[name] != checks[i] {
+			continue
 		}
 
 		h.results[name] = *out[i]
@@ -285,14 +291,18 @@ func (h *Health) snapshot(ctx context.Context) (map[string]result, map[string]bo
 	return res, critical
 }
 
+// stale reports whether a refresh would bring anything newer than the cache
+// holds. A check that is still running is not a reason for one: refresh
+// skips it, so its age would turn every probe into an inline run of all the
+// other checks for as long as it hangs.
 func (h *Health) stale() bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	limit := time.Now().Add(-(2*h.interval + h.timeout))
-	for name := range h.checks {
+	for name, c := range h.checks {
 		r, ok := h.results[name]
-		if !ok || r.checkedAt.Before(limit) {
+		if !ok || (r.checkedAt.Before(limit) && !c.running.Load()) {
 			return true
 		}
 	}

@@ -165,8 +165,8 @@ func (c Config) strayKeys(def Config) []error {
 }
 
 // Validate checks the whole config: the HTTP server's own rules (see
-// [httpx.Config.Validate], which also applies its defaults), Kafka's when it
-// is on, and this service's.
+// [httpx.Config.Validate], which also applies its defaults), Valkey's and
+// Kafka's when they are on, tracing's, and this service's.
 func (c *Config) Validate() error {
 	def, err := Defaults()
 	if err != nil {
@@ -178,11 +178,21 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 
-	if c.Postgres.URL == "" && c.Postgres.Host == "" {
+	if c.Postgres.URL.IsZero() && c.Postgres.Host == "" {
 		errs = append(errs, errors.New("DATABASE_URL or DB_HOST must be set"))
 	}
 
 	if err := c.Postgres.Validate(); err != nil {
+		errs = append(errs, err)
+	}
+
+	if c.ValkeyEnabled() {
+		if err := c.Valkey.Validate(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if err := c.OTel.Validate(); err != nil {
 		errs = append(errs, err)
 	}
 

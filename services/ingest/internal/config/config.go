@@ -106,7 +106,7 @@ func validateBreaker(b resilience.BreakerConfig) error {
 		return errors.New("failure_ratio must be in (0, 1]")
 	}
 
-	return errors.Join(b.Validate()...)
+	return b.Validate()
 }
 
 // ArchiveConfig tunes how events become S3 objects.
@@ -246,6 +246,10 @@ func (c *Config) Validate() error {
 	}
 
 	if err := c.S3.Validate(); err != nil {
+		errs = append(errs, err)
+	}
+
+	if err := c.OTel.Validate(); err != nil {
 		errs = append(errs, err)
 	}
 

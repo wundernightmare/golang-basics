@@ -10,19 +10,36 @@
 # The oracle is the unit layer (`-short`).
 #
 # Excluded: otelx.go and config.go — the exporter, the resource and the
-# provider are assembled there, and what proves them is the contract test
-# and libs/otelx/integration (a real collector), not a unit assertion per
-# line.
+# provider are assembled there. What proves that wiring is exporter_test.go
+# (Init against an httptest collector: TLS, headers, queue and batch sizes,
+# the ambient environment, shutdown), the contract test and
+# libs/otelx/integration (a real collector), not a unit assertion per line.
 #
-# Known survivors, all equivalent:
-#   - sampler.go, `SamplerRatio >= 0`: a ratio of exactly 0 gives a ratio
-#     sampler that samples nothing, which is what "never" gives.
-#   - retro/arena.go, the two bounds checks of shard.header: either one
-#     mutated leaves the other to refuse the same record — they are there for
-#     a ring that is no longer made of records.
-#   - retro/codec.go, the reader's bounds (take, count, number, string): the
-#     mutants refuse a read of exactly the bytes left, and no record ends in
-#     such a read — the last four fields are varints.
+# Known survivors:
+#   - sampler.go, `SamplerRatio >= 0`: equivalent — a ratio of exactly 0
+#     gives a ratio sampler that samples nothing, which is what "never"
+#     gives.
+#   - retro/arena.go, the two bounds checks of shard.header: equivalent —
+#     either one mutated leaves the other to refuse the same record; they
+#     are there for a ring that is no longer made of records.
+#   - retro/codec.go, the reader's bounds in take, count and string:
+#     equivalent — the mutants refuse a read of exactly the bytes left, and
+#     no record ends in such a read (the last four fields are varints).
+#   - retro/codec.go, reader.number, `v > MaxInt32` → `>=`: not equivalent,
+#     unreachable in practice — the mutant refuses the one value MaxInt32,
+#     a count of dropped attributes or child spans no span has.
+#
+# Outside the efficacy (killed against lived), checked by hand:
+#   - TIMED OUT: the mutants of the ring arithmetic in retro/arena.go that
+#     make a loop over the records endless.
+#   - NOT COVERED although the line is covered: gremlins does not mutate
+#     a `case` expression of a tagless switch — the trigger rate limit
+#     (`count >= limit` in arena.go) is one. Mutated by hand it is killed
+#     by TestArena_TheRateLimitRefusesTriggersAboveItsSecond and the
+#     trigger-budget tests above it. The other NOT COVERED are constant
+#     expressions: the header layout and the window mask of arena.go, and
+#     the dictionary quotas of codec.go (valuesMax, namesMax), which
+#     TestCodec_AFullDictionaryFallsBackToText pins.
 #
 # Thresholds fail the run (exit 11) when the suite lets too many mutants live.
 # Ratchet them up when the numbers improve, never down without a reason in

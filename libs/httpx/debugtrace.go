@@ -22,9 +22,11 @@ import (
 //     carries the mark ([IsDebugTrace]) turns [WithDebugLogging] on for that
 //     unit of work: its records pass whatever the level and the log sampler.
 //
-// The mark cannot come from the internet: a service that does not trust
-// remote parents (OTEL_TRACES_TRUST_REMOTE_PARENT=false, the edge) drops a
-// remote tracestate, so only its own debug token sets it.
+// The mark is two headers any client can send, so a server follows the mark
+// of an incoming request only when told that its callers are its own
+// services (Config.DebugTraceTrustRemote); otherwise it drops the mark before
+// its span starts, and only its own debug token sets one. Kafka headers are
+// written by the services themselves and are followed as they are.
 
 // The mark of a debug trace in tracestate: libs/otelx's sampler writes it,
 // [IsDebugTrace] reads it.
@@ -67,6 +69,19 @@ func FollowDebugTrace(ctx context.Context) context.Context {
 	}
 
 	return WithDebugLogging(ctx)
+}
+
+// dropRemoteDebugMark returns ctx whose remote span context — the one a
+// propagator extracted from the caller's headers — carries no debug mark, so
+// neither the span started under it nor the calls made from it inherit one.
+// The rest of the tracestate is kept.
+func dropRemoteDebugMark(ctx context.Context) context.Context {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsRemote() || sc.TraceState().Get(DebugTraceStateKey) == "" {
+		return ctx
+	}
+
+	return trace.ContextWithRemoteSpanContext(ctx, sc.WithTraceState(sc.TraceState().Delete(DebugTraceStateKey)))
 }
 
 // TraceTrigger is the trigger side of retroactive sampling

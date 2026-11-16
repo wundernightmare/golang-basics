@@ -24,6 +24,10 @@ set `TESTCONTAINERS_RYUK_DISABLED=true`.
 | postgres | `postgres:18-alpine` (shared, `libs/testx/containers`) | a peer that does not speak HTTP/2 at all |
 | toxiproxy | `ghcr.io/shopify/toxiproxy:2.12.0` (shared) | cuts, resets, delays, throttles and black-holes the TCP connection in front of Jaeger |
 
+**No container:** `embed_test.go` — `grpcx.Config` embedded in a service's
+config and loaded by `httpx.LoadYAML`. It is here because it needs
+`libs/httpx`, which `grpcx`'s `go.mod` does not.
+
 **Certificates.** As in the HTTP client's suite: `TestMain` issues a CA for
 the run and points `SSL_CERT_FILE` at it before anything dials, so a target
 with no option at all — the library's default, TLS with the system roots — is

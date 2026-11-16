@@ -3,9 +3,12 @@ package valkey
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- jitter, predictability is harmless
+	"runtime/debug"
 	"time"
+
+	"github.com/tracehubmmp/golang-basics/libs/resilience"
 )
 
 // tombstoneValue marks a key as "recently invalidated". [Cache.Get] reports it
@@ -37,21 +40,8 @@ func (c *Cache) Tombstone(ctx context.Context, key string, ttl time.Duration) er
 	return nil
 }
 
-// Jitter returns ttl spread uniformly over ±10%, so keys filled together (a
-// warm-up, a burst of misses after a deploy) do not all expire together and
-// stampede the source of truth at once.
-func Jitter(ttl time.Duration) time.Duration {
-	if ttl <= 0 {
-		return ttl
-	}
-
-	spread := int64(ttl) / 10
-	if spread == 0 {
-		return ttl
-	}
-
-	return ttl + time.Duration(rand.Int64N(2*spread+1)-spread) //nolint:gosec // G404: jitter, predictability is harmless
-}
+// ErrLoadPanic is the error of an [Aside] call whose loader panicked.
+var ErrLoadPanic = errors.New("valkey: loader panicked")
 
 // Aside is the cache-aside (lazy-loading) pattern as a generic helper: it
 // returns the JSON-decoded value at key on a hit, otherwise loads it and
@@ -61,61 +51,153 @@ func Jitter(ttl time.Duration) time.Duration {
 //     key expiring does not turn into N identical queries. Each caller still
 //     honours its own context while it waits; the shared load runs detached
 //     from the first caller's cancellation (keeping its deadline and trace),
-//     so one impatient client cannot fail the others. Waiters receive the
-//     same value — treat a shared pointer/slice/map T as read-only.
-//   - The fill is a SET NX with ttl ±10% (see [Jitter]): it never overwrites
-//     a tombstone ([Cache.Tombstone]), so a load that raced an invalidation
-//     cannot resurrect stale data.
+//     so one impatient client cannot fail the others. That deadline is the
+//     first caller's alone: a caller that joined the load and still has time
+//     when it runs out loads again, once, under its own context. Waiters
+//     receive the same value — treat a shared pointer/slice/map T as
+//     read-only. One key is one T: a caller that joins a load of another
+//     type gets an error.
+//   - The fill is a SET NX with ttl ±10% ([resilience.Jitter]): it never
+//     overwrites a tombstone ([Cache.Tombstone]), so a load that raced an
+//     invalidation cannot resurrect stale data.
 //   - A corrupt entry, a failed lookup or a failed fill is a miss / a warning:
 //     the source of truth (load) always wins, so caching never turns a
-//     readable value into an error. load's own error is returned as is.
+//     readable value into an error. A corrupt entry is replaced by the loaded
+//     value (compare-and-set against the bytes that were read, so still never
+//     over a tombstone). After a failed lookup the fill is skipped: a cache
+//     that does not answer costs the caller one OpTimeout, not two. The
+//     warnings of a failing cache are limited to one per ten seconds each,
+//     with the number left out; cache_command_errors_total has the rate.
+//   - load's own error is returned as is. A panic in load is recovered,
+//     logged with its stack, and returned to every waiter as an error
+//     wrapping [ErrLoadPanic]: it would otherwise surface on a goroutine no
+//     recover of the caller's reaches, and end the process.
+//   - A caller whose context is over when the lookup fails gets its
+//     context's error: nothing is loaded and nothing is logged as a cache
+//     failure.
 func Aside[T any](ctx context.Context, cache *Cache, key string, ttl time.Duration, load func(ctx context.Context) (T, error)) (T, bool, error) {
 	var zero T
 
-	raw, ok, err := cache.Get(ctx, key)
-	if err != nil {
-		cache.log.WarnContext(ctx, "valkey: lookup failed, loading from source", "key", key, "err", err)
+	v, hit, fill, err := lookup[T](ctx, cache, key)
+	if hit || err != nil {
+		return v, hit, err
 	}
 
-	if ok {
-		var v T
-		if json.Unmarshal([]byte(raw), &v) == nil {
-			return v, true, nil
-		}
+	for {
+		// Written by the load's goroutine before it sends the result, read
+		// here only after receiving it.
+		led := false
 
-		cache.log.WarnContext(ctx, "valkey: discarding corrupt cache entry", "key", key)
+		result := cache.flight.DoChan(key, func() (any, error) {
+			led = true
+
+			return loadAndFill(ctx, cache, key, ttl, load, fill)
+		})
+		select {
+		case res := <-result:
+			// The load this caller joined ran out of its starter's time,
+			// not of this caller's.
+			if !led && errors.Is(res.Err, context.DeadlineExceeded) && ctx.Err() == nil {
+				continue
+			}
+
+			if res.Err != nil {
+				return zero, false, res.Err
+			}
+
+			v, ok := res.Val.(T)
+			if !ok {
+				return zero, false, fmt.Errorf("valkey: aside %q: a concurrent load of this key returned %T, not %T", key, res.Val, zero)
+			}
+
+			return v, false, nil
+		case <-ctx.Done():
+			return zero, false, ctx.Err()
+		}
+	}
+}
+
+// fillFunc writes a loaded value to the cache; nil means "do not".
+type fillFunc func(ctx context.Context, key, value string, ttl time.Duration)
+
+// lookup is the read half of [Aside]: the hit, or how a load is to fill the
+// cache afterwards.
+func lookup[T any](ctx context.Context, cache *Cache, key string) (v T, hit bool, fill fillFunc, err error) {
+	raw, found, err := cache.Get(ctx, key)
+
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return v, false, nil, ctx.Err()
+	case err != nil:
+		cache.lookupWarn.log(ctx, cache.log, "valkey: lookup failed, loading from source", "key", key, "err", err)
+
+		return v, false, nil, nil
+	case !found:
+		return v, false, cache.fillNew, nil
 	}
 
-	result := cache.flight.DoChan(key, func() (any, error) {
-		lctx := context.WithoutCancel(ctx)
-		if dl, ok := ctx.Deadline(); ok {
-			var cancel context.CancelFunc
+	if json.Unmarshal([]byte(raw), &v) == nil {
+		return v, true, nil, nil
+	}
 
-			lctx, cancel = context.WithDeadline(lctx, dl)
-			defer cancel()
+	cache.log.WarnContext(ctx, "valkey: discarding corrupt cache entry", "key", key)
+
+	var zero T
+
+	return zero, false, func(ctx context.Context, key, value string, ttl time.Duration) {
+		cache.fillOver(ctx, key, raw, value, ttl)
+	}, nil
+}
+
+// loadAndFill is the shared half of [Aside], run once per flight: detached
+// from the starter's cancellation, under the starter's deadline.
+func loadAndFill[T any](ctx context.Context, cache *Cache, key string, ttl time.Duration, load func(ctx context.Context) (T, error), fill fillFunc) (T, error) {
+	lctx := context.WithoutCancel(ctx)
+	if dl, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+
+		lctx, cancel = context.WithDeadline(lctx, dl)
+		defer cancel()
+	}
+
+	v, err := guarded(lctx, cache, key, load)
+	if err != nil || fill == nil {
+		return v, err
+	}
+
+	if b, err := json.Marshal(v); err != nil {
+		cache.log.WarnContext(lctx, "valkey: cannot encode value for the cache", "key", key, "err", err)
+	} else {
+		fill(lctx, key, string(b), resilience.Jitter(ttl))
+	}
+
+	return v, nil
+}
+
+// guarded runs load and turns its panic into an error.
+func guarded[T any](ctx context.Context, cache *Cache, key string, load func(ctx context.Context) (T, error)) (v T, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			cache.log.ErrorContext(ctx, "valkey: loader panicked", "key", key, "panic", r, "stack", string(debug.Stack()))
+
+			err = fmt.Errorf("valkey: aside %q: %w: %v", key, ErrLoadPanic, r)
 		}
+	}()
 
-		v, err := load(lctx)
-		if err != nil {
-			return v, err
-		}
+	return load(ctx)
+}
 
-		if b, err := json.Marshal(v); err != nil {
-			cache.log.WarnContext(lctx, "valkey: cannot encode value for the cache", "key", key, "err", err)
-		} else if _, err := cache.SetNX(lctx, key, string(b), Jitter(ttl)); err != nil {
-			cache.log.WarnContext(lctx, "valkey: cache write failed", "key", key, "err", err)
-		}
+// fillNew is the fill after a miss.
+func (c *Cache) fillNew(ctx context.Context, key, value string, ttl time.Duration) {
+	if _, err := c.SetNX(ctx, key, value, ttl); err != nil {
+		c.fillWarn.log(ctx, c.log, "valkey: cache write failed", "key", key, "err", err)
+	}
+}
 
-		return v, nil
-	})
-	select {
-	case res := <-result:
-		if res.Err != nil {
-			return zero, false, res.Err
-		}
-
-		return res.Val.(T), false, nil //nolint:forcetypeassert // the closure above only ever returns T
-	case <-ctx.Done():
-		return zero, false, ctx.Err()
+// fillOver is the fill over an entry that did not decode: it replaces
+// exactly the bytes that were read.
+func (c *Cache) fillOver(ctx context.Context, key, corrupt, value string, ttl time.Duration) {
+	if _, err := c.Replace(ctx, key, corrupt, value, ttl); err != nil {
+		c.fillWarn.log(ctx, c.log, "valkey: cache write failed", "key", key, "err", err)
 	}
 }

@@ -33,9 +33,10 @@ type options struct {
 // WithLogger sets the logger (default: discard).
 func WithLogger(l *slog.Logger) Option { return func(o *options) { o.log = l } }
 
-// WithRegisterer registers the metrics on r instead of a private registry.
-// Two clients on one registerer collide; wrap it with
-// prometheus.WrapRegistererWith to tell them apart.
+// WithRegisterer registers the metrics on r instead of a private registry;
+// [Client.Close] takes them off r again. Two clients on one registerer
+// collide ([New] returns the error): give each of them its own view of it,
+// prometheus.WrapRegistererWith(prometheus.Labels{"client": "…"}, r).
 func WithRegisterer(r prometheus.Registerer) Option { return func(o *options) { o.reg = r } }
 
 // WithTracerProvider sets the provider the client spans (otelgrpc) come from.
@@ -51,8 +52,15 @@ func WithPropagator(p propagation.TextMapPropagator) Option {
 
 // WithDialOptions appends dial options to every target's connection, after
 // the ones built from its config — so they win where gRPC lets the last one
-// win: transport credentials (mTLS), a custom dialer. Interceptors given
-// here run inside the package's own.
+// win: transport credentials (mTLS), a custom dialer.
+//
+// An interceptor given with grpc.WithChainUnaryInterceptor /
+// WithChainStreamInterceptor runs inside the package's own: after the
+// breaker admitted the call, under the target's deadline, and what it
+// returns is what the breaker and the metrics see — so one that refuses a
+// call itself returns [LocalRejection]. One given with
+// grpc.WithUnaryInterceptor / WithStreamInterceptor runs outside all of
+// that (gRPC puts it first), and sees the calls the breaker rejects.
 func WithDialOptions(opts ...grpc.DialOption) Option {
 	return func(o *options) { o.dial = append(o.dial, opts...) }
 }
@@ -68,6 +76,7 @@ type Client struct {
 	log     *slog.Logger
 	m       *metrics
 	reg     *prometheus.Registry
+	shared  bool // the metrics are on the caller's registerer
 	targets map[string]*target
 
 	mu     sync.Mutex
@@ -102,6 +111,7 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 	}
 
 	client.m = m
+	client.shared = client.reg == nil
 
 	for i := range cfg.Targets {
 		t, err := client.dial(&cfg.Targets[i], &applied)
@@ -165,17 +175,15 @@ func (c *Client) dial(tc *TargetConfig, applied *options) (*target, error) {
 func (c *Client) newPolicy(tc *TargetConfig) *policy {
 	name := tc.Name
 	p := &policy{name: name, timeout: tc.Timeout, m: c.m}
+	gauge := func(s resilience.State) { c.m.breakerState.WithLabelValues(name).Set(float64(s)) }
 	p.breaker = resilience.NewBreaker(tc.Breaker, time.Now, func(from, to resilience.State) {
 		c.m.transitions.WithLabelValues(name, from.String(), to.String()).Inc()
-		// State(), not `to`, and under the lock: see resilience.NewBreaker.
-		p.stateMu.Lock()
-		c.m.breakerState.WithLabelValues(name).Set(float64(p.breaker.State()))
-		p.stateMu.Unlock()
+		p.breaker.Mirror(gauge)
 		c.log.Info("grpcx: circuit breaker "+to.String(), "target", name, "from", from.String())
 	})
 
-	// Set, so the series is there before the first transition.
-	c.m.breakerState.WithLabelValues(name).Set(float64(resilience.StateClosed))
+	// So the series is there before the first transition.
+	p.breaker.Mirror(gauge)
 
 	return p
 }
@@ -199,6 +207,7 @@ func (c *Client) Conn(target string) (*grpc.ClientConn, error) {
 }
 
 // BreakerState is target's circuit-breaker state (closed when it has none).
+// It keeps answering after [Client.Close].
 func (c *Client) BreakerState(target string) (resilience.State, error) {
 	t, ok := c.targets[target]
 	if !ok {
@@ -211,9 +220,11 @@ func (c *Client) BreakerState(target string) (resilience.State, error) {
 // Registry is the private metrics registry, or nil under [WithRegisterer].
 func (c *Client) Registry() *prometheus.Registry { return c.reg }
 
-// Close closes every connection. Calls in flight fail with Canceled — gRPC
-// has no client-side drain — so close after whatever makes the calls has
-// stopped. Safe to call more than once.
+// Close closes every connection and takes the metrics off a registerer given
+// with [WithRegisterer], so a new client can be built on it. Calls in flight
+// fail with Canceled — gRPC has no client-side drain — so close after
+// whatever makes the calls has stopped; a call started later fails with
+// [ErrClosed]. Safe to call more than once.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -226,7 +237,13 @@ func (c *Client) Close() error {
 
 	var errs []error
 
+	if c.shared {
+		c.m.unregister()
+	}
+
 	for name, t := range c.targets {
+		t.policy.closed.Store(true)
+
 		if err := t.conn.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("grpcx: close %q: %w", name, err))
 		}

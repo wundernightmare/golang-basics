@@ -125,7 +125,9 @@ func NewConsumer(ctx context.Context, cfg Config, log *slog.Logger, opts ...Opti
 
 // Run polls and dispatches records to handler until ctx is cancelled (a clean
 // shutdown, returning nil) or a record can be neither handled nor parked
-// (returning that error). It closes the consumer before returning.
+// (returning that error). It closes the consumer before returning, and
+// returns nil when [Consumer.Close] is called while it runs. A nil handler is
+// an error, returned before anything is polled.
 //
 // Per record: the handler runs with a per-attempt deadline
 // (HandlerTimeout); an error is retried MaxRetries times with jittered
@@ -153,6 +155,12 @@ func (c *Consumer) Run(ctx context.Context, handler Handler) error {
 		return errors.New("kafka: Consumer.Run called twice")
 	}
 	defer c.Close()
+
+	if handler == nil {
+		// Calling it would panic, and a panic is an error of the record:
+		// every record of the topic would be retried and parked.
+		return errors.New("kafka: Consumer.Run called with a nil Handler")
+	}
 
 	c.log.InfoContext(ctx, "kafka consumer loop started", "group", c.cfg.Group, "topics", c.cfg.Topics)
 
@@ -619,5 +627,7 @@ func (c *Consumer) ReadyCheck() func(ctx context.Context) error { return readyCh
 
 // Close commits anything still pending (via the revoke callback), leaves the
 // consumer group and shuts the client down. It is idempotent; [Consumer.Run]
-// calls it on return.
+// calls it on return. Called from another goroutine while Run is polling, it
+// makes Run return nil; a record a handler is still working on is then not
+// committed and goes to the group's next owner.
 func (c *Consumer) Close() { c.closeOnce.Do(c.cl.Close) }

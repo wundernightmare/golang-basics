@@ -26,11 +26,11 @@ check:
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-# Full suite (Docker-backed suites need a daemon; they skip under -short)
+# Full suite (no Docker: the container-backed suite is libs/tiercache/integration)
 test *args:
     go test -shuffle=on ./... {{args}}
 
-# Unit tests only (-short: Docker-backed suites skip) — what `ci` runs
+# The same under -short — what `ci` runs
 test-short *args:
     go test -short -shuffle=on ./... {{args}}
 
