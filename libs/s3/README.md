@@ -29,7 +29,10 @@ What it adds to the SDK:
   `Get`/`Head` for a key that is not there; "no such bucket" is the failure
   `ErrBucketNotFound`, from any call (`Head` excepted: a HEAD's 404 has no
   body to say which of the two is missing).
-- Metrics (`Collectors`) and a client span per call.
+- Metrics (`Collectors`) and a client span per call, named `s3 <operation>`
+  with the OpenTelemetry attributes of an AWS SDK call: `rpc.system.name`
+  (`aws-api`), `rpc.method` (`S3/PutObject`), `cloud.region`,
+  `aws.s3.bucket`, `aws.s3.key`.
 - Secure by default: an `http://` endpoint needs `S3_INSECURE=true`;
   `S3_CA_FILE` for a private CA.
 
@@ -64,17 +67,23 @@ match `errors.Is(err, s3.ErrConfig)`.
 | `S3_ENDPOINT` | "" (AWS) | base URL of an S3-compatible store |
 | `S3_REGION` | `us-east-1` | signing region |
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | "" | static keys; unset = the AWS default chain (IRSA, instance role) |
-| `S3_USE_PATH_STYLE` | `true` | `endpoint/bucket/key`; the default comes from the env tag, so a `s3.Config` built by hand has it `false` until set |
+| `S3_VIRTUAL_HOST_STYLE` | `false` | `bucket.endpoint/key` instead of `endpoint/bucket/key`. Path style is the zero value, so a `s3.Config` built by hand works with an S3-compatible store as it is. `S3_USE_PATH_STYLE` is no longer read: `LoadConfig` and `httpx.LoadYAML` refuse an environment that sets it (`Config.RetiredKeys`), a YAML `use_path_style` is an unknown field |
 | `S3_INSECURE` / `S3_CA_FILE` | `false` / "" | plaintext endpoint opt-in / private CA |
-| `S3_AUTO_CREATE_BUCKET` | `false` | create the bucket in `Ensure` (local, tests) |
+| `S3_AUTO_CREATE_BUCKET` | `false` | create the bucket in `Ensure` (local, tests); on AWS it is created in `S3_REGION`. A name another account holds (`BucketAlreadyExists`) is an error |
 | `S3_OP_TIMEOUT` / `S3_TRANSFER_TIMEOUT` / `S3_DIAL_TIMEOUT` | 10s / 60s / 5s | per-call deadlines |
 | `S3_MAX_ATTEMPTS` / `S3_RETRY_MAX_BACKOFF` | 3 / 2s | retries inside the call's deadline; there is no per-attempt timeout |
 | `S3_MAX_CONNS_PER_HOST` / `S3_UPLOAD_PART_BYTES` | 32 / 16 MiB | bounded pool and part buffer |
 | `S3_REQUEST_CHECKSUM` | `when_required` | `when_supported` is the SDK's own default (a CRC32 trailer on every upload), which several S3-compatible stores reject |
 
 With static keys the SDK configuration is built by hand: nothing but this
-config decides how the client behaves. Without them the SDK's default chain
-is loaded, which also reads the standard `AWS_*` environment.
+config decides how the client behaves. Without them the SDK's
+`config.LoadDefaultConfig` runs, and it reads more than credentials: the
+standard `AWS_*` environment and the shared config files (`~/.aws/config`,
+`AWS_CONFIG_FILE`, `AWS_PROFILE`). The region, the retries and the checksum
+mode still come from this config, and `S3_ENDPOINT`, when set, is the
+endpoint. With `S3_ENDPOINT` empty, an `AWS_ENDPOINT_URL` or
+`AWS_ENDPOINT_URL_S3` in the process environment decides where the client
+connects.
 
 ## Metrics
 

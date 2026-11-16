@@ -41,7 +41,7 @@ func loadService(t *testing.T, yaml string, environ map[string]string) (serviceC
 	return cfg, err
 }
 
-func TestEmbedded_LoadsLikeLoadConfig(t *testing.T) {
+func TestEmbedded_LoadsLikeParseYAML(t *testing.T) {
 	t.Parallel()
 
 	const clientYAML = `
@@ -56,7 +56,7 @@ targets:
   - name: search
 `
 
-	want, err := resilient.LoadConfig([]byte(clientYAML))
+	want, err := resilient.ParseYAML([]byte(clientYAML))
 	require.NoError(t, err)
 
 	cfg, err := loadService(t, `
@@ -74,7 +74,7 @@ http_client:
 `, map[string]string{"SVC_ADMIN_ADDR": ":7001"})
 	require.NoError(t, err)
 
-	assert.Equal(t, want, cfg.HTTPClient, "embedded in a service config, the same keys mean the same as in LoadConfig")
+	assert.Equal(t, want, cfg.HTTPClient, "embedded in a service config, the same keys mean the same as in ParseYAML")
 	assert.Equal(t, 100, cfg.HTTPClient.MaxIdleConns, "an omitted transport key keeps its (preset) default")
 	assert.Zero(t, cfg.HTTPClient.HTTP2PingInterval, "an explicit 0 disables")
 	assert.Equal(t, ":7000", cfg.Addr, "the rest of the file loads as before")
@@ -92,7 +92,7 @@ func TestEmbedded_NoKeyIsTheDefaultConfig(t *testing.T) {
 	cfg, err := loadService(t, "http_addr: \":7000\"\n", nil)
 	require.NoError(t, err)
 	assert.Equal(t, resilient.DefaultConfig(), cfg.HTTPClient)
-	require.NoError(t, cfg.HTTPClient.Validate())
+	require.ErrorContains(t, cfg.HTTPClient.Validate(), "at least one", "and a client with no target is one the service's Validate refuses")
 }
 
 // Without the preset the transport keys have no default at all: they are not

@@ -38,8 +38,12 @@ import (
 // context, and under its name they would count as that operation's queries.
 //
 // A batch is one observation, from SendBatch to the Close of its results. A
-// call that never got a connection (pool exhausted, pool closed) is in
-// neither metric: it shows in the db_pool_acquires_* counters.
+// call through [DB.Conn] or [DB.InTx] that fails before it has a connection
+// (the pool exhausted until the deadline, the pool closed) counts in
+// db_query_errors_total under its operation — "begin" for an InTx — and has
+// no observation in the histogram, so in such a moment the errors of an
+// operation can outnumber its observations. Calls on the raw [DB.Pool] that
+// fail this way are in neither metric.
 //
 // Two DBs in one process have the same metric names. To register both on one
 // registry, wrap the registry for each of them — for every one, not only the
@@ -100,7 +104,7 @@ func newQueryMetrics() *queryMetrics {
 		}, []string{"operation"}),
 		errors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "db_query_errors_total",
-			Help: "PostgreSQL queries that failed, by operation (a cancelled context counts).",
+			Help: "PostgreSQL queries that failed, by operation (a cancelled context and a call that got no connection count).",
 		}, []string{"operation"}),
 	}
 }
@@ -114,12 +118,7 @@ type queryStartKey struct{}
 
 // TraceQueryStart implements [pgx.QueryTracer].
 func (m *queryMetrics) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	keyword := statementKeyword(data.SQL)
-	if transactionControl[keyword] {
-		return started(ctx, keyword)
-	}
-
-	return started(ctx, operation(ctx, keyword))
+	return started(ctx, queryOperation(ctx, data.SQL))
 }
 
 // TraceQueryEnd implements [pgx.QueryTracer].
@@ -151,6 +150,16 @@ func (m *queryMetrics) TraceCopyFromEnd(ctx context.Context, _ *pgx.Conn, data p
 	m.end(ctx, data.Err)
 }
 
+// queryOperation is the operation label of one statement.
+func queryOperation(ctx context.Context, sql string) string {
+	keyword := statementKeyword(sql)
+	if transactionControl[keyword] {
+		return keyword
+	}
+
+	return operation(ctx, keyword)
+}
+
 // operation is the caller's [WithOperation] name, or else fallback.
 func operation(ctx context.Context, fallback string) string {
 	if op, _ := ctx.Value(operationKey{}).(string); op != "" {
@@ -161,6 +170,10 @@ func operation(ctx context.Context, fallback string) string {
 }
 
 func started(ctx context.Context, op string) context.Context {
+	if try, _ := ctx.Value(attemptKey{}).(*attempt); try != nil {
+		try.traced = true
+	}
+
 	return context.WithValue(ctx, queryStartKey{}, queryStart{op: op, start: time.Now()})
 }
 
@@ -174,6 +187,31 @@ func (m *queryMetrics) end(ctx context.Context, err error) {
 	// "no rows" is an answer, not a failure (it surfaces at Scan, but guard anyway).
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		m.errors.WithLabelValues(qs.op).Inc()
+	}
+}
+
+// attempt is how a call made through [DB.Conn] or [DB.InTx] learns whether it
+// got as far as a connection. pgx calls its tracer only there, so a call that
+// failed earlier — no free connection before the deadline, a closed pool, a
+// transaction already over — would be in no query metric. The tracer marks
+// the attempt it finds on the context of the call, on the goroutine of the
+// call and before the call returns; an attempt left unmarked is counted as a
+// failed query by [queryMetrics.missed].
+type attempt struct{ traced bool }
+
+type attemptKey struct{}
+
+func watch(ctx context.Context) (context.Context, *attempt) {
+	try := &attempt{}
+
+	return context.WithValue(ctx, attemptKey{}, try), try
+}
+
+// missed counts try as a failed query of op unless the tracer saw it. Such a
+// call has no observation in the duration histogram: it ran no statement.
+func (m *queryMetrics) missed(try *attempt, op string) {
+	if !try.traced {
+		m.errors.WithLabelValues(op).Inc()
 	}
 }
 

@@ -59,15 +59,24 @@ itself
 - unbinds the logger from the retroactive buffer: a warn line written after
   it carries `trace_unsampled_id`.
 
-`Config.Validate()` reports what `Init` refuses — a negative queue, batch or
-timeout, an endpoint that is a URL, half of an mTLS pair, a certificate file
-that cannot be read (with export on over TLS) — by the name of the
-environment key. `LoadConfig` and `Init` call it; a service that loads the
-config as a section of its own (`httpx.LoadYAML`) calls it from its
-`Validate`, which is what `--check-config` runs.
+`tel.Stop()` and `tel.Shutdown(ctx)` do nothing on a nil or zero `Telemetry`.
 
-A `Config` built in code needs only what differs from the defaults: every
-zero field is "not set".
+`Config.Validate()` reports what `Init` refuses — a negative queue, batch,
+timeout or trigger rate, a sampling ratio outside `[0, 1]`, an endpoint that
+is a URL or has no port, half of an mTLS pair, a certificate file that cannot
+be read (with export on over TLS) — by the name of the environment key.
+`LoadConfig` and `Init` call it; a service that loads the config as a section
+of its own (`httpx.LoadYAML`) calls it from its `Validate`, which is what
+`--check-config` runs. A key this package no longer reads is named by
+`Config.RetiredKeys()`; `LoadConfig` and `httpx.LoadYAML` refuse an
+environment that still sets one. Every error about the configuration matches
+`otelx.ErrConfig` with `errors.Is`.
+
+A `Config` built in code needs only what differs from the defaults: a zero
+field is "not set" — except `SamplerRatio`, whose zero samples no root. Its
+default of 1.0 is applied where a config is loaded (`LoadConfig`,
+`httpx.LoadYAML`), so a `Config` built by hand sets `SamplerRatio: 1` to
+sample.
 
 ## Signals: traces here, metrics in Prometheus
 
@@ -123,7 +132,7 @@ interchangeable.
 root of the trace, and everyone downstream follows it.
 
 - A **root** span is sampled with probability `OTEL_TRACES_SAMPLER_RATIO`
-  (a negative ratio never samples; `0` is read as "not set" and means 1.0).
+  (`0` samples no root; the default, 1.0, is applied when the config is loaded).
 - A span **with a parent** takes the parent's sampled flag, whatever this
   service's ratio: a request sampled at the edge stays sampled in every
   service behind it, and an unsampled one is never sampled again downstream.
@@ -289,17 +298,17 @@ With prefix `TASKS_` (YAML keys for `httpx.LoadYAML` in brackets):
 | `TASKS_OTEL_SERVICE_NAME` (`service_name`)       | *(service sets)* | resource `service.name`                         |
 | `TASKS_OTEL_SERVICE_VERSION` (`service_version`) | *(service sets)* | resource `service.version`                      |
 | `TASKS_OTEL_DEPLOYMENT_ENVIRONMENT` (`deployment_environment`) | *(empty)* | resource `deployment.environment.name` |
-| `TASKS_OTEL_EXPORTER_OTLP_ENDPOINT` (`endpoint`) | `localhost:4318` | collector `host:port`, OTLP over HTTP; a URL is refused |
+| `TASKS_OTEL_EXPORTER_OTLP_ENDPOINT` (`endpoint`) | `localhost:4318` | collector `host:port`, OTLP over HTTP; a URL, or a host without a port, is refused |
 | `TASKS_OTEL_EXPORTER_OTLP_INSECURE` (`insecure`) | `false`          | plaintext HTTP instead of TLS                   |
 | `TASKS_OTEL_EXPORTER_OTLP_HEADERS` (`headers`)   | *(none)*         | `k=v,k=v` request headers (secret)              |
 | `TASKS_OTEL_EXPORTER_OTLP_CERTIFICATE` (`ca_certificate`) | system roots | CA bundle (PEM) of the collector       |
 | `TASKS_OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` (`client_certificate`) | *(none)* | client certificate (PEM), mTLS |
 | `TASKS_OTEL_EXPORTER_OTLP_CLIENT_KEY` (`client_key`) | *(none)*     | client key (PEM), mTLS                          |
 | `TASKS_OTEL_EXPORTER_OTLP_TIMEOUT` (`export_timeout`) | `10s`       | per-export request timeout                      |
-| `TASKS_OTEL_TRACES_SAMPLER_RATIO` (`sampler_ratio`) | `1.0`         | head sampling ratio; negative = never; `0` is read as "not set" and gives 1.0 (the loaded config shows `0`, the `tracing enabled` line `1`); keep 1.0 under tail sampling |
-| `TASKS_OTEL_TRACES_REDRAW_REMOTE_PARENT` (`redraw_remote_parent`) | `false` | `true` on an internet-facing edge: ignore a remote parent's sampled flag (draw at the ratio) and drop its `tracestate`. `LoadConfig` / `LoadConfigFrom` refuse an environment that sets `TASKS_OTEL_TRACES_TRUST_REMOTE_PARENT`, the key this one replaced with the opposite sense; a config loaded through `httpx.LoadYAML` refuses the old key in the file (unknown key) but does not see it in the environment |
+| `TASKS_OTEL_TRACES_SAMPLER_RATIO` (`sampler_ratio`) | `1.0`         | head sampling ratio in `[0, 1]`; `0` samples no root (a `Config` built in code has no default: its zero is `0`); keep 1.0 under tail sampling |
+| `TASKS_OTEL_TRACES_REDRAW_REMOTE_PARENT` (`redraw_remote_parent`) | `false` | `true` on an internet-facing edge: ignore a remote parent's sampled flag (draw at the ratio) and drop its `tracestate`. `LoadConfig` / `LoadConfigFrom` refuse an environment that sets `TASKS_OTEL_TRACES_TRUST_REMOTE_PARENT`, the key this one replaced with the opposite sense; `httpx.LoadYAML` refuses it too, in the file (unknown key) and in the environment (`Config.RetiredKeys`) |
 | `TASKS_OTEL_RETRO_BUFFER_MIB` (`retro.buffer_mib`) | `16`          | retroactive sampling buffer, MiB, allocated at start; negative = off (`0` is read as "not set") |
-| `TASKS_OTEL_RETRO_TRIGGERS_PER_SECOND` (`retro.triggers_per_second`) | `50` | traces a warn / error line may export a second |
+| `TASKS_OTEL_RETRO_TRIGGERS_PER_SECOND` (`retro.triggers_per_second`) | `50` | traces a warn / error line may export a second; negative is refused |
 | `TASKS_OTEL_BSP_SCHEDULE_DELAY` (`batch_timeout`) | `5s`            | batch flush interval                            |
 | `TASKS_OTEL_BSP_MAX_QUEUE_SIZE` (`max_queue_size`) | `2048`         | spans buffered before dropping                  |
 | `TASKS_OTEL_BSP_MAX_EXPORT_BATCH_SIZE` (`max_export_batch_size`) | `512` | spans per export request             |

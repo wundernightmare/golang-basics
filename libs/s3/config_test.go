@@ -30,7 +30,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, cfg.Configured(), "no default bucket: unset means no object storage")
 	assert.Equal(t, "us-east-1", cfg.Region)
-	assert.True(t, cfg.UsePathStyle)
+	assert.False(t, cfg.VirtualHostStyle)
 	assert.False(t, cfg.Insecure)
 	assert.Equal(t, 10*time.Second, cfg.OpTimeout)
 	assert.Equal(t, time.Minute, cfg.TransferTimeout)
@@ -42,10 +42,15 @@ func TestLoadConfigDefaults(t *testing.T) {
 	require.ErrorContains(t, err, "S3_BUCKET must be set")
 
 	_, err = s3.LoadConfigFrom("INGEST_", map[string]string{"INGEST_S3_MAX_ATTEMPTS": "many"})
-	require.Error(t, err)
+	require.ErrorIs(t, err, s3.ErrConfig, "a value that does not parse")
 
 	_, err = s3.LoadConfigFrom("INGEST_", map[string]string{"INGEST_S3_BUCKET": "b", "INGEST_S3_ENDPOINT": "http://s3.internal:9000"})
 	require.ErrorIs(t, err, s3.ErrConfig, "a configured store is validated when it is loaded")
+
+	_, err = s3.LoadConfigFrom("INGEST_", map[string]string{"INGEST_S3_USE_PATH_STYLE": "false"})
+	require.ErrorContains(t, err, "INGEST_S3_USE_PATH_STYLE is no longer read", "the retired key is refused instead of being ignored")
+	require.ErrorContains(t, err, "S3_VIRTUAL_HOST_STYLE")
+	require.ErrorIs(t, err, s3.ErrConfig)
 }
 
 func TestConfigValidate(t *testing.T) {

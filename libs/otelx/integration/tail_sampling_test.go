@@ -295,9 +295,7 @@ func TestTailSamplingBaselineShareIsConfigurable(t *testing.T) {
 // sent. With head sampling off in the service, traces with an error — which
 // the collector keeps at 100% — never reach it, so nothing can keep them.
 //
-// The ratio is negative, otelx's "never sample": the deterministic end of
-// "a low ratio". (A ratio of exactly 0 in otelx.Config means "not set" and
-// becomes 1.0.)
+// The ratio is 0, "sample no root": the deterministic end of "a low ratio".
 //
 //nolint:paralleltest // serial: otelx.Init installs the OpenTelemetry globals
 func TestHeadSamplingDecidesWhatTailSamplingSees(t *testing.T) {
@@ -305,7 +303,7 @@ func TestHeadSamplingDecidesWhatTailSamplingSees(t *testing.T) {
 	endpoint := collector(t, "0")
 	name := testx.Unique("head")
 
-	unsampled := newService(t, endpoint, name, -1)
+	unsampled := newService(t, endpoint, name, 0)
 	lost := unsampled.times(10, unsampled.failed)
 	unsampled.close()
 
@@ -336,7 +334,7 @@ func TestAWarnLineBringsAnUnsampledTraceToTheStore(t *testing.T) {
 	name := testx.Unique("retro")
 
 	log := httpx.NewLogger(httpx.LogConfig{Service: name, Level: "info", Writer: io.Discard})
-	svc := newLoggingService(t, endpoint, name, -1, log)
+	svc := newLoggingService(t, endpoint, name, 0, log)
 
 	handle := func(warn bool) string {
 		ctx, consume := svc.tracer.Start(context.Background(), "process tasks.events")

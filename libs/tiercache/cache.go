@@ -35,6 +35,10 @@ var ErrPanic = errors.New("tiercache: panic in a lookup")
 // limit is 512 Latin characters, 256 Cyrillic ones, 170 CJK ones, 128 emoji.
 const MaxKeyLen = 512
 
+// ErrConfig is in every error [Config.Validate] returns, and so in what [New]
+// returns for a configuration it refuses.
+var ErrConfig = errors.New("tiercache: invalid config")
+
 // ErrKey is what [Cache.Get] and [Cache.Invalidate] return for a key that is
 // empty or longer than [MaxKeyLen].
 var ErrKey = errors.New("tiercache: a key is 1 to 512 bytes")
@@ -150,7 +154,7 @@ func New[T any](cfg Config, store StoreFactory, codec Codec[T], load Loader[T], 
 		return nil, errors.New("tiercache: the store factory returned no store")
 	}
 
-	life, stop := context.WithCancel(context.Background()) //nolint:gosec // G118: stop is kept in the Cache and called by Close
+	life, stop := context.WithCancel(context.Background())
 
 	cache := &Cache[T]{
 		cfg:        cfg,
@@ -172,13 +176,24 @@ func New[T any](cfg Config, store StoreFactory, codec Codec[T], load Loader[T], 
 
 	cache.flight.Store(new(singleflight.Group))
 
-	// Not through warn: the breaker opens once per OpenTimeout at most, and
-	// the line must not be lost to another warning of the same second.
-	cache.breaker = resilience.NewBreaker(cfg.Breaker, time.Now, func(_, to resilience.State) {
+	gauge := func(state resilience.State) { cache.metrics.breakerState.Set(float64(state)) }
+
+	var err error
+
+	cache.breaker, err = resilience.NewBreaker(cfg.Breaker, time.Now, func(_, to resilience.State) {
+		cache.breaker.Mirror(gauge)
+
+		// Not through warn: the breaker opens once per OpenTimeout at most,
+		// and the line must not be lost to another warning of the same second.
 		if to == resilience.StateOpen {
 			log.WarnContext(life, "tiercache: L2 is failing, skipping it", "cache", cfg.Name, "for", cfg.Breaker.OpenTimeout.String())
 		}
 	})
+	if err != nil {
+		stop()
+
+		return nil, fmt.Errorf("tiercache: breaker: %w", err)
+	}
 
 	if remote != nil && !cfg.DisableInvalidation {
 		cache.wg.Go(cache.subscribe)

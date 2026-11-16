@@ -80,14 +80,14 @@ func MigratedDB(t testing.TB, dsn string, opts ...pgx.Option) *pgx.DB {
 
 	ctx := context.Background()
 
-	db, err := pgx.New(ctx, pgx.Config{URL: secret.New(dsn), ConnectTimeout: 5 * time.Second, MaxConns: 8}, nil, opts...)
+	db, err := pgx.New(ctx, pgx.Config{URL: secret.New(dsn), DialTimeout: 5 * time.Second, MaxConns: 8}, nil, opts...)
 	if err != nil {
 		t.Fatalf("testsupport: connect: %v", err)
 	}
 
 	t.Cleanup(db.Close)
 
-	if err := pgx.Migrate(ctx, db.Pool(), migrations.FS, nil); err != nil {
+	if err := db.Migrate(ctx, migrations.FS); err != nil {
 		t.Fatalf("testsupport: migrate: %v", err)
 	}
 

@@ -85,7 +85,7 @@ require (
 	github.com/tracehubmmp/golang-basics/libs/httpx v0.0.0 // indirect
 	github.com/tracehubmmp/golang-basics/libs/kafka v0.0.0 // indirect
 	github.com/tracehubmmp/golang-basics/libs/resilience v0.0.0 // indirect
-	github.com/tracehubmmp/golang-basics/libs/secret v0.0.0-00010101000000-000000000000 // indirect
+	github.com/tracehubmmp/golang-basics/libs/secret v0.0.0 // indirect
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0 // indirect
 	github.com/twmb/franz-go/pkg/kmsg v1.15.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect

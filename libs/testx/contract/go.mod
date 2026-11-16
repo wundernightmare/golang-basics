@@ -6,6 +6,7 @@ require (
 	github.com/getkin/kin-openapi v0.153.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/stretchr/testify v1.12.1
+	github.com/tracehubmmp/golang-basics/libs/contracts v0.0.0
 	go.uber.org/goleak v1.3.0
 )
 
@@ -16,3 +17,5 @@ require (
 	go.yaml.in/yaml/v4 v4.0.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 )
+
+replace github.com/tracehubmmp/golang-basics/libs/contracts => ../../contracts

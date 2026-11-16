@@ -1,10 +1,12 @@
 package offheap_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/tracehubmmp/golang-basics/libs/tiercache"
 	"github.com/tracehubmmp/golang-basics/libs/tiercache/offheap"
 	"github.com/tracehubmmp/golang-basics/libs/tiercache/storetest"
 )
@@ -36,4 +38,23 @@ func TestTheEntryLimit(t *testing.T) {
 
 	_, found := store.Get(nil, "k")
 	assert.False(t, found)
+}
+
+// A read into a buffer with room allocates nothing, whatever the length of
+// the key: the key is lent to the library, not copied.
+//
+//nolint:paralleltest // serial: testing.AllocsPerRun refuses to run in a parallel test
+func TestAReadAllocatesNothing(t *testing.T) {
+	store := offheap.New(offheap.Step)
+	t.Cleanup(store.Reset)
+
+	key, buf := strings.Repeat("k", tiercache.MaxKeyLen), make([]byte, 0, 64)
+	store.Set(key, []byte("value"))
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		if _, found := store.Get(buf, key); !found {
+			t.Fatal("not found")
+		}
+	})
+	assert.Zero(t, allocs)
 }

@@ -10,6 +10,7 @@ import (
 
 	toxiclient "github.com/Shopify/toxiproxy/v2/client"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	tctoxiproxy "github.com/testcontainers/testcontainers-go/modules/toxiproxy"
@@ -29,35 +30,46 @@ const (
 	sparePortCount = 12
 )
 
+// spareProxy is what a [ProxyTo] name stands for within the test binary.
+type spareProxy struct {
+	listen   int
+	upstream string // host-mapped port of the container behind the proxy
+}
+
 type sparePorts struct {
 	mu     sync.Mutex
-	byName map[string]int
+	byName map[string]spareProxy
 }
 
 var spare sparePorts
 
 // port returns the listen port of name, taking the next free one for a new
-// name. Running out fails the test through FailNow, which unwinds like a
-// panic: the lock is released by defer so the binary's other tests are not
-// left waiting for it.
-func (s *sparePorts) port(tb testing.TB, name string) int {
+// name. A name already taken for another upstream fails the test: the proxy
+// exists and points elsewhere, and handing it out would send the caller's
+// traffic to a container it did not ask for. Both failures go through
+// FailNow, which unwinds like a panic: the lock is released by defer so the
+// binary's other tests are not left waiting for it.
+func (s *sparePorts) port(tb testing.TB, name, upstream string) int {
 	tb.Helper()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if listen, ok := s.byName[name]; ok {
-		return listen
+	if taken, ok := s.byName[name]; ok {
+		require.Equalf(tb, taken.upstream, upstream,
+			"containers: proxy %q already fronts host port %s; another upstream needs another name", name, taken.upstream)
+
+		return taken.listen
 	}
 
 	if s.byName == nil {
-		s.byName = map[string]int{}
+		s.byName = map[string]spareProxy{}
 	}
 
 	require.Lessf(tb, len(s.byName), sparePortCount, "containers: no spare proxy port left for %q", name)
 
 	listen := sparePortFirst + len(s.byName)
-	s.byName[name] = listen
+	s.byName[name] = spareProxy{listen: listen, upstream: upstream}
 
 	return listen
 }
@@ -141,7 +153,8 @@ func Proxied(tb testing.TB, dep string) *Proxy {
 // package's own [Fixture], usually — creating it on first use. name
 // identifies the proxy within the test binary: the same name returns the same
 // proxy (and, like every [Proxy], is restored when the test ends), so tests
-// that share one are serial. A dozen distinct names are available.
+// that share one are serial; the same name for another container or port
+// fails the test. A dozen distinct names are available.
 //
 // Toxiproxy speaks TCP only: a UDP port (HTTP/3) cannot be proxied.
 func ProxyTo(tb testing.TB, name string, upstream testcontainers.Container, port string) *Proxy {
@@ -149,7 +162,7 @@ func ProxyTo(tb testing.TB, name string, upstream testcontainers.Container, port
 
 	upstreamHost := mappedHostPort(tb, upstream, port)
 
-	return proxyOn(tb, name, spare.port(tb, name), upstreamHost)
+	return proxyOn(tb, name, spare.port(tb, name, upstreamHost), upstreamHost)
 }
 
 // proxyOn creates (or finds) the proxy name listening on port inside the
@@ -200,16 +213,27 @@ func (p *Proxy) Toxic(kind, stream string, attributes map[string]any) {
 	require.NoError(p.tb, err)
 }
 
-// Reset removes every toxic and re-enables the proxy.
+// Reset removes every toxic and re-enables the proxy. It also runs as the
+// test's cleanup, so a failure is logged, not fatal: the test's own verdict
+// stands, and the log says why the tests after it found the dependency still
+// broken.
 func (p *Proxy) Reset() {
+	p.tb.Helper()
+
 	toxics, err := p.proxy.Toxics()
-	if err == nil {
-		for _, t := range toxics {
-			_ = p.proxy.RemoveToxic(t.Name)
+	if err != nil {
+		p.tb.Logf("containers: reset proxy %s: list toxics: %v", p.proxy.Name, err)
+	}
+
+	for _, t := range toxics {
+		if err := p.proxy.RemoveToxic(t.Name); err != nil {
+			p.tb.Logf("containers: reset proxy %s: remove toxic %s: %v", p.proxy.Name, t.Name, err)
 		}
 	}
 
-	_ = p.proxy.Enable()
+	if err := p.proxy.Enable(); err != nil {
+		p.tb.Logf("containers: reset proxy %s: enable: %v", p.proxy.Name, err)
+	}
 }
 
 // Pause freezes the shared Kafka container (dep is "kafka", the one target)
@@ -228,9 +252,11 @@ func (p *Proxy) Reset() {
 // it) — so the same signal would leave them answering, and Pause refuses
 // them rather than freeze nothing; cut those off with [Proxied].
 //
-// Not the cgroup freezer (`docker pause`): the effect on clients is the same,
-// but that path proved able to wedge a desktop Docker daemon (OrbStack) on
-// unpause during development. Not `docker kill -s STOP` either: it reaches
+// Where the runtime cannot exec in the container (rootless podman: the exec
+// exits 126), the freeze is the runtime's own pause — the cgroup freezer,
+// `docker pause` — and the effect on clients is the same. It is the fallback
+// and not the only path because it proved able to wedge a desktop Docker
+// daemon (OrbStack) on unpause. Not `docker kill -s STOP` either: it reaches
 // PID 1 only, the shell, and the JVM would keep running.
 func Pause(tb testing.TB, dep string) (unpause func()) {
 	tb.Helper()
@@ -243,37 +269,71 @@ func Pause(tb testing.TB, dep string) (unpause func()) {
 
 	container := kafka.container
 
-	signalAll := func(sig string) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		// -1: every process the sender may signal except itself and PID 1
-		// (Linux kill(2)) — the container's workload only where PID 1 is not
-		// the server, which is why Pause takes Kafka alone.
-		code, _, err := container.Exec(ctx, []string{"/bin/sh", "-c", "kill -" + sig + " -1"})
-		if err != nil {
-			return err
-		}
+	resume := func() error { return signalAll(container, "CONT") }
 
-		if code != 0 {
-			return fmt.Errorf("kill -%s -1 exited %d", sig, code)
-		}
+	if err := signalAll(container, "STOP"); err != nil {
+		tb.Logf("containers: pause %s through exec: %v; using the runtime's pause", dep, err)
+		require.NoError(tb, runtimePause(container.GetContainerID(), true))
 
-		return nil
+		resume = func() error { return runtimePause(container.GetContainerID(), false) }
 	}
-	require.NoError(tb, signalAll("STOP"))
 
 	var once sync.Once
 
 	unpause = func() {
 		once.Do(func() {
-			if err := signalAll("CONT"); err != nil {
-				tb.Logf("containers: unpause %s: %v", dep, err)
+			// A container left frozen hangs every later test of the binary,
+			// and podman refuses to stop a paused one: say so loudly.
+			if err := resume(); err != nil {
+				tb.Errorf("containers: unpause %s: %v", dep, err)
 			}
 		})
 	}
 	tb.Cleanup(unpause)
 
 	return unpause
+}
+
+// signalAll sends sig to every process in the container the sender may
+// signal except itself and PID 1 (`kill -<sig> -1`, Linux kill(2)) — the
+// container's workload only where PID 1 is not the server, which is why
+// Pause takes Kafka alone.
+func signalAll(c testcontainers.Container, sig string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	code, _, err := c.Exec(ctx, []string{"/bin/sh", "-c", "kill -" + sig + " -1"})
+	if err != nil {
+		return err
+	}
+
+	if code != 0 {
+		return fmt.Errorf("kill -%s -1 exited %d", sig, code)
+	}
+
+	return nil
+}
+
+// runtimePause freezes (or thaws) every process of the container through the
+// runtime's API. testcontainers.Container has no pause, hence the client.
+func runtimePause(id string, freeze bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cli, err := testcontainers.NewDockerClientWithOpts(ctx)
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = cli.Close() }()
+
+	if freeze {
+		_, err = cli.ContainerPause(ctx, id, client.ContainerPauseOptions{})
+	} else {
+		_, err = cli.ContainerUnpause(ctx, id, client.ContainerUnpauseOptions{})
+	}
+
+	return err
 }
 
 // mappedHostPort returns "<host port>" for a container's exposed port.

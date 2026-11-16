@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -26,7 +27,7 @@ import (
 //	INGEST_S3_REGION              [region]              signing region                                 (default "us-east-1")
 //	INGEST_S3_ACCESS_KEY_ID       [access_key_id]       static credentials; "" = the AWS default chain (default "")
 //	INGEST_S3_SECRET_ACCESS_KEY   [secret_access_key]   …                                              (default "")
-//	INGEST_S3_USE_PATH_STYLE      [use_path_style]      endpoint/bucket/key instead of bucket.endpoint (default true; a hand-built Config sets it)
+//	INGEST_S3_VIRTUAL_HOST_STYLE  [virtual_host_style]  bucket.endpoint/key instead of endpoint/bucket/key (default false)
 //	INGEST_S3_INSECURE            [insecure]            allow an http:// endpoint                      (default false)
 //	INGEST_S3_CA_FILE             [ca_file]             PEM bundle that signs the endpoint's cert      (default "": system roots)
 //	INGEST_S3_AUTO_CREATE_BUCKET  [auto_create_bucket]  create the bucket at boot when it is missing   (default false)
@@ -58,15 +59,19 @@ import (
 // conservative one. Uploaded bytes are still covered by the request signature
 // over TLS and by the store's ETag.
 type Config struct {
-	Bucket           string        `env:"S3_BUCKET" yaml:"bucket"`
-	Endpoint         string        `env:"S3_ENDPOINT" yaml:"endpoint"`
-	Region           string        `env:"S3_REGION" envDefault:"us-east-1" yaml:"region"`
-	AccessKeyID      string        `env:"S3_ACCESS_KEY_ID" yaml:"access_key_id"`
-	SecretAccessKey  secret.String `env:"S3_SECRET_ACCESS_KEY" yaml:"secret_access_key"`
-	UsePathStyle     bool          `env:"S3_USE_PATH_STYLE" envDefault:"true" yaml:"use_path_style"`
-	Insecure         bool          `env:"S3_INSECURE" envDefault:"false" yaml:"insecure"`
-	CAFile           string        `env:"S3_CA_FILE" yaml:"ca_file"`
-	AutoCreateBucket bool          `env:"S3_AUTO_CREATE_BUCKET" envDefault:"false" yaml:"auto_create_bucket"`
+	Bucket          string        `env:"S3_BUCKET" yaml:"bucket"`
+	Endpoint        string        `env:"S3_ENDPOINT" yaml:"endpoint"`
+	Region          string        `env:"S3_REGION" envDefault:"us-east-1" yaml:"region"`
+	AccessKeyID     string        `env:"S3_ACCESS_KEY_ID" yaml:"access_key_id"`
+	SecretAccessKey secret.String `env:"S3_SECRET_ACCESS_KEY" yaml:"secret_access_key"`
+	// VirtualHostStyle puts the bucket into the host name
+	// (bucket.endpoint/key), which needs a DNS name and a certificate per
+	// bucket. Its zero value is path style (endpoint/bucket/key): the form
+	// every S3-compatible store serves, and AWS too.
+	VirtualHostStyle bool   `env:"S3_VIRTUAL_HOST_STYLE" envDefault:"false" yaml:"virtual_host_style"`
+	Insecure         bool   `env:"S3_INSECURE" envDefault:"false" yaml:"insecure"`
+	CAFile           string `env:"S3_CA_FILE" yaml:"ca_file"`
+	AutoCreateBucket bool   `env:"S3_AUTO_CREATE_BUCKET" envDefault:"false" yaml:"auto_create_bucket"`
 
 	DialTimeout time.Duration `env:"S3_DIAL_TIMEOUT" envDefault:"5s" yaml:"dial_timeout"`
 	// OpTimeout bounds one call that is not under TransferTimeout — put,
@@ -89,10 +94,7 @@ type Config struct {
 }
 
 // Defaults applied by [Config.Validate] (and [New]) to zero fields, so a
-// hand-built Config needs only what differs — and UsePathStyle: false is a
-// setting of its own, so the "true" of its env tag reaches only a Config
-// loaded from the environment or YAML. A hand-built one for an
-// S3-compatible store sets it.
+// hand-built Config needs only what differs.
 const (
 	defaultRegion          = "us-east-1"
 	defaultDialTimeout     = 5 * time.Second
@@ -112,24 +114,30 @@ const (
 	ChecksumWhenSupported = "when_supported"
 )
 
-// ErrConfig is in every error [Config.Validate] returns — and so in those of
-// [LoadConfig] and [New] that come from it.
+// ErrConfig is in every error a config is refused with: by
+// [Config.Validate], by [LoadConfig] (an environment that does not parse or
+// sets a retired key included) and by [New].
 var ErrConfig = errors.New("s3 config")
 
 // LoadConfig parses a [Config] from the environment using the given key prefix
 // (use "" for no prefix). Every field but the bucket, the endpoint and the
 // credentials is defaulted. A config with a bucket is validated
 // ([Config.Validate]); one without is returned as it is — object storage is
-// off ([Config.Configured]).
+// off ([Config.Configured]). An environment that still sets
+// S3_USE_PATH_STYLE is refused.
 func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, nil) }
 
 // LoadConfigFrom is [LoadConfig] reading environ instead of the process
 // environment (nil means the process environment). Tests pass a map, so they
 // need no t.Setenv and can run in parallel.
 func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
+	if err := refuseRetiredKeys(prefix, environ); err != nil {
+		return Config{}, err
+	}
+
 	var cfg Config
 	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix, Environment: environ}); err != nil {
-		return Config{}, fmt.Errorf("s3: parse config (prefix %q): %w", prefix, err)
+		return Config{}, fmt.Errorf("%w: parse (prefix %q): %w", ErrConfig, prefix, err)
 	}
 
 	if !cfg.Configured() {
@@ -141,6 +149,41 @@ func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// RetiredKeys names the environment keys this config once read, each with
+// what to set instead. [LoadConfig] refuses an environment that sets one
+// under its prefix, and so does httpx.LoadYAML for a service that has this
+// config as a section — it reads the keys of the struct, and cannot see one
+// that is gone.
+//
+// S3_USE_PATH_STYLE had the opposite sense of S3_VIRTUAL_HOST_STYLE: were
+// the key merely unknown, a deployment that set it to false would be moved
+// to path style without a word.
+func (Config) RetiredKeys() map[string]string {
+	return map[string]string{
+		"S3_USE_PATH_STYLE": "path style is the default — remove the key, or set S3_VIRTUAL_HOST_STYLE=true where it was false",
+	}
+}
+
+// refuseRetiredKeys fails when the environment (environ, or the process
+// environment when it is nil) sets a key of [Config.RetiredKeys] under
+// prefix, whatever its value.
+func refuseRetiredKeys(prefix string, environ map[string]string) error {
+	for name, instead := range (Config{}).RetiredKeys() {
+		key := prefix + name
+
+		_, set := environ[key]
+		if environ == nil {
+			_, set = os.LookupEnv(key)
+		}
+
+		if set {
+			return fmt.Errorf("%w: %s is no longer read: %s", ErrConfig, key, instead)
+		}
+	}
+
+	return nil
 }
 
 // Configured reports whether a bucket is set: the switch for a service that

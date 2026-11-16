@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
 	"github.com/tracehubmmp/golang-basics/libs/s3"
@@ -60,6 +61,13 @@ func TestCallIsMeasuredAndTraced(t *testing.T) {
 			ended := spans.Ended()
 			require.Len(t, ended, 1)
 			assert.Equal(t, "s3 get", ended[0].Name())
+			assert.ElementsMatch(t, []attribute.KeyValue{
+				attribute.String("rpc.system.name", "aws-api"),
+				attribute.String("rpc.method", "S3/GetObject"),
+				attribute.String("cloud.region", "us-east-1"),
+				attribute.String("aws.s3.bucket", "b"),
+				attribute.String("aws.s3.key", "k"),
+			}, ended[0].Attributes())
 
 			if tc.failed {
 				assert.InDelta(t, 1, testx.Metric(t, reg, "s3_request_errors_total", get), 0)

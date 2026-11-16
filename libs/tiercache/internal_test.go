@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,19 +87,32 @@ func TestConfig(t *testing.T) {
 	assert.Equal(t, 16, cfg.RefreshConcurrency)
 
 	require.ErrorContains(t, Config{HardTTL: time.Minute}.Validate(), "Name")
+	require.ErrorIs(t, Config{HardTTL: time.Minute}.Validate(), ErrConfig)
 	require.ErrorContains(t, Config{Name: "c"}.Validate(), "HardTTL")
 	require.ErrorContains(t, Config{Name: "c", HardTTL: time.Second, SoftTTL: time.Minute}.Validate(), "SoftTTL")
 	require.ErrorContains(t, Config{Name: "c", HardTTL: time.Second, StaleIfError: -1}.Validate(), "StaleIfError")
 
-	assert.Equal(t, resilience.BreakerConfig{FailureRatio: 0.5, MinRequests: 10, Window: 10 * time.Second, OpenTimeout: 5 * time.Second, HalfOpenProbes: 1}, cfg.Breaker)
+	// The breaker's defaults are DefaultConfig's: breaker.failure_ratio 0
+	// stays 0, which is "no breaker", and New builds none.
+	assert.False(t, cfg.Breaker.Enabled(), "failure_ratio 0 is not replaced by a default")
+	assert.Equal(t, resilience.BreakerConfig{}, cfg.Breaker)
 
-	cfg.Breaker.FailureRatio = 1.5
-	require.ErrorContains(t, cfg.Validate(), "breaker: failure_ratio")
+	defaults := resilience.BreakerConfig{FailureRatio: 0.5, MinRequests: 10, Window: 10 * time.Second, OpenTimeout: 5 * time.Second, HalfOpenProbes: 1}
+	assert.Equal(t, defaults, DefaultConfig().Breaker)
 
-	// Validate answers for the configuration as New would run it: a field
-	// left at zero is its default there too.
+	// A breaker that is asked for takes the defaults of what it leaves at
+	// zero, and Validate answers for the configuration as New would run it.
 	partial := Config{Name: "c", HardTTL: time.Minute, Breaker: resilience.BreakerConfig{FailureRatio: 0.3}}
 	require.NoError(t, partial.Validate())
+	partial.applyDefaults()
+
+	defaults.FailureRatio = 0.3
+	assert.Equal(t, defaults, partial.Breaker)
+
+	for _, ratio := range []float64{1.5, -0.1} {
+		cfg.Breaker.FailureRatio = ratio
+		require.ErrorContains(t, cfg.Validate(), "breaker: failure_ratio")
+	}
 }
 
 // An invalidation is about its key: a lookup of another key that is in
@@ -115,7 +127,7 @@ func TestALookupIsUndisturbedByWhatHappensToOtherKeys(t *testing.T) {
 		release = make(chan struct{})
 	)
 
-	cache, err := New(Config{Name: "keys", HardTTL: time.Minute}, newMapStore, byteCodec{},
+	cache, err := New(Config{Name: "keys", HardTTL: time.Minute}, NewMapStore, byteCodec{},
 		func(_ context.Context, key string) ([]byte, error) {
 			switch key {
 			case "a":
@@ -184,7 +196,7 @@ func TestNoRefreshStartsOnceTheCacheIsClosed(t *testing.T) {
 
 	var loads atomic.Int64
 
-	cache, err := New(Config{Name: "closed", HardTTL: time.Minute}, newMapStore, byteCodec{},
+	cache, err := New(Config{Name: "closed", HardTTL: time.Minute}, NewMapStore, byteCodec{},
 		func(context.Context, string) ([]byte, error) { loads.Add(1); return nil, nil }, nil, nil)
 	require.NoError(t, err)
 
@@ -197,7 +209,7 @@ func TestNoRefreshStartsOnceTheCacheIsClosed(t *testing.T) {
 func TestMetricsAreLintClean(t *testing.T) {
 	t.Parallel()
 
-	cache, err := New(Config{Name: "lint", HardTTL: time.Minute}, newMapStore, byteCodec{}, func(context.Context, string) ([]byte, error) { return nil, nil }, nil, nil)
+	cache, err := New(Config{Name: "lint", HardTTL: time.Minute}, NewMapStore, byteCodec{}, func(context.Context, string) ([]byte, error) { return nil, nil }, nil, nil)
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
 
@@ -207,50 +219,6 @@ func TestMetricsAreLintClean(t *testing.T) {
 	problems, err := testutil.GatherAndLint(reg)
 	require.NoError(t, err)
 	assert.Empty(t, problems)
-}
-
-// mapStore is the L1 of the tests in this package, which are about the
-// envelope and the deadlines and need no more of a store than a map: the
-// real ones are in offheap and onheap, which cannot be imported from here
-// (they import this package).
-type mapStore struct {
-	mu      sync.Mutex
-	entries map[string][]byte
-}
-
-func newMapStore(int) Store { return &mapStore{entries: map[string][]byte{}} }
-
-func (*mapStore) MaxEntry() int { return 1 << 20 }
-func (*mapStore) Bytes() int    { return 0 }
-
-func (s *mapStore) Get(dst []byte, key string) ([]byte, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	value, found := s.entries[key]
-
-	return append(dst, value...), found
-}
-
-func (s *mapStore) Set(key string, value []byte) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.entries[key] = append([]byte(nil), value...)
-}
-
-func (s *mapStore) Delete(key string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	delete(s.entries, key)
-}
-
-func (s *mapStore) Reset() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	clear(s.entries)
 }
 
 type byteCodec struct{}
@@ -266,7 +234,7 @@ func newByteCache(t *testing.T, log *slog.Logger, tune func(*Config)) *Cache[[]b
 		tune(&cfg)
 	}
 
-	cache, err := New(cfg, newMapStore, byteCodec{}, func(context.Context, string) ([]byte, error) { return nil, nil }, nil, log)
+	cache, err := New(cfg, NewMapStore, byteCodec{}, func(context.Context, string) ([]byte, error) { return nil, nil }, nil, log)
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
 

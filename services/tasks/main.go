@@ -76,7 +76,7 @@ func run(cfg config.Config) error {
 	}
 	defer db.Close()
 
-	if err := pgx.Migrate(bootCtx, db.Pool(), migrations.FS, logger); err != nil {
+	if err := db.Migrate(bootCtx, migrations.FS); err != nil {
 		logger.Error("migration failed", "err", err)
 		return err
 	}

@@ -5,8 +5,6 @@ go 1.27.0
 replace github.com/tracehubmmp/golang-basics/libs/resilience => ../resilience
 
 require (
-	github.com/VictoriaMetrics/fastcache v1.12.5 // the 1.12 line: 1.13 requires snappy v1, which `go work sync` and the per-module tidy gate cannot both accept while other modules resolve v0.0.4
-	github.com/coocood/freecache v1.2.7
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
 	github.com/tracehubmmp/golang-basics/libs/resilience v0.0.0-00010101000000-000000000000
@@ -18,7 +16,6 @@ require (
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/golang/snappy v0.0.4 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect

@@ -155,22 +155,20 @@ func (db *DB) unit(ctx context.Context) *unit {
 //		return err
 //	}
 //
-// With DB_OP_TIMEOUT set, each call on the result runs under that deadline on
-// top of ctx's own: waiting for a connection, the statement, and reading its
-// result — until Rows are closed or exhausted, a Row is scanned, BatchResults
-// are closed. It is what ends a call whose context has no deadline when the
-// pool is exhausted or the server stops answering.
+// Unless DB_OP_TIMEOUT is zero, each call on the result runs under that
+// deadline on top of ctx's own: waiting for a connection, the statement, and
+// reading its result — until Rows are closed or exhausted, a Row is scanned,
+// BatchResults are closed. It is what ends a call whose context has no
+// deadline when the pool is exhausted or the server stops answering. A call
+// that fails before it has a connection counts in db_query_errors_total (see
+// [DB.Collectors]).
 func (db *DB) Conn(ctx context.Context) Querier {
 	var q Querier = db.pool
 	if u := db.unit(ctx); u != nil {
 		q = u.tx
 	}
 
-	if db.opTimeout > 0 {
-		return bounded{q: q, timeout: db.opTimeout}
-	}
-
-	return q
+	return conn{q: q, db: db}
 }
 
 // InTx runs work as one unit of work: everything it does through [DB.Conn]
@@ -277,11 +275,14 @@ func (db *DB) run(
 	work func(context.Context) error,
 ) ([]func(context.Context), error) {
 	bctx, cancel := db.bound(ctx)
+	bctx, try := watch(bctx)
 	tx, err := begin(bctx)
 
 	cancel()
 
 	if err != nil {
+		db.metrics.missed(try, "begin")
+
 		return nil, fmt.Errorf("pgx: begin: %w", err)
 	}
 

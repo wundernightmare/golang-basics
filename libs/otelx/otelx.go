@@ -29,10 +29,6 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
-// ShutdownFunc flushes and tears down the tracer provider; see
-// [Telemetry.Shutdown] for what the one [Init] returns guarantees.
-type ShutdownFunc func(ctx context.Context) error
-
 // Telemetry is what [Init] built. Pass TracerProvider / Propagator to the
 // libraries explicitly (httpx.WithTracerProvider, kafka.WithTracerProvider,
 // pgx / valkey / resilient WithTracerProvider, …): explicit wiring is what
@@ -44,19 +40,29 @@ type Telemetry struct {
 	// Propagator is W3C trace context + baggage — always, even when disabled,
 	// so an incoming trace context is still forwarded to the next hop.
 	Propagator propagation.TextMapPropagator
-	// Shutdown exports what is buffered and stops the provider; a service
-	// calls it once, on exit, usually as [Telemetry.Stop]. It lasts until
-	// ctx's deadline, or five seconds when ctx has none, and does not stop
-	// when ctx is cancelled: the context of a service is cancelled by the
-	// signal that ends it, and a provider stopped under a cancelled context
-	// drops its spans for good. The error — also logged at warn — says that
-	// spans may have been lost: the time ran out, or the collector did not
-	// take the last export. A no-op when tracing is disabled.
-	Shutdown ShutdownFunc
 	// Retro is the retroactive sampling buffer: nil when tracing is disabled
 	// or the buffer is off (OTEL_RETRO_BUFFER_MIB < 0). A bus between
 	// services would call its Trigger and OnLocalTrigger.
 	Retro *retro.Processor
+
+	// shutdown is nil when there is no provider to stop.
+	shutdown func(ctx context.Context) error
+}
+
+// Shutdown exports what is buffered and stops the provider; a service calls
+// it once, on exit, usually as [Telemetry.Stop]. It lasts until ctx's
+// deadline, or five seconds when ctx has none, and does not stop when ctx is
+// cancelled: the context of a service is cancelled by the signal that ends
+// it, and a provider stopped under a cancelled context drops its spans for
+// good. The error — also logged at warn — says that spans may have been lost:
+// the time ran out, or the collector did not take the last export. A no-op
+// when tracing is disabled, and on a nil or zero Telemetry.
+func (t *Telemetry) Shutdown(ctx context.Context) error {
+	if t == nil || t.shutdown == nil {
+		return nil
+	}
+
+	return t.shutdown(ctx)
 }
 
 // Collectors returns the Prometheus collectors of the tracing pipeline — the
@@ -81,7 +87,7 @@ const shutdownBudget = 5 * time.Second
 //	tel, err := otelx.Init(ctx, cfg.OTel, logger)
 //	if err != nil { … }
 //	defer tel.Stop()
-func (t Telemetry) Stop() {
+func (t *Telemetry) Stop() {
 	_ = t.Shutdown(context.Background())
 }
 
@@ -136,11 +142,7 @@ func Init(ctx context.Context, cfg Config, log *slog.Logger) (*Telemetry, error)
 	if !cfg.Enabled {
 		log.InfoContext(ctx, "tracing disabled (propagation only)")
 
-		return &Telemetry{
-			TracerProvider: noop.NewTracerProvider(),
-			Propagator:     prop,
-			Shutdown:       func(context.Context) error { return nil },
-		}, nil
+		return &Telemetry{TracerProvider: noop.NewTracerProvider(), Propagator: prop}, nil
 	}
 
 	exporter, err := newExporter(ctx, cfg)
@@ -196,7 +198,7 @@ func Init(ctx context.Context, cfg Config, log *slog.Logger) (*Telemetry, error)
 		return err
 	}
 
-	return &Telemetry{TracerProvider: tp, Propagator: prop, Shutdown: shutdown, Retro: buffer}, nil
+	return &Telemetry{TracerProvider: tp, Propagator: prop, Retro: buffer, shutdown: shutdown}, nil
 }
 
 // newProvider assembles the SDK provider: the batch processor in front of

@@ -15,10 +15,11 @@
 package onheap
 
 import (
+	"unsafe"
+
 	"github.com/coocood/freecache"
 
 	"github.com/tracehubmmp/golang-basics/libs/tiercache"
-	"github.com/tracehubmmp/golang-basics/libs/tiercache/internal/lend"
 )
 
 // Min is the least capacity.
@@ -37,6 +38,15 @@ type store struct {
 	capacity int
 }
 
+// lend is key as a slice over the string's own memory: a read of any key
+// length then costs no allocation. The library copies a key into its ring
+// and neither keeps nor changes the slice — and nothing else may be handed
+// it: a string is immutable, and a write through the slice would be a write
+// into every copy of it.
+func lend(key string) []byte {
+	return unsafe.Slice(unsafe.StringData(key), len(key)) //nolint:gosec // G103: a read-only view of an immutable string, see above
+}
+
 // New is a [tiercache.StoreFactory].
 func New(maxBytes int) tiercache.Store {
 	maxBytes = max(maxBytes, Min)
@@ -49,7 +59,7 @@ func (s store) Get(dst []byte, key string) ([]byte, bool) {
 	// capacity — the spare capacity of dst, here — and allocates otherwise.
 	// Either way append puts the value after dst: in the first case it is
 	// there already, and the copy is of the bytes onto themselves.
-	value, err := s.cache.GetWithBuf(lend.Bytes(key), dst[len(dst):])
+	value, err := s.cache.GetWithBuf(lend(key), dst[len(dst):])
 	if err != nil {
 		return dst, false
 	}
@@ -61,12 +71,12 @@ func (s store) Get(dst []byte, key string) ([]byte, bool) {
 // carries the deadlines. It deletes what it cannot keep — the library
 // refuses an entry over the limit and leaves the previous value of its key.
 func (s store) Set(key string, value []byte) {
-	if err := s.cache.Set(lend.Bytes(key), value, 0); err != nil {
-		s.cache.Del(lend.Bytes(key))
+	if err := s.cache.Set(lend(key), value, 0); err != nil {
+		s.cache.Del(lend(key))
 	}
 }
 
-func (s store) Delete(key string) { s.cache.Del(lend.Bytes(key)) }
+func (s store) Delete(key string) { s.cache.Del(lend(key)) }
 func (s store) Reset()            { s.cache.Clear() }
 
 func (s store) MaxEntry() int {

@@ -33,6 +33,8 @@ unleash:
     - "doc\\.go$"
     - "^storetest/" # the store conformance suite: test code in a non-_test file
     - "^credential/" # a module of its own, with its own .gremlins.yaml
+    - "^offheap/" # modules of their own, each with its own .gremlins.yaml
+    - "^onheap/"
     - "^integration/" # a module of its own: the container-backed suite
   threshold:
     efficacy: 88

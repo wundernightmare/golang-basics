@@ -2,6 +2,7 @@ package grpcx
 
 import (
 	"bytes"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -14,10 +15,13 @@ import (
 
 	"go.yaml.in/yaml/v3"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/resolver"
 
 	"github.com/tracehubmmp/golang-basics/libs/resilience"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // maxAttemptsLimit is grpc-go's own cap on attempts per call (its
@@ -41,7 +45,7 @@ const (
 //
 // Zero means what each field's comment says — usually "disabled" — and is
 // never silently replaced by a default. Start from [DefaultConfig] /
-// [DefaultTarget] (or use [LoadConfig], which overlays the YAML on those
+// [DefaultTarget] (or use [ParseYAML], which overlays the YAML on those
 // defaults) and change what differs.
 type Config struct {
 	// Targets declares one connection and policy set per logical target.
@@ -58,9 +62,14 @@ type TargetConfig struct {
 	// resolves through DNS.
 	// Required.
 	Address string `yaml:"address"`
-	// Insecure connects without TLS (default false: TLS with the system
-	// roots; other credentials go through [WithDialOptions]).
+	// Insecure connects without TLS (default false: TLS, trusting what
+	// CAFile says; other credentials go through [WithDialOptions]).
 	Insecure bool `yaml:"insecure"`
+	// CAFile is the trust store of the TLS connection: a PEM bundle that
+	// replaces the system roots, it does not add to them (default "": the
+	// system roots). With Insecure it is a config error, not an ignored key.
+	// The file is read by [Config.Validate] and again by [New].
+	CAFile string `yaml:"ca_file"`
 
 	// Timeout is the deadline of a call that has none of its own, retries
 	// included; a caller's shorter deadline wins (default 5s; 0 = none — only
@@ -138,12 +147,12 @@ func DefaultTarget(name, address string) TargetConfig {
 	}
 }
 
-// LoadConfig parses YAML (each target over [DefaultTarget]), rejects unknown
-// keys and validates the result.
-func LoadConfig(data []byte) (Config, error) {
+// ParseYAML parses a YAML document (each target over [DefaultTarget]),
+// rejects unknown keys and validates the result.
+func ParseYAML(data []byte) (Config, error) {
 	var c Config
 	if err := strictDecode(data, &c); err != nil && !errors.Is(err, io.EOF) {
-		return Config{}, fmt.Errorf("grpcx: parse config: %w", err)
+		return Config{}, fmt.Errorf("%w: parse: %w", ErrConfig, err)
 	}
 
 	if err := c.Validate(); err != nil {
@@ -207,7 +216,7 @@ func (c *Config) Validate() error {
 		return nil
 	}
 
-	return fmt.Errorf("grpcx: invalid config: %w", errors.Join(errs...))
+	return fmt.Errorf("%w: %w", ErrConfig, errors.Join(errs...))
 }
 
 func (t *TargetConfig) validate() []error {
@@ -216,6 +225,10 @@ func (t *TargetConfig) validate() []error {
 	bad := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
 
 	if err := checkAddress(t.Address); err != nil {
+		errs = append(errs, err)
+	}
+
+	if _, err := t.transport(); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -355,6 +368,31 @@ func checkHostPort(s string) error {
 	}
 
 	return errors.New("address is not host:port")
+}
+
+// transport is the target's transport credentials. It reads CAFile: an error
+// is a problem of the config.
+func (t *TargetConfig) transport() (credentials.TransportCredentials, error) {
+	if t.Insecure {
+		if t.CAFile != "" {
+			return nil, errors.New("ca_file is set but insecure is true")
+		}
+
+		return insecure.NewCredentials(), nil
+	}
+
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	if t.CAFile != "" {
+		pool, err := secret.CertPool(t.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("ca_file: %w", err)
+		}
+
+		tlsConfig.RootCAs = pool
+	}
+
+	return credentials.NewTLS(tlsConfig), nil
 }
 
 // keepalive is the target's keepalive pings; ok is false when they are off.

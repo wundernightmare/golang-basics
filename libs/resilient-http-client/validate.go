@@ -4,9 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"math"
+
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
-// Validate reports every problem in c at once (joined), or nil.
+// ErrConfig is in every error a config is refused with: by
+// [Config.Validate], by [ParseYAML] (a document that does not parse included)
+// and by [New].
+var ErrConfig = errors.New("resilient: invalid config")
+
+// Validate reports every problem in c at once (joined), or nil. It reads the
+// ca_file of each target that names one.
 func (c *Config) Validate() error {
 	var errs []error
 
@@ -22,6 +30,10 @@ func (c *Config) Validate() error {
 
 	if c.MaxRedirects < 0 {
 		bad("max_redirects must not be negative")
+	}
+
+	if len(c.Targets) == 0 {
+		bad("targets: at least one is required")
 	}
 
 	seen := make(map[string]bool, len(c.Targets))
@@ -43,13 +55,19 @@ func (c *Config) Validate() error {
 		return nil
 	}
 
-	return fmt.Errorf("resilient: invalid config: %w", errors.Join(errs...))
+	return fmt.Errorf("%w: %w", ErrConfig, errors.Join(errs...))
 }
 
 func (t *TargetConfig) validate() []error {
 	var errs []error
 
 	bad := func(msg string) { errs = append(errs, errors.New(msg)) }
+
+	if t.CAFile != "" {
+		if _, err := secret.CertPool(t.CAFile); err != nil {
+			errs = append(errs, fmt.Errorf("ca_file: %w", err))
+		}
+	}
 
 	if t.Timeout < 0 || t.MaxConcurrentWait < 0 {
 		bad("timeouts must not be negative")

@@ -106,9 +106,11 @@ func LoadMigrations(fsys fs.FS) ([]Migration, error) {
 //	SET LOCAL statement_timeout = '10min';
 //
 // Migrate takes the raw pool: DB_OP_TIMEOUT does not apply, ctx is the only
-// client-side bound.
+// client-side bound. [DB.Migrate] is the same on a [DB].
 //
-// Migrations are forward-only; there is no "down". A migration that must not
+// Migrations are forward-only; there is no "down". An applied version is
+// known by its number alone — no checksum is kept, so an edit to a file that
+// has already run is not noticed. A migration that must not
 // run in a transaction (CREATE INDEX CONCURRENTLY) does not belong here.
 func Migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, log *slog.Logger) error {
 	if log == nil {
@@ -138,6 +140,12 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS, log *slog.Logg
 	log.InfoContext(ctx, "postgres schema up to date", "migrations", len(migrations), "applied", applied)
 
 	return nil
+}
+
+// Migrate is [Migrate] on the pool of db, logging to the logger db was built
+// with.
+func (db *DB) Migrate(ctx context.Context, fsys fs.FS) error {
+	return Migrate(ctx, db.pool, fsys, db.log)
 }
 
 // lockSQL takes the migration lock for the current schema. hashtextextended

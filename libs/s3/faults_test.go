@@ -52,7 +52,7 @@ func faulty(t *testing.T, handler http.HandlerFunc, mutate ...func(*s3.Config)) 
 	t.Cleanup(srv.Close)
 
 	cfg := s3.Config{
-		Bucket: "b", Endpoint: srv.URL, Insecure: true, UsePathStyle: true,
+		Bucket: "b", Endpoint: srv.URL, Insecure: true,
 		AccessKeyID: "k", SecretAccessKey: secret.New("s"), MaxAttempts: 1, OpTimeout: 5 * time.Second,
 		UploadPartBytes: s3.MinUploadPartBytes,
 	}
@@ -246,6 +246,10 @@ func TestEnsure_CreateBucketOutcomes(t *testing.T) {
 	raced := faulty(t, server(http.StatusConflict,
 		`<?xml version="1.0" encoding="UTF-8"?><Error><Code>BucketAlreadyOwnedByYou</Code><Message>yours</Message></Error>`), auto)
 	require.NoError(t, raced.Ensure(context.Background()), "another replica created it first")
+
+	taken := faulty(t, server(http.StatusConflict,
+		`<?xml version="1.0" encoding="UTF-8"?><Error><Code>BucketAlreadyExists</Code><Message>taken</Message></Error>`), auto)
+	require.ErrorContains(t, taken.Ensure(context.Background()), "BucketAlreadyExists", "the name is another account's: not this client's bucket")
 
 	broken := faulty(t, server(http.StatusInternalServerError, internalError), auto)
 	require.ErrorContains(t, broken.Ensure(context.Background()), "s3: create bucket")

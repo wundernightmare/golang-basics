@@ -1,7 +1,9 @@
 package resilient
 
 import (
+	"crypto/x509"
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,10 +15,10 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/resilience"
 )
 
-func TestLoadConfig_OverlaysDefaults(t *testing.T) {
+func TestParseYAML_OverlaysDefaults(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := LoadConfig([]byte(`
+	cfg, err := ParseYAML([]byte(`
 max_idle_conns_per_host: 8
 http2_ping_interval: 0s
 targets:
@@ -36,14 +38,6 @@ targets:
 	want.Targets[0].RateLimit = 2.5
 	want.Targets[0].Breaker.FailureRatio = 0
 	assert.Equal(t, want, cfg, "omitted keys keep their defaults; an explicit 0 disables")
-}
-
-func TestLoadConfig_EmptyIsDefault(t *testing.T) {
-	t.Parallel()
-
-	cfg, err := LoadConfig(nil)
-	require.NoError(t, err)
-	assert.Equal(t, DefaultConfig(), cfg)
 }
 
 // The documented defaults, as literals: the field comments of Config and
@@ -82,6 +76,7 @@ func TestDefaults(t *testing.T) {
 func TestNewTransport_AppliesTheConfig(t *testing.T) {
 	t.Parallel()
 
+	roots := x509.NewCertPool()
 	transport := newTransport(&Config{
 		MaxIdleConns:          1,
 		MaxIdleConnsPerHost:   2,
@@ -90,7 +85,7 @@ func TestNewTransport_AppliesTheConfig(t *testing.T) {
 		ResponseHeaderTimeout: 5 * time.Second,
 		HTTP2PingInterval:     6 * time.Second,
 		HTTP2PingTimeout:      7 * time.Second,
-	})
+	}, roots)
 
 	for _, tc := range []struct {
 		key       string
@@ -105,14 +100,17 @@ func TestNewTransport_AppliesTheConfig(t *testing.T) {
 		{"http2_ping_timeout", transport.HTTP2.PingTimeout, 7 * time.Second},
 		{"HTTP/2 is attempted", transport.ForceAttemptHTTP2, true},
 		{"the proxy comes from the environment", transport.Proxy != nil, true},
+		{"a target's ca_file is the trust store", transport.TLSClientConfig.RootCAs, roots},
 	} {
 		assert.Equal(t, tc.want, tc.got, tc.key)
 	}
 
-	assert.Nil(t, newTransport(&Config{}).HTTP2, "http2_ping_interval 0: no health check")
+	bare := newTransport(&Config{}, nil)
+	assert.Nil(t, bare.HTTP2, "http2_ping_interval 0: no health check")
+	assert.Nil(t, bare.TLSClientConfig, "no ca_file: the system's trust store")
 }
 
-func TestLoadConfig_RejectsUnknownKeysAndInvalid(t *testing.T) {
+func TestParseYAML_RejectsUnknownKeysAndInvalid(t *testing.T) {
 	t.Parallel()
 
 	for name, doc := range map[string]string{
@@ -121,16 +119,15 @@ func TestLoadConfig_RejectsUnknownKeysAndInvalid(t *testing.T) {
 		"bad duration":   "targets:\n  - name: a\n    timeout: soon",
 		"not yaml":       "targets: [",
 		"invalid":        "targets:\n  - name: a\n  - name: a",
+		"empty":          "",
 	} {
-		_, err := LoadConfig([]byte(doc))
-		assert.Error(t, err, name)
+		_, err := ParseYAML([]byte(doc))
+		assert.ErrorIs(t, err, ErrConfig, name)
 	}
 }
 
 func TestValidate(t *testing.T) {
 	t.Parallel()
-
-	require.NoError(t, (&Config{}).Validate(), "the zero config is valid: everything disabled")
 
 	def := DefaultConfig("a", "b")
 	require.NoError(t, def.Validate())
@@ -140,7 +137,9 @@ func TestValidate(t *testing.T) {
 		mut  func(*Config)
 		msg  string
 	}{
+		{"no targets", func(c *Config) { c.Targets = nil }, "at least one"},
 		{"empty name", func(c *Config) { c.Targets[0].Name = "" }, "name is empty"},
+		{"ca file", func(c *Config) { c.Targets[0].CAFile = filepath.Join(t.TempDir(), "absent.pem") }, `target "a": ca_file: `},
 		{"duplicate", func(c *Config) { c.Targets[1].Name = "a" }, "declared twice"},
 		{"pool", func(c *Config) { c.MaxConnsPerHost = -1 }, "pool sizes"},
 		{"pool idle", func(c *Config) { c.MaxIdleConns = -1 }, "pool sizes"},

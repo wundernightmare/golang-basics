@@ -2,7 +2,7 @@
 // logical target (a dependency). It is wiring, not a client of its own: the
 // policy that grpc-go already implements is configured, not re-implemented.
 //
-//	cfg, err := grpcx.LoadConfig(yamlBytes)
+//	cfg, err := grpcx.ParseYAML(yamlBytes)
 //	c, err := grpcx.New(cfg, grpcx.WithLogger(log), grpcx.WithRegisterer(reg))
 //	defer c.Close()
 //

@@ -49,6 +49,10 @@ func TestLoadConfig_Defaults(t *testing.T) {
 
 	_, err := LoadConfigFrom("TASKS_", map[string]string{})
 	require.ErrorContains(t, err, "KAFKA_BROKERS must be set", "the address has no default")
+	require.ErrorIs(t, err, ErrConfig)
+
+	_, err = LoadConfigFrom("TASKS_", map[string]string{"TASKS_KAFKA_BROKERS": "localhost:9092", "TASKS_KAFKA_DIAL_TIMEOUT": "soon"})
+	require.ErrorIs(t, err, ErrConfig, "a value that does not parse is a config error too")
 
 	environ := map[string]string{"TASKS_KAFKA_BROKERS": "localhost:9092"}
 
@@ -200,6 +204,7 @@ func TestConfig_Validate(t *testing.T) {
 			}
 
 			require.ErrorContains(t, err, tc.want)
+			require.ErrorIs(t, err, ErrConfig)
 		})
 	}
 }

@@ -17,7 +17,7 @@ var FS embed.FS
 db, err := pgx.New(ctx, cfg.Postgres, logger) // boot ping: fails fast on a bad DSN
 if err != nil { … }
 defer db.Close()
-if err := pgx.Migrate(ctx, db.Pool(), migrations.FS, logger); err != nil { … }
+if err := db.Migrate(ctx, migrations.FS); err != nil { … }
 
 srv.Health.Register("postgres", db.ReadyCheck())
 srv.Metrics.Registry.MustRegister(db.Collectors()...)
@@ -34,23 +34,38 @@ the `TASKS_` prefix the keys are:
 | Env | YAML | Default | |
 | --- | --- | --- | --- |
 | `TASKS_DATABASE_URL` | `url` | — | full DSN; wins over the discrete fields. A `secret.String`: it carries the password, and printing the config does not print it |
-| `TASKS_DB_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_NAME` / `_SSLMODE` | `host` … `sslmode` | `localhost` / `5432` / `app` / `app` / `app` / `disable` | |
+| `TASKS_DB_HOST` / `_PORT` / `_NAME` / `_SSLMODE` | `host` / `port` / `name` / `sslmode` | `localhost` / `5432` / `app` / `disable` | |
+| `TASKS_DB_USER` / `_PASSWORD` | `user` / `password` | — | no default account: without `DATABASE_URL`, the user and a password (this key or the file below) are required |
 | `TASKS_DB_PASSWORD_FILE` | `password_file` | — | a mounted secret, read for every new connection — a rotated mount reaches the connections opened after it, no restart; wins over `DB_PASSWORD` and the URL's password (trailing newline dropped) |
 | `TASKS_DB_MAX_CONNS` / `_MIN_CONNS` | `max_conns` / `min_conns` | `10` / `0` | pool size; in a hand-built `Config` a zero `MaxConns` is pgxpool's own default |
-| `TASKS_DB_MAX_CONN_LIFETIME` / `_MAX_CONN_IDLE` | … | `1h` / `30m` | recycling |
-| `TASKS_DB_CONNECT_TIMEOUT` | `connect_timeout` | `5s` | dial + boot ping (zero → 5s, never "expire at once") |
+| `TASKS_DB_CA_FILE` | `ca_file` | — (system roots) | PEM bundle the server's certificate is verified against — libpq's `sslrootcert`. Needs `sslmode` `require` (which then checks the chain, as `verify-ca`), `verify-ca` or `verify-full`; with `DATABASE_URL` put `sslrootcert` into the URL instead |
+| `TASKS_DB_MAX_CONN_LIFETIME` / `_MAX_CONN_IDLE` | `max_conn_lifetime` / `max_conn_idle` | `1h` / `30m` | recycling; each connection lives up to a tenth of the lifetime longer, at random, so connections opened together do not reconnect together |
+| `TASKS_DB_DIAL_TIMEOUT` | `dial_timeout` | `5s` | opening one connection (dial, TLS, authentication) + boot ping (zero → 5s, never "expire at once") |
 | `TASKS_DB_STATEMENT_TIMEOUT` | `statement_timeout` | `30s` | Postgres cancels a statement running longer |
 | `TASKS_DB_LOCK_TIMEOUT` | `lock_timeout` | `5s` | … or waiting longer for a lock |
 | `TASKS_DB_IDLE_IN_TX_TIMEOUT` | `idle_in_transaction_session_timeout` | `60s` | … and ends a session left idle inside a transaction |
-| `TASKS_DB_OP_TIMEOUT` | `op_timeout` | `0` (none) | client-side deadline of one call — see [Deadlines](#deadlines) |
+| `TASKS_DB_OP_TIMEOUT` | `op_timeout` | `35s` | client-side deadline of one call, `0` = none — see [Deadlines](#deadlines) |
 
 `DB_HOST` takes an IPv6 literal with or without brackets.
 
 `Config.Validate()` checks, without connecting, everything `New` would refuse
-on the config alone: a DSN pgx cannot parse (host, port, `sslmode`, TLS
-files), negative sizes and durations, `DB_MIN_CONNS` above `DB_MAX_CONNS`, a
-password file that is missing or empty. `LoadConfig` / `LoadConfigFrom` and
-`New` run it; the error never contains the password.
+on the config alone: no `DATABASE_URL` and no user or no password, a DSN pgx
+cannot parse (host, port, `sslmode`, TLS files), negative sizes and
+durations, `DB_MIN_CONNS` above `DB_MAX_CONNS`, a `DB_OP_TIMEOUT` that is not
+above `DB_STATEMENT_TIMEOUT`, a password file that is missing or empty, a CA
+file that is not a sound PEM bundle or that the `sslmode` would not use.
+`LoadConfig` / `LoadConfigFrom` and `New` run it; the error wraps
+`pgx.ErrConfig` (`errors.Is`) and never contains the password.
+
+`DB_CONNECT_TIMEOUT` is no longer read — the key is `DB_DIAL_TIMEOUT`.
+`LoadConfig` and `httpx.LoadYAML` refuse an environment that still sets it
+(`Config.RetiredKeys`); a YAML `connect_timeout` is an unknown key.
+
+There is no default user or password. Authentication that needs no password
+(trust, peer, `.pgpass`) is spelled as a `DATABASE_URL`. The default
+`sslmode` is `disable`: TLS to the database is opted into. `DB_CA_FILE` is
+the whole trust store — the system roots are not consulted — and is read
+when the pool is built: a rotated bundle needs a restart.
 
 The three timeouts are sent as run-time parameters on every connection
 (`SHOW statement_timeout` reports them); zero leaves the server's setting.
@@ -66,27 +81,31 @@ for an answer over a network path that went dead after the connection was
 made. A request context usually has a deadline; a worker's, a relay's or
 `context.Background()` does not.
 
-`DB_OP_TIMEOUT` is the client-side bound for those. When set, every call on
+`DB_OP_TIMEOUT` is the client-side bound for those. Unless it is `0`, every call on
 `db.Conn(ctx)` — in a unit of work or outside — runs under that deadline on
 top of the context's own: getting a connection, the statement, and reading
 its result (until `Rows` are closed or read to the end, a `Row` is scanned,
 `BatchResults` are closed). `InTx` puts the same deadline on its begin, which
 is what waits for a connection, and on its commit; the unit as a whole is not
-bounded by it. Keep it above `DB_STATEMENT_TIMEOUT`, so that the server's
-cancellation answers first: its error names the cause and the connection
-stays usable, while a client-side deadline that fires mid-statement closes
-the connection.
+bounded by it. It has to be above `DB_STATEMENT_TIMEOUT` (`Validate` refuses
+it otherwise), so that the server's cancellation answers first: its error
+names the cause and the connection stays usable, while a client-side deadline
+that fires mid-statement closes the connection. The default is 35s — the
+default statement timeout (30s) plus the default dial timeout (5s), which a
+call that first has to open a connection may spend before its statement
+starts. A statement that raises its own limit (`SET LOCAL statement_timeout`)
+and runs through `db.Conn` is still under `DB_OP_TIMEOUT`.
 
 | Call | Client-side bound |
 | --- | --- |
-| `db.Conn(ctx).…`, begin and commit of `db.InTx` | `ctx`, and `DB_OP_TIMEOUT` when set |
-| `db.Pool().…`, `pgx.Migrate` | `ctx` only — the raw pool |
-| opening a connection | `DB_CONNECT_TIMEOUT` |
+| `db.Conn(ctx).…`, begin and commit of `db.InTx` | `ctx`, and `DB_OP_TIMEOUT` unless `0` |
+| `db.Pool().…`, `db.Migrate` / `pgx.Migrate` | `ctx` only — the raw pool |
+| opening a connection | `DB_DIAL_TIMEOUT` |
 | `db.ReadyCheck()` | 2s of its own |
 | rollback of a failed unit | 5s of its own, detached from a cancelled `ctx` |
 
-The default is no `DB_OP_TIMEOUT`: such calls are then bounded by their
-context alone.
+A `Config` built by hand has no default: its zero `OpTimeout` is no
+deadline, and such calls are bounded by their context alone.
 
 After `db.Close()` every call fails with an error for which
 `errors.Is(err, pgx.ErrClosed)` holds — through `Conn`, `InTx`, `ReadyCheck`
@@ -98,8 +117,9 @@ connections in use)`, otherwise `postgres unreachable`.
 
 ## Migrations
 
-`pgx.Migrate(ctx, pool, fsys, log)` applies the `NNN_snake_name.sql` files at
-the root of `fsys`, in version order:
+`db.Migrate(ctx, fsys)` — or `pgx.Migrate(ctx, pool, fsys, log)` on a bare
+pool — applies the `NNN_snake_name.sql` files at the root of `fsys`, in
+version order:
 
 - applied versions are recorded in `schema_migrations(version, name,
   applied_at)` in the current schema, so a re-run is a no-op;
@@ -114,7 +134,9 @@ the root of `fsys`, in version order:
   back for the migration;
 - a misnamed `.sql` file or a duplicate version is an error, not a skip.
 
-Forward-only: never edit a shipped file, add the next number.
+Forward-only: never edit a shipped file, add the next number. An applied
+version is known by its number alone: no checksum is kept, so an edit to a
+shipped file is not noticed.
 `CREATE INDEX CONCURRENTLY` cannot run in a transaction and does not belong
 here.
 
@@ -261,9 +283,15 @@ list), `batch` for a `SendBatch`, `copy` for a `CopyFrom` — never the SQL
 text, so the label set stays bounded. `begin`, `commit`, `rollback`,
 `savepoint` and `release` are always under their keyword: `InTx` sends them
 with the caller's context, and under its name they would count as that
-operation's queries. A call that never got a connection is in neither query
-metric; one that gave up waiting for it shows in
-`db_pool_acquires_canceled_total`.
+operation's queries.
+
+A call through `db.Conn` or `db.InTx` that fails before it has a connection —
+the pool exhausted until the deadline, the pool closed — counts in
+`db_query_errors_total` under its operation (`begin` for an `InTx`) and has no
+observation in the histogram: it ran no statement. So while a pool is
+exhausted the errors of an operation can outnumber its observations; the
+wait itself shows in `db_pool_acquires_canceled_total`. Calls on the raw
+`db.Pool()` that fail this way are in neither metric.
 
 **Two pools in one process** (primary and replica) have the same metric
 names, and registering the second on the same registry fails. Wrap the
@@ -286,9 +314,10 @@ otelpgx (a client span per query, child of the caller's span) through pgx's
 
 `go test ./...` here needs no Docker and pulls none into `go.mod`:
 configuration and `Validate`, the DSN, migration files, the metric labels,
-`DB_OP_TIMEOUT` / `DB_CONNECT_TIMEOUT` / the readiness timeout against a
-server that accepts and never answers, `ErrClosed`, two pools on one
-registry.
+`DB_OP_TIMEOUT` / `DB_DIAL_TIMEOUT` / the readiness timeout against a
+server that accepts and never answers, `ErrClosed`, a call that got no
+connection counted as a failed query, two pools on one registry.
+`just mutate libs/pgx` runs gremlins over that layer (`.gremlins.yaml`).
 
 Everything that needs a database is the module next door,
 [`integration/`](integration) — container-backed (one Postgres per test

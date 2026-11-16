@@ -10,8 +10,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/tracehubmmp/golang-basics/libs/testx"
 )
 
 // What the loop promises about one record, against the scripted client: each
@@ -62,7 +60,7 @@ func TestConsumer_Loop(t *testing.T) {
 			handler: func(context.Context, context.CancelFunc) error { return nil },
 			check: func(t *testing.T, _ *fakeConsumer, reg *prometheus.Registry) {
 				t.Helper()
-				assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_consumer_fetch_errors_total", nil))
+				assert.Equal(t, 1.0, metric(t, reg, "kafka_consumer_fetch_errors_total", nil))
 			},
 		},
 		{
@@ -70,7 +68,7 @@ func TestConsumer_Loop(t *testing.T) {
 			client:  &fakeConsumer{commitErr: errors.New("coordinator not available")},
 			handler: func(context.Context, context.CancelFunc) error { return nil },
 			until: func(_ *fakeConsumer, reg *prometheus.Registry) bool {
-				return testx.Metric(t, reg, "kafka_consumer_commit_errors_total", nil) >= 1
+				return metric(t, reg, "kafka_consumer_commit_errors_total", nil) >= 1
 			},
 		},
 		{
@@ -253,7 +251,7 @@ func TestProducer_TwoOnOneRegistry(t *testing.T) {
 	}
 
 	for _, name := range []string{"events", "audit"} {
-		assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_producer_records_total", map[string]string{"producer": name, "result": "ok"}))
+		assert.Equal(t, 1.0, metric(t, reg, "kafka_producer_records_total", map[string]string{"producer": name, "result": "ok"}))
 	}
 }
 

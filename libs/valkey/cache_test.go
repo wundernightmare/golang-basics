@@ -153,6 +153,33 @@ func TestSubscribeRefusedByTheServerEndsForGood(t *testing.T) {
 	}
 }
 
+// What fills a cache or marks an invalidation must expire, so a ttl that is
+// not positive is refused before anything is sent; Set alone takes zero as
+// "no expiry".
+func TestTTLIsRequiredWhereAKeyMustExpire(t *testing.T) {
+	t.Parallel()
+
+	cache, server, _ := fakeCache(t, valkey.Config{})
+	ctx := t.Context()
+
+	_, err := cache.SetNX(ctx, "k", "v", 0)
+	require.ErrorContains(t, err, "ttl must be positive")
+
+	_, err = cache.Replace(ctx, "k", "old", "v", 0)
+	require.ErrorContains(t, err, "ttl must be positive")
+
+	require.ErrorContains(t, cache.Tombstone(ctx, "k", 0), "ttl must be positive")
+
+	_, stored := server.get("k")
+	assert.False(t, stored)
+
+	require.NoError(t, cache.Set(ctx, "k", "v", time.Minute))
+	assert.Equal(t, time.Minute, server.ttl("k"))
+
+	require.NoError(t, cache.Set(ctx, "k", "v", 0))
+	assert.Zero(t, server.ttl("k"))
+}
+
 // TLS from the discrete keys, against a server whose certificate only the
 // configured CA file vouches for.
 func TestTLSWithACAFile(t *testing.T) {
@@ -177,6 +204,46 @@ func TestTLSWithACAFile(t *testing.T) {
 	require.ErrorContains(t, err, "certificate")
 }
 
+// A server that asks for a client certificate gets the configured pair, and
+// refuses a client that has none.
+func TestTLSWithAClientCertificate(t *testing.T) {
+	t.Parallel()
+
+	certificate, caFile := selfSigned(t)
+
+	// The same self-signed certificate on both sides: the server trusts
+	// exactly it as a client.
+	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+	require.NoError(t, err)
+
+	clients := x509.NewCertPool()
+	clients.AddCert(leaf)
+
+	server := newFakeServer(t, &tls.Config{
+		Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12,
+		ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clients,
+	})
+
+	keyDER, err := x509.MarshalPKCS8PrivateKey(certificate.PrivateKey)
+	require.NoError(t, err)
+
+	keyFile := filepath.Join(t.TempDir(), "client.key")
+	require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600))
+
+	// caFile holds the certificate itself, so it serves as the cert file too.
+	cfg := valkey.Config{Addr: server.addr, TLS: true, CAFile: caFile, CertFile: caFile, KeyFile: keyFile}
+
+	cache, err := valkey.New(cfg, nil)
+	require.NoError(t, err)
+	t.Cleanup(cache.Close)
+
+	require.NoError(t, cache.Set(t.Context(), "k", "v", time.Minute))
+
+	cfg.CertFile, cfg.KeyFile, cfg.DialTimeout = "", "", 2*time.Second
+	_, err = valkey.New(cfg, nil)
+	require.ErrorContains(t, err, "certificate required")
+}
+
 // selfSigned issues a certificate for 127.0.0.1 and writes it out as the CA
 // file that verifies it.
 func selfSigned(t *testing.T) (tls.Certificate, string) {
@@ -191,7 +258,7 @@ func selfSigned(t *testing.T) (tls.Certificate, string) {
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1)},

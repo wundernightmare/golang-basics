@@ -45,7 +45,7 @@ import (
 //	PING_HTTP_MAX_BODY_BYTES     request body limit; larger bodies → 413   (default 1048576)
 //	PING_HTTP_RATE_LIMIT         requests per second the API accepts, all clients together; over it → 429 (default 0 = no limit)
 //	PING_HTTP_RATE_BURST         depth of that token bucket                (default 0 = ceil(rate))
-//	PING_HTTP_RATE_LIMIT_PER_CLIENT  requests per second per client address (default 0 = no limit)
+//	PING_HTTP_RATE_LIMIT_PER_CLIENT  requests per second per client: an IPv4 address or an IPv6 /64 (default 0 = no limit)
 //	PING_HTTP_RATE_BURST_PER_CLIENT  depth of a client's bucket            (default 0 = ceil(rate))
 //	PING_HTTP_RATE_CLIENTS_MAX   client buckets kept; when all are in use a new client is shed (default 10000)
 //	PING_HTTP_SHUTDOWN_DELAY     wait after readiness flips before closing (default "2s", 0 = none)
@@ -223,7 +223,7 @@ func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, n
 func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	var cfg Config
 	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix, Environment: environ}); err != nil {
-		return Config{}, fmt.Errorf("httpx: parse config (prefix %q): %w", prefix, err)
+		return Config{}, fmt.Errorf("httpx: parse config (prefix %q): %w", prefix, configError{err})
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -254,10 +254,11 @@ func (c *Config) withDefaults() {
 
 // Validate applies the defaults (see keepsZero for what a zero means) and
 // rejects a config the server could not run safely with: a typo in a level
-// or format (which would otherwise fall back silently), negative budgets and
-// limits, the two listeners on one address, a
+// or format (which would otherwise fall back silently), negative timeouts,
+// budgets and limits, the two listeners on one address, a
 // readiness check that outlives its interval, an unparsable proxy CIDR, and
 // an unauthenticated admin listener on a routable address (see AdminInsecure).
+// The error it returns has [ErrConfig] in its chain.
 func (c *Config) Validate() error {
 	c.withDefaults()
 
@@ -300,6 +301,14 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("HTTP_RATE_* values must not be negative"))
 	}
 
+	if min(c.ReadHeaderTimeout, c.ReadTimeout, c.WriteTimeout, c.IdleTimeout) < 0 {
+		errs = append(errs, errors.New("HTTP_READ_HEADER_TIMEOUT, HTTP_READ_TIMEOUT, HTTP_WRITE_TIMEOUT and HTTP_IDLE_TIMEOUT must not be negative"))
+	}
+
+	if min(c.HealthInterval, c.HealthTimeout) < 0 {
+		errs = append(errs, errors.New("HEALTH_CHECK_INTERVAL and HEALTH_CHECK_TIMEOUT must not be negative"))
+	}
+
 	if c.MaxBodyBytes < 0 {
 		errs = append(errs, errors.New("HTTP_MAX_BODY_BYTES must not be negative"))
 	}
@@ -330,8 +339,25 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("ADMIN_TOKEN is empty and ADMIN_ADDR %q is not loopback: set a token, or ADMIN_INSECURE=true for local development", c.AdminAddr))
 	}
 
-	return errors.Join(errs...)
+	if len(errs) > 0 {
+		return configError{errors.Join(errs...)}
+	}
+
+	return nil
 }
+
+// ErrConfig is in the chain of every error this package returns for a
+// configuration it will not run with — a value [Config.Validate] rejects, an
+// environment variable or a YAML file that does not parse, a file that
+// cannot be read — so a caller can tell "fix the config" from a failure at
+// run time with errors.Is.
+var ErrConfig = errors.New("httpx: invalid configuration")
+
+// configError adds [ErrConfig] to the chain of err and nothing to its text.
+type configError struct{ err error }
+
+func (e configError) Error() string   { return e.err.Error() }
+func (e configError) Unwrap() []error { return []error{ErrConfig, e.err} }
 
 // validateRuntime checks the RUNTIME_ and DIAG_ keys.
 func (c *Config) validateRuntime() []error {

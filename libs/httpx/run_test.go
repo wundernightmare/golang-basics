@@ -243,3 +243,35 @@ func TestRun_AnUnusedAdminConnectionDoesNotFailShutdown(t *testing.T) {
 
 	assert.NotNil(t, logs.Find(t, map[string]any{"msg": "admin listener: connections still open after its drain budget, closed"}))
 }
+
+// A worker that does not stop when told to must not hold the process past
+// the budget the operator gave shutdown: RunWith names it and returns.
+func TestRunWith_AWorkerThatIgnoresItsContextIsNotWaitedForForever(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := loggedServer(t, httpx.Config{AdminAddr: "127.0.0.1:0", ShutdownDelay: 0, ShutdownTimeout: 100 * time.Millisecond})
+
+	release := make(chan struct{})
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		done <- srv.RunWith(ctx,
+			httpx.Worker{Name: "stuck", Run: func(context.Context) error { <-release; return nil }},
+			httpx.Worker{Name: "polite", Run: func(ctx context.Context) error { <-ctx.Done(); return nil }},
+		)
+	}()
+
+	servingAddr(t, srv)
+	cancel()
+
+	select {
+	case err := <-done:
+		require.ErrorContains(t, err, `"stuck"`)
+		assert.NotContains(t, err.Error(), "polite")
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunWith waits for a worker that ignores its context")
+	}
+}

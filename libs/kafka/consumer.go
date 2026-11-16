@@ -65,7 +65,8 @@ type Consumer struct {
 // the linked provider and verifies broker connectivity. Automatic commits
 // are off: offsets advance only past records a [Handler] has accepted or
 // that were parked on the dead-letter topic. The caller owns it and must
-// call [Consumer.Close] if it never calls [Consumer.Run].
+// call [Consumer.Close] if it never calls [Consumer.Run]. A refused cfg is an
+// error wrapping [ErrConfig].
 func NewConsumer(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) (*Consumer, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -76,8 +77,8 @@ func NewConsumer(ctx context.Context, cfg Config, log *slog.Logger, opts ...Opti
 		return nil, err
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("kafka: consumer config: %w", err)
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("%w (consumer): %w", ErrConfig, err)
 	}
 
 	if len(cfg.Topics) == 0 || cfg.Group == "" {
@@ -627,7 +628,10 @@ func (c *Consumer) ReadyCheck() func(ctx context.Context) error { return readyCh
 
 // Close commits anything still pending (via the revoke callback), leaves the
 // consumer group and shuts the client down. It is idempotent; [Consumer.Run]
-// calls it on return. Called from another goroutine while Run is polling, it
-// makes Run return nil; a record a handler is still working on is then not
+// calls it on return.
+//
+// Calling it from another goroutine while Run is running is supported, with
+// either provider: Run then returns nil. It does not drain the way a
+// cancelled context does — a record a handler is still working on is not
 // committed and goes to the group's next owner.
 func (c *Consumer) Close() { c.closeOnce.Do(c.cl.Close) }

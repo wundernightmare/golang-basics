@@ -2,6 +2,7 @@ package resilient
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/tracehubmmp/golang-basics/libs/resilience"
+	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
 // BreakerState is a circuit breaker's state; its value is the
@@ -55,7 +57,8 @@ type options struct {
 // WithHTTPClient builds on a copy of hc (its Transport, Jar, Timeout and
 // CheckRedirect, which runs after the redirect policy) instead of a client
 // built from the pool settings of [Config]. hc itself is not modified, and
-// [Client.Shutdown] does not close its idle connections.
+// [Client.Shutdown] does not close its idle connections. Trust is hc's too: a
+// target with ca_file makes [New] fail.
 func WithHTTPClient(hc *http.Client) Option { return func(o *options) { o.hc = hc } }
 
 // WithLogger sets the logger (default: discard).
@@ -82,6 +85,7 @@ func WithPropagator(p propagation.TextMapPropagator) Option {
 type policy struct {
 	name     string
 	cfg      TargetConfig
+	hc       *http.Client            // shared by the targets with the same ca_file
 	limiter  *rate.Limiter           // nil: no rate limit
 	breaker  *resilience.Breaker     // nil: no breaker
 	bulkhead *bulkhead               // nil: no concurrency cap
@@ -92,7 +96,6 @@ type policy struct {
 // Client sends HTTP requests under a per-target policy. It is safe for
 // concurrent use; build one per process with [New].
 type Client struct {
-	hc        *http.Client
 	closeIdle func() // nil when the transport is the caller's
 	userAgent string
 	log       *slog.Logger
@@ -127,6 +130,12 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 		applied.reg = client.reg
 	}
 
+	// Before the metrics: a failure here must not leave them registered.
+	clients, err := client.httpClients(&cfg, &applied)
+	if err != nil {
+		return nil, err
+	}
+
 	m, err := newMetrics(applied.reg)
 	if err != nil {
 		return nil, fmt.Errorf("resilient: register metrics: %w", err)
@@ -134,43 +143,102 @@ func New(cfg Config, opts ...Option) (*Client, error) {
 
 	client.m = m
 
-	var hc http.Client
-	if applied.hc != nil {
-		hc = *applied.hc // a copy: the caller's client is never modified
-	} else {
-		t := newTransport(&cfg)
-		hc.Transport = t
-		client.closeIdle = t.CloseIdleConnections
-	}
-
-	hc.Transport = instrument(hc.Transport, applied.tp, applied.prop)
-	hc.CheckRedirect = redirectPolicy(cfg.MaxRedirects, cfg.AllowCrossHostRedirects, hc.CheckRedirect)
-	client.hc = &hc
-
 	for i := range cfg.Targets {
-		client.targets[cfg.Targets[i].Name] = client.newPolicy(cfg.Targets[i])
+		p, err := client.newPolicy(cfg.Targets[i], clients[cfg.Targets[i].CAFile])
+		if err != nil {
+			return nil, fmt.Errorf("resilient: target %q: breaker: %w", cfg.Targets[i].Name, err)
+		}
+
+		client.targets[cfg.Targets[i].Name] = p
 	}
 
 	return client, nil
 }
 
-func (c *Client) newPolicy(tc TargetConfig) *policy {
-	p := &policy{name: tc.Name, cfg: tc, logLimit: rate.NewLimiter(1, 10)}
+// httpClients builds one http.Client per trust store the targets name, keyed
+// by ca_file ("" is the system's). Each has a transport of its own — a
+// transport has one TLS configuration — with the same pool settings, so those
+// limits count per trust store. With [WithHTTPClient] there is one, a copy of
+// the caller's (theirs is never modified), and a ca_file is an error: trust
+// would be that client's, not the file's.
+func (c *Client) httpClients(cfg *Config, applied *options) (map[string]*http.Client, error) {
+	clients := make(map[string]*http.Client)
+
+	var transports []*http.Transport
+
+	for i := range cfg.Targets {
+		target := &cfg.Targets[i]
+		if clients[target.CAFile] != nil {
+			continue
+		}
+
+		var client http.Client
+
+		switch {
+		case applied.hc == nil:
+			var roots *x509.CertPool
+
+			if target.CAFile != "" {
+				var err error
+				if roots, err = secret.CertPool(target.CAFile); err != nil {
+					return nil, fmt.Errorf("resilient: target %q: ca_file: %w", target.Name, err)
+				}
+			}
+
+			transport := newTransport(cfg, roots)
+			transports = append(transports, transport)
+			client.Transport = transport
+		case target.CAFile != "":
+			return nil, fmt.Errorf("resilient: target %q: ca_file does not apply under WithHTTPClient: set the trust on that client", target.Name)
+		default:
+			client = *applied.hc
+		}
+
+		client.Transport = instrument(client.Transport, applied.tp, applied.prop)
+		client.CheckRedirect = redirectPolicy(cfg.MaxRedirects, cfg.AllowCrossHostRedirects, client.CheckRedirect)
+		clients[target.CAFile] = &client
+	}
+
+	if applied.hc == nil {
+		c.closeIdle = func() {
+			for _, transport := range transports {
+				transport.CloseIdleConnections()
+			}
+		}
+	}
+
+	return clients, nil
+}
+
+// maxDefaultBurst caps the burst derived from rate_limit. A float64 beyond
+// the range of int converts to an implementation-defined value — negative on
+// amd64 — and a limiter with a negative burst lets nothing through.
+const maxDefaultBurst = math.MaxInt32
+
+func (c *Client) newPolicy(tc TargetConfig, hc *http.Client) (*policy, error) {
+	p := &policy{name: tc.Name, cfg: tc, hc: hc, logLimit: rate.NewLimiter(1, 10)}
 	if tc.RateLimit > 0 {
 		burst := tc.RateBurst
 		if burst == 0 {
-			burst = int(max(1, math.Ceil(tc.RateLimit)))
+			burst = int(min(max(1, math.Ceil(tc.RateLimit)), maxDefaultBurst))
 		}
 
 		p.limiter = rate.NewLimiter(rate.Limit(tc.RateLimit), burst)
 	}
 
 	gauge := func(s BreakerState) { c.m.breakerState.WithLabelValues(tc.Name).Set(float64(s)) }
-	p.breaker = resilience.NewBreaker(tc.Breaker, time.Now, func(from, to BreakerState) {
+
+	var err error
+
+	p.breaker, err = resilience.NewBreaker(tc.Breaker, time.Now, func(from, to BreakerState) {
 		c.m.transitions.WithLabelValues(tc.Name, from.String(), to.String()).Inc()
 		p.breaker.Mirror(gauge) // not `to`: see resilience.Breaker.Mirror
 		c.log.Info("resilient: circuit breaker "+to.String(), "target", tc.Name, "from", from.String())
 	})
+	if err != nil {
+		return nil, err
+	}
+
 	p.bulkhead = newBulkhead(&tc)
 	p.budget = resilience.NewRetryBudget(tc.RetryBudgetRatio, tc.RetryBudgetMinRetries, tc.RetryBudgetWindow, time.Now)
 
@@ -180,7 +248,7 @@ func (c *Client) newPolicy(tc TargetConfig) *policy {
 		c.m.bulkheadInUse.WithLabelValues(tc.Name).Set(0)
 	}
 
-	return p
+	return p, nil
 }
 
 // Registry is the private metrics registry, or nil under [WithRegisterer].
@@ -213,10 +281,11 @@ func (c *Client) BreakerState(target string) (BreakerState, error) {
 // closed. A body that fails is never retried: the response was already
 // handed over.
 //
-// That holds for an upgraded connection too (101 Switching Protocols,
-// CONNECT), whose body is the connection: it is cut when the target's timeout
-// expires, and the breaker counts a failure. A long-lived upgrade therefore
-// needs a target with timeout 0.
+// An upgraded connection (101 Switching Protocols) is the exception: its body
+// is the connection, and the attempt is over once the protocol has switched.
+// The breaker hears a success then and the target's timeout stops applying;
+// the connection lasts until the body is closed or the caller's context
+// ends, and holds its bulkhead slot that long.
 func (c *Client) Send(target string, req *http.Request) (*http.Response, error) {
 	return c.send(target, req, false)
 }
@@ -233,7 +302,7 @@ func (c *Client) Send(target string, req *http.Request) (*http.Response, error) 
 // Retry-After, whichever is longer. It stops early when the caller's context
 // would expire during the wait, when a Retry-After exceeds retry_max_delay,
 // or when the target's retry budget is spent; the last error is returned
-// then.
+// then, with [OutboundError.RetryBudgetExhausted] set in the last case.
 func (c *Client) SendWithRetry(target string, req *http.Request) (*http.Response, error) {
 	return c.send(target, req, true)
 }
@@ -303,6 +372,8 @@ func (c *Client) send(target string, req *http.Request, retry bool) (*http.Respo
 		if !p.budget.TryRetry() {
 			c.m.budgetExhausted.WithLabelValues(target).Inc()
 			c.warn(ctx, p, "resilient: retry budget exhausted", "url", logURL(req.URL))
+
+			outErr.RetryBudgetExhausted = true
 
 			return nil, outErr
 		}
@@ -438,7 +509,7 @@ func (c *Client) attempt(ctx context.Context, p *policy, req *http.Request, n in
 	}
 
 	start := time.Now()
-	resp, err := c.hc.Do(r) //nolint:gosec // G704: sending the caller's request is this package's purpose; redirects are host-pinned
+	resp, err := p.hc.Do(r) //nolint:gosec // G704: sending the caller's request is this package's purpose; redirects are host-pinned
 	c.m.duration.WithLabelValues(p.name, method).Observe(time.Since(start).Seconds())
 
 	if err != nil {
@@ -578,7 +649,7 @@ type responseBody struct {
 	c       *Client
 	url     string
 	parent  context.Context //nolint:containedctx // the body outlives the call that made it; it is the attempt
-	attempt context.Context //nolint:containedctx // the body ends with it: its end releases a body nobody closed
+	attempt context.Context //nolint:containedctx // the body ends with it: its end releases a body nobody closed; the caller's context for an upgraded connection
 	adm     *admission
 	done    func() // runs after the admission is released
 
@@ -588,6 +659,18 @@ type responseBody struct {
 }
 
 func (c *Client) newResponseBody(parent, attempt context.Context, req *http.Request, rc io.ReadCloser, adm *admission, done func()) *responseBody {
+	// net/http hands over a writable body only for a completed protocol
+	// switch. The dependency has done all it was asked for, and what follows
+	// is a conversation of unknown length, so the attempt's timeout ends
+	// here; net/http has let go of the connection, which is why cancelling
+	// the attempt's context does not close it.
+	if _, upgraded := rc.(io.Writer); upgraded {
+		adm.settle(resilience.OutcomeSuccess)
+		adm.cancel()
+
+		attempt = parent
+	}
+
 	b := &responseBody{rc: rc, c: c, url: logURL(req.URL), parent: parent, attempt: attempt, adm: adm, done: done}
 	b.stopWatch = context.AfterFunc(attempt, func() {
 		_, o := classify(parent, attempt, attempt.Err())
@@ -598,10 +681,8 @@ func (c *Client) newResponseBody(parent, attempt context.Context, req *http.Requ
 	return b
 }
 
-// readCloser is b as the response's Body. A 101 Switching Protocols (or
-// CONNECT) body is the connection itself and stays writable — for as long as
-// the attempt lasts: the target's timeout ends it like any other body, and
-// the breaker counts that as a failure (see [Client.Send]).
+// readCloser is b as the response's Body. A 101 Switching Protocols body is
+// the connection itself and stays writable (see [Client.Send]).
 func (b *responseBody) readCloser() io.ReadCloser {
 	if w, ok := b.rc.(io.Writer); ok {
 		return &writableBody{responseBody: b, w: w}

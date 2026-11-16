@@ -24,6 +24,7 @@ import (
 	"github.com/aws/smithy-go"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/tracehubmmp/golang-basics/libs/secret"
@@ -53,6 +54,7 @@ var ErrTooLarge = errors.New("s3: object larger than the read limit")
 const deleteBatch = 1000
 
 // Operation names: the `operation` label of the metrics and the span names.
+// [rpcMethods] has the S3 API's own name of each.
 const (
 	opPut            = "put"
 	opGet            = "get"
@@ -66,6 +68,24 @@ const (
 	opCompleteUpload = "complete_upload"
 	opAbortUpload    = "abort_upload"
 )
+
+// rpcMethods is the rpc.method attribute of each operation's span: the S3
+// API operation behind it, qualified by the service.
+//
+//nolint:gochecknoglobals // a constant table
+var rpcMethods = map[string]string{
+	opPut:            "S3/PutObject",
+	opGet:            "S3/GetObject",
+	opHead:           "S3/HeadObject",
+	opList:           "S3/ListObjectsV2",
+	opDelete:         "S3/DeleteObjects",
+	opHeadBucket:     "S3/HeadBucket",
+	opCreateBucket:   "S3/CreateBucket",
+	opCreateUpload:   "S3/CreateMultipartUpload",
+	opUploadPart:     "S3/UploadPart",
+	opCompleteUpload: "S3/CompleteMultipartUpload",
+	opAbortUpload:    "S3/AbortMultipartUpload",
+}
 
 // api is the part of the AWS SDK client this package uses, spelled out so
 // the surface the library depends on is one list.
@@ -133,14 +153,14 @@ func New(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) (*Cl
 	}
 
 	sdk := awss3.NewFromConfig(awsCfg, func(o *awss3.Options) {
-		o.UsePathStyle = cfg.UsePathStyle
+		o.UsePathStyle = !cfg.VirtualHostStyle
 		if cfg.Endpoint != "" {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 		}
 	})
 
 	log.InfoContext(ctx, "s3 client ready", "endpoint", cfg.Endpoint, "bucket", cfg.Bucket, "region", cfg.Region,
-		"path_style", cfg.UsePathStyle, "op_timeout", cfg.OpTimeout.String(), "max_attempts", cfg.MaxAttempts)
+		"virtual_host_style", cfg.VirtualHostStyle, "op_timeout", cfg.OpTimeout.String(), "max_attempts", cfg.MaxAttempts)
 
 	return &Client{
 		api: sdk, cfg: cfg, log: log, metrics: newMetrics(),
@@ -238,15 +258,17 @@ func (c *Client) Close() { c.http.CloseIdleConnections() }
 // reads a key, ErrBucketNotFound for one that asks for the bucket, nil for a
 // call to which it is one more failure.
 func (c *Client) call(ctx context.Context, operation, key string, timeout time.Duration, missing error, run func(context.Context) error) error {
-	ctx, span := c.tracer.Start(ctx, "s3 "+operation,
-		trace.WithSpanKind(trace.SpanKindClient),
-		trace.WithAttributes(
-			attribute.String("rpc.system", "aws-api"),
-			attribute.String("rpc.service", "S3"),
-			attribute.String("rpc.method", operation),
-			attribute.String("aws.s3.bucket", c.cfg.Bucket),
-			attribute.String("aws.s3.key", key),
-		))
+	attrs := []attribute.KeyValue{
+		semconv.RPCSystemNameKey.String("aws-api"),
+		semconv.RPCMethod(rpcMethods[operation]),
+		semconv.CloudRegion(c.cfg.Region),
+		semconv.AWSS3Bucket(c.cfg.Bucket),
+	}
+	if key != "" {
+		attrs = append(attrs, semconv.AWSS3Key(key))
+	}
+
+	ctx, span := c.tracer.Start(ctx, "s3 "+operation, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
 	defer span.End()
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -541,6 +563,10 @@ var ensureLocks sync.Map //nolint:gochecknoglobals // process-wide by purpose: i
 // with RustFS). Across processes the race stays — one more reason the option
 // is not for production.
 //
+// On AWS (no S3_ENDPOINT) the bucket is created in S3_REGION. A name that is
+// taken by another account (BucketAlreadyExists) is an error: only the
+// answer that the bucket is already this account's counts as created.
+//
 // A bucket that is missing and not to be created is [ErrBucketNotFound].
 func (c *Client) Ensure(ctx context.Context) error {
 	lock, _ := ensureLocks.LoadOrStore(c.cfg.Endpoint+"\x00"+c.cfg.Bucket, make(chan struct{}, 1))
@@ -564,13 +590,9 @@ func (c *Client) Ensure(ctx context.Context) error {
 	}
 
 	err = c.call(ctx, opCreateBucket, "", c.cfg.OpTimeout, nil, func(ctx context.Context) error {
-		_, err := c.api.CreateBucket(ctx, &awss3.CreateBucketInput{Bucket: aws.String(c.cfg.Bucket)})
+		_, err := c.api.CreateBucket(ctx, c.createBucketInput())
 
-		var (
-			owned  *types.BucketAlreadyOwnedByYou
-			exists *types.BucketAlreadyExists
-		)
-		if errors.As(err, &owned) || errors.As(err, &exists) {
+		if _, owned := errors.AsType[*types.BucketAlreadyOwnedByYou](err); owned {
 			return nil // another replica won the race
 		}
 
@@ -583,6 +605,22 @@ func (c *Client) Ensure(ctx context.Context) error {
 	c.log.InfoContext(ctx, "s3 bucket created", "bucket", c.cfg.Bucket)
 
 	return nil
+}
+
+// createBucketInput names the region for AWS outside us-east-1, which
+// creates a bucket elsewhere only when told where and refuses a request that
+// names us-east-1. A store behind S3_ENDPOINT is not told: it has the one
+// region, and not every one accepts the element.
+func (c *Client) createBucketInput() *awss3.CreateBucketInput {
+	in := &awss3.CreateBucketInput{Bucket: aws.String(c.cfg.Bucket)}
+
+	if c.cfg.Endpoint == "" && c.cfg.Region != defaultRegion {
+		in.CreateBucketConfiguration = &types.CreateBucketConfiguration{
+			LocationConstraint: types.BucketLocationConstraint(c.cfg.Region),
+		}
+	}
+
+	return in
 }
 
 func (c *Client) headBucket(ctx context.Context) error {

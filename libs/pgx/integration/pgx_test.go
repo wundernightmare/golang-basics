@@ -46,7 +46,7 @@ func schemaConfig(t testing.TB) (pgx.Config, string) {
 	q.Set("search_path", schema)
 	u.RawQuery = q.Encode()
 
-	return pgx.Config{URL: secret.New(u.String()), ConnectTimeout: 5 * time.Second, MaxConns: 5}, schema
+	return pgx.Config{URL: secret.New(u.String()), DialTimeout: 5 * time.Second, MaxConns: 5}, schema
 }
 
 func newDB(t testing.TB, cfg pgx.Config, opts ...pgx.Option) *pgx.DB {
@@ -90,7 +90,7 @@ func TestMigrate_FreshSchemaThenRerunIsANoop(t *testing.T) {
 	db := newDB(t, cfg)
 	ctx := context.Background()
 
-	require.NoError(t, pgx.Migrate(ctx, db.Pool(), widgets, nil))
+	require.NoError(t, db.Migrate(ctx, widgets))
 	assert.Equal(t, []int64{1, 2}, appliedVersions(t, db))
 
 	var n int
@@ -332,6 +332,11 @@ func TestOpTimeout_AndAnExhaustedPool(t *testing.T) {
 	require.ErrorContains(t, db.ReadyCheck()(ctx), "postgres pool exhausted (1 of 1 connections in use)")
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "db_pool_connections", map[string]string{"state": "in_use"}))
 
+	// Neither call reached a connection, and both are failed queries.
+	for _, operation := range []string{"insert", "begin"} {
+		assert.Equal(t, 1.0, testx.Metric(t, reg, "db_query_errors_total", map[string]string{"operation": operation}), operation)
+	}
+
 	held.Release()
 
 	// pgxpool counts an acquire as "waited" when no idle connection was
@@ -354,11 +359,11 @@ func TestReadyCheckFailsWhenClosed(t *testing.T) {
 	require.Error(t, db.ReadyCheck()(ctx), "readiness must fail once the pool is closed")
 }
 
-func TestNew_ZeroConnectTimeoutStillPings(t *testing.T) {
+func TestNew_ZeroDialTimeoutStillPings(t *testing.T) {
 	t.Parallel()
 
 	cfg, _ := schemaConfig(t)
-	cfg.ConnectTimeout = 0 // a hand-built config: must not expire the boot ping immediately
+	cfg.DialTimeout = 0 // a hand-built config: must not expire the boot ping immediately
 	db := newDB(t, cfg)
 	require.NoError(t, db.ReadyCheck()(context.Background()))
 }
@@ -429,9 +434,10 @@ func TestBatchCopyAndTransactionControlAreMeasured(t *testing.T) {
 	duplicate.Queue(`INSERT INTO items (id, name) VALUES (1, 'a')`)
 	duplicate.Queue(`INSERT INTO items (id, name) VALUES (1, 'again')`)
 	require.Error(t, repo.db.Conn(ctx).SendBatch(ctx, duplicate).Close())
+	require.NoError(t, repo.db.Conn(ctx).SendBatch(ctx, &pgxv5.Batch{}).Close(), "pgx does not trace an empty batch")
 
 	assert.Equal(t, 1.0, count("db_query_duration_seconds", "batch"), "one observation for the batch, not one per statement")
-	assert.Equal(t, 1.0, count("db_query_errors_total", "batch"))
+	assert.Equal(t, 1.0, count("db_query_errors_total", "batch"), "the empty one is not a failure")
 
 	_, err := repo.db.Conn(ctx).CopyFrom(pgx.WithOperation(ctx, "items.load"), pgxv5.Identifier{"items"}, []string{"id", "name"},
 		pgxv5.CopyFromRows([][]any{{2, "b"}, {3, "c"}}))

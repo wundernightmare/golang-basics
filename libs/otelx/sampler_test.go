@@ -58,7 +58,7 @@ func TestSampler_ARootIsDrawnAtTheRatio(t *testing.T) {
 	all := newSampler(Config{SamplerRatio: 1}, false)
 	assert.Equal(t, sampled, sample(all, context.Background(), neverKept).Decision)
 
-	never := newSampler(Config{SamplerRatio: -1}, false)
+	never := newSampler(Config{}, false)
 	assert.Equal(t, dropped, sample(never, context.Background(), alwaysKept).Decision, "a negative ratio samples no root")
 }
 
@@ -87,7 +87,7 @@ func TestSampler_AChildFollowsItsParent(t *testing.T) {
 func TestSampler_AnUntrustedRemoteParentIsDrawnAfresh(t *testing.T) {
 	t.Parallel()
 
-	never := newSampler(Config{SamplerRatio: -1, RedrawRemoteParent: true}, false)
+	never := newSampler(Config{RedrawRemoteParent: true}, false)
 	got := sample(never, parentContext(t, alwaysKept, true, true, vendorState), alwaysKept)
 	assert.Equal(t, dropped, got.Decision, "the client's sampled flag does not force sampling")
 	assert.Zero(t, got.Tracestate.Len(), "the client's tracestate is dropped")
@@ -127,7 +127,7 @@ func TestSampler_AForcedTraceIsSampledAndMarked(t *testing.T) {
 	const mark = httpx.DebugTraceStateKey + "=" + httpx.DebugTraceStateValue
 
 	for name, redraw := range map[string]bool{"trusting": false, "edge": true} {
-		s := newSampler(Config{SamplerRatio: -1, RedrawRemoteParent: redraw}, false)
+		s := newSampler(Config{RedrawRemoteParent: redraw}, false)
 
 		root := sample(s, httpx.ForceTrace(context.Background()), neverKept)
 		assert.Equal(t, sampled, root.Decision, name)
@@ -148,7 +148,7 @@ func TestSampler_AForcedTraceIsSampledAndMarked(t *testing.T) {
 	}
 
 	// The mark alone — a tracestate a client made up — forces nothing on the edge.
-	edge := newSampler(Config{SamplerRatio: -1, RedrawRemoteParent: true}, false)
+	edge := newSampler(Config{RedrawRemoteParent: true}, false)
 	spoofed := sample(edge, parentContext(t, alwaysKept, true, true, mark), alwaysKept)
 	assert.Equal(t, dropped, spoofed.Decision)
 	assert.Zero(t, spoofed.Tracestate.Len())
@@ -166,7 +166,7 @@ func TestSampler_RecordsUnsampledSpansForTheBuffer(t *testing.T) {
 	assert.Equal(t, sampled, sample(s, context.Background(), alwaysKept).Decision, "a sampled span is sampled as before")
 	assert.Equal(t, sampled, sample(s, parentContext(t, neverKept, true, true, ""), neverKept).Decision)
 
-	edge := newSampler(Config{SamplerRatio: -1, RedrawRemoteParent: true}, true)
+	edge := newSampler(Config{RedrawRemoteParent: true}, true)
 	assert.Equal(t, recorded, sample(edge, parentContext(t, alwaysKept, true, true, ""), alwaysKept).Decision)
 }
 
@@ -175,8 +175,8 @@ func TestSampler_Description(t *testing.T) {
 
 	assert.Equal(t, "ParentBased{root:TraceIDRatioBased{0.5}}",
 		newSampler(Config{SamplerRatio: 0.5}, false).Description())
-	assert.Equal(t, "ParentBased{root:AlwaysOffSampler,remote:redrawn,unsampled:recorded}",
-		newSampler(Config{SamplerRatio: -1, RedrawRemoteParent: true}, true).Description())
+	assert.Equal(t, "ParentBased{root:TraceIDRatioBased{0},remote:redrawn,unsampled:recorded}",
+		newSampler(Config{RedrawRemoteParent: true}, true).Description())
 }
 
 func TestRandomTraceID(t *testing.T) {

@@ -86,12 +86,17 @@ func (p *policy) callContext(ctx context.Context) (_ context.Context, release fu
 	return context.WithValue(ctx, attemptsKey{}, new(atomic.Int32)), release
 }
 
-func (p *policy) observe(method string, start time.Time, err error) {
-	p.m.requests.WithLabelValues(p.name, method, codeOutcome(status.Code(err))).Inc()
+// panicked is the status code a call that panicked is counted under: it
+// ended with no status, which is what Unknown says of any error that is not
+// one.
+const panicked = codes.Unknown
+
+func (p *policy) observe(method string, start time.Time, code codes.Code) {
+	p.m.requests.WithLabelValues(p.name, method, codeOutcome(code)).Inc()
 	p.m.duration.WithLabelValues(p.name, method).Observe(time.Since(start).Seconds())
 }
 
-func (p *policy) unary(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+func (p *policy) unary(ctx context.Context, method string, req, reply any, conn *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 	if err := p.refuse(method, nil); err != nil {
 		return err
 	}
@@ -105,9 +110,12 @@ func (p *policy) unary(ctx context.Context, method string, req, reply any, cc *g
 		ctx, release := p.callContext(ctx)
 		defer release()
 
-		start := time.Now()
-		err = invoker(ctx, method, req, reply, cc, opts...)
-		p.observe(method, start, err)
+		start, code := time.Now(), panicked
+
+		defer func() { p.observe(method, start, code) }()
+
+		err = invoker(ctx, method, req, reply, conn, opts...)
+		code = status.Code(err)
 
 		return classify(err)
 	})
@@ -130,14 +138,17 @@ type call struct {
 func (c *call) finish(err error) {
 	c.once.Do(func() {
 		c.p.breaker.Record(c.grant, classify(err))
-		c.p.observe(c.method, c.start, err)
+		c.p.observe(c.method, c.start, status.Code(err))
 	})
 }
 
 // abort settles a call that panicked: a failure for the breaker, so a
-// half-open probe gives its slot back, and nothing for the metrics.
+// half-open probe gives its slot back.
 func (c *call) abort() {
-	c.once.Do(func() { c.p.breaker.Record(c.grant, resilience.OutcomeFailure) })
+	c.once.Do(func() {
+		c.p.breaker.Record(c.grant, resilience.OutcomeFailure)
+		c.p.observe(c.method, c.start, panicked)
+	})
 }
 
 func (p *policy) stream(ctx context.Context, desc *grpc.StreamDesc, conn *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {

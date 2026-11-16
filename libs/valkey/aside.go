@@ -75,6 +75,8 @@ var ErrLoadPanic = errors.New("valkey: loader panicked")
 //   - A caller whose context is over when the lookup fails gets its
 //     context's error: nothing is loaded and nothing is logged as a cache
 //     failure.
+//   - key is written whole into the log lines and the error texts of Aside:
+//     it must not carry a secret or personal data.
 func Aside[T any](ctx context.Context, cache *Cache, key string, ttl time.Duration, load func(ctx context.Context) (T, error)) (T, bool, error) {
 	var zero T
 

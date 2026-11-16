@@ -98,6 +98,12 @@ type OutboundError struct {
 	// Body is the start (at most 4 KiB) of a KindStatus response body, for
 	// diagnostics. It is never part of Error().
 	Body []byte
+	// RetryBudgetExhausted is set when [Client.SendWithRetry] would have
+	// retried this failure and the target's retry budget refused: the
+	// dependency is failing for many callers at once. It is false when the
+	// retries ended for any other reason — the attempts ran out, the failure
+	// is not retryable, the caller's deadline is too close.
+	RetryBudgetExhausted bool
 	// Err is the underlying cause, if any. For a failed request it is what
 	// net/http's *url.Error wraps, not that error: its text quotes the URL,
 	// query string included.

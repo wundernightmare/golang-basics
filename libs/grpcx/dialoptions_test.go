@@ -128,7 +128,8 @@ func (s *panickyStream) RecvMsg(m any) error {
 
 // A half-open breaker waits for its probe's result. A probe that panics —
 // in the caller's interceptor or codec, recovered further up — is a result
-// too: without one the target would stay cut off until a restart.
+// too: without one the target would stay cut off until a restart, and the
+// call would be missing from the metrics.
 func TestCall_AProbeThatPanicsGivesItsSlotBack(t *testing.T) {
 	t.Parallel()
 
@@ -184,6 +185,8 @@ func TestCall_AProbeThatPanicsGivesItsSlotBack(t *testing.T) {
 
 			require.Panics(t, func() { probe(blowUp, conn) })
 			assert.Equal(t, resilience.StateOpen, state(t, client), "the probe failed: open again, not half-open for good")
+			assert.InDelta(t, 1, metric(t, client, "grpc_client_requests_total", map[string]string{"outcome": "unknown"}), 0,
+				"and the call is counted: it ended with no status")
 
 			blowUp.onCall.Store(false)
 			blowUp.onRecv.Store(false)

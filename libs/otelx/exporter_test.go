@@ -134,7 +134,8 @@ func TestInit_ExportsOverTLSAsConfigured(t *testing.T) {
 	col := newCollector(t, httptest.NewTLSServer, true)
 
 	tel, _, _ := initTracing(t, Config{
-		Endpoint: col.endpoint(), CACert: col.caFile(t), Headers: map[string]string{"x-tenant": "acme"},
+		SamplerRatio: 1,
+		Endpoint:     col.endpoint(), CACert: col.caFile(t), Headers: map[string]string{"x-tenant": "acme"},
 		MaxQueueSize: 4, MaxExportBatchSize: 2,
 	})
 
@@ -157,7 +158,7 @@ func TestInit_ExportsOverTLSAsConfigured(t *testing.T) {
 	}
 
 	// The same collector without its CA: the system roots do not know it.
-	stranger, _, _ := initTracing(t, Config{Endpoint: col.endpoint()})
+	stranger, _, _ := initTracing(t, Config{Endpoint: col.endpoint(), SamplerRatio: 1})
 	endSpans(stranger, 1)
 	require.ErrorContains(t, stranger.Shutdown(context.Background()), "x509")
 	assert.Len(t, col.seen(), 3)
@@ -188,8 +189,8 @@ func TestInit_TheUnprefixedExporterVariablesAreIgnored(t *testing.T) {
 		col *collector
 		cfg Config
 	}{
-		"TLS":       {secure, Config{Endpoint: secure.endpoint(), CACert: secure.caFile(t)}},
-		"plaintext": {plain, Config{Endpoint: plain.endpoint(), Insecure: true}},
+		"TLS":       {secure, Config{Endpoint: secure.endpoint(), CACert: secure.caFile(t), SamplerRatio: 1}},
+		"plaintext": {plain, Config{Endpoint: plain.endpoint(), Insecure: true, SamplerRatio: 1}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			tel, _, _ := initTracing(t, tc.cfg)
@@ -211,7 +212,7 @@ func TestInit_TheUnprefixedExporterVariablesAreIgnored(t *testing.T) {
 //
 //nolint:paralleltest // serial: otelx.Init installs the OpenTelemetry globals
 func TestShutdown_ReportsTheSpansItCouldNotExport(t *testing.T) {
-	tel, _, lines := initTracing(t, Config{Endpoint: refusing(t), Insecure: true})
+	tel, _, lines := initTracing(t, Config{Endpoint: refusing(t), Insecure: true, SamplerRatio: 1})
 
 	otel.Handle(errors.New("a background export failed")) // opens the throttle window, as an outage does
 	endSpans(tel, 1)
@@ -229,7 +230,7 @@ func TestShutdown_ReportsTheSpansItCouldNotExport(t *testing.T) {
 //nolint:paralleltest // serial: otelx.Init installs the OpenTelemetry globals
 func TestShutdown_FlushesUnderACancelledContext(t *testing.T) {
 	col := newCollector(t, httptest.NewServer, false)
-	tel, _, _ := initTracing(t, Config{Endpoint: col.endpoint(), Insecure: true})
+	tel, _, _ := initTracing(t, Config{Endpoint: col.endpoint(), Insecure: true, SamplerRatio: 1})
 
 	endSpans(tel, 1)
 
@@ -245,7 +246,7 @@ func TestShutdown_FlushesUnderACancelledContext(t *testing.T) {
 //
 //nolint:paralleltest // serial: otelx.Init installs the OpenTelemetry globals
 func TestShutdown_AWarnLineNoLongerClaimsATrace(t *testing.T) {
-	tel, log, lines := initTracing(t, Config{Endpoint: refusing(t), Insecure: true, SamplerRatio: -1})
+	tel, log, lines := initTracing(t, Config{Endpoint: refusing(t), Insecure: true})
 
 	ctx, span := tel.TracerProvider.Tracer("t").Start(context.Background(), "work")
 	defer span.End()
@@ -257,4 +258,25 @@ func TestShutdown_AWarnLineNoLongerClaimsATrace(t *testing.T) {
 	require.NotNil(t, line)
 	assert.NotContains(t, line, "trace_id")
 	assert.Contains(t, line, "trace_unsampled_id")
+}
+
+// OTEL_TRACES_SAMPLER_RATIO=0 is "sample no root", in the environment as in
+// a Config built by hand; the default of 1 belongs to the loader.
+//
+//nolint:paralleltest // serial: otelx.Init installs the OpenTelemetry globals
+func TestInit_ARatioOfZeroSamplesNoRoot(t *testing.T) {
+	cfg, err := LoadConfigFrom(envPrefix, map[string]string{
+		envPrefix + "OTEL_TRACES_SAMPLER_RATIO":   "0",
+		envPrefix + "OTEL_EXPORTER_OTLP_ENDPOINT": refusing(t),
+		envPrefix + "OTEL_EXPORTER_OTLP_INSECURE": "true",
+	})
+	require.NoError(t, err)
+
+	tel, _, lines := initTracing(t, cfg)
+
+	_, span := tel.TracerProvider.Tracer("t").Start(context.Background(), "work")
+	defer span.End()
+
+	assert.False(t, span.SpanContext().IsSampled())
+	assert.InDelta(t, 0, lines.Find(t, map[string]any{"msg": "tracing enabled"})["sampler_ratio"], 0)
 }

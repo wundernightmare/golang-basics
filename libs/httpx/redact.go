@@ -22,8 +22,11 @@ const redactedValue = "[redacted]"
 var secretFieldName = regexp.MustCompile(`(?i)(password|passwd|pwd|secret|token|api[_-]?key|private[_.-]?key|credential|dsn|auth|cert|key[_.-]?pem|keystore|passphrase)`)
 
 // secretParam matches URL query parameters and keyword-DSN keys whose value
-// is a secret (?sslpassword=…, ?token=…, "host=db password=x").
-var secretParam = regexp.MustCompile(`(?i)^(.*(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|credential|sslkey|auth))$`)
+// is a secret (?sslpassword=…, ?token=…, "host=db password=x"): a name that
+// ends in one of the long words (X-Amz-Signature), or is one of the short
+// ones of a presigned URL or an OAuth redirect — whole, since "code" and
+// "key" end too many ordinary names (status_code).
+var secretParam = regexp.MustCompile(`(?i)^(.*(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|credential|sslkey|auth|signature)|sig|key|code)$`)
 
 // dsnPair matches one "key=value" of a libpq keyword/value DSN.
 var dsnPair = regexp.MustCompile(`(?i)\b(password|passwd|pwd|sslpassword)=('(?:[^'\\]|\\.)*'|\S+)`)
@@ -87,7 +90,7 @@ func isHex(s string) bool {
 //   - rewrites, in any other string, the userinfo password of every URL in
 //     it (postgres://app:s3cret@host → postgres://app:xxxxx@host), the
 //     secret-looking query and fragment parameters of those URLs
-//     (?sslpassword=, ?token=), and the password pair of a libpq keyword DSN
+//     (?sslpassword=, ?token=, ?X-Amz-Signature=, ?sig=, ?key=, ?code=), and the password pair of a libpq keyword DSN
 //     ("host=db password=x");
 //   - renders time.Duration as its string ("10s"), not nanoseconds, and a
 //     struct with a text form of its own (url.URL, an encoding.TextMarshaler

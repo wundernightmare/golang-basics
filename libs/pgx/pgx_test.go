@@ -2,8 +2,15 @@ package pgx_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +62,8 @@ func TestConfigDSN(t *testing.T) {
 // cannot run in a parallel test.
 func TestLoadConfig_ReadsTheProcessEnvironment(t *testing.T) {
 	t.Setenv("TASKS_DB_HOST", "db.from-env")
+	t.Setenv("TASKS_DB_USER", "tasks")
+	t.Setenv("TASKS_DB_PASSWORD", "s3cret")
 
 	cfg, err := pgx.LoadConfig("TASKS_")
 	require.NoError(t, err)
@@ -64,7 +73,14 @@ func TestLoadConfig_ReadsTheProcessEnvironment(t *testing.T) {
 func TestLoadConfigDefaults(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := pgx.LoadConfigFrom("TASKS_", map[string]string{})
+	// There is no default account: the least an environment names.
+	account := func(env map[string]string) map[string]string {
+		env["TASKS_DB_USER"], env["TASKS_DB_PASSWORD"] = "tasks", "s3cret"
+
+		return env
+	}
+
+	cfg, err := pgx.LoadConfigFrom("TASKS_", account(map[string]string{}))
 	require.NoError(t, err)
 	assert.Equal(t, "localhost", cfg.Host)
 	assert.Equal(t, 5432, cfg.Port)
@@ -72,22 +88,38 @@ func TestLoadConfigDefaults(t *testing.T) {
 	assert.Equal(t, 30*time.Second, cfg.StatementTimeout)
 	assert.Equal(t, 5*time.Second, cfg.LockTimeout)
 	assert.Equal(t, time.Minute, cfg.IdleInTransactionSessionTimeout)
-	assert.Zero(t, cfg.OpTimeout, "no client-side deadline unless asked for")
+	assert.Equal(t, 35*time.Second, cfg.OpTimeout, "the statement timeout and a dial")
 
-	cfg, err = pgx.LoadConfigFrom("TASKS_", map[string]string{
+	cfg, err = pgx.LoadConfigFrom("TASKS_", account(map[string]string{
 		"TASKS_DB_HOST":              "db.internal",
 		"TASKS_DB_MAX_CONNS":         "42",
 		"TASKS_DB_STATEMENT_TIMEOUT": "2s",
 		"TASKS_DB_OP_TIMEOUT":        "3s",
-	})
+	}))
 	require.NoError(t, err)
 	assert.Equal(t, "db.internal", cfg.Host)
 	assert.Equal(t, int32(42), cfg.MaxConns)
 	assert.Equal(t, 2*time.Second, cfg.StatementTimeout)
 	assert.Equal(t, 3*time.Second, cfg.OpTimeout)
 
-	_, err = pgx.LoadConfigFrom("TASKS_", map[string]string{"TASKS_DB_MIN_CONNS": "11"})
+	cfg, err = pgx.LoadConfigFrom("TASKS_", account(map[string]string{"TASKS_DB_OP_TIMEOUT": "0"}))
+	require.NoError(t, err)
+	assert.Zero(t, cfg.OpTimeout, "an explicit zero is no deadline, not the default")
+
+	_, err = pgx.LoadConfigFrom("TASKS_", account(map[string]string{"TASKS_DB_MIN_CONNS": "11"}))
 	require.ErrorContains(t, err, "DB_MIN_CONNS", "what Validate refuses does not load")
+	require.ErrorIs(t, err, pgx.ErrConfig)
+
+	_, err = pgx.LoadConfigFrom("TASKS_", map[string]string{"TASKS_DB_PORT": "five"})
+	require.ErrorIs(t, err, pgx.ErrConfig, "a value that does not parse")
+
+	_, err = pgx.LoadConfigFrom("TASKS_", map[string]string{"TASKS_DATABASE_URL": "postgres://db/app"})
+	require.NoError(t, err, "a URL is taken as it is, with or without an account")
+
+	_, err = pgx.LoadConfigFrom("TASKS_", account(map[string]string{"TASKS_DB_CONNECT_TIMEOUT": "3s"}))
+	require.ErrorContains(t, err, "TASKS_DB_CONNECT_TIMEOUT is no longer read", "the renamed key is refused, not ignored")
+	require.ErrorContains(t, err, "DB_DIAL_TIMEOUT")
+	require.ErrorIs(t, err, pgx.ErrConfig)
 }
 
 func TestLoadMigrations(t *testing.T) {
@@ -135,7 +167,10 @@ func TestConfig_Validate(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "pw"), []byte("s3cret\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "empty"), []byte("\n"), 0o600))
 
-	valid, err := pgx.LoadConfigFrom("", map[string]string{})
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ca.pem"), selfSignedPEM(t), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "not-a-ca.pem"), []byte("-----BEGIN CERTIFICATE-----\nnope\n"), 0o600))
+
+	valid, err := pgx.LoadConfigFrom("", map[string]string{"DB_USER": "app", "DB_PASSWORD": "app"})
 	require.NoError(t, err)
 
 	with := func(mut func(*pgx.Config)) pgx.Config {
@@ -145,7 +180,13 @@ func TestConfig_Validate(t *testing.T) {
 		return cfg
 	}
 
-	require.NoError(t, with(func(c *pgx.Config) { c.PasswordFile = filepath.Join(dir, "pw") }).Validate())
+	require.NoError(t, with(func(c *pgx.Config) {
+		c.Password, c.PasswordFile = secret.String{}, filepath.Join(dir, "pw")
+	}).Validate(), "the file is a password")
+
+	trusting := with(func(c *pgx.Config) { c.SSLMode, c.CAFile = "verify-full", filepath.Join(dir, "ca.pem") })
+	require.NoError(t, trusting.Validate())
+	assert.Contains(t, trusting.DSN(), "sslrootcert=", "the CA file reaches pgx as libpq's sslrootcert")
 
 	for name, tc := range map[string]struct {
 		cfg  pgx.Config
@@ -164,6 +205,26 @@ func TestConfig_Validate(t *testing.T) {
 		"more warm connections than the pool holds": {
 			with(func(c *pgx.Config) { c.MinConns, c.MaxConns = 50, 2 }), "DB_MIN_CONNS 50 is above DB_MAX_CONNS 2",
 		},
+		"no user":     {with(func(c *pgx.Config) { c.User = "" }), "DB_USER is empty"},
+		"no password": {with(func(c *pgx.Config) { c.Password = secret.String{} }), "DB_PASSWORD and DB_PASSWORD_FILE are empty"},
+		"operation timeout not above the statement timeout": {
+			with(func(c *pgx.Config) { c.OpTimeout = c.StatementTimeout }), "DB_OP_TIMEOUT 30s is not above DB_STATEMENT_TIMEOUT 30s",
+		},
+		"CA file that is not a bundle": {
+			with(func(c *pgx.Config) { c.SSLMode, c.CAFile = "verify-full", filepath.Join(dir, "not-a-ca.pem") }), "DB_CA_FILE: " + dir,
+		},
+		"CA file missing": {
+			with(func(c *pgx.Config) { c.SSLMode, c.CAFile = "require", filepath.Join(dir, "nope") }), "DB_CA_FILE: open",
+		},
+		"CA file the sslmode would not use": {
+			with(func(c *pgx.Config) { c.SSLMode, c.CAFile = "prefer", filepath.Join(dir, "ca.pem") }), "DB_SSLMODE=prefer does not verify",
+		},
+		"CA file beside a URL": {
+			with(func(c *pgx.Config) {
+				c.URL, c.CAFile = secret.New("postgres://app:Sup3rS3cret@db/app"), filepath.Join(dir, "ca.pem")
+			}),
+			"DB_CA_FILE is set with DATABASE_URL",
+		},
 		"password file missing": {
 			with(func(c *pgx.Config) { c.PasswordFile = filepath.Join(dir, "nope") }), "DB_PASSWORD_FILE: open " + filepath.Join(dir, "nope"),
 		},
@@ -176,12 +237,33 @@ func TestConfig_Validate(t *testing.T) {
 
 			err := tc.cfg.Validate()
 			require.ErrorContains(t, err, tc.want)
+			require.ErrorIs(t, err, pgx.ErrConfig)
 			assert.NotContains(t, err.Error(), "Sup3rS3cret")
 
 			_, newErr := pgx.New(t.Context(), tc.cfg, nil)
-			require.EqualError(t, newErr, "pgx: "+err.Error())
+			require.EqualError(t, newErr, err.Error())
 		})
 	}
+}
+
+// selfSignedPEM is a certificate of its own authority, PEM-encoded: a CA
+// bundle of one.
+func selfSignedPEM(t *testing.T) []byte {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test ca"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
 // DATABASE_URL carries the password, so no way of printing the config shows it.
@@ -205,7 +287,7 @@ func TestNew_UnreachableDatabaseFailsFast(t *testing.T) {
 
 	start := time.Now()
 	_, err := pgx.New(context.Background(), pgx.Config{
-		URL: secret.New("postgres://app:app@127.0.0.1:1/app?sslmode=disable"), ConnectTimeout: time.Second,
+		URL: secret.New("postgres://app:app@127.0.0.1:1/app?sslmode=disable"), DialTimeout: time.Second,
 	}, nil)
 	require.ErrorContains(t, err, "pgx: initial ping")
 	assert.Less(t, time.Since(start), 5*time.Second)

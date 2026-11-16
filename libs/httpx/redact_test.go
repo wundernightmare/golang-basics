@@ -181,7 +181,8 @@ func TestRedact_KeywordDSN(t *testing.T) {
 func TestRedact_SecretQueryParameters(t *testing.T) {
 	t.Parallel()
 
-	out, ok := httpx.Redact("postgres://app@db:5432/app?sslmode=require&sslpassword=k&token=t&api_key=a&x-auth=z").(string)
+	out, ok := httpx.Redact("postgres://app@db:5432/app?sslmode=require&sslpassword=k&token=t&api_key=a&x-auth=z" +
+		"&X-Amz-Signature=s&sig=s&key=k&code=c&status_code=7&monkey=m").(string)
 	require.True(t, ok)
 
 	u, err := url.Parse(out)
@@ -190,9 +191,12 @@ func TestRedact_SecretQueryParameters(t *testing.T) {
 	q := u.Query()
 	assert.Equal(t, "require", q.Get("sslmode"), "ordinary parameters are kept")
 
-	for _, k := range []string{"sslpassword", "token", "api_key", "x-auth"} {
+	for _, k := range []string{"sslpassword", "token", "api_key", "x-auth", "X-Amz-Signature", "sig", "key", "code"} {
 		assert.Equal(t, "[redacted]", q.Get(k), k)
 	}
+
+	assert.Equal(t, "7", q.Get("status_code"), "the short names are whole names, not endings")
+	assert.Equal(t, "m", q.Get("monkey"))
 
 	assert.Equal(t, "app", u.User.Username())
 

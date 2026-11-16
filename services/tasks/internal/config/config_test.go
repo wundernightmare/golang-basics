@@ -23,10 +23,11 @@ func writeYAML(t *testing.T, body string) string {
 
 // The admin listener is on a routable address by default, so it needs a
 // token (or ADMIN_INSECURE) to validate — as in any deployment.
-// withAdminToken returns a fresh environment holding the token plus env
-// (env wins on a clash, like a sub-test's t.Setenv over its parent's).
-func withAdminToken(env map[string]string) map[string]string {
-	out := map[string]string{"TASKS_ADMIN_TOKEN": "s3cret"}
+// withRequired returns a fresh environment holding what has no default — the
+// admin token and the database account — plus env (env wins on a clash, like
+// a sub-test's t.Setenv over its parent's).
+func withRequired(env map[string]string) map[string]string {
+	out := map[string]string{"TASKS_ADMIN_TOKEN": "s3cret", "TASKS_DB_USER": "tasks", "TASKS_DB_PASSWORD": "s3cret"}
 	maps.Copy(out, env)
 
 	return out
@@ -35,7 +36,7 @@ func withAdminToken(env map[string]string) map[string]string {
 func TestLoadDefaults(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := config.LoadFrom("", withAdminToken(nil))
+	cfg, err := config.LoadFrom("", withRequired(nil))
 	require.NoError(t, err)
 
 	assert.Equal(t, "tasks", cfg.Service)
@@ -74,7 +75,7 @@ func TestOptionalIntegrationsByPresence(t *testing.T) {
 	t.Run("addresses turn them on", func(t *testing.T) {
 		t.Parallel()
 
-		cfg, err := config.LoadFrom("", withAdminToken(map[string]string{
+		cfg, err := config.LoadFrom("", withRequired(map[string]string{
 			"TASKS_VALKEY_ADDR":   "cache:6379",
 			"TASKS_KAFKA_BROKERS": "k:9092",
 		}))
@@ -85,7 +86,7 @@ func TestOptionalIntegrationsByPresence(t *testing.T) {
 	t.Run("a key without its address", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := config.LoadFrom("", withAdminToken(map[string]string{
+		_, err := config.LoadFrom("", withRequired(map[string]string{
 			"TASKS_VALKEY_OP_TIMEOUT":               "1s",
 			"TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION": "true",
 		}))
@@ -95,19 +96,19 @@ func TestOptionalIntegrationsByPresence(t *testing.T) {
 	t.Run("a YAML section without its address", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := config.LoadFrom(writeYAML(t, "kafka:\n  topic: x\n"), withAdminToken(nil))
+		_, err := config.LoadFrom(writeYAML(t, "kafka:\n  topic: x\n"), withRequired(nil))
 		require.ErrorContains(t, err, "KAFKA_BROKERS is not")
 	})
 	t.Run("a key set to its default is harmless", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := config.LoadFrom("", withAdminToken(map[string]string{"TASKS_KAFKA_TOPIC": "tasks.events"}))
+		_, err := config.LoadFrom("", withRequired(map[string]string{"TASKS_KAFKA_TOPIC": "tasks.events"}))
 		require.NoError(t, err)
 	})
 	t.Run("Kafka's own rules apply once it is on", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := config.LoadFrom("", withAdminToken(map[string]string{
+		_, err := config.LoadFrom("", withRequired(map[string]string{
 			"TASKS_KAFKA_BROKERS":           "k:9092",
 			"TASKS_KAFKA_SECURITY_PROTOCOL": "sasl_ssl",
 			"TASKS_KAFKA_SASL_MECHANISM":    "PLAIN",
@@ -117,7 +118,7 @@ func TestOptionalIntegrationsByPresence(t *testing.T) {
 	t.Run("max attempts", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := config.LoadFrom("", withAdminToken(map[string]string{"TASKS_OUTBOX_MAX_ATTEMPTS": "-1"}))
+		_, err := config.LoadFrom("", withRequired(map[string]string{"TASKS_OUTBOX_MAX_ATTEMPTS": "-1"}))
 		require.ErrorContains(t, err, "OUTBOX_MAX_ATTEMPTS")
 	})
 }
@@ -126,7 +127,7 @@ func TestOptionalIntegrationsByPresence(t *testing.T) {
 func TestLibKeysKeepTheirDocumentedNames(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := config.LoadFrom("", withAdminToken(map[string]string{
+	cfg, err := config.LoadFrom("", withRequired(map[string]string{
 		"TASKS_DATABASE_URL":                "postgres://u:p@db:5432/app",
 		"TASKS_DB_MAX_CONNS":                "33",
 		"TASKS_DB_STATEMENT_TIMEOUT":        "7s",
@@ -195,7 +196,7 @@ outbox:
 func TestLoadRejectsUnknownYAMLKeysAndBadValues(t *testing.T) {
 	t.Parallel()
 
-	env := withAdminToken(nil)
+	env := withRequired(nil)
 	_, err := config.LoadFrom(writeYAML(t, "databse_url: postgres://typo\n"), env)
 	require.ErrorContains(t, err, "databse_url", "a typo is an error, not a silent default")
 
@@ -204,6 +205,15 @@ func TestLoadRejectsUnknownYAMLKeysAndBadValues(t *testing.T) {
 
 	_, err = config.LoadFrom(writeYAML(t, "otel:\n  max_queue_size: -1\n"), env)
 	require.ErrorContains(t, err, "OTEL_BSP_MAX_QUEUE_SIZE")
+
+	_, err = config.LoadFrom("", withRequired(map[string]string{"TASKS_OTEL_TRACES_TRUST_REMOTE_PARENT": "false"}))
+	require.ErrorContains(t, err, "OTEL_TRACES_REDRAW_REMOTE_PARENT", "a key otelx retired is refused, not ignored")
+
+	_, err = config.LoadFrom("", withRequired(map[string]string{"TASKS_DB_CONNECT_TIMEOUT": "3s"}))
+	require.ErrorContains(t, err, "DB_DIAL_TIMEOUT", "and so is one pgx renamed")
+
+	_, err = config.LoadFrom("", map[string]string{"TASKS_ADMIN_TOKEN": "s3cret"})
+	require.ErrorContains(t, err, "DB_USER", "there is no default database account")
 
 	env["TASKS_ADMIN_TOKEN"] = ""
 
@@ -223,7 +233,7 @@ func TestServiceDefaultsYieldToExplicitValues(t *testing.T) {
 
 	path := writeYAML(t, "admin_addr: \":9080\"\nkafka:\n  brokers: [k:9092]\n  client_id: from-yaml\n")
 
-	cfg, err := config.LoadFrom(path, withAdminToken(map[string]string{"TASKS_SERVICE_NAME": "tasks-canary"}))
+	cfg, err := config.LoadFrom(path, withRequired(map[string]string{"TASKS_SERVICE_NAME": "tasks-canary"}))
 	require.NoError(t, err)
 	assert.Equal(t, ":9080", cfg.AdminAddr, "set in YAML to the lib's default: kept")
 	assert.Equal(t, "from-yaml", cfg.Kafka.ClientID)
@@ -238,7 +248,7 @@ func TestServiceDefaultsYieldToExplicitValues(t *testing.T) {
 func TestLoadFailsOnMissingFiles(t *testing.T) {
 	t.Parallel()
 
-	env := withAdminToken(nil)
+	env := withRequired(nil)
 	_, err := config.LoadFrom(filepath.Join(t.TempDir(), "absent.yaml"), env)
 	require.ErrorContains(t, err, "absent.yaml")
 

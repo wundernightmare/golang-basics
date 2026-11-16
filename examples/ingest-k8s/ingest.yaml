@@ -21,7 +21,6 @@ data:
       bucket: events-archive
       endpoint: https://s3.corp.example.com
       region: us-east-1
-      use_path_style: true
       op_timeout: 5s          # one put — what an answer waits on while Kafka is away
       max_attempts: 3
       # ca_file: /etc/s3-ca/ca.crt

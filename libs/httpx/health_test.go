@@ -287,3 +287,24 @@ func TestHealth_StandaloneCollectorsLint(t *testing.T) {
 	assert.Equal(t, 1.0, testx.Metric(t, reg, "health_check_up", map[string]string{"check": "db"}))
 	testx.LintMetrics(t, reg)
 }
+
+// What /readyz says about a check that failed is read by anyone who can reach
+// the admin port: a panic is a failed check, not a dead process, and an
+// error's text loses the credentials of the URL in it.
+func TestReadyz_AFailedCheckIsReportedSafely(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := loggedServer(t, httpx.Config{})
+	srv.Health.SetReady(true)
+	srv.Health.Register("cache", func(context.Context) error { panic("nil map") })
+	srv.Health.Register("db", func(context.Context) error {
+		return errors.New("dial postgres://app:s3cret@db:5432/app: connection refused")
+	})
+
+	code, body := probe(srv)
+	assert.Equal(t, http.StatusServiceUnavailable, code)
+	assert.Contains(t, body, `"cache":"check panicked: nil map"`)
+	assert.Contains(t, body, "postgres://app:xxxxx@db:5432/app: connection refused")
+	assert.NotContains(t, body, "s3cret")
+	assert.Zero(t, testx.Metric(t, srv.Metrics.Registry, "health_check_up", map[string]string{"check": "cache"}))
+}

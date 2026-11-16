@@ -16,9 +16,6 @@
 # libs/otelx/integration (a real collector), not a unit assertion per line.
 #
 # Known survivors:
-#   - sampler.go, `SamplerRatio >= 0`: equivalent — a ratio of exactly 0
-#     gives a ratio sampler that samples nothing, which is what "never"
-#     gives.
 #   - retro/arena.go, the two bounds checks of shard.header: equivalent —
 #     either one mutated leaves the other to refuse the same record; they
 #     are there for a ring that is no longer made of records.

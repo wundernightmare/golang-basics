@@ -12,7 +12,8 @@ import (
 )
 
 // CheckFunc is a single readiness probe. It returns nil when the dependency
-// it guards is healthy, or an error describing why it is not.
+// it guards is healthy, or an error describing why it is not. A check that
+// panics has failed, with the panic value as its error.
 type CheckFunc func(ctx context.Context) error
 
 // CheckOption configures a registered check.
@@ -229,7 +230,7 @@ func (h *Health) refresh(ctx context.Context) {
 // closes right after a fast check returns, so the select below sees both
 // cases ready, picks one at random and reports half of the instant results as
 // timed out (TestReadyz_CriticalFailureIsNotReady_OptionalIsDegraded).
-func runCheck(ctx context.Context, c *check, timeout time.Duration) (result, time.Duration) {
+func runCheck(ctx context.Context, chk *check, timeout time.Duration) (result, time.Duration) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -237,9 +238,17 @@ func runCheck(ctx context.Context, c *check, timeout time.Duration) (result, tim
 	done := make(chan error, 1)
 
 	go func() {
-		defer c.running.Store(false)
+		defer chk.running.Store(false)
 
-		done <- c.fn(cctx)
+		// A check is the service's code on a goroutine of ours: its panic
+		// would end the process from a probe.
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				done <- fmt.Errorf("check panicked: %v", recovered)
+			}
+		}()
+
+		done <- chk.fn(cctx)
 	}()
 
 	select {
@@ -323,7 +332,9 @@ func (h *Health) LiveHandler() http.HandlerFunc {
 //	200 {"status":"degraded"}   gate open, only optional checks failing
 //	503 {"status":"not_ready"}  gate closed, or a critical check failing
 //
-// with a per-check breakdown ("ok" or the error) in "checks".
+// with a per-check breakdown in "checks": "ok", or the error's text with the
+// credentials of any URL or DSN in it masked as [Redact] masks them — the
+// probes are served without the admin token.
 func (h *Health) ReadyHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !h.ready.Load() {
@@ -344,7 +355,7 @@ func (h *Health) ReadyHandler() http.HandlerFunc {
 				continue
 			}
 
-			checks[name] = res.err.Error()
+			checks[name] = redactURL(res.err.Error()) // a driver's error quotes the URL it dialled
 			if critical[name] {
 				criticalFailing = true
 			} else {

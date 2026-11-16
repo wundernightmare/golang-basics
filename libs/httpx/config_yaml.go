@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -27,7 +29,15 @@ import (
 // a ConfigMap that was not mounted) is an error, not a silent fall-back to
 // the defaults. Unknown YAML keys are an error too: a typo must not silently
 // become a default. So is a second YAML document ("---"): only the first
-// would be read.
+// would be read. So is an environment variable a section says it no longer
+// reads: a struct anywhere in dst with a method
+//
+//	RetiredKeys() map[string]string // key it once read → what to set instead
+//
+// has those keys looked up under the prefix it is loaded with (libs/pgx,
+// libs/s3 and libs/otelx name theirs this way) — a renamed key is a struct
+// field that is gone, which nothing else here could notice. Every error has
+// [ErrConfig] in its chain.
 //
 // Defaults come from the envDefault tags, so a service config can embed the
 // libs' Config structs directly instead of copying fields by hand — with no
@@ -68,28 +78,64 @@ func LoadYAMLFrom[T any](path, prefix string, environ map[string]string, dst *T)
 	if path != "" {
 		data, err := os.ReadFile(path) //nolint:gosec // G304: path is operator-supplied config, not user input
 		if err != nil {
-			return fmt.Errorf("httpx: read yaml %q: %w", path, err)
+			return fmt.Errorf("httpx: read yaml %q: %w", path, configError{err})
 		}
 
 		dec := yaml.NewDecoder(bytes.NewReader(data))
 		dec.KnownFields(true)
 
 		if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) { // an empty file is an empty config
-			return fmt.Errorf("httpx: parse yaml %q: %w", path, err)
+			return fmt.Errorf("httpx: parse yaml %q: %w", path, configError{err})
 		}
 
 		if err := dec.Decode(new(yaml.Node)); !errors.Is(err, io.EOF) {
-			return fmt.Errorf("httpx: parse yaml %q: want one YAML document, found another after it", path)
+			return fmt.Errorf("httpx: parse yaml %q: %w", path, configError{errors.New("want one YAML document, found another after it")})
 		}
+	}
+
+	if err := refuseRetiredKeys(prefix, environ, reflect.TypeFor[T]()); err != nil {
+		return fmt.Errorf("httpx: env overlay (prefix %q): %w", prefix, configError{err})
 	}
 
 	// 3. The environment, only the variables that are actually set (defaults
 	//    were applied in step 1, so an absent variable leaves the file's value).
 	if err := env.ParseWithOptions(dst, env.Options{Prefix: prefix, Environment: environ, DefaultValueTagName: "envDefaultDisabled"}); err != nil {
-		return fmt.Errorf("httpx: env overlay (prefix %q): %w", prefix, err)
+		return fmt.Errorf("httpx: env overlay (prefix %q): %w", prefix, configError{err})
 	}
 
 	return nil
+}
+
+// refuseRetiredKeys reports every environment variable that a struct of type
+// typ, or one nested in it, names in RetiredKeys and that is set — to any
+// value, the empty one included: the operator meant something by it.
+func refuseRetiredKeys(prefix string, environ map[string]string, typ reflect.Type) error {
+	var errs []error
+
+	if typ.Implements(reflect.TypeFor[interface{ RetiredKeys() map[string]string }]()) {
+		retired := reflect.Zero(typ).Interface().(interface{ RetiredKeys() map[string]string }).RetiredKeys() //nolint:forcetypeassert // Implements was checked on the line above
+
+		for _, name := range slices.Sorted(maps.Keys(retired)) {
+			key := prefix + name
+
+			_, set := environ[key]
+			if environ == nil {
+				_, set = os.LookupEnv(key)
+			}
+
+			if set {
+				errs = append(errs, fmt.Errorf("%s is no longer read: %s", key, retired[name]))
+			}
+		}
+	}
+
+	for f := range typ.Fields() {
+		if f.IsExported() && f.Type.Kind() == reflect.Struct && !isScalarStruct(f.Type) {
+			errs = append(errs, refuseRetiredKeys(prefix+f.Tag.Get("envPrefix"), environ, f.Type))
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // Defaults fills every field of dst that is still at its zero value from the
@@ -101,7 +147,7 @@ func LoadYAMLFrom[T any](path, prefix string, environ map[string]string, dst *T)
 func Defaults[T any](prefix string, dst *T) error {
 	var defaults T
 	if err := env.ParseWithOptions(&defaults, env.Options{Prefix: prefix, Environment: map[string]string{}}); err != nil {
-		return fmt.Errorf("httpx: env defaults (prefix %q): %w", prefix, err)
+		return fmt.Errorf("httpx: env defaults (prefix %q): %w", prefix, configError{err})
 	}
 
 	fillZero(reflect.ValueOf(dst).Elem(), reflect.ValueOf(&defaults).Elem())

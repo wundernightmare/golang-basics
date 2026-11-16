@@ -47,6 +47,14 @@ type Server struct {
 	subjects debugSubjects // tenants / users under investigation (subjects.go)
 
 	inFlight inFlight // API requests a handler has not returned from (see shutdown)
+
+	ran atomic.Bool // Run was called: the gate, the listeners and the timers are those of one run
+
+	// listen is net.Listen, a field so that a test can hand Run a listener
+	// that fails while serving. It takes no context: a bind is immediate,
+	// and a Run whose ctx is already cancelled must still bind and then shut
+	// down cleanly.
+	listen func(network, address string) (net.Listener, error)
 }
 
 // inFlight counts the requests of the API listener whose handler is still
@@ -130,8 +138,9 @@ func WithPropagator(p propagation.TextMapPropagator) Option {
 }
 
 // WithMiddleware installs middleware — an authenticator, a tenant resolver, a
-// rate limiter — *inside* the built-in tracing, access log and metrics and
-// outside the handler's panic recovery and the body limit. A request it
+// rate limiter — *inside* the built-in tracing, access log, metrics and body
+// limit (what it reads of the body is capped at Config.MaxBodyBytes, like
+// what the handler reads) and outside the handler's panic recovery. A request it
 // rejects (401, 429) is therefore still traced, logged and counted like any
 // other, and what it adds to the context is visible to the handler; the
 // access-log line is written after it returns. A handler that panics has
@@ -158,9 +167,9 @@ func WithConfig(v any) Option {
 // The API chain applies, in order: flight-recorder trigger (when
 // Config.DiagFlightRecorder and DiagFlightSlowRequest are set) → request id +
 // deadline → debug token (when Config.DebugToken is set) → tracing → access
-// log → metrics → panic recovery → rate limit (when Config.RateLimit or
-// RateLimitPerClient is set) → [WithMiddleware] extras → panic recovery →
-// body limit → routing (404/405 as problem+json) → the service's mux. The admin handler serves the
+// log → metrics → panic recovery → body limit → rate limit (when
+// Config.RateLimit or RateLimitPerClient is set) → [WithMiddleware] extras →
+// panic recovery → routing (404/405 as problem+json) → the service's mux. The admin handler serves the
 // probes, /metrics, /version, /admin/* and /debug/pprof; its table of routes
 // is on newAdminMux (admin.go).
 func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
@@ -204,6 +213,7 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
 		Build:      build,
 		Metrics:    metrics, Health: h,
 		LogLevel: LogLevelOf(log),
+		listen:   net.Listen,
 	}
 
 	s.diag = newDiagnostics(cfg, build, log)
@@ -227,6 +237,9 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
 		// reaches net/http, the client sees a dropped connection, and the
 		// log and the metrics above record a request that wrote nothing.
 		s.recovery,
+		// Before anything that may read the body: the service's middleware
+		// (a signature check buffers it) as well as its handlers.
+		bodyLimit(cfg.MaxBodyBytes),
 	)
 
 	// Inside tracing, the access log and the metrics — a 429 is a request
@@ -237,10 +250,7 @@ func NewServer(cfg Config, log *slog.Logger, opts ...Option) (*Server, error) {
 	}
 
 	mws = append(mws, applied.outer...)
-	mws = append(mws,
-		s.recovery,
-		bodyLimit(cfg.MaxBodyBytes),
-	)
+	mws = append(mws, s.recovery)
 	s.handler = chain(route(s.mux), mws...)
 	s.admin = newAdminMux(s)
 
@@ -298,17 +308,31 @@ func derefString(p *string) string {
 //     handlers to return, so that main's deferred cleanup does not close a
 //     pool under a handler that is rolling back. A handler that ignores its
 //     context for longer than that outlives Run;
-//  4. the admin listener stops last, so probes answered throughout.
+//  4. the admin listener stops last, so probes answered throughout; its
+//     requests are not cancelled by the forced close of step 3.
+//
+// A listener that fails ends Run with its error at once, during step 2 as
+// well: there is nothing left to wait for.
 //
 // A clean shutdown returns nil. Binding happens before anything else, so a
 // port in use is returned from Run directly rather than reported from a
-// goroutine.
+// goroutine. A Server runs once: a second Run, after the first or next to
+// it, is an error — build a new Server.
 func (s *Server) Run(ctx context.Context) error {
+	if !s.ran.CompareAndSwap(false, true) {
+		return errors.New("httpx: Run was called more than once on one Server")
+	}
+
 	// Request contexts are deliberately NOT derived from ctx: cancelling Run
 	// must drain in-flight requests within ShutdownTimeout, not abort them.
 	// cancelBase (step 3 above) is what ends them.
 	baseCtx, cancelBase := context.WithCancel(context.Background())
 	defer cancelBase()
+
+	// The admin listener has a context of its own: the forced close of the
+	// API must not cut a profile or a scrape that is being served.
+	adminCtx, cancelAdmin := context.WithCancel(context.Background())
+	defer cancelAdmin()
 
 	var (
 		api, admin     *http.Server
@@ -326,7 +350,7 @@ func (s *Server) Run(ctx context.Context) error {
 			BaseContext:       func(net.Listener) context.Context { return baseCtx },
 		}
 
-		ln, err := net.Listen("tcp", s.cfg.Addr) //nolint:noctx // bind is immediate; a cancelled ctx must still bind and then shut down cleanly (Run returns nil)
+		ln, err := s.listen("tcp", s.cfg.Addr)
 		if err != nil {
 			return fmt.Errorf("httpx: bind API listener %s: %w", s.cfg.Addr, err)
 		}
@@ -343,10 +367,10 @@ func (s *Server) Run(ctx context.Context) error {
 			ReadHeaderTimeout: s.cfg.ReadHeaderTimeout,
 			IdleTimeout:       s.cfg.IdleTimeout,
 			MaxHeaderBytes:    s.cfg.MaxHeaderBytes,
-			BaseContext:       func(net.Listener) context.Context { return baseCtx },
+			BaseContext:       func(net.Listener) context.Context { return adminCtx },
 		}
 
-		ln, err := net.Listen("tcp", s.cfg.AdminAddr) //nolint:noctx // bind is immediate; a cancelled ctx must still bind and then shut down cleanly (Run returns nil)
+		ln, err := s.listen("tcp", s.cfg.AdminAddr)
 		if err != nil {
 			if apiLn != nil {
 				_ = apiLn.Close()
@@ -420,7 +444,16 @@ func (s *Server) Run(ctx context.Context) error {
 			"delay", s.cfg.ShutdownDelay.String(), "timeout", s.cfg.ShutdownTimeout.String())
 
 		if s.cfg.ShutdownDelay > 0 {
-			time.Sleep(s.cfg.ShutdownDelay)
+			delay := time.NewTimer(s.cfg.ShutdownDelay)
+			defer delay.Stop()
+
+			select {
+			case <-delay.C:
+			case err := <-serveErr:
+				_ = s.shutdown(api, admin, cancelBase)
+
+				return err
+			}
 		}
 
 		if err := s.shutdown(api, admin, cancelBase); err != nil { // ctx is done: shutdown runs on its own ShutdownTimeout context

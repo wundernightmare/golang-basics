@@ -139,6 +139,11 @@ unknown or malformed property in `KAFKA_*_EXTRA_PROPERTIES` — librdkafka
 checks properties when a client is created. `NewProducer` and `NewConsumer`
 do (the consumer for its dead-letter producer too), so it still fails at boot.
 
+Every refusal of a config — from `Validate`, from `LoadConfig` (a value that
+does not parse included) and from a constructor before it builds a client —
+wraps `kafka.ErrConfig` (`errors.Is`), which tells a wrong config apart from
+brokers that do not answer.
+
 **Connection**
 
 | Key | librdkafka | franz-go | Default | Why |
@@ -359,6 +364,13 @@ for the next commit or the revoke callback.
 detached context, what did not is redelivered to the next owner; then the
 member leaves the group (committing on revoke) and the client closes.
 
+**`Close` while `Run` is running is supported**, from another goroutine and with
+either provider: it is the way to stop a consumer whose context the caller
+does not own. `Run` returns `nil`. Unlike a cancelled context it does not
+drain: a record a handler is working on is not committed and goes to the
+group's next owner, so prefer cancelling the context where the batch should
+finish first.
+
 **At-least-once.** A record can be delivered twice (crash between processing
 and commit, a lost partition, a producer retry), so handlers are idempotent —
 `services/consumer` dedupes by `event_id`.
@@ -511,6 +523,12 @@ with a negative `KAFKA_STATISTICS_INTERVAL_MS`. With librdkafka they refresh
 every interval and disappear when the client stops reporting (three missed
 periods, at least a minute), so a stuck client does not show its last healthy
 numbers; with franz-go they are read from the client at scrape time.
+librdkafka hands a consumer its statistics only inside a poll, so a
+consumer's `kafka_client_brokers_up` and `kafka_client_request_errors_total`
+do not move while a batch is being handled (handlers, retries and their
+backoff included) and are absent once that lasts longer than the three
+periods; a producer's are refreshed by its own event loop, whatever the
+application does.
 
 `kafka_consumer_fetch_errors_total` counts while the brokers are away, with
 either provider — it is the series to alert on for a consumer that cannot
@@ -563,7 +581,7 @@ unreachable shows in readiness and `kafka_client_brokers_up`.
 | --- | --- |
 | `libs/kafka` (`go test ./...`, no broker) | config defaults and validation (buffers, security, strategies, the dead-letter topic), the JSON / YAML property maps and their redaction, the error kinds, metric lint, header propagation; the loop against a scripted client: handler panics, the retry backoff, dead-letter publish retries, commit and fetch error counters, lost partitions, `Run` misuse, `Send` bounds and `Close` |
 | `libs/kafka-rdkafka`, `libs/kafka-franz` (unit, no broker) | every named key reaches the client (librdkafka accepts the property map; franz-go's option values), the passthrough rules, the local code → kind maps, statistics parsing; librdkafka: `Close` during a poll, a poll during an outage, the dead-letter producer checked at boot |
-| **conformance** (`libs/kafka/kafkatest`, run by `libs/kafka-rdkafka/integration` and `libs/kafka-franz/integration` against one Kafka container each) | round trip with headers and both trace paths, client gauges, retries, `Permanent` and exhausted records on the DLQ with their headers and the exact committed offset, DLQ off stopping `Run`, shutdown mid-batch committing exactly what finished (checked by restarting a member), a two-member rebalance without loss and with bounded duplicates, `Close` during `Run`, a `^regex` subscription, a cancelled `Send` failing no other, a validated config building its clients at each client's range edges, the error taxonomy (missing topic, oversized record) |
+| **conformance** (`libs/kafka/kafkatest`, run by `libs/kafka-rdkafka/integration` and `libs/kafka-franz/integration` against one Kafka container each) | round trip with headers and both trace paths, client gauges, retries, `Permanent` and exhausted records on the DLQ with their headers and the exact committed offset, DLQ off stopping `Run`, shutdown mid-batch committing exactly what finished (checked by restarting a member), a two-member rebalance without loss and with bounded duplicates, reported to the member that gives partitions up as revoked and not as lost, a session that expires behind a frozen broker (`containers.Pause`) reported as lost with the member rejoining and reading on, `Close` during `Run`, a `^regex` subscription, a cancelled `Send` failing no other, a validated config building its clients at each client's range edges, the error taxonomy (missing topic, oversized record) |
 | `TestSASLSSL` (both `integration` modules) | produce + consume through `examples/kafka-sasl-ssl` — runs when `KAFKA_SASL_SSL_BROKERS` is set (`just kafka-sasl-ssl-test`) |
 | `TestTrustStore` (both `integration` modules) | what `KAFKA_SSL_CA_LOCATION` means, against Redpanda with TLS from a private CA and SASL/SCRAM (a container of the suite's own): the CA file connects, the system roots alone do not, another CA's file does not — and, in a child process whose system root *is* the broker's CA, another CA's file still does not (the file replaces the system roots; skipped for librdkafka, which does not read `SSL_CERT_FILE`) |
 | services | the tasks / consumer integration suites and e2e run with the default build; CI runs them with `-tags kafka_franz` too |

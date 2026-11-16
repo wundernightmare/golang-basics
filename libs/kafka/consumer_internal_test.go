@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"slices"
 	"sync"
 	"testing"
@@ -14,9 +13,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
 	"github.com/tracehubmmp/golang-basics/libs/secret"
-	"github.com/tracehubmmp/golang-basics/libs/testx"
 )
 
 // The provider-neutral loop against a scripted client: the paths a real
@@ -29,7 +28,7 @@ var fake = &fakeDriver{}
 
 func TestMain(m *testing.M) {
 	Register(fake)
-	os.Exit(testx.Main(m))
+	goleak.VerifyTestMain(m)
 }
 
 type fakeDriver struct {
@@ -212,11 +211,13 @@ func TestNewConsumer_Errors(t *testing.T) {
 	cfg.Brokers = nil
 	_, err := NewConsumer(ctx, cfg, nil)
 	require.ErrorContains(t, err, "KAFKA_BROKERS must be set")
+	require.ErrorIs(t, err, ErrConfig)
 
 	use(t, nil, nil, errors.New("boom"))
 
 	_, err = NewConsumer(ctx, testConfig(), nil)
 	require.ErrorContains(t, err, "new fake consumer: boom")
+	require.NotErrorIs(t, err, ErrConfig, "the client's refusal is not the config's")
 
 	fc := &fakeConsumer{pingErr: errors.New("no route")}
 	use(t, fc, nil, nil)
@@ -234,6 +235,7 @@ func TestNewProducer_Errors(t *testing.T) {
 	cfg.CompressionType = "brotli"
 	_, err := NewProducer(ctx, cfg, nil)
 	require.ErrorContains(t, err, "unknown codec")
+	require.ErrorIs(t, err, ErrConfig)
 
 	use(t, nil, nil, errors.New("boom"))
 
@@ -282,7 +284,7 @@ func TestConsumer_LostDropsPendingRevokedCommitsOnlyItsOwn(t *testing.T) {
 	reg.MustRegister(consumer.Collectors()...)
 
 	for _, event := range []string{"assigned", "revoked", "lost"} {
-		assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_consumer_rebalances_total", map[string]string{"event": event}), event)
+		assert.Equal(t, 1.0, metric(t, reg, "kafka_consumer_rebalances_total", map[string]string{"event": event}), event)
 	}
 }
 

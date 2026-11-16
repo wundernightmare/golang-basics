@@ -1,7 +1,6 @@
 package grpcx
 
 import (
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,8 +12,6 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/tracehubmmp/golang-basics/libs/resilience"
 )
@@ -133,7 +130,10 @@ func (c *Client) dial(tc *TargetConfig, applied *options) (*target, error) {
 		return nil, err
 	}
 
-	p := c.newPolicy(tc)
+	p, err := c.newPolicy(tc)
+	if err != nil {
+		return nil, fmt.Errorf("grpcx: target %q: breaker: %w", tc.Name, err)
+	}
 
 	var tracing []otelgrpc.Option
 	if applied.tp != nil {
@@ -144,9 +144,9 @@ func (c *Client) dial(tc *TargetConfig, applied *options) (*target, error) {
 		tracing = append(tracing, otelgrpc.WithPropagators(applied.prop))
 	}
 
-	creds := credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
-	if tc.Insecure {
-		creds = insecure.NewCredentials()
+	creds, err := tc.transport()
+	if err != nil {
+		return nil, fmt.Errorf("grpcx: target %q: %w", tc.Name, err)
 	}
 
 	dial := []grpc.DialOption{
@@ -172,20 +172,26 @@ func (c *Client) dial(tc *TargetConfig, applied *options) (*target, error) {
 	return &target{conn: conn, policy: p}, nil
 }
 
-func (c *Client) newPolicy(tc *TargetConfig) *policy {
+func (c *Client) newPolicy(tc *TargetConfig) (*policy, error) {
 	name := tc.Name
 	p := &policy{name: name, timeout: tc.Timeout, m: c.m}
 	gauge := func(s resilience.State) { c.m.breakerState.WithLabelValues(name).Set(float64(s)) }
-	p.breaker = resilience.NewBreaker(tc.Breaker, time.Now, func(from, to resilience.State) {
+
+	var err error
+
+	p.breaker, err = resilience.NewBreaker(tc.Breaker, time.Now, func(from, to resilience.State) {
 		c.m.transitions.WithLabelValues(name, from.String(), to.String()).Inc()
 		p.breaker.Mirror(gauge)
 		c.log.Info("grpcx: circuit breaker "+to.String(), "target", name, "from", from.String())
 	})
+	if err != nil {
+		return nil, err
+	}
 
 	// So the series is there before the first transition.
 	p.breaker.Mirror(gauge)
 
-	return p
+	return p, nil
 }
 
 // Conn is target's connection, to build generated clients on. It is shared:

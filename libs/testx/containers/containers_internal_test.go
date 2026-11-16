@@ -3,8 +3,12 @@ package containers
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	toxiclient "github.com/Shopify/toxiproxy/v2/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -29,6 +33,7 @@ type stopsHere struct {
 	testing.TB
 
 	skipped, failed bool
+	logged          []string
 }
 
 type stopped struct{}
@@ -38,6 +43,10 @@ func (s *stopsHere) Skipf(string, ...any) { s.skipped = true; panic(stopped{}) }
 func (s *stopsHere) Fatalf(string, ...any) { s.failed = true; panic(stopped{}) }
 
 func (s *stopsHere) Errorf(string, ...any) { s.failed = true }
+
+func (s *stopsHere) Logf(format string, args ...any) {
+	s.logged = append(s.logged, fmt.Sprintf(format, args...))
+}
 
 func (s *stopsHere) FailNow() { s.failed = true; panic(stopped{}) }
 
@@ -152,17 +161,56 @@ func TestSparePortsStayUsableAfterRunningOut(t *testing.T) {
 	var ports sparePorts
 
 	for i := range sparePortCount {
-		assert.Equal(t, sparePortFirst+i, ports.port(t, string(rune('a'+i))))
+		assert.Equal(t, sparePortFirst+i, ports.port(t, string(rune('a'+i)), "32768"))
 	}
 
-	assert.Equal(t, sparePortFirst, ports.port(t, "a"), "a name keeps its port")
+	assert.Equal(t, sparePortFirst, ports.port(t, "a", "32768"), "a name keeps its port")
 
 	fake := &stopsHere{TB: t}
 
-	require.True(t, fake.run(func() { ports.port(fake, "one too many") }))
+	require.True(t, fake.run(func() { ports.port(fake, "one too many", "32768") }))
 	assert.True(t, fake.failed)
 	require.True(t, ports.mu.TryLock(), "the lock was left held")
 	ports.mu.Unlock()
+}
+
+func TestAProxyNameCannotMoveToAnotherUpstream(t *testing.T) {
+	t.Parallel()
+
+	var ports sparePorts
+
+	ports.port(t, "edge", "32768")
+
+	fake := &stopsHere{TB: t}
+
+	require.True(t, fake.run(func() { ports.port(fake, "edge", "32769") }))
+	assert.True(t, fake.failed)
+}
+
+// Reset is every proxy's cleanup: what it could not undo must reach the log
+// of the test that left the dependency broken.
+func TestProxyResetLogsWhatItCouldNotUndo(t *testing.T) {
+	t.Parallel()
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/proxies/edge" {
+			_, _ = w.Write([]byte(`{"name":"edge","enabled":false,"toxics":[]}`))
+			return
+		}
+
+		http.Error(w, `{"error":"toxiproxy is gone","status":500}`, http.StatusInternalServerError)
+	}))
+	t.Cleanup(api.Close)
+
+	proxy, err := toxiclient.NewClient(api.URL).Proxy("edge")
+	require.NoError(t, err)
+
+	fake := &stopsHere{TB: t}
+	(&Proxy{tb: fake, proxy: proxy}).Reset()
+
+	assert.False(t, fake.failed, "a cleanup that cannot reset does not change the test's verdict")
+	require.Len(t, fake.logged, 2, "listing the toxics and enabling the proxy both failed")
+	assert.Contains(t, fake.logged[1], "reset proxy edge: enable")
 }
 
 func TestAnEmptyCIVariableIsNotCI(t *testing.T) {

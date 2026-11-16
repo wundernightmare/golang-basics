@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -75,6 +76,68 @@ func TestString_Equal(t *testing.T) {
 
 	assert.False(t, unset.Equal(""), "an unset secret must not accept an empty credential")
 	assert.False(t, unset.Equal(hunter))
+
+	assert.True(t, set.EqualTo(secret.New(hunter)))
+	assert.False(t, set.EqualTo(secret.New(hunter+"x")))
+	assert.False(t, set.EqualTo(unset))
+	assert.False(t, unset.EqualTo(set))
+	assert.False(t, unset.EqualTo(unset), "two unset secrets are not a matching credential")
+}
+
+// A rendering read back is what a marshalled config pasted into the
+// environment looks like; only that exact shape is refused.
+func TestString_RefusesItsOwnRenderingAsInput(t *testing.T) {
+	t.Parallel()
+
+	const rendering = "[redacted:f52fbd32]"
+
+	target := reflect.TypeFor[secret.String]()
+	inputs := map[string]func(*secret.String, string) error{
+		"text": func(s *secret.String, text string) error { return s.UnmarshalText([]byte(text)) },
+		"yaml": func(s *secret.String, text string) error {
+			return s.UnmarshalYAML(func(node any) error {
+				*node.(*string) = text
+
+				return nil
+			})
+		},
+		"hook, string": func(s *secret.String, text string) error {
+			out, err := secret.DecodeHook(reflect.TypeFor[string](), target, text)
+			if err == nil {
+				*s = out.(secret.String)
+			}
+
+			return err
+		},
+		"hook, bytes": func(s *secret.String, text string) error {
+			out, err := secret.DecodeHook(reflect.TypeFor[[]byte](), target, []byte(text))
+			if err == nil {
+				*s = out.(secret.String)
+			}
+
+			return err
+		},
+	}
+
+	for name, read := range inputs {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := secret.New("previous")
+
+			err := read(&got, rendering)
+			require.ErrorIs(t, err, secret.ErrDecode)
+			assert.Equal(t, "previous", got.Expose(), "a refused value leaves the secret as it was")
+
+			for _, text := range []string{
+				"[redacted:f52fbd3]", "[redacted:f52fbd321]", "[redacted:f52fbd3z]", "[redacted:]",
+				"[redacted:f52fbd32", "redacted:f52fbd32]", " [redacted:f52fbd32]", "[redacted:f52fbd32]\n",
+			} {
+				require.NoError(t, read(&got, text), text)
+				assert.Equal(t, text, got.Expose())
+			}
+		})
+	}
 }
 
 func TestString_Fingerprint(t *testing.T) {
@@ -262,9 +325,14 @@ func TestString_TextRoundTripIsRedacted(t *testing.T) {
 	assert.True(t, back.IsZero())
 }
 
+// rendering is the shape of String.String, written apart from the package.
+var rendering = regexp.MustCompile(`^\[redacted:[0-9a-fA-F]{8}\]$`)
+
 // FuzzString: whatever the value, Expose returns it and no rendering does.
 func FuzzString(f *testing.F) {
-	for _, seed := range []string{hunter, "", "%s%v%d", "[redacted:f52fbd32]", "\x00\xff", `"quoted"`, "redacted"} {
+	for _, seed := range []string{
+		hunter, "", "%s%v%d", "[redacted:f52fbd32]", "[redacted:F52FBD32]", "[redacted:f52fbd3]", "\x00\xff", `"quoted"`, "redacted",
+	} {
 		f.Add(seed)
 	}
 
@@ -276,6 +344,19 @@ func FuzzString(f *testing.F) {
 
 		if !s.Equal(value) && value != "" {
 			t.Fatalf("Equal(%q) = false", value)
+		}
+
+		// Text is read back as given, unless it is a rendering: then it is
+		// refused, so what was read is never a marker of some other secret.
+		var read secret.String
+
+		err := read.UnmarshalText([]byte(value))
+		if rendering.MatchString(value) {
+			if !errors.Is(err, secret.ErrDecode) {
+				t.Fatalf("UnmarshalText(%q) = %v, want ErrDecode", value, err)
+			}
+		} else if err != nil || read.Expose() != value {
+			t.Fatalf("UnmarshalText(%q) = %q, %v", value, read.Expose(), err)
 		}
 
 		want := "[redacted:" + fingerprint(value) + "]"

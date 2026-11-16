@@ -6,7 +6,9 @@
 # A directory with _test.go files is one test binary, and a binary checks for
 # leaked goroutines only if its TestMain says so: testx.Main(m),
 # containers.Main(m) (the same check, after the containers are gone), or
-# goleak.VerifyTestMain(m) in a module that does not depend on libs/testx. A
+# goleak.VerifyTestMain(m) in a module that does not depend on libs/testx —
+# or a bare Main(m), which is how the internal tests of libs/testx/containers
+# call their own package's containers.Main. A
 # new package without one passes with goroutines left running, and nothing
 # else would notice: the gate is the file list, not a reviewer's memory.
 #
@@ -26,7 +28,7 @@ for dir in $(printf '%s\n' "$files" | grep -v '/testdata/' | sed 's|/[^/]*$||' |
   # A deleted file is still in the index until the commit.
   [ -d "$dir" ] || continue
 
-  if ! grep -qE 'testx\.Main\(|containers\.Main\(|goleak\.VerifyTestMain\(' "$dir"/*_test.go; then
+  if ! grep -qE 'testx\.Main\(|containers\.Main\(|goleak\.VerifyTestMain\(|os\.Exit\(Main\(m' "$dir"/*_test.go; then
     missing="$missing  $dir
 "
   fi

@@ -6,6 +6,7 @@ require (
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
 	github.com/tracehubmmp/golang-basics/libs/resilience v0.0.0
+	github.com/tracehubmmp/golang-basics/libs/secret v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/otel v1.47.0
@@ -37,3 +38,5 @@ require (
 replace github.com/tracehubmmp/golang-basics/libs/testx => ../testx
 
 replace github.com/tracehubmmp/golang-basics/libs/resilience => ../resilience
+
+replace github.com/tracehubmmp/golang-basics/libs/secret => ../secret

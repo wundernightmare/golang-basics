@@ -36,9 +36,10 @@ func baseConfig() archive.WriterConfig {
 func start(t *testing.T, cfg archive.WriterConfig) *fixture {
 	t.Helper()
 
-	breaker := resilience.NewBreaker(resilience.BreakerConfig{
+	breaker, err := resilience.NewBreaker(resilience.BreakerConfig{
 		FailureRatio: 0.5, MinRequests: 2, Window: time.Minute, OpenTimeout: 50 * time.Millisecond, HalfOpenProbes: 1,
 	}, time.Now, nil)
+	require.NoError(t, err)
 
 	store := testsupport.NewStore()
 	writer, err := archive.NewWriter(cfg, store, archive.NewLayout("t"), "w1", breaker, nil)
@@ -268,7 +269,8 @@ func TestWriter_ShutdownFlushesWhatIsLeft(t *testing.T) {
 func TestNewWriter_RejectsBadConfig(t *testing.T) {
 	t.Parallel()
 
-	breaker := resilience.NewBreaker(resilience.BreakerConfig{FailureRatio: 1, MinRequests: 1, Window: time.Second, OpenTimeout: time.Second, HalfOpenProbes: 1}, time.Now, nil)
+	breaker, err := resilience.NewBreaker(resilience.BreakerConfig{FailureRatio: 1, MinRequests: 1, Window: time.Second, OpenTimeout: time.Second, HalfOpenProbes: 1}, time.Now, nil)
+	require.NoError(t, err)
 
 	for name, mutate := range map[string]func(*archive.WriterConfig){
 		"compression": func(c *archive.WriterConfig) { c.Compression = "zip" },

@@ -1,0 +1,24 @@
+# gremlins — mutation testing of the off-heap (fastcache) L1 store of libs/tiercache.
+#
+#   just mutate libs/tiercache/offheap
+#
+# Run it through scripts/mutate.sh (`just mutate` and CI do), never bare: see
+# the script for why a bare `gremlins unleash` reports every mutant killed.
+#
+# Thresholds fail the run (exit 11) when the suite lets too many mutants live.
+# Efficacy = killed / (killed + lived); mutant coverage = mutants any test
+# reaches. The module is a thin adapter with a handful of mutants, all of
+# them killed by tiercache/storetest and the entry-limit tests: a survivor is
+# a gap, so efficacy has no room.
+#
+# NOT COVERED (2 of 5) is a gremlins limitation, not untested code: Go's cover
+# profile has no block for a const, and both are in the MaxEntry expression —
+# which the entry-limit tests do pin.
+#
+unleash:
+  workers: 4
+  timeout-coefficient: 8
+  output-statuses: lt # print only LIVED and TIMED OUT — the ones that matter
+  threshold:
+    efficacy: 99 # gremlins fails a run AT the threshold: this is "all of them"
+    mutant-coverage: 59 # 3 of 5 is 60, see NOT COVERED above

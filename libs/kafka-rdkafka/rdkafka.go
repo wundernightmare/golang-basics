@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -366,9 +367,9 @@ func (Driver) NewConsumer(cfg kafka.Config, log *slog.Logger, rb kafka.Rebalance
 
 // consumer is a librdkafka group member. Group changes are only delivered
 // from within Poll or Close (the rebalance callback), so the loop's batch is
-// never interrupted by one; what was polled for a partition revoked during
-// the same Poll is dropped. Close waits for a Poll in progress, so the two
-// never run their callbacks at once.
+// never interrupted by one; what a Poll had collected for a partition is
+// dropped when that Poll takes the partition away. Close waits for a Poll in
+// progress, so the two never run their callbacks at once.
 type consumer struct {
 	cl    *ckafka.Consumer
 	cfg   kafka.Config
@@ -376,7 +377,12 @@ type consumer struct {
 	rb    kafka.Rebalance
 	stats *statsHolder
 
-	revoked  map[kafka.TopicPartition]struct{} // during the current Poll
+	// batch is what the Poll in progress has collected (nil outside Poll).
+	// The rebalance callback, which librdkafka runs inside that Poll, takes
+	// out of it the records of the partitions it revokes — then and there:
+	// a partition that comes back within the same Poll is read again from
+	// its committed offset, and those records must reach the loop.
+	batch    []kafka.Message
 	dlqOnce  sync.Once
 	dlq      *producer
 	dlqErr   error
@@ -428,11 +434,9 @@ func (c *consumer) rebalance(cl *ckafka.Consumer, ev ckafka.Event) error {
 			c.rb.Revoked(ctx, parts)
 		}
 
-		if c.revoked != nil { // nil outside Poll: Close's revoke has no polled batch to filter
-			for _, p := range parts {
-				c.revoked[p] = struct{}{}
-			}
-		}
+		c.batch = slices.DeleteFunc(c.batch, func(m kafka.Message) bool {
+			return slices.Contains(parts, kafka.TopicPartition{Topic: m.Topic, Partition: m.Partition})
+		})
 	}
 
 	return nil
@@ -461,13 +465,9 @@ func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, e
 
 	defer c.calls.Done()
 
-	c.revoked = map[kafka.TopicPartition]struct{}{}
-	defer func() { c.revoked = nil }()
+	defer func() { c.batch = nil }()
 
-	var (
-		out  []kafka.Message
-		errs []error
-	)
+	var errs []error
 
 	fetchError := func(err error) {
 		if len(errs) < maxPollErrors {
@@ -477,7 +477,7 @@ func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, e
 
 	timeoutMs := 100
 
-	for len(out) < maxRecords && ctx.Err() == nil {
+	for len(c.batch) < maxRecords && ctx.Err() == nil {
 		if c.isClosing() {
 			// What was polled is not handed out: nothing of it is
 			// committed, so the group's next owner gets it.
@@ -486,7 +486,7 @@ func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, e
 
 		ev := c.cl.Poll(timeoutMs)
 		if ev == nil {
-			if len(out) > 0 {
+			if len(c.batch) > 0 {
 				break
 			}
 
@@ -500,7 +500,7 @@ func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, e
 				break
 			}
 
-			out = append(out, toMessage(event))
+			c.batch = append(c.batch, toMessage(event))
 			timeoutMs = 0
 		case *ckafka.Stats:
 			c.stats.update(event.String())
@@ -517,34 +517,12 @@ func (c *consumer) Poll(ctx context.Context, maxRecords int) ([]kafka.Message, e
 			fetchError(event)
 		}
 
-		if len(errs) > 0 && len(out) == 0 {
+		if len(errs) > 0 && len(c.batch) == 0 {
 			break
 		}
-
-		out = c.dropRevoked(out)
 	}
 
-	return out, errors.Join(errs...)
-}
-
-// dropRevoked removes from a batch being polled the records of partitions
-// revoked since the last call (the rebalance callback ran inside this Poll).
-func (c *consumer) dropRevoked(out []kafka.Message) []kafka.Message {
-	if len(c.revoked) == 0 {
-		return out
-	}
-
-	kept := out[:0]
-
-	for _, m := range out {
-		if _, gone := c.revoked[kafka.TopicPartition{Topic: m.Topic, Partition: m.Partition}]; !gone {
-			kept = append(kept, m)
-		}
-	}
-
-	clear(c.revoked)
-
-	return kept
+	return c.batch, errors.Join(errs...)
 }
 
 func (c *consumer) isClosing() bool {
@@ -693,6 +671,10 @@ func (c *consumer) Ping(ctx context.Context) error {
 	return ping(ctx, c.cl)
 }
 
+// Stats implements kafka.ConsumerClient. The snapshot is the last one Poll
+// took off the consumer's queue — librdkafka delivers statistics there and
+// nowhere else — so it does not change while the loop handles a batch, and
+// is invalid once that takes longer than statsMaxAge.
 func (c *consumer) Stats() kafka.ClientStats { return c.stats.clientStats(c.cfg) }
 
 // Close implements kafka.ConsumerClient: no new Poll or Ping starts, the

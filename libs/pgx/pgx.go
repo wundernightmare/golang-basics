@@ -88,7 +88,7 @@ func open(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) (*D
 
 	poolCfg, err := cfg.poolConfig()
 	if err != nil {
-		return nil, nil, fmt.Errorf("pgx: %w", err)
+		return nil, nil, err
 	}
 
 	// Tracing and metrics: a span per query/batch/copy/prepare/connect, child

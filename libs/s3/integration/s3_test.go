@@ -29,7 +29,7 @@ func storeConfig(t testing.TB) s3.Config {
 	return s3.Config{
 		Bucket: testBucket, Endpoint: store.Endpoint, Region: store.Region,
 		AccessKeyID: store.AccessKey, SecretAccessKey: secret.New(store.SecretKey),
-		UsePathStyle: true, Insecure: true, AutoCreateBucket: true,
+		Insecure: true, AutoCreateBucket: true,
 	}
 }
 

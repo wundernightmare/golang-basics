@@ -44,7 +44,7 @@ func newFixture(t *testing.T) *fixture {
 	store, err := s3.New(context.Background(), s3.Config{
 		Bucket: "ingest-compact-test", Endpoint: backend.Endpoint, Region: backend.Region,
 		AccessKeyID: backend.AccessKey, SecretAccessKey: secret.New(backend.SecretKey),
-		UsePathStyle: true, Insecure: true, AutoCreateBucket: true,
+		Insecure: true, AutoCreateBucket: true,
 		UploadPartBytes: s3.MinUploadPartBytes,
 	}, nil)
 	require.NoError(t, err)

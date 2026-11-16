@@ -97,4 +97,7 @@ func TestLoad_RejectsBadConfig(t *testing.T) {
 	require.ErrorContains(t, err, "KAFKA_SASL_")
 	require.ErrorContains(t, err, "OTEL_EXPORTER_OTLP_ENDPOINT")
 	require.ErrorContains(t, err, "DEDUPE_SIZE", "all problems are reported at once")
+
+	_, err = config.LoadFrom("", map[string]string{"CONSUMER_OTEL_TRACES_TRUST_REMOTE_PARENT": "false"})
+	require.ErrorContains(t, err, "OTEL_TRACES_REDRAW_REMOTE_PARENT", "a key otelx retired is refused, not ignored")
 }

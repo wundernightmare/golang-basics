@@ -90,10 +90,12 @@ type snapshot struct {
 // outbound clients').
 type BreakerConfig struct {
 	// FailureRatio trips the breaker when failures / requests in the window
-	// reach it, in (0, 1]. 0 = no breaker: [BreakerConfig.Validate] accepts
-	// it and [NewBreaker] returns nil. An owner that cannot run without a
-	// breaker, or that reads 0 as "use my default", decides that itself
-	// before it gets here.
+	// reach it, in (0, 1]. 0 = the breaker is off, for every owner of a
+	// BreakerConfig: [BreakerConfig.Enabled] is false, [BreakerConfig.Validate]
+	// accepts it and [NewBreaker] returns nil. An owner's default ratio
+	// therefore lives in what it loads over (a preset, an env default), never
+	// in a substitution for 0; an owner that cannot run without a breaker
+	// rejects a config that is not Enabled.
 	FailureRatio float64 `env:"FAILURE_RATIO" yaml:"failure_ratio"`
 	// MinRequests is the least requests in the window before the ratio is
 	// evaluated (≥ 1 with a breaker).
@@ -121,10 +123,15 @@ func DefaultBreakerConfig() BreakerConfig {
 	}
 }
 
+// Enabled reports whether c asks for a breaker: FailureRatio above 0. A
+// disabled policy — the zero BreakerConfig is one — is valid whatever its
+// other fields say, and [NewBreaker] builds nothing from it.
+func (c BreakerConfig) Enabled() bool { return c.FailureRatio > 0 }
+
 // Validate reports every problem in c — joined with [errors.Join], each
 // named by its yaml key within the breaker's block (the owner prefixes its
-// own name) — or nil when there is none. With FailureRatio 0 (no breaker)
-// the other fields are free.
+// own name) — or nil when there is none. A policy that is not
+// [BreakerConfig.Enabled] leaves the other fields free.
 func (c BreakerConfig) Validate() error {
 	// Written as "not inside" so that NaN, for which every comparison is
 	// false, is rejected too.
@@ -132,7 +139,7 @@ func (c BreakerConfig) Validate() error {
 		return errors.New("failure_ratio must be in [0, 1]")
 	}
 
-	if c.FailureRatio == 0 {
+	if !c.Enabled() {
 		return nil
 	}
 
@@ -181,19 +188,25 @@ type Breaker struct {
 	mirrorMu sync.Mutex // serialises Mirror's read of the state with its set
 }
 
-// NewBreaker builds a breaker from cfg, which must pass
-// [BreakerConfig.Validate]; nil (admit everything) when cfg.FailureRatio is
-// 0 (or below). now is the clock (time.Now) and must not be nil; onChange,
+// NewBreaker builds a breaker from cfg, or returns what
+// [BreakerConfig.Validate] says is wrong with it. A disabled cfg (see
+// [BreakerConfig.Enabled]) gives a nil breaker and no error: nil admits
+// everything. now is the clock (time.Now), must not be nil and is read once
+// here — the failure window counts the time elapsed since; onChange,
 // if not nil, is called after every state transition — concurrently,
 // possibly out of order. An owner that mirrors the state somewhere (a gauge)
 // therefore does not write to: it calls [Breaker.Mirror].
-func NewBreaker(cfg BreakerConfig, now func() time.Time, onChange func(from, to State)) *Breaker {
-	if cfg.FailureRatio <= 0 {
-		return nil
+func NewBreaker(cfg BreakerConfig, now func() time.Time, onChange func(from, to State)) (*Breaker, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	if !cfg.Enabled() {
+		return nil, nil //nolint:nilnil // a nil *Breaker is the documented "no breaker"
 	}
 
 	b := &Breaker{
-		win:         newWindow(cfg.Window),
+		win:         newWindow(cfg.Window, now()),
 		ratio:       cfg.FailureRatio,
 		minRequests: cfg.MinRequests,
 		openTimeout: cfg.OpenTimeout,
@@ -203,7 +216,7 @@ func NewBreaker(cfg BreakerConfig, now func() time.Time, onChange func(from, to 
 	}
 	b.cur.Store(&snapshot{state: StateClosed})
 
-	return b
+	return b, nil
 }
 
 // State returns the current state.

@@ -100,6 +100,7 @@ func TestLoadConfig_InvalidIsAnError(t *testing.T) {
 	environ[envPrefix+"HTTP_READ_TIMEOUT"] = "soon"
 	_, err = httpx.LoadConfigFrom(envPrefix, environ)
 	require.ErrorContains(t, err, "parse config")
+	require.ErrorIs(t, err, httpx.ErrConfig, "a value that does not parse is a configuration error like a value that is refused")
 }
 
 func TestConfigValidate(t *testing.T) {
@@ -126,6 +127,11 @@ func TestConfigValidate(t *testing.T) {
 		{"negative body limit", func(c *httpx.Config) { c.MaxBodyBytes = -1 }, "HTTP_MAX_BODY_BYTES"},
 		{"negative header limit", func(c *httpx.Config) { c.MaxHeaderBytes = -1 }, "HTTP_MAX_HEADER_BYTES"},
 		{"check timeout ≥ interval", func(c *httpx.Config) { c.HealthInterval, c.HealthTimeout = time.Second, time.Second }, "HEALTH_CHECK_TIMEOUT"},
+		{"negative read timeout", func(c *httpx.Config) { c.ReadTimeout = -time.Second }, "HTTP_READ_TIMEOUT"},
+		{"negative read-header timeout", func(c *httpx.Config) { c.ReadHeaderTimeout = -time.Second }, "HTTP_READ_HEADER_TIMEOUT"},
+		{"negative write timeout", func(c *httpx.Config) { c.WriteTimeout = -time.Second }, "HTTP_WRITE_TIMEOUT"},
+		{"negative idle timeout", func(c *httpx.Config) { c.IdleTimeout = -time.Second }, "HTTP_IDLE_TIMEOUT"},
+		{"negative check interval and timeout", func(c *httpx.Config) { c.HealthInterval, c.HealthTimeout = -time.Second, -2*time.Second }, "HEALTH_CHECK_"},
 		{"negative level TTL", func(c *httpx.Config) { c.LogLevelMaxTTL = -time.Minute }, "LOG_LEVEL_MAX_TTL"},
 		{"negative sampling", func(c *httpx.Config) { c.LogSampleInitial = -1 }, "LOG_SAMPLE_INITIAL"},
 		{"bad proxy CIDR", func(c *httpx.Config) { c.TrustedProxies = []string{"10.0.0.0/8", "not-an-ip"} }, "HTTP_TRUSTED_PROXIES"},
@@ -169,6 +175,7 @@ func TestConfigValidate(t *testing.T) {
 			}
 
 			require.ErrorContains(t, err, tc.wantErr)
+			require.ErrorIs(t, err, httpx.ErrConfig)
 		})
 	}
 }
@@ -394,6 +401,41 @@ func TestLoadYAML_EnvDefaultsWithoutFile(t *testing.T) {
 	assert.Equal(t, 3, cfg.DB.MaxConns)
 }
 
+// agedSection is a library's config section that used to read SECTION_OLD.
+type agedSection struct {
+	New string `env:"SECTION_NEW" yaml:"new"`
+}
+
+func (agedSection) RetiredKeys() map[string]string {
+	return map[string]string{"SECTION_OLD": "set SECTION_NEW instead"}
+}
+
+// The loader reads the keys the struct has, so a key a library dropped would
+// be ignored without a word; the section names it and the load fails.
+//
+// Serial on purpose: exercises the process-environment path (t.Setenv cannot run in parallel).
+func TestLoadYAML_RefusesAKeyASectionRetired(t *testing.T) {
+	type config struct {
+		Section agedSection `yaml:"section"`
+		Second  agedSection `envPrefix:"SECOND_" yaml:"second"`
+	}
+
+	for _, key := range []string{envPrefix + "SECTION_OLD", envPrefix + "SECOND_SECTION_OLD"} {
+		var cfg config
+
+		err := httpx.LoadYAMLFrom("", envPrefix, map[string]string{key: ""}, &cfg)
+		require.ErrorContains(t, err, key+" is no longer read: set SECTION_NEW instead", "whatever its value")
+		require.ErrorIs(t, err, httpx.ErrConfig)
+	}
+
+	var cfg config
+	require.NoError(t, httpx.LoadYAMLFrom("", envPrefix, map[string]string{"OTHER_SECTION_OLD": "1", envPrefix + "SECTION_NEW": "1"}, &cfg),
+		"another prefix is another service's key")
+
+	t.Setenv(envPrefix+"SECTION_OLD", "1")
+	require.ErrorIs(t, httpx.LoadYAML("", envPrefix, &cfg), httpx.ErrConfig, "the process environment is searched the same way")
+}
+
 func TestLoadYAML_Errors(t *testing.T) {
 	t.Parallel()
 
@@ -404,6 +446,7 @@ func TestLoadYAML_Errors(t *testing.T) {
 
 		err := httpx.LoadYAMLFrom(writeYAML(t, "http_adr: \":9000\"\n"), envPrefix, map[string]string{}, &cfg)
 		require.ErrorContains(t, err, "parse yaml")
+		require.ErrorIs(t, err, httpx.ErrConfig)
 		assert.ErrorContains(t, err, "http_adr", "a typo is named, not silently defaulted")
 	})
 	t.Run("unknown nested key", func(t *testing.T) {
@@ -413,6 +456,7 @@ func TestLoadYAML_Errors(t *testing.T) {
 
 		err := httpx.LoadYAMLFrom(writeYAML(t, "db:\n  max_con: 3\n"), envPrefix, map[string]string{}, &cfg)
 		require.ErrorContains(t, err, "max_con")
+		require.ErrorIs(t, err, httpx.ErrConfig)
 	})
 	t.Run("a second document", func(t *testing.T) {
 		t.Parallel()
@@ -421,6 +465,7 @@ func TestLoadYAML_Errors(t *testing.T) {
 
 		err := httpx.LoadYAMLFrom(writeYAML(t, "workers: 1\n---\nworkers: 2\n"), envPrefix, map[string]string{}, &cfg)
 		require.ErrorContains(t, err, "one YAML document", "what it says would be dropped without a word")
+		require.ErrorIs(t, err, httpx.ErrConfig)
 	})
 	t.Run("wrong type", func(t *testing.T) {
 		t.Parallel()
@@ -429,6 +474,7 @@ func TestLoadYAML_Errors(t *testing.T) {
 
 		err := httpx.LoadYAMLFrom(writeYAML(t, "workers: many\n"), envPrefix, map[string]string{}, &cfg)
 		require.ErrorContains(t, err, "parse yaml")
+		require.ErrorIs(t, err, httpx.ErrConfig)
 	})
 	t.Run("empty file is an empty config", func(t *testing.T) {
 		t.Parallel()
@@ -443,6 +489,7 @@ func TestLoadYAML_Errors(t *testing.T) {
 
 		err := httpx.LoadYAMLFrom(t.TempDir(), envPrefix, map[string]string{}, &cfg) // a directory
 		require.ErrorContains(t, err, "read yaml")
+		require.ErrorIs(t, err, httpx.ErrConfig)
 	})
 	t.Run("bad env value", func(t *testing.T) {
 		t.Parallel()
@@ -453,5 +500,6 @@ func TestLoadYAML_Errors(t *testing.T) {
 
 		err := httpx.LoadYAMLFrom("", envPrefix, environ, &cfg)
 		require.ErrorContains(t, err, "env overlay")
+		require.ErrorIs(t, err, httpx.ErrConfig)
 	})
 }

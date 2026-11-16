@@ -75,7 +75,7 @@ func ensureBucket(t testing.TB, backend containers.S3Store) {
 	store, err := s3.New(context.Background(), s3.Config{
 		Bucket: bucket, Endpoint: backend.Endpoint, Region: backend.Region,
 		AccessKeyID: backend.AccessKey, SecretAccessKey: secret.New(backend.SecretKey),
-		UsePathStyle: true, Insecure: true, AutoCreateBucket: true,
+		Insecure: true, AutoCreateBucket: true,
 	}, nil)
 	require.NoError(t, err)
 
@@ -305,7 +305,7 @@ func (s *service) archived() map[string]int {
 	store, err := s3.New(context.Background(), s3.Config{
 		Bucket: bucket, Endpoint: s.back.store.Endpoint, Region: s.back.store.Region,
 		AccessKeyID: s.back.store.AccessKey, SecretAccessKey: secret.New(s.back.store.SecretKey),
-		UsePathStyle: true, Insecure: true,
+		Insecure: true,
 	}, nil)
 	require.NoError(s.t, err)
 

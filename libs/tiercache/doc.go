@@ -32,7 +32,8 @@
 // L1 is the always-on level. A nil [Remote], an unreachable or a slow one
 // never fails a read: every L2 call has its own deadline, a circuit breaker
 // skips L2 once the configured share of its recent calls failed
-// ([Config.Breaker]), and the loader answers instead. What
+// ([Config.Breaker]; [DefaultConfig] has one, the zero Config none), and the
+// loader answers instead. What
 // is lost is sharing between processes and invalidation — bounded by the TTL.
 //
 // # Invalidation
@@ -58,7 +59,8 @@
 //
 // L1 is a [Store], built by the [StoreFactory] given to [New] with the
 // capacity of the configuration ([Config.MaxBytes]), fixed from then on.
-// Two are provided, and the service names one. Package offheap
+// Two are provided, each a module of its own so that a service requires
+// only the library of the one it names. Package offheap
 // (github.com/VictoriaMetrics/fastcache) is off the Go heap, so neither the
 // garbage collector nor the Go memory limit counts it; sized in steps of
 // 32 MiB; never returned to the OS (budget the full capacity as resident);
