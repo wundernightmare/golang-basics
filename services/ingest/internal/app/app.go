@@ -83,7 +83,6 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, onServer f
 	return err
 }
 
-// runIngest wires and serves the request path.
 func runIngest(ctx, bootCtx context.Context, cfg config.Config, srv *httpx.Server, store *s3.Client, tel *otelx.Telemetry, logger *slog.Logger) error {
 	registry := srv.Metrics.Registry
 	breakers := newBreakerMetrics(registry)
@@ -200,7 +199,6 @@ func serveIngest(ctx context.Context, srv *httpx.Server, writer *archive.Writer,
 	return err
 }
 
-// runCompact serves the admin listener and runs the compactor.
 func runCompact(ctx context.Context, cfg config.Config, srv *httpx.Server, store *s3.Client, logger *slog.Logger) error {
 	// Compaction has nothing else to do without the store: critical.
 	srv.Health.Register("s3", store.ReadyCheck())

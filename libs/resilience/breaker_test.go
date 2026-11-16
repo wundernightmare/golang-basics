@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeClock is a settable clock for the breaker and the retry budget.
 type fakeClock struct {
 	mu sync.Mutex
 	t  time.Time

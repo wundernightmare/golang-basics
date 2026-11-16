@@ -23,7 +23,6 @@ import (
 // id that arrives over HTTP is the client's choice), so ending a span and
 // triggering a trace each take one lock, and a trigger walks one ring.
 const (
-	// shardsMax is the most shards an arena has.
 	shardsMax = 64
 	// shardMinBytes is the least a shard holds, so a small buffer has fewer
 	// shards: a span is a few hundred bytes.
@@ -61,13 +60,11 @@ type shard struct {
 	spans int
 	// newestNanos is the end time of the newest record ever pushed.
 	newestNanos int64
-
 	// triggered is the set of trace ids exported from now on; order is the
 	// same ids, oldest first, in a ring of its own.
 	triggered map[trace.TraceID]struct{}
 	order     []trace.TraceID
 	orderHead int
-
 	// What happened in this shard, counted under its lock: a counter every
 	// goroutine bumps for every span is a cache line they all wait for.
 	kept, evicted, taken        uint64
@@ -279,7 +276,6 @@ func (o Outcome) String() string {
 	}
 }
 
-// usage is a snapshot of the arena.
 type usage struct {
 	spans   int           // spans kept
 	bytes   int           // bytes of the rings in use, headers and taken records included
@@ -319,7 +315,6 @@ type arena struct {
 // of them at least shardMinBytes large.
 func newArena(capacity, perSecond int, now time.Time) *arena {
 	shards := min(max(capacity/shardMinBytes, 1), shardsMax)
-	// Round down to a power of two.
 	for shards&(shards-1) != 0 {
 		shards &= shards - 1
 	}

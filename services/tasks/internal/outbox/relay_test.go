@@ -37,7 +37,8 @@ type fakePublisher struct {
 	mu      sync.Mutex
 	records []record
 	failOn  map[string]error
-	delay   time.Duration
+
+	delay time.Duration
 	// afterSend runs once a record was published, with its key.
 	afterSend func(key string)
 }

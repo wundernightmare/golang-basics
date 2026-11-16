@@ -5,7 +5,6 @@ import (
 	"google.golang.org/grpc/codes"
 )
 
-// outcomeCircuitOpen is the outcome label of a call the breaker rejected.
 const outcomeCircuitOpen = "circuit_open"
 
 // metrics are the client's Prometheus instruments:

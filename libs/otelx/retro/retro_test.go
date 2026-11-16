@@ -26,8 +26,8 @@ import (
 type sink struct {
 	mu    sync.Mutex
 	spans []sdktrace.ReadOnlySpan
-	count atomic.Int64
 
+	count                     atomic.Int64
 	started, flushed, stopped atomic.Int64
 }
 

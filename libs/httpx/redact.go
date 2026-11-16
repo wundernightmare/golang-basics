@@ -10,7 +10,6 @@ import (
 	"time"
 )
 
-// redactedValue replaces a secret in [Redact] output.
 const redactedValue = "[redacted]"
 
 // secretFieldName matches field / map-key names that are secrets by

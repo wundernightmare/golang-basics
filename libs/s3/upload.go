@@ -99,7 +99,7 @@ func (u *Upload) flushPart() error {
 		}
 	}
 
-	number := int32(len(u.parts) + 1) //nolint:gosec // bounded by maxUploadParts just below
+	number := int32(len(u.parts) + 1) //nolint:gosec // G115: bounded by maxUploadParts just below
 	if number > maxUploadParts {
 		return fmt.Errorf("s3: upload of %q needs more than %d parts: raise S3_UPLOAD_PART_BYTES", u.key, maxUploadParts)
 	}

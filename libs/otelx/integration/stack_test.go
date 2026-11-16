@@ -90,7 +90,6 @@ type store struct {
 	OTLPPort string
 }
 
-// jaeger starts the suite's trace store.
 func jaeger(tb testing.TB) store {
 	tb.Helper()
 

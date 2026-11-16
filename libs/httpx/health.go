@@ -68,7 +68,8 @@ type Health struct {
 	mu      sync.RWMutex
 	checks  map[string]*check
 	results map[string]result
-	ready   atomic.Bool
+
+	ready atomic.Bool
 
 	interval, timeout time.Duration
 	refreshMu         sync.Mutex // serialises inline refreshes
@@ -218,10 +219,10 @@ func (h *Health) refresh(ctx context.Context) {
 // loop and every probe with it — found by the chaos suite, where a frozen
 // Kafka turned readiness degradation into a 15-second wait.
 //
-// cancel runs here, not in the check goroutine: cancelling there closed
-// cctx.Done() right after a fast check returned, so the select below saw both
-// cases ready, picked one at random and reported half of the instant results
-// as timed out (the flaky TestReadyz_CriticalFailureIsNotReady_OptionalIsDegraded).
+// cancel runs here, not in the check goroutine: cancelled there, cctx.Done()
+// closes right after a fast check returns, so the select below sees both
+// cases ready, picks one at random and reports half of the instant results as
+// timed out (TestReadyz_CriticalFailureIsNotReady_OptionalIsDegraded).
 func runCheck(ctx context.Context, c *check, timeout time.Duration) (result, time.Duration) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

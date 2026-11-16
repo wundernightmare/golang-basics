@@ -21,10 +21,11 @@ import (
 // level entirely (see [Config].DebugToken), so a single request can be
 // debugged without touching this at all.
 type LogLevel struct {
+	base slog.Level
+
 	mu      sync.Mutex
-	lv      slog.LevelVar
-	base    slog.Level
-	gen     uint64 // bumped on every Set/Reset so a stale timer never reverts a newer change
+	lv      slog.LevelVar // written under mu; read without it by the handlers
+	gen     uint64        // bumped on every Set/Reset so a stale timer never reverts a newer change
 	expires time.Time
 	timer   *time.Timer
 

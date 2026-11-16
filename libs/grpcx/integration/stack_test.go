@@ -116,7 +116,6 @@ exporters:
     trace_storage: store
 `
 
-// jaeger starts the suite's Jaeger.
 func jaeger(tb testing.TB) tracing {
 	tb.Helper()
 

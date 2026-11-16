@@ -143,8 +143,8 @@ func TestValidate_PassthroughCannotOverrideNamedKeys(t *testing.T) {
 
 // A static member fenced by another instance with its group.instance.id is a
 // fatal librdkafka error: Run ends with kafka.ErrClientFailed (the service
-// exits and restarts) and readiness fails — the loop no longer polls a dead
-// client while /readyz stays green.
+// exits and restarts) and readiness fails — the loop does not keep polling a
+// dead client while /readyz stays green.
 func TestFencedStaticMemberStopsTheLoop(t *testing.T) {
 	t.Parallel()
 

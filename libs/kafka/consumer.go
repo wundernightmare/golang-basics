@@ -49,9 +49,9 @@ type Consumer struct {
 	metrics *consumerMetrics
 	tel     telemetry
 
-	// mu guards pending and owned: the loop marks and commits, the driver's
-	// rebalance callbacks prune both, and a driver may run those on a
-	// goroutine of its client (see [Driver.NewConsumer]).
+	// The loop marks and commits, the driver's rebalance callbacks prune
+	// pending and owned, and a driver may run those on a goroutine of its
+	// client (see [Driver.NewConsumer]).
 	mu      sync.Mutex
 	pending map[TopicPartition]int64    // processed, not yet committed: the latest offset per partition
 	owned   map[TopicPartition]struct{} // assigned to this member now: nothing else is processed or committed
@@ -529,7 +529,6 @@ func containsPartition(ps []TopicPartition, p TopicPartition) bool {
 	return slices.Contains(ps, p)
 }
 
-// onAssigned tracks the partitions this member now owns.
 func (c *Consumer) onAssigned(ctx context.Context, parts []TopicPartition) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -596,7 +595,7 @@ func (c *Consumer) onLost(ctx context.Context, parts []TopicPartition) {
 	}
 }
 
-// forgetLocked removes partitions from the owned set. c.mu must be held.
+// forgetLocked: c.mu must be held.
 func (c *Consumer) forgetLocked(gone []TopicPartition) {
 	for _, p := range gone {
 		delete(c.owned, p)

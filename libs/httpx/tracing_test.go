@@ -14,7 +14,6 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/testx"
 )
 
-// spanView is what these tests read from the server span.
 type spanView struct {
 	name        string
 	attrs       map[string]any

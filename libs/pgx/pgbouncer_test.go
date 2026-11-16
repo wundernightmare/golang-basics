@@ -169,7 +169,6 @@ func directDB(tb testing.TB) *pgx.DB {
 	return newDB(tb, pgx.Config{URL: containers.Postgres(tb), MaxConns: 2, MinConns: 1, ConnectTimeout: 5 * time.Second})
 }
 
-// freshSchema creates a schema of the test's own and returns its name.
 func freshSchema(tb testing.TB) string {
 	tb.Helper()
 

@@ -599,7 +599,6 @@ func rebalance(t *testing.T, h Harness) {
 	memberA := start(t, cfg, handler)
 	require.Eventually(t, func() bool { return got.len() >= 100 }, 30*time.Second, 50*time.Millisecond)
 
-	// B joins while records keep arriving.
 	publishing := make(chan struct{})
 	go func() {
 		defer close(publishing)
@@ -626,7 +625,6 @@ func rebalance(t *testing.T, h Harness) {
 		return testx.Metric(t, memberA.reg, "kafka_client_brokers_up", up) >= 1 && testx.Metric(t, b.reg, "kafka_client_brokers_up", up) >= 1
 	}, 30*time.Second, 100*time.Millisecond, "both members report their client gauges")
 
-	// A leaves mid-stream; B takes everything over.
 	publishing = make(chan struct{})
 	go func() {
 		defer close(publishing)
