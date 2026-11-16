@@ -115,7 +115,7 @@ type unit struct {
 	tx        pgx.Tx
 	isolation pgx.TxIsoLevel // of the outermost transaction
 
-	mu    sync.Mutex // guards hooks
+	mu    sync.Mutex
 	hooks []func(context.Context)
 }
 

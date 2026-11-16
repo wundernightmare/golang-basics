@@ -360,7 +360,7 @@ func (c Config) LogConfig() LogConfig {
 	}
 }
 
-// parsePrefixes parses CIDRs (a bare IP is accepted as a /32 or /128).
+// parsePrefixes accepts a bare IP as a /32 or /128.
 func parsePrefixes(cidrs []string) ([]netip.Prefix, error) {
 	out := make([]netip.Prefix, 0, len(cidrs))
 	for _, raw := range cidrs {

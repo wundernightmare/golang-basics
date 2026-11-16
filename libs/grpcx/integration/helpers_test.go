@@ -120,7 +120,6 @@ func breaker(tb testing.TB, client *grpcx.Client) resilience.State {
 	return state
 }
 
-// traceID is a fresh random trace id.
 func traceID(tb testing.TB) []byte {
 	tb.Helper()
 

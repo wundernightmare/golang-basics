@@ -93,7 +93,6 @@ func methodLabel(m string) string {
 	return "_OTHER"
 }
 
-// statusOutcome is the outcome label of an answered request.
 func statusOutcome(code int) string {
 	switch {
 	case code >= 500:

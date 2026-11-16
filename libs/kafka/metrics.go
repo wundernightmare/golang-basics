@@ -47,7 +47,6 @@ func newSendMetrics(role string) *sendMetrics {
 	}
 }
 
-// observe records one send of a record to topic that started at start.
 func (m *sendMetrics) observe(topic string, start time.Time, err error) {
 	result := "ok"
 	if err != nil {
@@ -62,7 +61,6 @@ func (m *sendMetrics) observe(topic string, start time.Time, err error) {
 	m.records.WithLabelValues(topic, result).Inc()
 }
 
-// producerMetrics is the instrument set behind [Producer.Collectors].
 type producerMetrics struct {
 	send   *sendMetrics
 	client *clientCollector
@@ -99,7 +97,6 @@ const (
 // says, not whatever the cluster grows.
 const otherTopic = "other"
 
-// consumerMetrics is the instrument set behind [Consumer.Collectors].
 type consumerMetrics struct {
 	records    *prometheus.CounterVec
 	duration   *prometheus.HistogramVec

@@ -14,8 +14,9 @@ import (
 // consumer whose effect must be exactly-once keeps the applied ids next to
 // the effect instead — a unique key in the same database transaction.
 type lru struct {
+	size int
+
 	mu    sync.Mutex
-	size  int
 	order *list.List               // front = most recent
 	items map[string]*list.Element // value: the id
 }
@@ -24,7 +25,7 @@ func newLRU(size int) *lru {
 	return &lru{size: size, order: list.New(), items: make(map[string]*list.Element, size)}
 }
 
-// contains reports whether id is in the set, refreshing it if so.
+// contains refreshes id when it is in the set.
 func (l *lru) contains(id string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -55,7 +56,6 @@ func (l *lru) add(id string) {
 	}
 }
 
-// len is the number of remembered ids.
 func (l *lru) len() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()

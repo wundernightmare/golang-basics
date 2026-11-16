@@ -17,7 +17,6 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
-// admin serves one admin request and returns the status and the decoded body.
 func admin(t testing.TB, srv *httpx.Server, method, target string, headers ...string) (int, map[string]any) {
 	t.Helper()
 

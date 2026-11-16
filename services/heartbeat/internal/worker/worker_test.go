@@ -28,7 +28,6 @@ func TestWorker_BeatsThenStopsOnCancel(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 
-	// Wait for a couple of ticks to be counted, then stop.
 	require.Eventually(t, func() bool { return testx.Metric(t, reg, "heartbeat_beats_total", nil) >= 2 },
 		2*time.Second, 5*time.Millisecond)
 	cancel()

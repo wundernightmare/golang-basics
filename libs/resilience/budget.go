@@ -9,8 +9,9 @@ import (
 // window, so an outage of the dependency cannot multiply the traffic sent to
 // it by the attempt count. A nil budget allows every retry.
 type RetryBudget struct {
-	mu         sync.Mutex
-	w          window // a = requests, b = retries
+	mu sync.Mutex
+	w  window // a = requests, b = retries
+
 	ratio      float64
 	minRetries int
 	now        func() time.Time

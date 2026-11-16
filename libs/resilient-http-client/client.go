@@ -80,7 +80,6 @@ func WithPropagator(p propagation.TextMapPropagator) Option {
 	return func(o *options) { o.prop = p }
 }
 
-// policy is one target's resilience policy.
 type policy struct {
 	name     string
 	cfg      TargetConfig

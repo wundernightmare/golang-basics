@@ -46,10 +46,11 @@ func titlePatterns(t *testing.T) []*regexp.Regexp {
 
 // The contract promises that a schema-compliant title is accepted
 // (Schemathesis checks exactly that, with generated strings). The pattern
-// and NormalizeTitle are two statements of one rule, and they drifted on what
-// "whitespace" is: the pattern said \s, the server trims Unicode White_Space,
-// and a title of one U+00A0 was valid to the generator and blank to the
-// server. Here every code point is tried alone and beside a letter.
+// and NormalizeTitle are two statements of one rule and can drift on what
+// "whitespace" is: against a pattern that says \s, a server that trims
+// Unicode White_Space makes a title of one U+00A0 valid to the generator and
+// blank to the server. Here every code point is tried alone and beside a
+// letter.
 func TestTitlePatternAcceptsOnlyWhatTheServerAccepts(t *testing.T) {
 	t.Parallel()
 

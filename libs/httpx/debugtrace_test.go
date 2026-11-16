@@ -47,8 +47,9 @@ func inSpan(t testing.TB, sampled bool, state string) context.Context {
 
 // triggers is a retroactive buffer as the logger sees it.
 type triggers struct {
+	accept bool
+
 	mu        sync.Mutex
-	accept    bool
 	triggered map[trace.TraceID]bool
 	byLog     []trace.TraceID
 	asked     int

@@ -108,7 +108,8 @@ func (s sampler) decide(params sdktrace.SamplingParameters) sdktrace.SamplingRes
 	}
 }
 
-// randomTraceID is an id for a draw at the ratio — never the id of a span.
+// randomTraceID is an id for a draw at the ratio: decide hands it to the root
+// sampler only, and the span keeps the id it had.
 func randomTraceID() trace.TraceID {
 	var id trace.TraceID
 

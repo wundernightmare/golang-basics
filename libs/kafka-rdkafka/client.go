@@ -156,8 +156,7 @@ func parseStats(raw string) (statsSnapshot, error) {
 
 // statsHolder keeps the latest snapshot for the collectors.
 type statsHolder struct {
-	// mu guards every field: the client's event pump (a consumer's Poll)
-	// updates, a scrape reads.
+	// The client's event pump (a consumer's Poll) updates, a scrape reads.
 	mu   sync.Mutex
 	snap statsSnapshot
 	// seen is each broker's last cumulative error count, total the sum of

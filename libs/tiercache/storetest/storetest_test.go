@@ -22,8 +22,9 @@ type simple struct {
 	entries map[string][]byte
 	order   []string
 	bytes   int
-	budget  int
-	defect  string
+
+	budget int
+	defect string
 }
 
 func newSimple(defect string) tiercache.StoreFactory {
@@ -92,7 +93,7 @@ func (s *simple) Set(key string, value []byte) {
 	}
 }
 
-// drop removes key. Callers hold s.mu.
+// drop must be called with s.mu held.
 func (s *simple) drop(key string) {
 	value, found := s.entries[key]
 	if !found {

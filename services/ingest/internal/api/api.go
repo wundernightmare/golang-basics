@@ -77,7 +77,7 @@ func (h *handlers) ingest(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case err == nil:
-		httpx.WriteJSON(w, http.StatusOK, ingestapi.IngestResponse{Accepted: int32(len(events))}) //nolint:gosec // bounded by MaxBatchEvents
+		httpx.WriteJSON(w, http.StatusOK, ingestapi.IngestResponse{Accepted: int32(len(events))}) //nolint:gosec // G115: decode refuses more than MaxBatchEvents events
 	case errors.Is(err, pipeline.ErrOverloaded):
 		w.Header().Set("Retry-After", h.retryAfter)
 		httpx.WriteProblem(w, r, problem(http.StatusTooManyRequests, codeOverloaded,

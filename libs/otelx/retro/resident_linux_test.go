@@ -21,7 +21,6 @@ const residentChildEnv = "RETRO_RESIDENT_CHILD"
 // residentReport is the line the child prints, and the parent reads.
 const residentReport = "retro-resident reserved=%d filled=%d\n"
 
-// residentBytes is the resident set size of this process.
 func residentBytes(t *testing.T) int {
 	t.Helper()
 
