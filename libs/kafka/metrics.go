@@ -180,7 +180,10 @@ func (m *consumerMetrics) topic(t string) string {
 // means the worker is stuck, both climbing means it is under-provisioned.
 // The client gauges are exposed while the driver has something current to
 // report (see [ClientStats]): not with KAFKA_STATISTICS_INTERVAL_MS
-// negative, and not from a client that stopped reporting.
+// negative, and not from a client that stopped reporting. The librdkafka
+// provider gets a consumer's statistics only inside a poll: the gauges stand
+// still while a batch is handled and are absent once that outlasts three
+// statistics periods (at least a minute).
 func (c *Consumer) Collectors() []prometheus.Collector {
 	m := c.metrics
 

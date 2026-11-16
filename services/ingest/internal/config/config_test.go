@@ -158,6 +158,8 @@ func TestValidateRejects(t *testing.T) {
 		"compact compression":     {map[string]string{"INGEST_COMPACT_COMPRESSION": "lz4"}, "COMPACT_COMPRESSION"},
 		"no admin token":          {map[string]string{"INGEST_ADMIN_TOKEN": ""}, "ADMIN_TOKEN"},
 		"collector as a URL":      {map[string]string{"INGEST_OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318"}, "OTEL_EXPORTER_OTLP_ENDPOINT"},
+		"retired otelx key":       {map[string]string{"INGEST_OTEL_TRACES_TRUST_REMOTE_PARENT": "false"}, "OTEL_TRACES_REDRAW_REMOTE_PARENT"},
+		"retired s3 key":          {map[string]string{"INGEST_S3_USE_PATH_STYLE": "false"}, "S3_VIRTUAL_HOST_STYLE"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

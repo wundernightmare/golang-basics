@@ -28,6 +28,7 @@ func admin(t testing.TB) *ckafka.AdminClient {
 
 var harness = kafkatest.Harness{
 	Brokers: containers.Kafka,
+	Freeze:  func(t testing.TB) func() { t.Helper(); return containers.Pause(t, "kafka") },
 	CreateTopic: func(t testing.TB, partitions int32, names ...string) {
 		t.Helper()
 		adminClient := admin(t)

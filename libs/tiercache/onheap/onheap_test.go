@@ -1,10 +1,12 @@
 package onheap_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/wundernightmare/golang-basics/libs/tiercache"
 	"github.com/wundernightmare/golang-basics/libs/tiercache/onheap"
 	"github.com/wundernightmare/golang-basics/libs/tiercache/storetest"
 )
@@ -45,4 +47,23 @@ func TestTheCapacityAndTheEntryLimit(t *testing.T) {
 		_, found := store.Get(nil, "k")
 		assert.False(t, found, "capacity asked: %d", asked)
 	}
+}
+
+// A read into a buffer with room allocates nothing, whatever the length of
+// the key: the key is lent to the library, not copied.
+//
+//nolint:paralleltest // serial: testing.AllocsPerRun refuses to run in a parallel test
+func TestAReadAllocatesNothing(t *testing.T) {
+	store := onheap.New(4 * mib)
+	t.Cleanup(store.Reset)
+
+	key, buf := strings.Repeat("k", tiercache.MaxKeyLen), make([]byte, 0, 64)
+	store.Set(key, []byte("value"))
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		if _, found := store.Get(buf, key); !found {
+			t.Fatal("not found")
+		}
+	})
+	assert.Zero(t, allocs)
 }

@@ -16,7 +16,8 @@ const outcomeCircuitOpen = "circuit_open"
 //	grpc_client_circuit_breaker_transitions_total{target,from,to}
 //
 // outcome is the status code in lower case (ok, unavailable,
-// deadline_exceeded, …) or circuit_open; method is the full method name
+// deadline_exceeded, …) or circuit_open — unknown for a call that panicked,
+// which ended with no status; method is the full method name
 // (/pkg.Service/Method), which comes from generated code. The names are the
 // workspace's metrics contract (docs/METRICS.md).
 type metrics struct {

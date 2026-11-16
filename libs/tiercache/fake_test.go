@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,8 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wundernightmare/golang-basics/libs/tiercache"
-	"github.com/wundernightmare/golang-basics/libs/tiercache/offheap"
-	"github.com/wundernightmare/golang-basics/libs/tiercache/onheap"
 )
 
 // fakeRemote is an in-memory tiercache.Remote with the semantics of
@@ -384,32 +381,6 @@ func record(key string, version, payload int) row {
 	}
 }
 
-// suiteStoreEnv names the store the suite's caches are built on: unset is
-// offheap, "onheap" the other. TestTheSuiteHoldsOnTheHeapStore runs the
-// suite again with it set.
-const suiteStoreEnv = "TIERCACHE_TEST_STORE"
-
-func onTheHeap() bool { return os.Getenv(suiteStoreEnv) == "onheap" }
-
-func suiteStore() tiercache.StoreFactory {
-	if onTheHeap() {
-		return onheap.New
-	}
-
-	return offheap.New
-}
-
-// suiteBytes is the capacity of a cache whose test names none: the default,
-// or on the heap 16 MiB — entries of up to 16 KiB, which is what the suites
-// write when they mean "fits in L1".
-func suiteBytes() int {
-	if onTheHeap() {
-		return 16 << 20
-	}
-
-	return 0
-}
-
 // harnesses numbers the caches of the suite: each gets a name of its own.
 var harnesses atomic.Int64
 
@@ -437,16 +408,14 @@ func newHarness(t *testing.T, remote tiercache.Remote, src *source, tune func(*t
 func newLoggedHarness(t *testing.T, remote tiercache.Remote, src *source, tune func(*tiercache.Config), log *slog.Logger) *harness {
 	t.Helper()
 
-	cfg := tiercache.Config{Name: fmt.Sprint("unit-", harnesses.Add(1)), SoftTTL: softTTL, HardTTL: hardTTL}
+	cfg := tiercache.DefaultConfig()
+	cfg.Name, cfg.SoftTTL, cfg.HardTTL = fmt.Sprint("unit-", harnesses.Add(1)), softTTL, hardTTL
+
 	if tune != nil {
 		tune(&cfg)
 	}
 
-	if cfg.MaxBytes == 0 {
-		cfg.MaxBytes = suiteBytes()
-	}
-
-	cache, err := tiercache.New(cfg, suiteStore(), rowCodec{}, src.load, remote, log)
+	cache, err := tiercache.New(cfg, tiercache.NewMapStore, rowCodec{}, src.load, remote, log)
 	require.NoError(t, err)
 	t.Cleanup(cache.Close)
 

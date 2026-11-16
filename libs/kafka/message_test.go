@@ -9,8 +9,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/wundernightmare/golang-basics/libs/testx"
 )
 
 // The instrument set is a contract for dashboards and alerts: lint it the
@@ -37,20 +35,20 @@ func TestMetrics_AreLintClean(t *testing.T) {
 	c.metrics.dlq.observe("t.dlq", time.Now(), nil)
 	c.metrics.rebalances.WithLabelValues("assigned").Inc()
 
-	testx.LintMetrics(t, reg)
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_producer_records_total", map[string]string{"client": "producer", "topic": "t", "result": "ok"}))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_producer_records_total", map[string]string{"client": "producer", "topic": "t", "result": KindQueueFull}))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_producer_records_total", map[string]string{"client": "consumer", "topic": "t.dlq", "result": "ok"}))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_producer_send_duration_seconds", map[string]string{"client": "consumer", "topic": "t.dlq"}))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_consumer_records_total", map[string]string{"topic": "other", "result": "ok"}),
+	lintMetrics(t, reg)
+	assert.Equal(t, 1.0, metric(t, reg, "kafka_producer_records_total", map[string]string{"client": "producer", "topic": "t", "result": "ok"}))
+	assert.Equal(t, 1.0, metric(t, reg, "kafka_producer_records_total", map[string]string{"client": "producer", "topic": "t", "result": KindQueueFull}))
+	assert.Equal(t, 1.0, metric(t, reg, "kafka_producer_records_total", map[string]string{"client": "consumer", "topic": "t.dlq", "result": "ok"}))
+	assert.Equal(t, 1.0, metric(t, reg, "kafka_producer_send_duration_seconds", map[string]string{"client": "consumer", "topic": "t.dlq"}))
+	assert.Equal(t, 1.0, metric(t, reg, "kafka_consumer_records_total", map[string]string{"topic": "other", "result": "ok"}),
 		"a topic matched by a regex subscription does not become a label value")
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_client_info", map[string]string{"client": "consumer", "provider": "test"}))
-	assert.Equal(t, 3.0, testx.Metric(t, reg, "kafka_client_brokers_up", map[string]string{"client": "producer"}))
-	assert.Equal(t, 2.0, testx.Metric(t, reg, "kafka_client_request_errors_total", map[string]string{"client": "consumer"}))
-	assert.Equal(t, float64(64<<20), testx.Metric(t, reg, "kafka_producer_queue_max_bytes", nil))
+	assert.Equal(t, 1.0, metric(t, reg, "kafka_client_info", map[string]string{"client": "consumer", "provider": "test"}))
+	assert.Equal(t, 3.0, metric(t, reg, "kafka_client_brokers_up", map[string]string{"client": "producer"}))
+	assert.Equal(t, 2.0, metric(t, reg, "kafka_client_request_errors_total", map[string]string{"client": "consumer"}))
+	assert.Equal(t, float64(64<<20), metric(t, reg, "kafka_producer_queue_max_bytes", nil))
 
 	for _, gone := range []string{"kafka_consumer_lag", "kafka_consumer_lag_max", "kafka_consumer_dlq_total", "kafka_publish_total", "kafka_consume_total"} {
-		assert.Equal(t, -1.0, testx.Metric(t, reg, gone, nil), "%s is not part of the metrics contract", gone)
+		assert.Equal(t, -1.0, metric(t, reg, gone, nil), "%s is not part of the metrics contract", gone)
 	}
 }
 
@@ -61,8 +59,8 @@ func TestClientCollector_StaleSnapshotIsNotExposed(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(newClientCollector("consumer", "test", func() ClientStats { return ClientStats{BrokersUp: 2} }))
-	assert.Equal(t, -1.0, testx.Metric(t, reg, "kafka_client_brokers_up", nil))
-	assert.Equal(t, 1.0, testx.Metric(t, reg, "kafka_client_info", map[string]string{"client": "consumer", "provider": "test"}))
+	assert.Equal(t, -1.0, metric(t, reg, "kafka_client_brokers_up", nil))
+	assert.Equal(t, 1.0, metric(t, reg, "kafka_client_info", map[string]string{"client": "consumer", "provider": "test"}))
 }
 
 func TestPermanent(t *testing.T) {

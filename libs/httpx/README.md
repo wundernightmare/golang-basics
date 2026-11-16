@@ -89,22 +89,25 @@ so that it times the whole request):
 3. **tracing** — a server span per request (see *Traces* below);
 4. **access log** — one line per request;
 5. **metrics** — count, latency, in-flight;
-6. **recovery** — for the two below: a panic in the service's own middleware
-   is the same counted 500 as a panic in a handler (see 9), not a dropped
+6. **recovery** — for what follows: a panic in the service's own middleware
+   is the same counted 500 as a panic in a handler (see 10), not a dropped
    connection;
-7. **rate limit** — when `HTTP_RATE_LIMIT` or `HTTP_RATE_LIMIT_PER_CLIENT` is
-   set: a token bucket for all requests and one per client address; over it
+7. **body limit** — `HTTP_MAX_BODY_BYTES`, for the extras that read the body
+   (a signature check) as well as for the handlers; `DecodeJSON` turns an
+   overrun into 413;
+8. **rate limit** — when `HTTP_RATE_LIMIT` or `HTTP_RATE_LIMIT_PER_CLIENT` is
+   set: a token bucket for all requests and one per client — an IPv4 address,
+   or an IPv6 /64; over it
    → 429 problem with `Retry-After`, a tick of
    `http_rate_limited_total{scope}`. It is the service's last line — an
    ingress should shed first — and it sits outside the extras below, so what
    is shed costs no authentication;
-8. **`WithMiddleware(...)` extras** — an authenticator, a tenant resolver, a
+9. **`WithMiddleware(...)` extras** — an authenticator, a tenant resolver, a
    per-tenant quota; they see the request id and the deadline, the handler sees
    what they add to the context, and a request they reject (401, 429) is
    still traced, logged and counted like any other;
-9. **recovery** — a panic becomes a 500 problem, an error log with the stack,
+10. **recovery** — a panic becomes a 500 problem, an error log with the stack,
    an error span and a tick of `http_unhandled_errors_total`;
-10. **body limit** — `HTTP_MAX_BODY_BYTES`; `DecodeJSON` turns an overrun into 413;
 11. **routing** — unknown path → 404, known path with the wrong method → 405
    with `Allow`, both as `problem+json`; the matched pattern becomes the
    `route` of the logs, metrics and span (`httpx.RouteFromContext`).
@@ -126,7 +129,10 @@ writer) runs both with `srv.RunWith`: the server drains first, the workers —
 each under `Guard` — are stopped only after it has, and the first failure of
 any of them stops the rest in that order. A worker that answers the stop with
 `return ctx.Err()` has not failed: once the server has stopped, a worker's
-`context.Canceled` is not an error of `RunWith`.
+`context.Canceled` is not an error of `RunWith`. The workers have
+`HTTP_SHUTDOWN_TIMEOUT` to return once they are told to stop; past it
+`RunWith` returns an error naming those still running, instead of waiting for
+a worker that ignores its context.
 
 ```go
 err := srv.RunWith(ctx,
@@ -152,7 +158,9 @@ line is written:
 - by key: an attribute whose name says it is a secret — `password`, `token`,
   `secret`, `api_key`, `authorization`, `credential`, `dsn`, … (the list
   `Redact` uses) — or is listed in `LOG_REDACT_KEYS` (`email,phone,card` —
-  the private data of your domain) is logged as `[redacted]`;
+  the private data of your domain) is logged as `[redacted]`. Under a built-in
+  name a number or a boolean passes (`max_tokens`); under a listed key it is
+  hidden as well, unless it is zero;
 - by shape: a URL with credentials or a secret query parameter, and a keyword
   DSN with a password, are masked wherever they appear — under any key, and
   anywhere inside an error's text (`Get "https://api/x?token=[redacted]": dial
@@ -174,7 +182,7 @@ or `token_type` is hidden too; name it otherwise if it must be read.
 | `httpx.Internal(detail, cause)`    | A 500 with a cause                                                   |
 | `p.WithCause(err)`                 | Attach the underlying error: logged (5xx) and recorded on the span, never sent |
 | `httpx.WriteProblem(w, r, p)`      | Write it; fills `instance` (the path) and the `request_id` extension |
-| `httpx.WriteError(w, r, err)`      | `Problem` (also wrapped, also `*Problem`) → itself; `context.DeadlineExceeded` → 504; `context.Canceled` on a request whose own context is cancelled (the client left) → 499; anything else → 500 with `err` as the cause |
+| `httpx.WriteError(w, r, err)`      | `Problem` (also wrapped, also `*Problem`) → itself; `context.DeadlineExceeded` → 504; `context.Canceled` on a request whose own context is cancelled (the client left) → 499; anything else → 500 with `err` as the cause (a nil `err` too, logged as the caller's mistake) |
 | `httpx.DecodeJSON(r, &v)`          | Decode one JSON value; returns a 413 / 400 `Problem` ready for `WriteError` |
 | `httpx.WriteJSON(w, status, v)`    | A plain JSON response                                                |
 
@@ -189,7 +197,7 @@ as an error. An out-of-range status degrades to 500 instead of panicking.
 | Route                      | Auth  | Purpose                                                  |
 | -------------------------- | ----- | -------------------------------------------------------- |
 | `GET /healthz`, `/livez`   | open  | Liveness — `200 {"status":"ok"}` while the process runs  |
-| `GET /readyz`              | open  | Readiness — `200 ready` / `200 degraded` (only optional checks failing) / `503 not_ready`, with a per-check breakdown |
+| `GET /readyz`              | open  | Readiness — `200 ready` / `200 degraded` (only optional checks failing) / `503 not_ready`, with a per-check breakdown: `ok`, or the error's text with URL and DSN credentials masked; a check that panics has failed |
 | `GET /metrics`             | open  | Prometheus exposition of the server's registry (OpenMetrics negotiated: exemplars, native histograms) |
 | `GET /version`             | open  | `BuildInfo` (service, version, revision, build time, Go version) plus `started_at` and `uptime_seconds` |
 | `GET /admin/config`        | token | The effective configuration, passed through `Redact`     |
@@ -299,7 +307,7 @@ with — after YAML, env and defaults — through `httpx.Redact`:
   out of logs and `fmt`;
 - the password of a URL with userinfo becomes `xxxxx`
   (`postgres://app:xxxxx@db/app`, also when `net/url` cannot parse it), secret-looking query parameters
-  (`?sslpassword=`, `?token=`, `?api_key=`) become `[redacted]`, and so does
+  (`?sslpassword=`, `?token=`, `?api_key=`, `?X-Amz-Signature=`, and the whole names `sig`, `key`, `code`) become `[redacted]`, and so does
   the password pair of a libpq keyword DSN (`host=db password=[redacted]`);
 - durations read as `10s`, a `url.URL` and a type with a text form of its own
   (`netip.Addr`) as that text, masked like any other string; fields are named
@@ -376,16 +384,23 @@ kills the process immediately):
    closed, `Run` waits up to two seconds for their handlers to return (so
    that what `main` closes next is not in use by a handler rolling back) and
    returns an error;
-4. the admin listener stops last, so probes answer throughout.
+4. the admin listener stops last, so probes answer throughout; the forced
+   close of step 3 does not cancel what it is serving.
 
-A clean shutdown returns nil. A port in use is returned by `Run` directly.
+A clean shutdown returns nil. A port in use is returned by `Run` directly; a
+listener that fails later ends `Run` with its error at once, without waiting
+out step 2. A `Server` runs once: a second `Run` is an error.
 
 ## Configuration
 
 `LoadConfig(prefix)` reads the environment; `LoadYAML(path, prefix, &cfg)`
 reads an optional YAML file and overlays the environment, with the precedence
 **env > yaml > envDefault > zero**. Unknown YAML keys are an error, and so is a
-second YAML document in the file. A service config embeds the lib configs
+second YAML document in the file. A key a section no longer reads is an error
+too, when the section names it: a struct with
+`RetiredKeys() map[string]string` (old key → what to set instead; `pgx.Config`,
+`s3.Config` and `otelx.Config` have one) has those keys looked up in the
+environment, under the prefix it is loaded with. A service config embeds the lib configs
 instead of copying fields — without an `envPrefix`: the keys of a lib config
 carry their own namespace (`DB_HOST`, `KAFKA_BROKERS`), and a prefix on the
 field would be added to it (`TASKS_DB_DB_HOST`):
@@ -398,7 +413,9 @@ type Config struct {
 ```
 
 Either way `Config.Validate` (also run by `NewServer`) rejects a config the
-server cannot run safely with, reporting every problem at once.
+server cannot run safely with, reporting every problem at once. Every
+configuration error of the package — a rejected value, a variable or a file
+that does not parse — satisfies `errors.Is(err, httpx.ErrConfig)`.
 
 **Zero.** A key that is not set takes its default. A zero is a setting of its
 own only where the table says what it means (`0` = none / off / no limit); for
@@ -449,7 +466,7 @@ With prefix `PING_`:
 | `PING_HTTP_MAX_BODY_BYTES`       | `max_body_bytes`        | `1048576`        | request body limit (larger → 413)                          |
 | `PING_HTTP_RATE_LIMIT`           | `rate_limit`            | `0`              | requests per second the API accepts, all clients together; over it → 429 (`0` = no limit) |
 | `PING_HTTP_RATE_BURST`           | `rate_burst`            | `0`              | depth of that token bucket (`0` = the rate, rounded up)    |
-| `PING_HTTP_RATE_LIMIT_PER_CLIENT` | `rate_limit_per_client` | `0`             | requests per second per client address (`0` = no limit)    |
+| `PING_HTTP_RATE_LIMIT_PER_CLIENT` | `rate_limit_per_client` | `0`             | requests per second per client: an IPv4 address or an IPv6 /64 (`0` = no limit) |
 | `PING_HTTP_RATE_BURST_PER_CLIENT` | `rate_burst_per_client` | `0`             | depth of a client's bucket (`0` = the rate, rounded up)    |
 | `PING_HTTP_RATE_CLIENTS_MAX`     | `rate_clients_max`      | `10000`          | client buckets kept; when all are in use a new client is shed |
 | `PING_HTTP_SHUTDOWN_DELAY`       | `shutdown_delay`        | `2s`             | serve on after readiness flips, before draining (`0` = none) |

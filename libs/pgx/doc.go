@@ -9,7 +9,7 @@
 //     lock_timeout and idle_in_transaction_session_timeout (see [New]),
 //     read back after connecting so that a pooler which accepts and drops
 //     them cannot leave a pool without guard rails ([ErrGuardRailOff]);
-//   - an optional client-side deadline on every call made through [DB.Conn]
+//   - a client-side deadline on every call made through [DB.Conn]
 //     (DB_OP_TIMEOUT), for the waits no server-side timeout sees;
 //   - a readiness check that plugs straight into libs/httpx ([DB.ReadyCheck]);
 //   - tracing (a client span per query via otelpgx) and metrics: pool
@@ -19,7 +19,7 @@
 //     [DB.Conn] gives repositories the transaction of their context or the
 //     pool, [DB.AfterCommit] defers a side effect until the commit;
 //   - a versioned migration runner over NNN_name.sql files, safe for
-//     replicas booting together ([Migrate]).
+//     replicas booting together ([DB.Migrate]).
 //
 // It deliberately stops at "give me a healthy *pgxpool.Pool" and a
 // transaction boundary; query building,
@@ -27,6 +27,9 @@
 // for a worked example). pgx is chosen over database/sql + lib/pq because it
 // is the actively-maintained, batteries-included PostgreSQL driver for Go and
 // exposes pgxpool for connection pooling without CGO.
+//
+// The package has the name of the driver it wraps: a file that needs both
+// imports the driver under another name (pgxv5).
 //
 // A service typically does:
 //
@@ -36,7 +39,7 @@
 //	db, err := pgx.New(ctx, cfg.Postgres, logger)
 //	if err != nil { … }
 //	defer db.Close()
-//	if err := pgx.Migrate(ctx, db.Pool(), migrations, logger); err != nil { … }
+//	if err := db.Migrate(ctx, migrations); err != nil { … }
 //	srv.Health.Register("postgres", db.ReadyCheck())
 //	srv.Metrics.Registry.MustRegister(db.Collectors()...)
 package pgx

@@ -9,7 +9,8 @@ import (
 
 // warnInterval is how often one kind of cache-failure warning is logged.
 // During an outage every request fails the same way; the line says that it
-// is happening and cache_command_errors_total says how often.
+// is happening and cache_command_errors_total says how often. A constant:
+// there is no configuration key for it.
 const warnInterval = 10 * time.Second
 
 // warnGate lets one warning through per warnInterval and counts the rest.

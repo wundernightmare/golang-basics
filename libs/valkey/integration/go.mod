@@ -15,7 +15,7 @@ replace github.com/wundernightmare/golang-basics/libs/testx/containers => ../../
 require (
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
-	github.com/wundernightmare/golang-basics/libs/secret v0.0.0-00010101000000-000000000000
+	github.com/wundernightmare/golang-basics/libs/secret v0.0.0
 	github.com/wundernightmare/golang-basics/libs/testx v0.0.0
 	github.com/wundernightmare/golang-basics/libs/testx/containers v0.0.0
 	github.com/wundernightmare/golang-basics/libs/valkey v0.0.0

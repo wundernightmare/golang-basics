@@ -10,14 +10,23 @@ import (
 	"log/slog"
 	"reflect"
 	"strconv"
+	"strings"
 )
 
 // fingerprintBytes is how much of the SHA-256 digest a rendering shows.
 const fingerprintBytes = 4
 
-// ErrDecode is returned by [DecodeHook] for a value that is not text, and by
-// [String.UnmarshalYAML] for a node that is not a scalar. It never carries
-// the value itself.
+// The marker a set String renders as: renderPrefix, the fingerprint in hex,
+// renderSuffix.
+const (
+	renderPrefix = "[redacted:"
+	renderSuffix = "]"
+)
+
+// ErrDecode is returned by [DecodeHook] for a value that is not text, by
+// [String.UnmarshalYAML] for a node that is not a scalar, and by every input
+// path for text that is itself a rendering of a String ("[redacted:1a2b3c4d]").
+// It never carries the value itself.
 var ErrDecode = errors.New("secret: cannot decode into secret.String")
 
 // String is a secret text value: a password, a token, a key. The zero value
@@ -32,7 +41,7 @@ var ErrDecode = errors.New("secret: cannot decode into secret.String")
 // unexported struct field, so a String kept in one would otherwise be printed
 // raw by %v of the enclosing struct. With the pointer fmt prints an address.
 // The price is that == compares identity, not content: compare with
-// [String.Equal], or reflect.DeepEqual in tests.
+// [String.Equal] and [String.EqualTo], or reflect.DeepEqual in tests.
 //
 // A String is not a vault: the bytes stay in process memory, a debugger or a
 // reflection walk that follows pointers (go-spew, a test diff) reads them.
@@ -83,6 +92,11 @@ func (s String) Equal(candidate string) bool {
 	return subtle.ConstantTimeCompare(want[:], got[:]) == 1
 }
 
+// EqualTo reports whether the two hold the same secret, without either being
+// exposed to the caller; the comparison is that of [String.Equal]. An unset
+// String equals nothing, another unset one included.
+func (s String) EqualTo(other String) bool { return s.Equal(other.Expose()) }
+
 // Fingerprint returns the first four bytes of the SHA-256 of the secret, in
 // hex ("" when unset) — what `printf %s "$SECRET" | sha256sum | cut -c1-8`
 // prints. It tells whether a secret changed across a rotation, or whether two
@@ -110,7 +124,7 @@ func (s String) String() string {
 		return ""
 	}
 
-	return "[redacted:" + s.Fingerprint() + "]"
+	return renderPrefix + s.Fingerprint() + renderSuffix
 }
 
 // Format implements [fmt.Formatter], so that no verb reaches the value: %d
@@ -136,18 +150,46 @@ func (s String) MarshalText() ([]byte, error) { return []byte(s.String()), nil }
 // UnmarshalText implements [encoding.TextUnmarshaler] — what encoding/json,
 // caarlos0/env (envDefault included), flag.TextVar and a YAML library
 // without [String.UnmarshalYAML] read a String through. The text is taken as
-// is, surrounding whitespace included — and so is "[redacted:1a2b3c4d]": a
-// marshalled config read back holds the marker as its secret.
+// is, surrounding whitespace included, with one exception: text that is
+// exactly a rendering — "[redacted:" + eight hex digits + "]" — is
+// [ErrDecode]. That is a marshalled config read back, and the marker would
+// otherwise be sent as the credential.
 func (s *String) UnmarshalText(text []byte) error {
-	*s = New(string(text))
+	read, err := parse(string(text))
+	if err != nil {
+		return err
+	}
+
+	*s = read
 
 	return nil
+}
+
+// parse is [New] for text that arrives from outside the program: it refuses
+// what [String.String] prints.
+func parse(text string) (String, error) {
+	digits, found := strings.CutPrefix(text, renderPrefix)
+	if !found {
+		return New(text), nil
+	}
+
+	digits, found = strings.CutSuffix(digits, renderSuffix)
+	if !found || len(digits) != hex.EncodedLen(fingerprintBytes) {
+		return New(text), nil
+	}
+
+	if _, err := hex.DecodeString(digits); err != nil {
+		return New(text), nil //nolint:nilerr // not hex, so not a rendering: an ordinary value
+	}
+
+	return String{}, fmt.Errorf("%w: the value is a redacted rendering of a secret, not the secret", ErrDecode)
 }
 
 // UnmarshalYAML is what a YAML library calls instead of UnmarshalText when it
 // knows this method (go.yaml.in/yaml v2, v3 and v4 do). It asks the library
 // for the node as a string, so a scalar is taken as its text, and a mapping
-// or a sequence is [ErrDecode]. Through UnmarshalText alone a mapping is no
+// or a sequence is [ErrDecode], and so is a rendering, as in
+// [String.UnmarshalText]. Through UnmarshalText alone a mapping is no
 // error in v2 and v3 unless the decoder is strict: it is matched against a
 // struct with no exported fields, and the secret stays unset.
 //
@@ -161,7 +203,12 @@ func (s *String) UnmarshalYAML(unmarshal func(any) error) error {
 		return fmt.Errorf("%w: not a YAML scalar", ErrDecode)
 	}
 
-	*s = New(text)
+	read, err := parse(text)
+	if err != nil {
+		return err
+	}
+
+	*s = read
 
 	return nil
 }
@@ -175,7 +222,8 @@ func (s *String) UnmarshalYAML(unmarshal func(any) error) error {
 //		mapstructure.StringToTimeDurationHookFunc(),
 //	)))
 //
-// Values bound for any other type pass through untouched.
+// Values bound for any other type pass through untouched. Text that is a
+// rendering is [ErrDecode], as in [String.UnmarshalText].
 func DecodeHook(from, to reflect.Type, data any) (any, error) {
 	if to != reflect.TypeFor[String]() {
 		return data, nil
@@ -185,9 +233,9 @@ func DecodeHook(from, to reflect.Type, data any) (any, error) {
 	case String:
 		return value, nil
 	case string:
-		return New(value), nil
+		return parse(value)
 	case []byte:
-		return New(string(value)), nil
+		return parse(string(value))
 	default:
 		return nil, fmt.Errorf("%w: got %s", ErrDecode, from)
 	}

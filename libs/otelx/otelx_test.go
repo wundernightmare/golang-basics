@@ -121,7 +121,8 @@ func TestLoadConfig_FromEnv(t *testing.T) {
 
 	environ[envPrefix+"OTEL_TRACES_SAMPLER_RATIO"] = "most"
 	_, err = LoadConfigFrom(envPrefix, environ)
-	require.ErrorContains(t, err, "otelx: parse config")
+	require.ErrorContains(t, err, "otelx: config: parse (prefix")
+	require.ErrorIs(t, err, ErrConfig)
 }
 
 // The retired key meant the opposite of the one that replaced it, so a
@@ -132,7 +133,8 @@ func TestLoadConfig_RefusesTheRetiredTrustRemoteParentKey(t *testing.T) {
 	for _, value := range []string{"false", "true", ""} {
 		_, err := LoadConfigFrom(envPrefix, map[string]string{envPrefix + "OTEL_TRACES_TRUST_REMOTE_PARENT": value})
 		require.ErrorContains(t, err, envPrefix+"OTEL_TRACES_TRUST_REMOTE_PARENT", "value %q", value)
-		require.ErrorContains(t, err, envPrefix+"OTEL_TRACES_REDRAW_REMOTE_PARENT", "the error names the key to set instead")
+		require.ErrorContains(t, err, "OTEL_TRACES_REDRAW_REMOTE_PARENT", "the error names the key to set instead")
+		require.ErrorIs(t, err, ErrConfig)
 	}
 
 	_, err := LoadConfigFrom(envPrefix, map[string]string{"OTHER_OTEL_TRACES_TRUST_REMOTE_PARENT": "false"})
@@ -145,9 +147,8 @@ func TestConfig_Validate(t *testing.T) {
 	for name, cfg := range map[string]Config{
 		"zero":                 {},
 		"host and port":        {Endpoint: "collector:4318"},
-		"host alone":           {Endpoint: "collector"},
 		"IPv6":                 {Endpoint: "[::1]:4318"},
-		"never sample":         {SamplerRatio: -1},
+		"sample every root":    {SamplerRatio: 1},
 		"buffer off":           {Retro: retro.Config{BufferMiB: -1}},
 		"TLS files unread off": {CACert: "absent.pem", ClientCert: "absent.pem"},
 		"plaintext reads none": {Enabled: true, Insecure: true, CACert: "absent.pem"},
@@ -167,11 +168,17 @@ func TestConfig_Validate(t *testing.T) {
 		"batch timeout":    {Config{BatchTimeout: -time.Second}, "OTEL_BSP_SCHEDULE_DELAY must not be negative"},
 		"queue":            {Config{MaxQueueSize: -1}, "OTEL_BSP_MAX_QUEUE_SIZE must not be negative, got -1"},
 		"batch":            {Config{MaxExportBatchSize: -1}, "OTEL_BSP_MAX_EXPORT_BATCH_SIZE must not be negative, got -1"},
+		"no port":          {Config{Endpoint: "collector"}, "OTEL_EXPORTER_OTLP_ENDPOINT"},
+		"IPv6, no port":    {Config{Endpoint: "[::1]"}, "OTEL_EXPORTER_OTLP_ENDPOINT"},
 		"ratio":            {Config{SamplerRatio: math.NaN()}, "OTEL_TRACES_SAMPLER_RATIO"},
+		"ratio above 1":    {Config{SamplerRatio: 1.5}, "OTEL_TRACES_SAMPLER_RATIO must be within [0, 1], got 1.5"},
+		"ratio below 0":    {Config{SamplerRatio: -1}, "OTEL_TRACES_SAMPLER_RATIO must be within [0, 1], got -1"},
+		"trigger rate":     {Config{Retro: retro.Config{TriggersPerSecond: -1}}, "OTEL_RETRO_TRIGGERS_PER_SECOND must not be negative, got -1"},
 		"cert without key": {Config{Enabled: true, ClientCert: "client.pem"}, "must both be set"},
 	} {
 		err := tc.cfg.Validate()
 		require.ErrorContains(t, err, tc.want, name)
+		require.ErrorIs(t, err, ErrConfig, name)
 		assert.NotContains(t, err.Error(), "pass", name)
 	}
 
@@ -183,11 +190,11 @@ func TestConfig_Validate(t *testing.T) {
 func TestConfig_WithDefaultsFillsAHandBuiltConfig(t *testing.T) {
 	t.Parallel()
 
-	cfg := Config{SamplerRatio: -1}
+	cfg := Config{}
 	cfg.withDefaults()
 	assert.Equal(t, "localhost:4318", cfg.Endpoint)
 	assert.Equal(t, 10*time.Second, cfg.ExportTimeout)
-	assert.InDelta(t, -1.0, cfg.SamplerRatio, 1e-9, "a negative ratio (never) is kept")
+	assert.Zero(t, cfg.SamplerRatio, "a ratio of zero is a setting: no root is sampled")
 	assert.Equal(t, 5*time.Second, cfg.BatchTimeout)
 	assert.Equal(t, 2048, cfg.MaxQueueSize)
 	assert.Equal(t, 512, cfg.MaxExportBatchSize)
@@ -218,6 +225,18 @@ func TestInit_DisabledInstallsPropagatorsOnly(t *testing.T) {
 
 	// Stop is Shutdown for a defer: safe to call, again and after Shutdown.
 	tel.Stop()
+}
+
+// A service that failed before Init, or a test that builds no tracing, still
+// runs its deferred Stop.
+func TestTelemetry_NilAndZeroStopWithoutPanic(t *testing.T) {
+	t.Parallel()
+
+	var none *Telemetry
+
+	none.Stop()
+	require.NoError(t, none.Shutdown(context.Background()))
+	require.NoError(t, new(Telemetry).Shutdown(context.Background()))
 }
 
 // The flush is bounded whatever the caller passes, and a cancelled context
@@ -273,7 +292,7 @@ func TestInit_EnabledInstallsAnSDKProvider(t *testing.T) {
 	assert.Equal(t, true, line["insecure"])
 	assert.Equal(t, "svc", line["service_name"])
 	assert.Equal(t, false, line["redraw_remote_parent"])
-	assert.InDelta(t, 1, line["sampler_ratio"], 0, "the ratio in effect, not the zero of the Config")
+	assert.InDelta(t, 0, line["sampler_ratio"], 0, "the ratio of a Config built by hand without one")
 	assert.InDelta(t, retro.DefaultBufferMiB, line["retro_buffer_mib"], 0, "the buffer allocated, not the zero of the Config")
 	assert.NotContains(t, buf.String(), "acme", "headers (credentials) are never logged")
 

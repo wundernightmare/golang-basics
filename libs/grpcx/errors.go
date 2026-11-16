@@ -23,6 +23,10 @@ var (
 	// status as well, code Canceled — what gRPC itself answers on a closed
 	// connection).
 	ErrClosed = errors.New("client is closed")
+	// ErrConfig is in every error a config is refused with: by
+	// [Config.Validate], by [ParseYAML] (a document that does not parse
+	// included) and by [New].
+	ErrConfig = errors.New("grpcx: invalid config")
 	// ErrLocalRejection is the cause of an error made by [LocalRejection].
 	ErrLocalRejection = errors.New("rejected locally")
 )

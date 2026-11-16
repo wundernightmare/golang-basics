@@ -54,8 +54,11 @@ const maxCachedKeys = 4096
 //   - an attribute whose key names a secret (password, token, secret, api
 //     key, credential, authorization, …) or is listed in LogConfig.RedactKeys
 //     is logged as "[redacted]" — strings, errors and composite values;
-//     numbers, booleans, durations and times pass, they carry no secret;
-//     the same holds for every attribute of a group with such a name;
+//     the same holds for every attribute of a group with such a name.
+//     Under a name the patterns recognise, numbers, booleans, durations and
+//     times pass: max_tokens is a count. Under a listed key a number or a
+//     boolean that is not zero is hidden too, as [Redact] hides it — the
+//     operator named the data (card, phone), not its type;
 //   - a string (or an error's text) with a URL that carries credentials, or
 //     a keyword DSN with a password, has them masked wherever it appears;
 //   - headers and string maps get the same treatment entry by entry, structs
@@ -81,13 +84,18 @@ func newAttrRewriter(ecs bool, extraKeys []string) *attrRewriter {
 	return rw
 }
 
+func (rw *attrRewriter) isListed(key string) bool {
+	_, listed := rw.extra[strings.ToLower(key)]
+
+	return listed
+}
+
 func (rw *attrRewriter) isSensitive(key string) bool {
 	if v, ok := rw.sensitive.Load(key); ok {
 		return v.(bool) //nolint:forcetypeassert // only bools are stored
 	}
 
-	_, listed := rw.extra[strings.ToLower(key)]
-	sensitive := listed || secretFieldName.MatchString(key)
+	sensitive := rw.isListed(key) || secretFieldName.MatchString(key)
 
 	if rw.cached.Load() < maxCachedKeys {
 		if _, loaded := rw.sensitive.LoadOrStore(key, sensitive); !loaded {
@@ -105,6 +113,10 @@ func (rw *attrRewriter) replace(groups []string, attr slog.Attr) slog.Attr {
 		// A group under a secret name: slog hands over its leaves one by
 		// one, each with the names of the groups above it.
 		attr.Value = rw.mask(attr.Key, attr.Value, slices.ContainsFunc(groups, rw.isSensitive))
+
+		if rw.isListed(attr.Key) || slices.ContainsFunc(groups, rw.isListed) {
+			attr.Value = maskScalar(attr.Value)
+		}
 	}
 
 	if rw.ecs && len(groups) == 0 {
@@ -144,6 +156,20 @@ func (rw *attrRewriter) mask(key string, v slog.Value, under bool) slog.Value {
 	default: // numbers, booleans, durations, times; groups arrive attribute by attribute
 		return v
 	}
+}
+
+// maskScalar hides a number or a boolean that is set; zero stays, so "unset"
+// remains visible, and a duration or a time passes — the rule of redactValue.
+func maskScalar(v slog.Value) slog.Value {
+	switch v.Kind() {
+	case slog.KindInt64, slog.KindUint64, slog.KindFloat64, slog.KindBool:
+		if !reflect.ValueOf(v.Any()).IsZero() {
+			return slog.StringValue(redactedValue)
+		}
+	default:
+	}
+
+	return v
 }
 
 func (rw *attrRewriter) maskAny(key string, v slog.Value, under bool) slog.Value {

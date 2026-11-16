@@ -17,7 +17,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.45.0
 	github.com/wundernightmare/golang-basics/libs/pgx v0.0.0-00010101000000-000000000000
-	github.com/wundernightmare/golang-basics/libs/secret v0.0.0-00010101000000-000000000000
+	github.com/wundernightmare/golang-basics/libs/secret v0.0.0
 	github.com/wundernightmare/golang-basics/libs/testx v0.0.0
 	github.com/wundernightmare/golang-basics/libs/testx/containers v0.0.0
 	go.opentelemetry.io/otel/sdk v1.47.0

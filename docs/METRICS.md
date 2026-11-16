@@ -71,7 +71,7 @@ duration of them all; the repeats are in `http_client_retries_total`.
 
 | Metric | Type | Labels |
 | --- | --- | --- |
-| `grpc_client_requests_total` | counter | `target, method, outcome` (the status code in lower case — `ok`, `unavailable`, `deadline_exceeded`, …, `canceled` spelt as in the HTTP client — or `circuit_open`; a code gRPC does not define is `unknown`) |
+| `grpc_client_requests_total` | counter | `target, method, outcome` (the status code in lower case — `ok`, `unavailable`, `deadline_exceeded`, …, `canceled` spelt as in the HTTP client — or `circuit_open`; a code gRPC does not define is `unknown`, and so is a call that panicked) |
 | `grpc_client_request_duration_seconds` | histogram | `target, method` |
 | `grpc_client_retries_total` | counter | `target` |
 | `grpc_client_circuit_breaker_state` | gauge | `target` (0 closed, 1 open, 2 half-open) |
@@ -101,6 +101,12 @@ In Go a `SendBatch` and a `CopyFrom` are one observation each (`batch` /
 site's name: `operation="tasks.create"` counts the statements of the unit,
 not the transaction around them.
 
+In Go a call through `db.Conn` / `db.InTx` that fails before it has a
+connection (pool exhausted until the deadline, pool closed) counts in
+`db_query_errors_total` under its operation (`begin` for an `InTx`) with no
+observation in `db_query_duration_seconds`: while a pool is exhausted the
+errors of an operation can outnumber its observations.
+
 ## Kafka — `libs/kafka` (same names for both Go providers)
 
 | Metric | Type | Labels |
@@ -120,7 +126,10 @@ not the transaction around them.
 are producer sends with `client="consumer"` and the DLQ topic as `topic`
 (there is no separate DLQ counter — `kafka_consumer_records_total{result=
 "dead_lettered"}` is it). Go only: `kafka_client_info{client,provider}`,
-`kafka_consumer_fetch_errors_total`.
+`kafka_consumer_fetch_errors_total`. Go with librdkafka: the
+`kafka_client_*{client="consumer"}` series are refreshed only between
+batches (the statistics arrive inside a poll) and are absent while one batch
+takes longer than three statistics periods (at least a minute).
 
 **Lag** comes from the broker: locally
 `redpanda_kafka_consumer_group_lag_sum{redpanda_group}` / `_lag_max`
@@ -170,6 +179,7 @@ commands are the `cache_*` series above.
 | `tiercache_refreshes_total` | counter | `cache`, `result` = `ok` \| `error` \| `dropped` |
 | `tiercache_invalidations_total` | counter | `cache`, `scope` = `key` \| `all` (L1 emptied after the subscription reconnected) |
 | `tiercache_l2_bypassed_total` | counter | `cache` — lookups that skipped L2 while its breaker was open |
+| `tiercache_circuit_breaker_state` | gauge (Go) | `cache` — the L2 breaker: 0 closed (also when it is switched off), 1 open, 2 half-open |
 | `tiercache_l1_oversize_total` | counter | `cache` — entries too large for L1 (served from L2) |
 | `tiercache_l1_bytes` | gauge | `cache` — bytes L1 holds, bounded by the configured capacity: in Go what the store reports (`offheap`: mapped so far; `onheap`: the whole of it, allocated at construction), the encoded size of the entries (kept decoded on the heap) in Node |
 

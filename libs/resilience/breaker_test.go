@@ -53,12 +53,13 @@ func testBreaker(t *testing.T, mut func(*BreakerConfig)) (*Breaker, *fakeClock, 
 		seen []transition
 	)
 
-	b := NewBreaker(tc, clk.now, func(from, to State) {
+	b, err := NewBreaker(tc, clk.now, func(from, to State) {
 		mu.Lock()
 
 		seen = append(seen, transition{from, to})
 		mu.Unlock()
 	})
+	require.NoError(t, err)
 	require.NotNil(t, b)
 
 	return b, clk, func() []transition {
@@ -99,7 +100,11 @@ func TestBreaker_Disabled(t *testing.T) {
 
 	tc := DefaultBreakerConfig()
 	tc.FailureRatio = 0
-	b := NewBreaker(tc, time.Now, nil)
+	assert.False(t, tc.Enabled(), "a ratio of 0 is no breaker, whatever the other fields say")
+	assert.True(t, DefaultBreakerConfig().Enabled())
+
+	b, err := NewBreaker(tc, time.Now, nil)
+	require.NoError(t, err)
 	require.Nil(t, b)
 	tk, ok := b.Allow()
 	assert.True(t, ok)
@@ -111,9 +116,24 @@ func TestBreaker_Disabled(t *testing.T) {
 
 	require.NoError(t, b.Do(func() Outcome { ran = true; return OutcomeFailure }))
 	assert.True(t, ran, "no breaker: the request runs")
+}
 
-	tc.FailureRatio = -0.5
-	assert.Nil(t, NewBreaker(tc, time.Now, nil), "a ratio below 0 is no breaker either")
+func TestNewBreaker_RejectsWhatValidateRejects(t *testing.T) {
+	t.Parallel()
+
+	for name, mut := range map[string]func(*BreakerConfig){
+		"ratio below 0":      func(c *BreakerConfig) { c.FailureRatio = -0.5 },
+		"ratio NaN":          func(c *BreakerConfig) { c.FailureRatio = math.NaN() },
+		"enabled, no window": func(c *BreakerConfig) { c.Window = 0 },
+	} {
+		cfg := DefaultBreakerConfig()
+		mut(&cfg)
+
+		b, err := NewBreaker(cfg, time.Now, nil)
+		require.Error(t, err, name)
+		assert.Equal(t, cfg.Validate(), err, name)
+		assert.Nil(t, b, name)
+	}
 }
 
 func TestBreaker_DoRecordsWhatTheRequestReturns(t *testing.T) {
@@ -567,7 +587,7 @@ func TestBreaker_LateRecordKeepsTheNewWindow(t *testing.T) {
 		cycle func()
 	)
 
-	b = NewBreaker(BreakerConfig{FailureRatio: 0.6, MinRequests: 5, Window: 10 * time.Second, OpenTimeout: 5 * time.Second, HalfOpenProbes: 1},
+	b, err := NewBreaker(BreakerConfig{FailureRatio: 0.6, MinRequests: 5, Window: 10 * time.Second, OpenTimeout: 5 * time.Second, HalfOpenProbes: 1},
 		func() time.Time {
 			if run := cycle; run != nil {
 				cycle = nil
@@ -577,6 +597,7 @@ func TestBreaker_LateRecordKeepsTheNewWindow(t *testing.T) {
 
 			return clk.now()
 		}, nil)
+	require.NoError(t, err)
 
 	late := admit(t, b)
 	// Runs inside the late Record's clock read: after it loaded the state,
@@ -597,7 +618,8 @@ func TestBreaker_LateRecordKeepsTheNewWindow(t *testing.T) {
 }
 
 func BenchmarkBreaker_AllowRecord(b *testing.B) {
-	br := NewBreaker(DefaultBreakerConfig(), time.Now, nil)
+	br, err := NewBreaker(DefaultBreakerConfig(), time.Now, nil)
+	require.NoError(b, err)
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {

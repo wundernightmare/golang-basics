@@ -9,7 +9,7 @@ with them (stampedes and stale write-backs) closed.
 ## Usage
 
 ```go
-c, err := valkey.New(cfg.Valkey, logger) // boot PING: fails fast
+c, err := valkey.New(cfg.Valkey, logger) // connects and PINGs: a server that is down is an error here
 if err != nil { … }
 defer c.Close()
 srv.Health.Register("valkey", c.ReadyCheck(), httpx.Optional()) // a cache degrades, it does not gate readiness
@@ -44,13 +44,16 @@ _ = c.Tombstone(ctx, "task:v2:"+id, 5*time.Second)
   — still never over a tombstone or a newer value.
 - **A cache that does not answer costs one `op_timeout` per call**: after a
   failed lookup the fill is skipped. Its warnings (`lookup failed`, `cache
-  write failed`) are logged once per ten seconds each, with a `suppressed`
-  count; `cache_command_errors_total` has the rate.
+  write failed`) are logged once per ten seconds each (a constant, not a
+  key), with a `suppressed` count; `cache_command_errors_total` has the rate.
 - **A panic in the loader is an error** wrapping `valkey.ErrLoadPanic` for
   every waiter, logged with its stack. (It would otherwise be re-raised on a
   goroutine of singleflight's, past any recover of the caller's.)
 - A caller whose context is already over gets its context's error: nothing
   is loaded for it and nothing is logged as a cache failure.
+- **The key is logged whole** — in the warnings above, in the loader-panic
+  line and in the error texts of `Aside`. Keep secrets and personal data out
+  of keys.
 
 ## Invalidation that cannot be undone by a racing read
 
@@ -82,10 +85,11 @@ Both are what [`libs/tiercache`](../tiercache) is built on.
 
 | Env (`TASKS_` prefix) | YAML | Default | |
 | --- | --- | --- | --- |
-| `TASKS_VALKEY_URL` | `url` | — | `valkey://[user:pw@]host:6379[/db]` (`valkeys://`: TLS); wins over the discrete fields. No default address: `Config.Configured()` is false until URL or ADDR is set. The field is a `secret.String` (the URL holds the password): hand-built as `secret.New(url)`, never printed by a formatter, a logger or `/admin/config` |
+| `TASKS_VALKEY_URL` | `url` | — | `valkey://[user:pw@]host:6379[/db]` (`valkeys://`: TLS); wins over the discrete fields. One server: a URL with `addr=` (several addresses, a cluster) or `master_set=` (a sentinel) is a config error. No default address: `Config.Configured()` is false until URL or ADDR is set. The field is a `secret.String` (the URL holds the password): hand-built as `secret.New(url)`, never printed by a formatter, a logger or `/admin/config` |
 | `TASKS_VALKEY_ADDR` / `_USERNAME` / `_PASSWORD` / `_DB` | `addr` / `username` / `password` / `db` | — / — / — / `0` | the user is an ACL user; empty is the server's default user |
 | `TASKS_VALKEY_TLS` | `tls` | `false` | connect over TLS; applies to a `valkey://` URL too |
 | `TASKS_VALKEY_CA_FILE` | `ca_file` | — | PEM bundle that verifies the server; it is the trust store (the system roots are not consulted). Needs TLS on — the flag or a TLS scheme — otherwise a config error |
+| `TASKS_VALKEY_CERT_FILE` / `_KEY_FILE` | `cert_file` / `key_file` | — | client certificate and its private key (PEM) for a server that asks for one (mTLS). Both or neither, and only with TLS on. Read when the client is built: a rotated pair needs a restart |
 | `TASKS_VALKEY_DIAL_TIMEOUT` | `dial_timeout` | `5s` | also bounds the boot PING |
 | `TASKS_VALKEY_OP_TIMEOUT` | `op_timeout` | `500ms` | every command of the cache's own methods; past it the caller treats the cache as a miss |
 | `TASKS_VALKEY_PIPELINE_CONNS` | `pipeline_conns` | `4` | shared connections every ordinary command is pipelined over; a power of two, 1–256 |
@@ -96,10 +100,14 @@ Both are what [`libs/tiercache`](../tiercache) is built on.
 
 `Config.Validate()` reports everything `New` rejects before it dials: no
 address, a value the library would reinterpret (a negative size or duration,
-a count that is not a power of two), a URL that does not parse, a CA file
-that cannot be read. `LoadConfig` / `LoadConfigFrom` call it when an address
+a count that is not a power of two), a URL that does not parse or names more
+than one server, a CA file or a client key pair that cannot be read. `LoadConfig` / `LoadConfigFrom` call it when an address
 is set, `New` always; every such error wraps `valkey.ErrConfig`. The error
 for a URL never quotes the URL — it is where the password is.
+
+`New` takes no context: it cannot be cancelled, and a dial and the boot PING
+are each given `dial_timeout`. A server that is down at boot is an error from
+`New`, not a cache that connects later.
 
 After `Close` every method of `Cache` fails with an error wrapping
 `valkey.ErrClosed` (`Aside` still answers from its loader); calls through
@@ -117,6 +125,8 @@ valkey-go does not take a connection per command. There are two kinds:
   `XREAD BLOCK`), a pipeline of 2000 commands or more, `Dedicated` /
   `Dedicate`, all through `Cache.Client()`. `pool_size` bounds them; a caller
   beyond it waits and gets its context's error if that ends first.
+  `Dedicated` / `Dedicate` take no context in valkey-go, so there the wait
+  has no way out but a connection given back.
 
 So one client holds at most `pipeline_conns + pool_size` connections; multiply
 by the replicas and keep it under the server's `maxclients`.
@@ -176,7 +186,7 @@ prometheus.WrapRegistererWith(prometheus.Labels{"cache": "tasks"}, srv.Metrics.R
 behaviour of `Cache` and `Aside` that a healthy server never shows — a server
 that stops answering (`op_timeout`, the readiness timeout), a refused
 subscription, a corrupt entry, a panicking loader, `Close`, TLS with a CA
-file — against a RESP3 listener inside the test (`fake_test.go`).
+file and a client certificate — against a RESP3 listener inside the test (`fake_test.go`).
 
 What only Valkey can answer is in [`integration/`](integration) (a module of
 its own, so that testcontainers and the Docker client stay out of this

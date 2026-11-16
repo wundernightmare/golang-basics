@@ -4,7 +4,7 @@
 //
 // One [Client] serves the whole process. Each request names its target:
 //
-//	cfg, err := resilient.LoadConfig(yamlBytes) // or resilient.DefaultConfig("billing")
+//	cfg, err := resilient.ParseYAML(yamlBytes) // or resilient.DefaultConfig("billing")
 //	c, err := resilient.New(cfg, resilient.WithLogger(log), resilient.WithRegisterer(reg))
 //	defer c.Shutdown(ctx)
 //

@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -777,6 +780,16 @@ func TestDial_TLSIsTheDefault(t *testing.T) {
 	_, conn = dial(t, target(srv.addr, secure),
 		grpcx.WithDialOptions(grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}))))
 	require.NoError(t, check(t.Context(), conn), "WithDialOptions credentials replace the default ones")
+
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}), 0o600))
+
+	_, conn = dial(t, target(srv.addr, func(tc *grpcx.TargetConfig) {
+		secure(tc)
+
+		tc.CAFile = caFile
+	}))
+	require.NoError(t, check(t.Context(), conn), "ca_file is the target's trust store")
 
 	plain := serve(t, &backend{})
 	_, conn = dial(t, target(plain.addr, secure))

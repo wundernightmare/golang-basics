@@ -121,7 +121,9 @@ func newHarness(t *testing.T, remote tiercache.Remote, src *source, tune func(*t
 func newHarnessOn(t *testing.T, store tiercache.StoreFactory, remote tiercache.Remote, src *source, tune func(*tiercache.Config)) *harness {
 	t.Helper()
 
-	cfg := tiercache.Config{Name: testx.Unique("integration")}
+	cfg := tiercache.DefaultConfig()
+	cfg.Name = testx.Unique("integration")
+
 	if tune != nil {
 		tune(&cfg)
 	}

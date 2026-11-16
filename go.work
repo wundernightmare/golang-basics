@@ -30,7 +30,9 @@
 //   libs/s3/integration         — its integration suite: the client against RustFS, behind Toxiproxy (_test only)
 //   libs/otelx                  — shared OpenTelemetry tracing setup
 //   libs/otelx/integration      — its integration suite: the shipped collector config (tail sampling) in a real collector, in front of Jaeger (_test only)
-//   libs/tiercache              — two-level cache: an L1 behind a store contract (offheap: fastcache, onheap: freecache) + an L2 (SWR, Pub/Sub invalidation)
+//   libs/tiercache              — two-level cache: an L1 behind a store contract + an L2 (SWR, Pub/Sub invalidation)
+//   libs/tiercache/offheap      — its L1 store outside the Go heap (keeps fastcache out of tiercache's go.mod)
+//   libs/tiercache/onheap       — its L1 store on the Go heap (keeps freecache out of tiercache's go.mod)
 //   libs/tiercache/credential   — its worked example of a value: a protobuf codec (keeps google.golang.org/protobuf out of tiercache's go.mod)
 //   libs/tiercache/integration  — its integration suite: the cache against a real Valkey (libs/valkey), behind Toxiproxy (_test only)
 //   libs/testx                  — shared test harness (signal helpers, unique names; _test only, no Docker)
@@ -72,6 +74,8 @@ use (
 	./libs/tiercache
 	./libs/tiercache/credential
 	./libs/tiercache/integration
+	./libs/tiercache/offheap
+	./libs/tiercache/onheap
 	./libs/valkey
 	./libs/valkey/integration
 	./services/consumer

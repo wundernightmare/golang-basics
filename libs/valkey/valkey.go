@@ -59,6 +59,11 @@ func closedErr(err error) error {
 // misconfigured cache fails fast at boot) and returns a ready [Cache]. The
 // caller owns it and must call [Cache.Close]. A cfg that [Config.Validate]
 // rejects is rejected here with the same error, before any dial.
+//
+// New takes no context, so the caller cannot cancel it: a dial and the PING
+// are each given Config.DialTimeout. A server that is down at boot is an
+// error here, not a cache that connects later — a service that starts
+// without its cache decides that from this error.
 func New(cfg Config, log *slog.Logger, opts ...Option) (*Cache, error) {
 	var applied options
 	for _, opt := range opts {
@@ -135,6 +140,8 @@ func (c *Cache) do(ctx context.Context, op string, cmd valkeygo.Completed) valke
 // takes a dedicated connection (a blocking command, a pipeline of 2000
 // commands or more, Dedicated / Dedicate) is held to Config.PoolSize: a
 // caller beyond it waits, and gets its context's error if that ends first.
+// Dedicated and Dedicate take no context (the library's signatures): beyond
+// PoolSize they wait until a connection is given back, with no way out.
 func (c *Cache) Client() valkeygo.Client { return c.client }
 
 // Get returns the value at key. The boolean is false on a cache miss (a missing

@@ -48,8 +48,13 @@ Two shapes render differently from what the table says:
 Marshalling is redacted too, so the output does **not** round-trip. A config
 that is being marshalled is a config about to be shown; to write a secret out
 (a generated file, a request body) write `Expose()` explicitly. Reading the
-output back is not refused: the secret is then the text `[redacted:f52fbd32]`
-itself.
+output back is refused: text that is exactly `[redacted:` + eight hex digits +
+`]` is `secret.ErrDecode` on every path in the table below (JSON, env, flags,
+YAML, the decode hook), so a marshalled config pasted into the environment
+fails at load instead of sending the marker as the password. `caarlos0/env`
+v11.4.2 reports the cause in its error text only (`env.ParseError` has no
+`Unwrap`), so `errors.Is(err, secret.ErrDecode)` holds for the other loaders,
+not for that one. `secret.New` takes any text, that one included.
 
 ## What reads it
 
@@ -130,9 +135,12 @@ as long whether the values differ in the first byte, the last, or in length
 (hashing a value takes time proportional to its own length, nothing more is
 told). No test holds this: timing is not something a functional test sees,
 and a plain `==` in its place passes the suite — it is kept by review. An unset
-secret equals nothing, `""` included. `==` on two `String`s
-compares identity, not content — use `Equal`, or `reflect.DeepEqual` /
-`assert.Equal` in tests.
+secret equals nothing, `""` included.
+
+`a.EqualTo(b)` is the same comparison between two `String`s, with no
+`Expose()` at the call site; two unset secrets are not equal either. `==` on
+two `String`s compares identity, not content — use `Equal` / `EqualTo`, or
+`reflect.DeepEqual` / `assert.Equal` in tests.
 
 ## What it does not do
 
@@ -157,8 +165,9 @@ there `fmt` prints an address. One small allocation per secret, at config load.
 
 `just mod libs/secret test` — every fmt verb on a value, a pointer and a struct
 with the secret in unexported fields; both slog handlers; JSON, `flag`, the
-decode hook; `FuzzString` checks that for any value `Expose` returns it and no
-rendering does (`go test -fuzz FuzzString`).
+decode hook; `FuzzString` checks that for any value `Expose` returns it, no
+rendering does, and it is read back as given unless it is itself a rendering
+(`go test -fuzz FuzzString`).
 
 [`compat/`](compat) is a module of its own with the tests against YAML,
 `caarlos0/env` and mapstructure: those libraries are that suite's

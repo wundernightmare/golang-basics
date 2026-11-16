@@ -88,23 +88,26 @@ func TestPoolConfig(t *testing.T) {
 	const dsn = "postgres://app:app@db:5432/app"
 
 	set, err := Config{
-		URL: secret.New(dsn), MaxConns: 7, MinConns: 3,
-		MaxConnLifetime: 11 * time.Minute, MaxConnIdleTime: 5 * time.Minute, ConnectTimeout: 3 * time.Second,
+		URL: secret.New(dsn), MaxConns: 7, MinConns: 7,
+		MaxConnLifetime: 11 * time.Minute, MaxConnIdleTime: 5 * time.Minute, DialTimeout: 3 * time.Second,
 		StatementTimeout: time.Second,
 	}.poolConfig()
 	require.NoError(t, err)
 	assert.Equal(t, int32(7), set.MaxConns)
-	assert.Equal(t, int32(3), set.MinConns)
+	assert.Equal(t, int32(7), set.MinConns, "as many warm connections as the pool holds")
 	assert.Equal(t, 11*time.Minute, set.MaxConnLifetime)
+	assert.Equal(t, 66*time.Second, set.MaxConnLifetimeJitter, "a tenth of the lifetime")
 	assert.Equal(t, 5*time.Minute, set.MaxConnIdleTime)
 	assert.Equal(t, 3*time.Second, set.ConnConfig.ConnectTimeout)
 	assert.Equal(t, "1000", set.ConnConfig.RuntimeParams["statement_timeout"])
 
-	zero, err := Config{URL: secret.New(dsn + "?pool_max_conns=4&pool_max_conn_lifetime=2h")}.poolConfig()
+	zero, err := Config{URL: secret.New(dsn + "?pool_max_conns=4&pool_max_conn_lifetime=2h&pool_max_conn_lifetime_jitter=1m")}.poolConfig()
 	require.NoError(t, err)
 	assert.Equal(t, int32(4), zero.MaxConns)
 	assert.Equal(t, 2*time.Hour, zero.MaxConnLifetime)
-	assert.Equal(t, defaultConnectTimeout, zero.ConnConfig.ConnectTimeout)
+	assert.Equal(t, time.Minute, zero.MaxConnLifetimeJitter, "the DSN's own jitter stands")
+	assert.Equal(t, 30*time.Minute, zero.MaxConnIdleTime, "pgxpool's own")
+	assert.Equal(t, defaultDialTimeout, zero.ConnConfig.ConnectTimeout)
 }
 
 // The operation label of the query metrics, for each kind of call.
@@ -244,9 +247,9 @@ func silentDB(t *testing.T, mut func(*Config)) *DB {
 	}()
 
 	cfg := Config{
-		URL:            secret.New("postgres://app:app@" + listener.Addr().String() + "/app?sslmode=disable"),
-		MaxConns:       2,
-		ConnectTimeout: time.Minute,
+		URL:         secret.New("postgres://app:app@" + listener.Addr().String() + "/app?sslmode=disable"),
+		MaxConns:    2,
+		DialTimeout: time.Minute,
 	}
 	if mut != nil {
 		mut(&cfg)
@@ -313,12 +316,12 @@ func TestOpTimeout_EndsACallTheServerNeverAnswers(t *testing.T) {
 	}
 }
 
-// DB_CONNECT_TIMEOUT is the bound of a connection attempt when nothing else
+// DB_DIAL_TIMEOUT is the bound of a connection attempt when nothing else
 // is: no deadline on the context, no DB_OP_TIMEOUT.
-func TestConnectTimeout_EndsAnAttemptTheServerNeverAnswers(t *testing.T) {
+func TestDialTimeout_EndsAnAttemptTheServerNeverAnswers(t *testing.T) {
 	t.Parallel()
 
-	db := silentDB(t, func(c *Config) { c.ConnectTimeout = 50 * time.Millisecond })
+	db := silentDB(t, func(c *Config) { c.DialTimeout = 50 * time.Millisecond })
 
 	_, err := db.Conn(context.Background()).Exec(context.Background(), "SELECT 1")
 	require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -417,4 +420,48 @@ func TestCollectors_TwoPoolsOnOneRegistry(t *testing.T) {
 
 	assert.Equal(t, 3.0, sample(t, reg, "db_pool_max_connections", map[string]string{"pool": "primary"}))
 	assert.Equal(t, 3.0, sample(t, reg, "db_pool_max_connections", map[string]string{"pool": "replica"}))
+}
+
+// A call that fails before it reaches a connection — here the pool is closed
+// — is a failed query of its operation, though the pgx tracer never sees it.
+func TestQueryErrors_CountACallThatNeverGotAConnection(t *testing.T) {
+	t.Parallel()
+
+	db, _, err := open(t.Context(), Config{URL: secret.New("postgres://app:app@127.0.0.1:1/app")}, nil)
+	require.NoError(t, err)
+	db.Close()
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(db.Collectors()...)
+
+	ctx := context.Background()
+	named := WithOperation(ctx, "tasks.create")
+
+	for operation, call := range map[string]func() error{
+		"select": func() error {
+			_, err := db.Conn(ctx).Exec(ctx, "SELECT 1")
+			return err
+		},
+		"update": func() error {
+			rows, err := db.Conn(ctx).Query(ctx, "UPDATE t SET a = 1 RETURNING a")
+			rows.Close()
+
+			return err
+		},
+		"tasks.create": func() error { return db.Conn(named).QueryRow(named, "SELECT 1").Scan(new(int)) },
+		"batch": func() error {
+			batch := &pgx.Batch{}
+			batch.Queue("SELECT 1")
+
+			return db.Conn(ctx).SendBatch(ctx, batch).Close()
+		},
+		"copy": func() error {
+			_, err := db.Conn(ctx).CopyFrom(ctx, pgx.Identifier{"t"}, []string{"id"}, pgx.CopyFromRows(nil))
+			return err
+		},
+		"begin": func() error { return db.InTx(named, func(context.Context) error { return nil }) },
+	} {
+		require.ErrorIs(t, call(), ErrClosed, operation)
+		assert.Equal(t, 1.0, sample(t, reg, "db_query_errors_total", map[string]string{"operation": operation}), operation)
+	}
 }

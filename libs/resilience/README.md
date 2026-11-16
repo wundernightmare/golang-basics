@@ -14,7 +14,8 @@ logic: no I/O, no metrics, no logging, an injected clock.
 | `ErrOpen` | the rejection: what `Breaker.Do` returns, and what a client's own "circuit open" error wraps, so `errors.Is(err, resilience.ErrOpen)` works over any of them |
 
 ```go
-b := resilience.NewBreaker(resilience.DefaultBreakerConfig(), time.Now, onChange) // nil when FailureRatio is 0
+b, err := resilience.NewBreaker(resilience.DefaultBreakerConfig(), time.Now, onChange)
+// err: what cfg.Validate() reports; b is nil, without an error, when the policy is not Enabled()
 
 grant, ok := b.Allow()
 if !ok { /* reject: the dependency is down */ }
@@ -46,7 +47,7 @@ latest state:
 
 ```go
 set := func(s resilience.State) { gauge.Set(float64(s)) }
-b = resilience.NewBreaker(cfg, time.Now, func(from, to resilience.State) { b.Mirror(set) })
+b, err = resilience.NewBreaker(cfg, time.Now, func(from, to resilience.State) { b.Mirror(set) })
 b.Mirror(set) // the series exists before the first transition; a nil breaker reports closed
 ```
 
@@ -72,14 +73,23 @@ their own name (`breaker.failure_ratio`, `…_BREAKER_FAILURE_RATIO`). The
 tags carry no defaults: each owner sets its own policy before loading.
 
 `BreakerConfig.Validate() error` reports every problem at once
-(`errors.Join`), named by key; `NaN` is not a ratio. In this package
-`failure_ratio: 0` means "no breaker": `Validate` accepts it and `NewBreaker`
-returns nil. An owner may read the key differently before it gets here —
-require a breaker, or substitute a default of its own — and says so in its
-own documentation.
+(`errors.Join`), named by key; `NaN` is not a ratio. `NewBreaker` runs it
+and returns its error, so a policy that skipped validation cannot become a
+breaker.
 
-The clocks are injected and must not be nil. Any instant works, before 1970
-included.
+`failure_ratio: 0` means "the breaker is off" for every owner of a
+`BreakerConfig`: `Enabled()` is false, `Validate` accepts it whatever the
+other keys say, and `NewBreaker` returns nil. The zero `BreakerConfig` is
+therefore off. An owner's default ratio lives in what it loads over (a
+preset, an env default) and is not substituted for an explicit 0; an owner
+that cannot run without a breaker rejects a policy that is not `Enabled()`.
+
+The clocks are injected and must not be nil; each is read once at
+construction. The sliding windows count the time elapsed since that reading
+(`time.Time.Sub`), not a calendar position: with `time.Now` that is the
+monotonic clock, so setting the wall clock forward or back neither empties a
+window nor keeps stale counts in it. Any instant works — before 1970 or
+beyond what `UnixNano` can express.
 
 ## Tests
 

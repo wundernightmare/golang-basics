@@ -163,7 +163,7 @@ func clientOf(t *testing.T, endpoint string, opts []s3.Option, mutate ...func(*s
 	t.Helper()
 
 	cfg := s3.Config{
-		Bucket: "b", Endpoint: endpoint, Insecure: true, UsePathStyle: true,
+		Bucket: "b", Endpoint: endpoint, Insecure: true,
 		AccessKeyID: "k", SecretAccessKey: secret.New("s"), MaxAttempts: 1,
 		OpTimeout: long, TransferTimeout: long, UploadPartBytes: s3.MinUploadPartBytes,
 	}

@@ -8,13 +8,16 @@
 # in the pre-push hook. This file gates the unit layer alone (`go test
 # -short`, .cover/unit.out) for exactly those packages.
 #
-# Only the overrides below gate anything: the general thresholds are 0
-# because the libraries that need a dependency are tested where it is real,
-# in their integration modules; their unit layer (pgx 60%, the Kafka
-# providers 62% and 78%, valkey 85%, s3 93%, kafka 95%) has no floor here.
-# The numbers are the measured unit coverage at the time (grpcx 97.9, httpx
-# 96.2, resilience 100, resilient-http-client 98.9, secret 100, tiercache
-# 98.5) minus a few points of room: a ratchet, raised when it improves.
+# Only the overrides below gate anything: the general thresholds are 0. A
+# library that needs a dependency is tested where the dependency is real, in
+# its integration module, so its floor here is lower — it holds what the unit
+# layer pins without a container (config, deadlines, error mapping), and the
+# rest is the merged gate's. The Kafka providers (62% and 80%) have no floor:
+# their unit layer is the option mapping, everything else needs a broker.
+# The numbers are the measured unit coverage at the time (grpcx 97.2, httpx
+# 96.7, resilience 100, resilient-http-client 98.3, secret 100, tiercache
+# 97.9, kafka 95.4, otelx 94.1, otelx/retro 97.8, s3 93.3, valkey 87.4, pgx
+# 65.4) minus a few points of room: a ratchet, raised when it improves.
 #
 # Still not a proof of assertions — the unit layer also instruments the whole
 # workspace, so another module's unit test counts here too. `just mutate` is
@@ -43,3 +46,15 @@ override:
     threshold: 95
   - path: ^libs/tiercache$
     threshold: 92
+  - path: ^libs/kafka$
+    threshold: 92
+  - path: ^libs/otelx$
+    threshold: 91
+  - path: ^libs/otelx/retro$
+    threshold: 95
+  - path: ^libs/s3$
+    threshold: 90
+  - path: ^libs/valkey$
+    threshold: 84
+  - path: ^libs/pgx$
+    threshold: 62

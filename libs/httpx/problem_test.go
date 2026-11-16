@@ -158,6 +158,7 @@ func TestWriteError(t *testing.T) {
 		{"a dependency's cancellation, the client still here", fmt.Errorf("lookup: %w", context.Canceled), http.StatusInternalServerError, "internal error", true},
 		{"deadline", fmt.Errorf("query: %w", context.DeadlineExceeded), http.StatusGatewayTimeout, "the request took too long", true},
 		{"anything else", errors.New("pgconn: connection refused"), http.StatusInternalServerError, "internal error", true},
+		{"no error at all", nil, http.StatusInternalServerError, "internal error", true},
 		{"5xx problem with cause", httpx.Internal("could not persist", errors.New("disk full")), http.StatusInternalServerError, "could not persist", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

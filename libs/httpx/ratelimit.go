@@ -3,6 +3,7 @@ package httpx
 import (
 	"math"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -12,7 +13,8 @@ import (
 )
 
 // rateLimiter is the server's inbound limit: a token bucket for all requests
-// and, optionally, one per client address. It protects the service itself —
+// and, optionally, one per client — an IPv4 address or an IPv6 /64 (see
+// clientKey). It protects the service itself —
 // the last line, not the first: an ingress or a gateway should shed load
 // before it gets here, and a per-tenant quota belongs in the service's own
 // middleware, behind its authenticator.
@@ -118,6 +120,23 @@ func (l *rateLimiter) client(key string, now time.Time) *rate.Limiter {
 	return lim
 }
 
+// ipv6ClientBits is the prefix an IPv6 client is counted by: a /64 is what
+// one subscriber or one host is given, so every address in it is the same
+// client, and counted one by one they are 2^64 full buckets.
+const ipv6ClientBits = 64
+
+// clientKey is the key of the bucket a client address shares: the address
+// itself for IPv4, its /64 for IPv6. An address that does not parse is its
+// own key.
+func clientKey(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil || addr.Is4() || addr.Is4In6() {
+		return ip
+	}
+
+	return netip.PrefixFrom(addr, ipv6ClientBits).Masked().String()
+}
+
 // take asks lim for one token now; when there is none it reports how long
 // until there is, and takes nothing.
 func take(lim *rate.Limiter, now time.Time) (ok bool, wait time.Duration) {
@@ -142,7 +161,7 @@ func (l *rateLimiter) middleware(next http.Handler) http.Handler {
 		// The client's own bucket first: a client over its share must not
 		// spend the tokens everyone else lives on.
 		if l.perClient > 0 {
-			lim := l.client(ClientIPFromContext(r.Context()), now)
+			lim := l.client(clientKey(ClientIPFromContext(r.Context())), now)
 			if lim == nil {
 				l.reject(w, r, scopeClient, retryAfterUnknown)
 

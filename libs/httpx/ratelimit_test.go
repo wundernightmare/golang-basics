@@ -238,3 +238,28 @@ func TestGuard_TurnsAPanicIntoAnOrderlyStop(t *testing.T) {
 	require.NoError(t, srv.Guard("relay", ctx, func(context.Context) error { return nil })())
 	assert.InDelta(t, 1, testx.Metric(t, srv.Metrics.Registry, "background_panics_total", map[string]string{"task": "relay"}), 0)
 }
+
+// An IPv6 client owns its /64, not one address: the bucket is the network's,
+// or every request could come from a fresh address with a full bucket.
+func TestRateLimit_AnIPv6ClientIsItsNetwork(t *testing.T) {
+	t.Parallel()
+
+	_, send := limited(t, func(c *httpx.Config) { c.RateLimitPerClient, c.RateBurstPerClient = 0.001, 2 })
+
+	for _, host := range []string{"[2001:db8:0:1::1]", "[2001:db8:0:1::2]"} {
+		code, _ := send(host)
+		require.Equal(t, http.StatusNoContent, code)
+	}
+
+	code, _ := send("[2001:db8:0:1:ffff::3]")
+	assert.Equal(t, http.StatusTooManyRequests, code, "a third address of the same /64")
+
+	code, _ = send("[2001:db8:0:2::1]")
+	assert.Equal(t, http.StatusNoContent, code, "the next /64 is another client")
+
+	code, _ = send("[::ffff:10.0.0.1]")
+	assert.Equal(t, http.StatusNoContent, code)
+
+	code, _ = send("[::ffff:10.0.0.2]")
+	assert.Equal(t, http.StatusNoContent, code, "an IPv4 client in IPv6 clothes is still one address")
+}

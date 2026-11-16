@@ -2,7 +2,6 @@ package tiercache
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -10,8 +9,10 @@ import (
 )
 
 // Config tunes one cache. It carries `env` and `yaml` tags so a service can
-// embed it in its own config (with an envPrefix per cache); zero values of
-// the optional fields mean the defaults below.
+// embed it in its own config (with an envPrefix per cache) and load over
+// [DefaultConfig]. Zero values of the optional fields mean the defaults
+// below — but for breaker.failure_ratio, where 0 means no breaker and the
+// default is DefaultConfig's.
 //
 //	TIERCACHE_NAME                 [name]                 metric label, L2 key prefix and channel   (required)
 //	TIERCACHE_MAX_BYTES            [max_bytes]            L1 capacity in bytes                      (default 32 MiB)
@@ -21,7 +22,7 @@ import (
 //	TIERCACHE_REFRESH_TIMEOUT      [refresh_timeout]      deadline of one background refresh        (default 5s)
 //	TIERCACHE_REFRESH_CONCURRENCY  [refresh_concurrency]  background refreshes in flight            (default 16)
 //	TIERCACHE_TOMBSTONE_TTL        [tombstone_ttl]        how long an invalidation blocks L2 fills  (default 5s)
-//	TIERCACHE_BREAKER_FAILURE_RATIO [breaker.failure_ratio] share of failed L2 calls that opens it  (default 0.5)
+//	TIERCACHE_BREAKER_FAILURE_RATIO [breaker.failure_ratio] share of failed L2 calls that opens it  (DefaultConfig: 0.5; 0: no breaker)
 //	TIERCACHE_BREAKER_MIN_REQUESTS  [breaker.min_requests]  L2 calls in the window before it counts (default 10)
 //	TIERCACHE_BREAKER_WINDOW        [breaker.window]        window the ratio is measured over       (default 10s)
 //	TIERCACHE_BREAKER_OPEN_TIMEOUT  [breaker.open_timeout]  how long L2 is skipped once open        (default 5s)
@@ -58,10 +59,13 @@ type Config struct {
 	// every other one): when breaker.failure_ratio of at least
 	// breaker.min_requests L2 calls within breaker.window failed, L2 is
 	// skipped for breaker.open_timeout; then breaker.half_open_probes calls
-	// probe it. Defaults: 0.5 of 10 in 10s, 5s, one probe — a cache wants L2
-	// back soon and has no use for several probes. A zero field takes its
-	// default here, breaker.failure_ratio included: unlike the breakers of
-	// the outbound clients, this one cannot be switched off with 0.
+	// probe it. [DefaultConfig] has 0.5 of 10 in 10s, 5s, one probe — a
+	// cache wants L2 back soon and has no use for several probes.
+	//
+	// breaker.failure_ratio 0 — the zero Config's — is no breaker, as it is
+	// everywhere ([resilience.BreakerConfig.Enabled]): every lookup then
+	// asks L2 and waits out its deadline while L2 is down. With a ratio
+	// set, each of the other four left at zero takes its default above.
 	Breaker resilience.BreakerConfig `envPrefix:"TIERCACHE_BREAKER_" yaml:"breaker"`
 	// DisableInvalidation turns the Pub/Sub subscription off: entries then
 	// leave L1 by TTL only.
@@ -70,6 +74,17 @@ type Config struct {
 
 // DefaultMaxBytes is the L1 capacity of a cache that names none.
 const DefaultMaxBytes = 32 << 20
+
+// DefaultConfig is the configuration to load the environment or YAML over,
+// or to fill in by hand: every optional setting at the default the table at
+// [Config] lists, the L2 breaker's among them. Name and HardTTL are the
+// caller's to set.
+func DefaultConfig() Config {
+	cfg := Config{Breaker: resilience.BreakerConfig{FailureRatio: 0.5}}
+	cfg.applyDefaults()
+
+	return cfg
+}
 
 func (c *Config) applyDefaults() {
 	if c.MaxBytes <= 0 {
@@ -92,8 +107,8 @@ func (c *Config) applyDefaults() {
 		c.TombstoneTTL = 5 * time.Second
 	}
 
-	if c.Breaker.FailureRatio <= 0 {
-		c.Breaker.FailureRatio = 0.5
+	if !c.Breaker.Enabled() {
+		return
 	}
 
 	if c.Breaker.MinRequests <= 0 {
@@ -121,17 +136,17 @@ func (c Config) Validate() error {
 
 	switch {
 	case c.Name == "":
-		return errors.New("tiercache: Name is required")
+		return fmt.Errorf("%w: Name is required", ErrConfig)
 	case c.HardTTL <= 0:
-		return errors.New("tiercache: HardTTL must be positive")
+		return fmt.Errorf("%w: HardTTL must be positive", ErrConfig)
 	case c.SoftTTL > c.HardTTL:
-		return fmt.Errorf("tiercache: SoftTTL (%s) must not exceed HardTTL (%s)", c.SoftTTL, c.HardTTL)
+		return fmt.Errorf("%w: SoftTTL (%s) must not exceed HardTTL (%s)", ErrConfig, c.SoftTTL, c.HardTTL)
 	case c.StaleIfError < 0:
-		return errors.New("tiercache: StaleIfError must not be negative")
+		return fmt.Errorf("%w: StaleIfError must not be negative", ErrConfig)
 	}
 
 	if err := c.Breaker.Validate(); err != nil {
-		return fmt.Errorf("tiercache: breaker: %w", err)
+		return fmt.Errorf("%w: breaker: %w", ErrConfig, err)
 	}
 
 	return nil

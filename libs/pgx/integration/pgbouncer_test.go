@@ -151,9 +151,9 @@ func openViaBouncer(tb testing.TB, cfg bouncerConfig, alias string, mut func(*pg
 	tb.Helper()
 
 	conf := pgx.Config{
-		URL:            secret.New("postgres://app:app@" + bouncer(tb, cfg) + "/" + alias + "?sslmode=disable"),
-		MaxConns:       1,
-		ConnectTimeout: 5 * time.Second,
+		URL:         secret.New("postgres://app:app@" + bouncer(tb, cfg) + "/" + alias + "?sslmode=disable"),
+		MaxConns:    1,
+		DialTimeout: 5 * time.Second,
 	}
 	if mut != nil {
 		mut(&conf)
@@ -167,7 +167,7 @@ func openViaBouncer(tb testing.TB, cfg bouncerConfig, alias string, mut func(*pg
 func directDB(tb testing.TB) *pgx.DB {
 	tb.Helper()
 
-	return newDB(tb, pgx.Config{URL: secret.New(containers.Postgres(tb)), MaxConns: 2, MinConns: 1, ConnectTimeout: 5 * time.Second})
+	return newDB(tb, pgx.Config{URL: secret.New(containers.Postgres(tb)), MaxConns: 2, MinConns: 1, DialTimeout: 5 * time.Second})
 }
 
 func freshSchema(tb testing.TB) string {

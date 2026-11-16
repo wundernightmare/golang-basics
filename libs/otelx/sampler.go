@@ -43,10 +43,7 @@ type sampler struct {
 }
 
 func newSampler(cfg Config, recordUnsampled bool) sdktrace.Sampler {
-	root := sdktrace.NeverSample()
-	if cfg.SamplerRatio >= 0 {
-		root = sdktrace.TraceIDRatioBased(cfg.SamplerRatio)
-	}
+	root := sdktrace.TraceIDRatioBased(cfg.SamplerRatio)
 
 	description := "ParentBased{root:" + root.Description()
 	if cfg.RedrawRemoteParent {

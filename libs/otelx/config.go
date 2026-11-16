@@ -3,7 +3,6 @@ package otelx
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -32,7 +31,7 @@ import (
 //	TASKS_OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE  client certificate (PEM) for mTLS       (default none)
 //	TASKS_OTEL_EXPORTER_OTLP_CLIENT_KEY       client key (PEM) for mTLS                  (default none)
 //	TASKS_OTEL_EXPORTER_OTLP_TIMEOUT          per-export request timeout                 (default "10s")
-//	TASKS_OTEL_TRACES_SAMPLER_RATIO           head sampling ratio (0,1]; negative = never sample; 0 = not set (default 1.0)
+//	TASKS_OTEL_TRACES_SAMPLER_RATIO           head sampling ratio [0,1]; 0 samples no root (default 1.0)
 //	TASKS_OTEL_TRACES_REDRAW_REMOTE_PARENT    ignore a caller's sampled flag: the edge   (default false)
 //	TASKS_OTEL_RETRO_BUFFER_MIB               retroactive buffer, MiB; negative = off    (default 16)
 //	TASKS_OTEL_RETRO_TRIGGERS_PER_SECOND      traces a warn/error line may export a second (default 50)
@@ -43,9 +42,11 @@ import (
 // Export is TLS by default: the collector is one hop away in a cluster and
 // still on a network you do not own. Set INSECURE only for a local collector.
 //
-// The zero Config is a valid one: [Init] reads every zero field as "not set"
-// and applies the default above, whether the Config was built by hand or
-// loaded. [Config.Validate] says what Init refuses.
+// The zero Config is a valid one: [Init] reads a zero field as "not set" and
+// applies the default above, whether the Config was built by hand or loaded.
+// SamplerRatio is the exception — its zero is a setting, and its default is
+// applied by [LoadConfig] and httpx.LoadYAML, not by Init: a Config built by
+// hand names its ratio. [Config.Validate] says what Init refuses.
 type Config struct {
 	Enabled     bool   `env:"OTEL_ENABLED" envDefault:"false" yaml:"enabled"`
 	ServiceName string `env:"OTEL_SERVICE_NAME" yaml:"service_name"`
@@ -60,10 +61,10 @@ type Config struct {
 	ClientKey     string            `env:"OTEL_EXPORTER_OTLP_CLIENT_KEY" yaml:"client_key"`
 	ExportTimeout time.Duration     `env:"OTEL_EXPORTER_OTLP_TIMEOUT" envDefault:"10s" yaml:"export_timeout"`
 
-	// SamplerRatio is the share of root traces sampled, in (0,1]. A negative
-	// value samples no root. Zero is "not set" and means 1.0 — written in
-	// the environment or in YAML too: Init replaces it, so the loaded Config
-	// (and /admin/config) shows 0 where the "tracing enabled" line shows 1.
+	// SamplerRatio is the share of root traces sampled, in [0,1]. Zero
+	// samples no root — also in a Config built by hand, which gets no
+	// default here: with the retroactive buffer on, a trace is then
+	// exported only by a warn / error line or the debug token.
 	SamplerRatio float64 `env:"OTEL_TRACES_SAMPLER_RATIO" envDefault:"1.0" yaml:"sampler_ratio"`
 	// RedrawRemoteParent is for the internet-facing edge, where the caller
 	// is a client that could otherwise have every request of its own traced
@@ -83,6 +84,11 @@ type Config struct {
 	MaxExportBatchSize int           `env:"OTEL_BSP_MAX_EXPORT_BATCH_SIZE" envDefault:"512" yaml:"max_export_batch_size"`
 }
 
+// ErrConfig is what every error about a configuration matches with
+// [errors.Is]: a value [Config.Validate] refuses, an environment that does
+// not parse, a retired key.
+var ErrConfig = errors.New("otelx: config")
+
 // LoadConfig parses a [Config] from the environment using the given key prefix
 // (use "" for no prefix) and validates it. Every field is defaulted; tracing
 // export is off unless OTEL_ENABLED is set. An environment that still sets
@@ -94,13 +100,13 @@ func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, n
 // environment (nil means the process environment). Tests pass a map, so they
 // need no t.Setenv and can run in parallel.
 func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
-	if err := refuseRetiredKey(prefix, environ); err != nil {
+	if err := refuseRetiredKeys(prefix, environ); err != nil {
 		return Config{}, err
 	}
 
 	var cfg Config
 	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix, Environment: environ}); err != nil {
-		return Config{}, fmt.Errorf("otelx: parse config (prefix %q): %w", prefix, err)
+		return Config{}, fmt.Errorf("%w: parse (prefix %q): %w", ErrConfig, prefix, err)
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -110,39 +116,52 @@ func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	return cfg, nil
 }
 
-// retiredTrustRemoteParent had the opposite sense of
+// RetiredKeys names the environment keys this config once read, each with
+// what to set instead. [LoadConfig] refuses an environment that sets one
+// under its prefix, and so does httpx.LoadYAML for a service that has this
+// config as a section — it reads the keys of the struct, and cannot see one
+// that is gone.
+//
+// OTEL_TRACES_TRUST_REMOTE_PARENT had the opposite sense of
 // OTEL_TRACES_REDRAW_REMOTE_PARENT and the opposite default: an edge that
 // still sets it to false would, were the key merely unknown, follow every
 // client's sampled flag.
-const retiredTrustRemoteParent = "OTEL_TRACES_TRUST_REMOTE_PARENT"
+func (Config) RetiredKeys() map[string]string {
+	return map[string]string{
+		"OTEL_TRACES_TRUST_REMOTE_PARENT": "set OTEL_TRACES_REDRAW_REMOTE_PARENT to the opposite value " +
+			"(true on an internet-facing edge) or remove the key",
+	}
+}
 
-// refuseRetiredKey fails when the environment still sets
-// [retiredTrustRemoteParent], whatever its value.
-func refuseRetiredKey(prefix string, environ map[string]string) error {
-	key := prefix + retiredTrustRemoteParent
+// refuseRetiredKeys fails when the environment (environ, or the process
+// environment when it is nil) sets a key of [Config.RetiredKeys] under
+// prefix, whatever its value.
+func refuseRetiredKeys(prefix string, environ map[string]string) error {
+	for name, instead := range (Config{}).RetiredKeys() {
+		key := prefix + name
 
-	_, set := environ[key]
-	if environ == nil {
-		_, set = os.LookupEnv(key)
+		_, set := environ[key]
+		if environ == nil {
+			_, set = os.LookupEnv(key)
+		}
+
+		if set {
+			return fmt.Errorf("%w: %s is no longer read: %s", ErrConfig, key, instead)
+		}
 	}
 
-	if !set {
-		return nil
-	}
-
-	return fmt.Errorf("otelx: %s is no longer read: set %sOTEL_TRACES_REDRAW_REMOTE_PARENT to the opposite value "+
-		"(true on an internet-facing edge) or remove the key", key, prefix)
+	return nil
 }
 
 // Validate reports every value [Init] refuses, by the name of its
-// environment key. With export on over TLS it reads the certificate files,
-// as Init will. A zero field is "not set" and passes.
+// environment key, in an error that matches [ErrConfig]. With export on over
+// TLS it reads the certificate files, as Init will. A zero field passes.
 func (c Config) Validate() error {
 	var errs []error
 
 	if !validEndpoint(c.Endpoint) {
 		// The value is not quoted: a URL may carry credentials.
-		errs = append(errs, errors.New("OTEL_EXPORTER_OTLP_ENDPOINT must be host:port, without a scheme or a path "+
+		errs = append(errs, errors.New("OTEL_EXPORTER_OTLP_ENDPOINT must be host:port, with the port and without a scheme or a path "+
 			"(OTEL_EXPORTER_OTLP_INSECURE chooses plaintext or TLS, the path is /v1/traces)"))
 	}
 
@@ -170,8 +189,14 @@ func (c Config) Validate() error {
 		}
 	}
 
-	if math.IsNaN(c.SamplerRatio) {
-		errs = append(errs, errors.New("OTEL_TRACES_SAMPLER_RATIO must be a number"))
+	// Written so that NaN, which compares false with everything, is refused.
+	if !(c.SamplerRatio >= 0 && c.SamplerRatio <= 1) {
+		errs = append(errs, fmt.Errorf("OTEL_TRACES_SAMPLER_RATIO must be within [0, 1], got %v", c.SamplerRatio))
+	}
+
+	if c.Retro.TriggersPerSecond < 0 {
+		errs = append(errs, fmt.Errorf("OTEL_RETRO_TRIGGERS_PER_SECOND must not be negative, got %d "+
+			"(OTEL_RETRO_BUFFER_MIB < 0 turns the buffer off)", c.Retro.TriggersPerSecond))
 	}
 
 	if c.Enabled && !c.Insecure {
@@ -181,14 +206,16 @@ func (c Config) Validate() error {
 	}
 
 	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("otelx: config: %w", err)
+		return fmt.Errorf("%w: %w", ErrConfig, err)
 	}
 
 	return nil
 }
 
-// validEndpoint reports whether endpoint is a host with an optional port and
-// nothing else: the exporter puts a scheme in front of it and a path behind.
+// validEndpoint reports whether endpoint is a host with a port and nothing
+// else: the exporter puts a scheme in front of it and a path behind, and
+// without a port would dial 80 or 443, where no OTLP receiver listens by
+// default.
 func validEndpoint(endpoint string) bool {
 	if endpoint == "" {
 		return true
@@ -196,10 +223,10 @@ func validEndpoint(endpoint string) bool {
 
 	u, err := url.Parse("//" + endpoint)
 
-	return err == nil && u.Host == endpoint && !strings.Contains(endpoint, "://")
+	return err == nil && u.Host == endpoint && u.Port() != "" && !strings.Contains(endpoint, "://")
 }
 
-// withDefaults fills the zero fields of a Config.
+// withDefaults fills the zero fields of a Config whose zero is "not set".
 func (c *Config) withDefaults() {
 	if c.Endpoint == "" {
 		c.Endpoint = "localhost:4318"
@@ -207,10 +234,6 @@ func (c *Config) withDefaults() {
 
 	if c.ExportTimeout == 0 {
 		c.ExportTimeout = 10 * time.Second
-	}
-
-	if c.SamplerRatio == 0 {
-		c.SamplerRatio = 1.0
 	}
 
 	if c.BatchTimeout == 0 {

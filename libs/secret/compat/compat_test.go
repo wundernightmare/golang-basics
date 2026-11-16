@@ -62,6 +62,25 @@ func TestString_YAML_RefusesWhatIsNotAScalar(t *testing.T) {
 	}
 }
 
+// What Marshal wrote is the marker, not the secret: reading it back through
+// the real loaders fails instead of yielding the marker as the password.
+func TestString_AMarshalledConfigDoesNotLoadBack(t *testing.T) {
+	t.Parallel()
+
+	out, err := yaml.Marshal(config{Host: "db", Password: secret.New(hunter)})
+	require.NoError(t, err)
+
+	var cfg config
+
+	require.ErrorIs(t, yaml.Unmarshal(out, &cfg), secret.ErrDecode)
+
+	// env.ParseError (v11.4.2) has no Unwrap: the cause is in the text only.
+	require.ErrorContains(t, env.ParseWithOptions(&cfg, env.Options{
+		Environment: map[string]string{"PASSWORD": redacted},
+	}), secret.ErrDecode.Error())
+	assert.True(t, cfg.Password.IsZero())
+}
+
 func TestString_Env(t *testing.T) {
 	t.Parallel()
 

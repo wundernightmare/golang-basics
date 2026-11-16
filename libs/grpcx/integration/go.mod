@@ -78,7 +78,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/valkey v0.45.0 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
-	github.com/wundernightmare/golang-basics/libs/secret v0.0.0-00010101000000-000000000000 // indirect
+	github.com/wundernightmare/golang-basics/libs/secret v0.0.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.72.0 // indirect

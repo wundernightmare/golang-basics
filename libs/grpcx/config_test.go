@@ -3,6 +3,7 @@ package grpcx
 import (
 	"encoding/json"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,10 +19,10 @@ import (
 	"github.com/wundernightmare/golang-basics/libs/resilience"
 )
 
-func TestLoadConfig_OverlaysDefaults(t *testing.T) {
+func TestParseYAML_OverlaysDefaults(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := LoadConfig([]byte(`
+	cfg, err := ParseYAML([]byte(`
 targets:
   - name: billing
     address: dns:///billing.internal:443
@@ -51,25 +52,27 @@ targets:
 	assert.Equal(t, DefaultConfig(billing, search), cfg, "omitted keys keep their defaults; an explicit 0 disables")
 }
 
-func TestLoadConfig_EmptyIsNoTargets(t *testing.T) {
+func TestParseYAML_EmptyIsNoTargets(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := LoadConfig(nil)
+	cfg, err := ParseYAML(nil)
 	require.NoError(t, err)
 	assert.Empty(t, cfg.Targets)
 }
 
-func TestLoadConfig_RejectsUnknownKeysAndInvalid(t *testing.T) {
+func TestParseYAML_RejectsUnknownKeysAndInvalid(t *testing.T) {
 	t.Parallel()
 
-	_, err := LoadConfig([]byte("targets:\n  - name: a\n    address: x\n    retry_max_atempts: 3\n"))
+	_, err := ParseYAML([]byte("targets:\n  - name: a\n    address: x\n    retry_max_atempts: 3\n"))
 	require.ErrorContains(t, err, "retry_max_atempts", "a misspelt target key")
+	require.ErrorIs(t, err, ErrConfig)
 
-	_, err = LoadConfig([]byte("target: []\n"))
+	_, err = ParseYAML([]byte("target: []\n"))
 	require.ErrorContains(t, err, "target", "a misspelt top-level key")
 
-	_, err = LoadConfig([]byte("targets:\n  - name: a\n"))
+	_, err = ParseYAML([]byte("targets:\n  - name: a\n"))
 	require.ErrorContains(t, err, `target "a": address is empty`)
+	require.ErrorIs(t, err, ErrConfig)
 }
 
 func TestDefaultTarget(t *testing.T) {
@@ -93,6 +96,7 @@ func TestValidate(t *testing.T) {
 	valid := func() Config {
 		return DefaultConfig(DefaultTarget("a", "dns:///a:443"), DefaultTarget("b", "dns:///b:443"))
 	}
+	noSuchDir := filepath.Join(t.TempDir(), "absent")
 
 	for _, tc := range []struct {
 		name string
@@ -106,6 +110,8 @@ func TestValidate(t *testing.T) {
 		{"address: a URL, not a target", func(t *TargetConfig) { t.Address = "https://billing.internal" }, "address has no endpoint"},
 		{"address: not host:port", func(t *TargetConfig) { t.Address = "billing.internal:443:443" }, "address is not host:port"},
 		{"address: dns endpoint not host:port", func(t *TargetConfig) { t.Address = "dns:///billing.internal:" }, "address is not host:port"},
+		{"ca_file without TLS", func(t *TargetConfig) { t.Insecure, t.CAFile = true, "ca.pem" }, "ca_file is set but insecure is true"},
+		{"ca_file that cannot be read", func(t *TargetConfig) { t.CAFile = filepath.Join(noSuchDir, "ca.pem") }, "ca_file: open"},
 		{"timeout", func(t *TargetConfig) { t.Timeout = -1 }, "timeout must not"},
 		{"wait_for_ready without a timeout", func(t *TargetConfig) { t.WaitForReady, t.Timeout = true, 0 }, "timeout must be > 0 with wait_for_ready"},
 		{"lb", func(t *TargetConfig) { t.LoadBalancing = "random" }, "load_balancing"},

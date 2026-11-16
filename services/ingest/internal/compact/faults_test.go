@@ -32,7 +32,7 @@ func TestPass_StoreDown(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	store, err := s3.New(context.Background(), s3.Config{
-		Bucket: "b", Endpoint: srv.URL, Insecure: true, UsePathStyle: true,
+		Bucket: "b", Endpoint: srv.URL, Insecure: true,
 		AccessKeyID: "k", SecretAccessKey: secret.New("s"), MaxAttempts: 1, UploadPartBytes: s3.MinUploadPartBytes,
 	}, nil)
 	require.NoError(t, err)
@@ -79,7 +79,7 @@ func TestPass_MissingBucketIsNotAMissingManifest(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	store, err := s3.New(context.Background(), s3.Config{
-		Bucket: "b", Endpoint: srv.URL, Insecure: true, UsePathStyle: true,
+		Bucket: "b", Endpoint: srv.URL, Insecure: true,
 		AccessKeyID: "k", SecretAccessKey: secret.New("s"), MaxAttempts: 1, UploadPartBytes: s3.MinUploadPartBytes,
 	}, nil)
 	require.NoError(t, err)

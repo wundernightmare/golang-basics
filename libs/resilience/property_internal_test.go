@@ -2,6 +2,7 @@ package resilience
 
 import (
 	"flag"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -45,11 +46,11 @@ type event struct {
 // modelSum is the window written the obvious way — every event kept, the
 // ones in the last windowSlots slots added up — to compare the ring buffer
 // against.
-func modelSum(events []event, slot time.Duration, now time.Time) (a, b int) {
-	current := modelSlot(now, slot)
+func modelSum(events []event, w *window, now time.Time) (a, b int) {
+	current := modelSlot(now, w)
 
 	for _, e := range events {
-		if current-modelSlot(e.at, slot) < windowSlots {
+		if current-modelSlot(e.at, w) < windowSlots {
 			a += e.a
 			b += e.b
 		}
@@ -58,9 +59,10 @@ func modelSum(events []event, slot time.Duration, now time.Time) (a, b int) {
 	return a, b
 }
 
-// modelSlot counts slots from 1970, rounding down on both sides of it.
-func modelSlot(at time.Time, slot time.Duration) int64 {
-	ns := at.UnixNano()
+// modelSlot counts slots from the window's base, rounding down on both
+// sides of it.
+func modelSlot(at time.Time, w *window) int64 {
+	ns, slot := int64(at.Sub(w.base)), w.slot
 
 	idx := ns / int64(slot)
 	if idx*int64(slot) > ns {
@@ -70,8 +72,8 @@ func modelSlot(at time.Time, slot time.Duration) int64 {
 	return idx
 }
 
-// epoch is where the generated clocks start: on either side of 1970, where
-// the Unix time the window indexes its slots by changes sign.
+// epoch is where the generated clocks start: on either side of 1970, so no
+// rule holds only for a positive Unix time.
 func epoch(t *rapid.T) time.Time {
 	return time.Unix(rapid.Int64Range(-4_000_000_000, 4_000_000_000).Draw(t, "start"), 0)
 }
@@ -84,8 +86,10 @@ func TestWindowEqualsItsModel(t *testing.T) {
 
 	rapid.Check(t, func(t *rapid.T) {
 		length := time.Duration(rapid.Int64Range(1, int64(time.Hour)).Draw(t, "length"))
-		win := newWindow(length)
 		now := epoch(t)
+		// The clock starts within three windows of the base, on either side,
+		// so it runs before the base, across it and after it.
+		win := newWindow(length, now.Add(time.Duration(rapid.Int64Range(-3*int64(length), 3*int64(length)).Draw(t, "base"))))
 
 		var events []event
 
@@ -102,7 +106,7 @@ func TestWindowEqualsItsModel(t *testing.T) {
 			},
 			"": func(t *rapid.T) { // checked after every step
 				gotA, gotB := win.sum(now)
-				wantA, wantB := modelSum(events, win.slot, now)
+				wantA, wantB := modelSum(events, &win, now)
 
 				if gotA != wantA || gotB != wantB {
 					t.Fatalf("sum at %s = (%d, %d), the model says (%d, %d)", now.Format(time.RFC3339Nano), gotA, gotB, wantA, wantB)
@@ -112,7 +116,24 @@ func TestWindowEqualsItsModel(t *testing.T) {
 	})
 }
 
-// A wall clock can step back (NTP). The window may then count imprecisely,
+// The window measures time elapsed, not a calendar position: an instant
+// whose Unix time in nanoseconds does not fit an int64 (past the year 2262)
+// is as good as any other.
+func TestWindowForgetsAcrossTheEndOfUnixNano(t *testing.T) {
+	t.Parallel()
+
+	last := time.Unix(0, math.MaxInt64) // the last instant UnixNano can express
+	win := newWindow(time.Second, last)
+
+	win.add(last, 1, 1)
+
+	a, b := win.sum(last.Add(2 * time.Second))
+	if a != 0 || b != 0 {
+		t.Fatalf("sum two windows later = (%d, %d), want nothing", a, b)
+	}
+}
+
+// An injected clock can step back. The window may then count imprecisely,
 // but never invents anything: totals stay within what was added, and
 // nothing panics.
 func TestWindowSurvivesAClockSteppingBack(t *testing.T) {
@@ -120,8 +141,8 @@ func TestWindowSurvivesAClockSteppingBack(t *testing.T) {
 
 	rapid.Check(t, func(t *rapid.T) {
 		length := time.Duration(rapid.Int64Range(1, int64(time.Minute)).Draw(t, "length"))
-		win := newWindow(length)
 		start := epoch(t).Add(time.Hour)
+		win := newWindow(length, start)
 
 		var totalA, totalB int
 
@@ -171,7 +192,7 @@ func TestRetryBudgetGrantsExactlyWhatItsRuleAllows(t *testing.T) {
 				events = append(events, event{at: now, a: 1})
 			},
 			"retry": func(t *rapid.T) {
-				requests, retries := modelSum(events, budget.w.slot, now)
+				requests, retries := modelSum(events, &budget.w, now)
 				allowed := float64(retries) < float64(minRetries)+ratio*float64(requests)
 
 				if got := budget.TryRetry(); got != allowed {
@@ -275,7 +296,7 @@ func TestBreakerIsAStateMachineThatKeepsItsPromises(t *testing.T) {
 			inFlight    []issued
 		)
 
-		breaker := NewBreaker(cfg, func() time.Time { return now }, func(from, to State) {
+		breaker, err := NewBreaker(cfg, func() time.Time { return now }, func(from, to State) {
 			if from != state {
 				t.Fatalf("a transition from %s, but the state was %s", from, state)
 			}
@@ -294,6 +315,9 @@ func TestBreakerIsAStateMachineThatKeepsItsPromises(t *testing.T) {
 				openedAt = now
 			}
 		})
+		if err != nil {
+			t.Fatalf("NewBreaker: %v", err)
+		}
 
 		// probesInFlight counts the unrecorded probes of the current state.
 		probesInFlight := func() int {

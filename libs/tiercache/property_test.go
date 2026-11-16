@@ -68,7 +68,7 @@ func TestReadsAreNeverStalerThanTheCachePromises(t *testing.T) {
 			name := "prop-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 
 			open := func() *tiercache.Cache[row] {
-				cache, err := tiercache.New(tiercache.Config{Name: name, SoftTTL: softTTL, HardTTL: hardTTL, MaxBytes: suiteBytes()}, suiteStore(),
+				cache, err := tiercache.New(tiercache.Config{Name: name, SoftTTL: softTTL, HardTTL: hardTTL}, tiercache.NewMapStore,
 					rowCodec{}, src.load, remote, nil)
 				if err != nil {
 					t.Fatalf("new cache: %v", err)

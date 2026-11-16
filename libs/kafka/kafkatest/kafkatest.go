@@ -2,7 +2,8 @@
 // every provider (libs/kafka-rdkafka, libs/kafka-franz) must show against a
 // real broker — delivery with headers and trace context, retries,
 // Permanent, the dead-letter topic, commit-after-handle across restarts,
-// graceful drain, rebalances without loss, Close during Run, ^regex
+// graceful drain, rebalances without loss, partitions lost with an expired
+// session, Close during Run, ^regex
 // subscriptions, the error taxonomy, sends that do not fail each other, a
 // validated config that builds its clients, and the client metrics. A
 // provider's integration suite calls [Run] with a [Harness] built from its
@@ -52,6 +53,9 @@ type Harness struct {
 	// Committed returns the group's committed offsets for topic, by
 	// partition.
 	Committed func(t testing.TB, group, topic string) map[int32]int64
+	// Freeze makes the broker stop answering — connections stay open, as
+	// with a hung broker — until thaw is called.
+	Freeze func(t testing.TB) (thaw func())
 }
 
 // Run runs the conformance suite against the linked provider.
@@ -63,6 +67,7 @@ func Run(t *testing.T, h Harness) {
 	t.Run("Consumer_DLQDisabledStopsOnPoison", func(t *testing.T) { dlqDisabled(t, h) })
 	t.Run("Consumer_GracefulShutdownCommitsProcessed", func(t *testing.T) { gracefulShutdown(t, h) })
 	t.Run("Consumer_RebalanceNoLossBoundedDuplicates", func(t *testing.T) { rebalance(t, h) })
+	t.Run("Consumer_ExpiredSessionLosesPartitions", func(t *testing.T) { sessionExpired(t, h) })
 	t.Run("Consumer_StopsOnContextCancel", func(t *testing.T) { stopsOnCancel(t, h) })
 	t.Run("Consumer_CloseDuringRunStopsIt", func(t *testing.T) { closeDuringRun(t, h) })
 	t.Run("Consumer_RegexSubscription", func(t *testing.T) { regexSubscription(t, h) })
@@ -586,7 +591,9 @@ func gracefulShutdown(t *testing.T, harness Harness) {
 
 // Two members of one group share the partitions without losing a record,
 // with bounded duplicates across the rebalances (a member joining, then one
-// leaving mid-stream), each reporting its own client gauges.
+// leaving mid-stream), each reporting its own client gauges. The member that
+// gives partitions up to the newcomer is told they were revoked, not lost:
+// only a revoke commits what was processed on them.
 func rebalance(t *testing.T, h Harness) {
 	t.Helper()
 
@@ -632,6 +639,13 @@ func rebalance(t *testing.T, h Harness) {
 
 	require.Eventually(t, func() bool { return assigned(memberA) > 0 && assigned(b) > 0 && assigned(memberA)+assigned(b) == 4 },
 		60*time.Second, 50*time.Millisecond, "the group settles with both members")
+
+	rebalances := func(r *running, event string) float64 {
+		return testx.Metric(t, r.reg, "kafka_consumer_rebalances_total", map[string]string{"event": event})
+	}
+
+	assert.Positive(t, rebalances(memberA, "revoked"), "partitions handed to a joining member are revoked")
+	testx.NoMetric(t, memberA.reg, "kafka_consumer_rebalances_total", map[string]string{"event": "lost"}) // an orderly rebalance loses nothing
 	<-publishing
 	require.Eventually(t, func() bool {
 		up := map[string]string{"client": "consumer"}
@@ -669,7 +683,45 @@ func rebalance(t *testing.T, h Harness) {
 	dups := got.len() - 300
 	t.Logf("deliveries=%d unique=300 duplicates=%d", got.len(), dups)
 	assert.LessOrEqual(t, dups, 2*cfg.MaxPollRecords, "duplicates are bounded by the in-flight batch")
-	assert.Positive(t, testx.Metric(t, b.reg, "kafka_consumer_rebalances_total", map[string]string{"event": "assigned"}))
+	assert.Positive(t, rebalances(b, "assigned"))
+}
+
+// A member whose session ran out — the broker stopped answering for longer
+// than KAFKA_CONSUMER_SESSION_TIMEOUT_MS — is told its partitions are lost,
+// not revoked (they may already be someone else's: nothing is committed for
+// them), and rejoins once the broker is back.
+func sessionExpired(t *testing.T, harness Harness) {
+	t.Helper()
+
+	topic := testx.Unique("lost")
+	harness.CreateTopic(t, 1, topic)
+	prod := newProducer(t, harness, topic)
+
+	var got seen
+
+	cfg := consumerConfig(t, harness, topic)
+	cfg.SessionTimeoutMs = 6000 // the smallest a broker takes by default (group.min.session.timeout.ms)
+	member := start(t, cfg, func(ctx context.Context, m kafka.Message) error {
+		got.add(ctx, m)
+		return nil
+	})
+
+	rebalances := func(event string) float64 {
+		return testx.Metric(t, member.reg, "kafka_consumer_rebalances_total", map[string]string{"event": event})
+	}
+
+	require.Eventually(t, func() bool { return rebalances("assigned") == 1 }, 30*time.Second, 50*time.Millisecond, "joined the group")
+
+	thaw := harness.Freeze(t)
+	lost := assert.Eventually(t, func() bool { return rebalances("lost") >= 1 }, 60*time.Second, 100*time.Millisecond,
+		"the session expires while the broker is silent")
+
+	thaw()
+	require.True(t, lost)
+	testx.NoMetric(t, member.reg, "kafka_consumer_rebalances_total", map[string]string{"event": "revoked"})
+
+	sendN(t, prod, topic, 1)
+	require.Eventually(t, func() bool { return got.len() == 1 }, 60*time.Second, 50*time.Millisecond, "the member rejoins and reads on")
 }
 
 func stopsOnCancel(t *testing.T, h Harness) {

@@ -11,6 +11,7 @@ type metrics struct {
 	refreshOK, refreshError, refreshDropped                    prometheus.Counter
 	invalidatedKey, invalidatedAll                             prometheus.Counter
 	bypassed, oversize                                         prometheus.Counter
+	breakerState                                               prometheus.Gauge
 
 	collectors []prometheus.Collector
 }
@@ -43,6 +44,11 @@ func newMetrics(name string, local Store) *metrics {
 		Help:        "Entries not stored in L1 because they exceed its per-entry limit.",
 		ConstLabels: labels,
 	})
+	breakerState := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "tiercache_circuit_breaker_state",
+		Help:        "State of the L2 circuit breaker: 0 closed (also when there is none), 1 open, 2 half-open.",
+		ConstLabels: labels,
+	})
 	size := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name:        "tiercache_l1_bytes",
 		Help:        "Bytes of memory L1 holds, bounded by its configured capacity (offheap: mapped so far; onheap: all of it, allocated at construction).",
@@ -64,7 +70,8 @@ func newMetrics(name string, local Store) *metrics {
 		invalidatedAll: invalidations.WithLabelValues("all"),
 		bypassed:       bypassed,
 		oversize:       oversize,
-		collectors:     []prometheus.Collector{reads, refreshes, invalidations, bypassed, oversize, size},
+		breakerState:   breakerState,
+		collectors:     []prometheus.Collector{reads, refreshes, invalidations, bypassed, oversize, breakerState, size},
 	}
 }
 
@@ -75,6 +82,7 @@ func newMetrics(name string, local Store) *metrics {
 //	tiercache_refreshes_total{result="ok|error|dropped"}
 //	tiercache_invalidations_total{scope="key|all"}
 //	tiercache_l2_bypassed_total
+//	tiercache_circuit_breaker_state                                   0 closed, 1 open, 2 half-open
 //	tiercache_l1_oversize_total
 //	tiercache_l1_bytes
 //

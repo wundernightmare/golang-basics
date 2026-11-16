@@ -15,10 +15,11 @@
 package offheap
 
 import (
+	"unsafe"
+
 	"github.com/VictoriaMetrics/fastcache"
 
 	"github.com/wundernightmare/golang-basics/libs/tiercache"
-	"github.com/wundernightmare/golang-basics/libs/tiercache/internal/lend"
 )
 
 // Step is the granularity, and the minimum, of the capacity.
@@ -31,26 +32,35 @@ const MaxEntry = 64<<10 - 5
 
 type store struct{ cache *fastcache.Cache }
 
+// lend is key as a slice over the string's own memory: a read of any key
+// length then costs no allocation. The library copies a key into its ring
+// and neither keeps nor changes the slice — and nothing else may be handed
+// it: a string is immutable, and a write through the slice would be a write
+// into every copy of it.
+func lend(key string) []byte {
+	return unsafe.Slice(unsafe.StringData(key), len(key)) //nolint:gosec // G103: a read-only view of an immutable string, see above
+}
+
 // New is a [tiercache.StoreFactory].
 func New(maxBytes int) tiercache.Store { return store{fastcache.New(maxBytes)} }
 
 func (s store) Get(dst []byte, key string) ([]byte, bool) {
-	return s.cache.HasGet(dst, lend.Bytes(key))
+	return s.cache.HasGet(dst, lend(key))
 }
 
 // Set deletes what it cannot keep: the library drops an entry over the limit
 // and leaves the previous value of its key where it was.
 func (s store) Set(key string, value []byte) {
 	if len(key)+len(value) > MaxEntry {
-		s.cache.Del(lend.Bytes(key))
+		s.cache.Del(lend(key))
 
 		return
 	}
 
-	s.cache.Set(lend.Bytes(key), value)
+	s.cache.Set(lend(key), value)
 }
 
-func (s store) Delete(key string) { s.cache.Del(lend.Bytes(key)) }
+func (s store) Delete(key string) { s.cache.Del(lend(key)) }
 func (s store) Reset()            { s.cache.Reset() }
 func (store) MaxEntry() int       { return MaxEntry }
 

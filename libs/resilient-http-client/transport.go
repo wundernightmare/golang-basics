@@ -1,6 +1,8 @@
 package resilient
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -19,7 +21,9 @@ import (
 // tracing agents wrap it — and New must not depend on what it holds. Proxy,
 // dialer, HTTP/2 and the TLS and 100-continue timeouts are set as net/http
 // sets them on its default transport (go1.27); the rest comes from cfg.
-func newTransport(cfg *Config) *http.Transport {
+// roots, when not nil, is the whole trust store (a target's ca_file): the
+// system's authorities are not consulted.
+func newTransport(cfg *Config, roots *x509.CertPool) *http.Transport {
 	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 
 	transport := &http.Transport{
@@ -35,6 +39,10 @@ func newTransport(cfg *Config) *http.Transport {
 		IdleConnTimeout:       cfg.IdleConnTimeout,
 		ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
 	}
+	if roots != nil {
+		transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	}
+
 	if cfg.HTTP2PingInterval > 0 {
 		transport.HTTP2 = &http.HTTP2Config{SendPingTimeout: cfg.HTTP2PingInterval, PingTimeout: cfg.HTTP2PingTimeout}
 	}

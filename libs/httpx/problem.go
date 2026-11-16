@@ -163,22 +163,29 @@ func fromRequest(p Problem, r *http.Request) Problem {
 // because the client went away is a 499 (nobody reads it, but the access log
 // and http_requests_total show the client left instead of counting a 5xx);
 // anything else is a 500 with err as the cause, so no error is ever swallowed
-// on the way to a generic response.
+// on the way to a generic response. A nil err is a 500 too, logged as the
+// caller's mistake.
 func WriteError(w http.ResponseWriter, r *http.Request, err error) {
-	var p Problem
+	var problem Problem
 	switch {
-	case errors.As(err, &p):
-	case asProblemPointer(err, &p):
+	case errors.As(err, &problem):
+	case asProblemPointer(err, &problem):
 	case errors.Is(err, context.DeadlineExceeded):
-		p = NewProblem(http.StatusGatewayTimeout, "the request took too long").WithCause(err)
+		problem = NewProblem(http.StatusGatewayTimeout, "the request took too long").WithCause(err)
 	case errors.Is(err, context.Canceled) && r != nil && errors.Is(r.Context().Err(), context.Canceled):
-		p = Problem{Status: statusClientClosedRequest, Title: "Client Closed Request", Detail: "the client went away"}.WithCause(err)
+		problem = Problem{Status: statusClientClosedRequest, Title: "Client Closed Request", Detail: "the client went away"}.WithCause(err)
+	case err == nil:
+		// The caller's bug, and a 500 all the same: without a cause the log
+		// line would say nothing about where to look.
+		problem = Internal("internal error", errNilError)
 	default:
-		p = Internal("internal error", err)
+		problem = Internal("internal error", err)
 	}
 
-	WriteProblem(w, r, p)
+	WriteProblem(w, r, problem)
 }
+
+var errNilError = errors.New("httpx: WriteError was called with a nil error")
 
 // asProblemPointer is errors.As for a *Problem: Problem's methods are on the
 // value, so a pointer to one is an error too, and one errors.As into a

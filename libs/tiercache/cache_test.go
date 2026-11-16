@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,13 +15,12 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
 	"github.com/wundernightmare/golang-basics/libs/tiercache"
-	"github.com/wundernightmare/golang-basics/libs/tiercache/offheap"
-	"github.com/wundernightmare/golang-basics/libs/tiercache/onheap"
 )
 
 func TestMain(m *testing.M) {
@@ -831,13 +828,13 @@ func TestNewRejectsWhatItCannotRunWith(t *testing.T) {
 	load := newSource().load
 	good := tiercache.Config{Name: "c", HardTTL: time.Minute}
 
-	_, err := tiercache.New(tiercache.Config{HardTTL: time.Minute}, offheap.New, rowCodec{}, load, nil, nil)
+	_, err := tiercache.New(tiercache.Config{HardTTL: time.Minute}, tiercache.NewMapStore, rowCodec{}, load, nil, nil)
 	require.ErrorContains(t, err, "Name")
 
-	_, err = tiercache.New[row](good, offheap.New, nil, load, nil, nil)
+	_, err = tiercache.New[row](good, tiercache.NewMapStore, nil, load, nil, nil)
 	require.ErrorContains(t, err, "store, codec and loader")
 
-	_, err = tiercache.New(good, offheap.New, rowCodec{}, nil, nil, nil)
+	_, err = tiercache.New(good, tiercache.NewMapStore, rowCodec{}, nil, nil, nil)
 	require.ErrorContains(t, err, "store, codec and loader")
 
 	_, err = tiercache.New(good, nil, rowCodec{}, load, nil, nil)
@@ -859,7 +856,7 @@ func TestTheStoreIsBuiltWithTheConfiguredCapacity(t *testing.T) {
 			func(maxBytes int) tiercache.Store {
 				asked = maxBytes
 
-				return onheap.New(maxBytes)
+				return tiercache.NewMapStore(maxBytes)
 			}, rowCodec{}, newSource().load, nil, nil)
 		require.NoError(t, err)
 		cache.Close()
@@ -868,34 +865,6 @@ func TestTheStoreIsBuiltWithTheConfiguredCapacity(t *testing.T) {
 	}
 
 	assert.Equal(t, 32<<20, tiercache.DefaultMaxBytes)
-}
-
-// Every test builds its caches on the off-heap store unless it says
-// otherwise. This runs them all once more on the heap store — the same
-// binary, with the suite's store set — so a rule of the cache that holds on
-// one store and not on the other fails here. (What a store itself owes is
-// storetest's, run by each provider.)
-//
-//nolint:paralleltest // serial: a second suite beside this one would have both wait on each other's CPU
-func TestTheSuiteHoldsOnTheHeapStore(t *testing.T) {
-	if onTheHeap() {
-		t.Skip("this is the second run")
-	}
-
-	args := []string{"-test.count=1", "-test.shuffle=on"}
-	if testing.Short() {
-		args = append(args, "-test.short")
-	}
-
-	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Minute)
-	defer cancel()
-
-	child := exec.CommandContext(ctx, os.Args[0], args...)
-
-	child.Env = append(os.Environ(), suiteStoreEnv+"=onheap")
-
-	out, err := child.CombinedOutput()
-	require.NoError(t, err, "on the heap store:\n%s", out)
 }
 
 // The budget of the hot path: a fresh read allocates what Decode returns —
@@ -921,7 +890,7 @@ func TestFreshReadAllocatesOnlyTheDecodedValue(t *testing.T) {
 	})
 	assert.InDelta(t, 3, allocs, 0, "one per string field")
 
-	counters, err := tiercache.New(tiercache.Config{Name: "allocs", HardTTL: time.Minute, MaxBytes: suiteBytes()}, suiteStore(), fixedCodec{},
+	counters, err := tiercache.New(tiercache.Config{Name: "allocs", HardTTL: time.Minute}, tiercache.NewMapStore, fixedCodec{},
 		func(context.Context, string) (uint64, error) { return 42, nil }, nil, nil)
 	require.NoError(t, err)
 	t.Cleanup(counters.Close)
@@ -936,7 +905,7 @@ func TestFreshReadAllocatesOnlyTheDecodedValue(t *testing.T) {
 	})
 	assert.Zero(t, allocs, "a value without pointers: nothing at all")
 
-	// A key is lent to L1, not copied: the longest one costs no more.
+	// A key reaches L1 as the string it is: the longest one costs no more.
 	long := strings.Repeat("k", tiercache.MaxKeyLen)
 
 	_, err = counters.Get(ctx, long)
@@ -1100,52 +1069,40 @@ func (fixedCodec) Decode(src []byte) (uint64, error) {
 	return v, nil
 }
 
-// Writing several times its capacity into L1 leaves it at its capacity, and
-// the most recent entries readable.
-func TestL1StaysWithinItsCapacity(t *testing.T) {
+// tiercache_l1_bytes is the store's own account of its memory, read at the
+// scrape.
+func TestTheL1GaugeReportsWhatTheStoreHolds(t *testing.T) {
 	t.Parallel()
 
-	const capacity = 32 << 20
+	var store tiercache.Store
 
-	src := newSource()
-	src.payload = 1000
+	src, key := newSource(), tiercache.KeyOf("a")
+	src.set(key, 1)
 
-	rig := newHarness(t, nil, src, func(cfg *tiercache.Config) { cfg.MaxBytes = capacity })
+	cfg := tiercache.Config{Name: "gauge", HardTTL: time.Minute}
+	cache, err := tiercache.New(cfg, func(maxBytes int) tiercache.Store {
+		store = tiercache.NewMapStore(maxBytes)
 
-	const entries = 100_000 // ≈ 110 MiB of envelopes
+		return store
+	}, rowCodec{}, src.load, nil, nil)
+	require.NoError(t, err)
+	t.Cleanup(cache.Close)
 
-	keys := make([]string, entries)
-	for i := range keys {
-		keys[i] = tiercache.KeyOf(fmt.Sprint("k", i))
-		src.set(keys[i], 1)
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(cache.Collectors()...)
 
-		_, err := rig.cache.Get(t.Context(), keys[i])
-		require.NoError(t, err)
-	}
+	_, err = cache.Get(t.Context(), key)
+	require.NoError(t, err)
 
-	held := rig.metric(t, "tiercache_l1_bytes", nil)
-	assert.LessOrEqual(t, held, float64(capacity))
-	assert.Greater(t, held, float64(capacity)*0.9, "and it is actually used")
-
-	loads := src.loads.Load()
-
-	for _, key := range keys[entries-1000:] {
-		require.Equal(t, record(key, 1, 1000).KeyEncrypted, func() string {
-			got, err := rig.cache.Get(t.Context(), key)
-			require.NoError(t, err)
-
-			return got.KeyEncrypted
-		}())
-	}
-
-	assert.Less(t, src.loads.Load()-loads, int64(50), "the newest entries are still in L1")
+	require.Positive(t, store.Bytes())
+	assert.InDelta(t, store.Bytes(), (&harness{reg: reg}).metric(t, "tiercache_l1_bytes", nil), 0)
 }
 
 func BenchmarkGetFresh(b *testing.B) {
 	src, key := newSource(), tiercache.KeyOf("a")
 	src.set(key, 1)
 
-	cache, err := tiercache.New(tiercache.Config{Name: "bench", HardTTL: time.Hour, MaxBytes: suiteBytes()}, suiteStore(), rowCodec{}, src.load, nil, nil)
+	cache, err := tiercache.New(tiercache.Config{Name: "bench", HardTTL: time.Hour}, tiercache.NewMapStore, rowCodec{}, src.load, nil, nil)
 	require.NoError(b, err)
 	b.Cleanup(cache.Close)
 
@@ -1342,14 +1299,18 @@ func TestTheBreakerCountsFailuresOfL2NotOfTheCallers(t *testing.T) {
 	}
 	inTime := func(ctx context.Context) context.Context { return ctx }
 
+	noBreaker := func(cfg *tiercache.Config) { cfg.Breaker.FailureRatio = 0 }
+
 	for name, tc := range map[string]struct {
 		caller   func(context.Context) context.Context
 		failure  error
+		tune     func(*tiercache.Config)
 		bypassed bool
 	}{
-		"callers that had gone away":         {caller: gone},
-		"callers whose deadline had passed":  {caller: late},
-		"L2 timing out on callers with time": {caller: inTime, failure: context.DeadlineExceeded, bypassed: true},
+		"callers that had gone away":          {caller: gone},
+		"callers whose deadline had passed":   {caller: late},
+		"L2 timing out on callers with time":  {caller: inTime, failure: context.DeadlineExceeded, bypassed: true},
+		"breaker.failure_ratio 0: no breaker": {caller: inTime, failure: context.DeadlineExceeded, tune: noBreaker},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -1357,7 +1318,7 @@ func TestTheBreakerCountsFailuresOfL2NotOfTheCallers(t *testing.T) {
 				var logged bytes.Buffer
 
 				remote, src := newFakeRemote(), newSource()
-				rig := newLoggedHarness(t, remote, src, nil, slog.New(slog.NewTextHandler(&logged, nil)))
+				rig := newLoggedHarness(t, remote, src, tc.tune, slog.New(slog.NewTextHandler(&logged, nil)))
 
 				synctest.Wait()
 				remote.fail(tc.failure)
@@ -1376,6 +1337,7 @@ func TestTheBreakerCountsFailuresOfL2NotOfTheCallers(t *testing.T) {
 				require.Equal(t, "v1", rig.version(t, "healthy"))
 
 				assert.Equal(t, tc.bypassed, rig.metric(t, "tiercache_l2_bypassed_total", nil) > 0)
+				assert.Equal(t, tc.bypassed, rig.metric(t, "tiercache_circuit_breaker_state", nil) == 1, "the gauge says open (1) for as long as L2 is skipped")
 				assert.Equal(t, tc.bypassed, strings.Contains(logged.String(), "L2 is failing"), "the breaker opening is what is logged")
 			})
 		})
@@ -1478,7 +1440,7 @@ func TestCloseEndsWhatIsInFlightAndWaitsForIt(t *testing.T) {
 
 		cache, err := tiercache.New(tiercache.Config{Name: "closing", SoftTTL: softTTL, HardTTL: hardTTL},
 			func(maxBytes int) tiercache.Store {
-				store = &resetCounter{Store: suiteStore()(maxBytes)}
+				store = &resetCounter{Store: tiercache.NewMapStore(maxBytes)}
 
 				return store
 			}, rowCodec{}, load, nil, nil)

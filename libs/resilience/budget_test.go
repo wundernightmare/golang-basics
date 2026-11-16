@@ -132,20 +132,27 @@ func TestRetryBudget_WindowSlides(t *testing.T) {
 func TestWindow_SumAndReset(t *testing.T) {
 	t.Parallel()
 
-	w := newWindow(time.Second)
 	now := time.Unix(100, 0)
-	w.add(now, 1, 2)
-	w.add(now.Add(500*time.Millisecond), 3, 4)
-	a, b := w.sum(now.Add(900 * time.Millisecond))
-	assert.Equal(t, [2]int{4, 6}, [2]int{a, b})
+	win := newWindow(time.Second, now)
+	win.add(now, 1, 2)
+	win.add(now.Add(500*time.Millisecond), 3, 4)
+	a, b := win.sum(now.Add(950 * time.Millisecond))
+	assert.Equal(t, [2]int{4, 6}, [2]int{a, b}, "a slot begins at its boundary: the add made on one is in for the whole window")
 
-	a, b = w.sum(now.Add(time.Second))
+	a, b = win.sum(now.Add(time.Second))
 	assert.Equal(t, [2]int{3, 4}, [2]int{a, b}, "the first slot slid out")
 
-	w.reset()
-	a, b = w.sum(now.Add(900 * time.Millisecond))
+	win.reset()
+	a, b = win.sum(now.Add(900 * time.Millisecond))
 	assert.Equal(t, [2]int{0, 0}, [2]int{a, b})
 
-	tiny := newWindow(time.Nanosecond)
+	win.add(now.Add(-50*time.Millisecond), 1, 1)
+	a, b = win.sum(now.Add(850 * time.Millisecond))
+	assert.Equal(t, [2]int{1, 1}, [2]int{a, b}, "an instant before the base has a slot like any other")
+
+	a, b = win.sum(now.Add(950 * time.Millisecond))
+	assert.Equal(t, [2]int{0, 0}, [2]int{a, b}, "and that slot slides out on time")
+
+	tiny := newWindow(time.Nanosecond, now)
 	assert.Equal(t, time.Duration(1), tiny.slot, "slots are at least 1ns")
 }

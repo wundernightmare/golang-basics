@@ -57,11 +57,11 @@ type account struct {
 func TestLogger_MasksPrivateDataInAttributes(t *testing.T) {
 	t.Parallel()
 
-	log, line := logged(t, httpx.LogConfig{RedactKeys: []string{"email", "Phone"}})
+	log, line := logged(t, httpx.LogConfig{RedactKeys: []string{"email", "Phone", "card"}})
 
 	secrets := []string{
 		"hunter2", "tok-9f8e7d", "dsn-pass", "url-pass", "q-secret", "err-pass", "bearer-abc", "sid=42", "map-pass",
-		"struct-pass", "grp-pass", "typed-pass", "list-pass", "under-pass", "composite-pass", "a@b.example", "+15550100", "hdr-key",
+		"struct-pass", "grp-pass", "typed-pass", "list-pass", "under-pass", "composite-pass", "a@b.example", "+15550100", "hdr-key", "4111111111111111",
 	}
 
 	log.Info("user signed in with password hunter (the message is the caller's business)",
@@ -69,6 +69,7 @@ func TestLogger_MasksPrivateDataInAttributes(t *testing.T) {
 		"api_key", "tok-9f8e7d",
 		"Email", "a@b.example",
 		"phone", "+15550100",
+		"card", 4111111111111111,
 		"api_keys", map[string]string{"primary": "composite-pass"},
 		"database", "host=db user=app password=dsn-pass sslmode=disable",
 		"upstream", "https://svc:url-pass@billing.internal/v1?token=q-secret&page=2",
@@ -98,6 +99,7 @@ func TestLogger_MasksPrivateDataInAttributes(t *testing.T) {
 	assert.Equal(t, "[redacted]", got["api_key"])
 	assert.Equal(t, "[redacted]", got["Email"], "a key from LOG_REDACT_KEYS, matched without regard to case")
 	assert.Equal(t, "[redacted]", got["phone"], "on either side")
+	assert.Equal(t, "[redacted]", got["card"], "a listed key hides a number too: the operator named the data, not its type")
 	assert.Equal(t, "[redacted]", got["api_keys"], "a composite value under a secret key is hidden whole")
 	assert.Equal(t, "host=db user=app password=[redacted] sslmode=disable", got["database"])
 	assert.Equal(t, "https://svc:xxxxx@billing.internal/v1?token=[redacted]&page=2", got["upstream"])

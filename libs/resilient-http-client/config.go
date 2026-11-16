@@ -16,7 +16,7 @@ import (
 //
 // Zero means what each field's comment says — usually "disabled" — and is
 // never silently replaced by a default. Start from [DefaultConfig] /
-// [DefaultTarget] (or use [LoadConfig], which overlays the YAML on those
+// [DefaultTarget] (or use [ParseYAML], which overlays the YAML on those
 // defaults) and change what differs.
 //
 // YAML example (every key optional except a target's name):
@@ -67,8 +67,9 @@ type Config struct {
 	// (default "" = Go's default).
 	UserAgent string `yaml:"user_agent"`
 
-	// Targets declares one policy set per logical target. A request names its
-	// target; an undeclared name is an error, never a lazily created policy.
+	// Targets declares one policy set per logical target; at least one is
+	// required. A request names its target; an undeclared name is an error,
+	// never a lazily created policy.
 	Targets []TargetConfig `yaml:"targets"`
 }
 
@@ -78,14 +79,25 @@ type TargetConfig struct {
 	// Required, unique.
 	Name string `yaml:"name"`
 
+	// CAFile is a PEM bundle that is the target's whole trust store: a server
+	// certificate must chain to it, and the system's authorities are not
+	// consulted (default "" = the system's). The file is read by [New], not
+	// re-read later. Targets with the same CAFile share one connection pool,
+	// apart from the pool of the others, so the pool limits of [Config] count
+	// per trust store. It does not combine with [WithHTTPClient].
+	CAFile string `yaml:"ca_file"`
+
 	// Timeout bounds one attempt, including the wait for the rate limiter and
-	// the bulkhead (default 5s; 0 = none — only the caller's context).
+	// the bulkhead (default 5s; 0 = none — only the caller's context, and
+	// with a context that has no deadline either, a request waits for a
+	// rate-limiter token for as long as it takes).
 	Timeout time.Duration `yaml:"timeout"`
 
 	// RateLimit is the sustained requests per second, fractions allowed
 	// (default 0 = no rate limit). It must be finite.
 	RateLimit float64 `yaml:"rate_limit"`
-	// RateBurst is the token-bucket depth (0 = max(1, ceil(RateLimit))).
+	// RateBurst is the token-bucket depth (0 = max(1, ceil(RateLimit)), at
+	// most MaxInt32).
 	RateBurst int `yaml:"rate_burst"`
 
 	// MaxConcurrent caps in-flight requests to the target — a bulkhead
@@ -153,12 +165,12 @@ func DefaultTarget(name string) TargetConfig {
 	}
 }
 
-// LoadConfig parses YAML over [DefaultConfig] (and each target over
+// ParseYAML parses YAML over [DefaultConfig] (and each target over
 // [DefaultTarget]), rejects unknown keys and validates the result.
-func LoadConfig(data []byte) (Config, error) {
+func ParseYAML(data []byte) (Config, error) {
 	c := DefaultConfig()
 	if err := strictDecode(data, &c); err != nil && !errors.Is(err, io.EOF) {
-		return Config{}, fmt.Errorf("resilient: parse config: %w", err)
+		return Config{}, fmt.Errorf("%w: parse: %w", ErrConfig, err)
 	}
 
 	if err := c.Validate(); err != nil {

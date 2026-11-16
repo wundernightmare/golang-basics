@@ -10,6 +10,7 @@ policy applies:
 | Concern | Implementation |
 | --- | --- |
 | Transport | its own `http.Transport`, set up as net/http sets up its default one (proxy from env, HTTP/2, dial/TLS timeouts) — never a clone of the `http.DefaultTransport` variable — + pool settings + HTTP/2 PING health check (`net/http`'s `HTTP2Config`, no `x/net`) |
+| TLS trust | the system's authorities, or per target a `ca_file` that is its whole trust store ([`libs/secret`](../secret) `CertPool`) |
 | Tracing | `otelhttp` transport: `traceparent` injected, client span `"METHOD target"`; its `url.full` is scheme, host and path |
 | Attempt timeout | per target; starts **before** the rate-limiter and bulkhead waits |
 | Rate limit | `golang.org/x/time/rate` token bucket (fractional rates) |
@@ -23,7 +24,7 @@ policy applies:
 ## Use
 
 ```go
-cfg, err := resilient.LoadConfig(yamlBytes) // or resilient.DefaultConfig("billing")
+cfg, err := resilient.ParseYAML(yamlBytes) // or resilient.DefaultConfig("billing")
 if err != nil { return err }
 c, err := resilient.New(cfg, resilient.WithLogger(log), resilient.WithRegisterer(prometheus.DefaultRegisterer))
 if err != nil { return err }
@@ -78,9 +79,12 @@ for the life of the process. A failed body is
 not retried (the response was already handed over), and
 `http_client_requests_total` keeps the outcome known at the headers (`2xx`).
 
-An **upgraded connection** (101 Switching Protocols, CONNECT) is such a body:
-it stays writable, and it is cut when the target's `timeout` expires — a
-breaker failure. A long-lived upgrade needs a target with `timeout: 0`.
+An **upgraded connection** (101 Switching Protocols) is the exception. Its
+body is the connection and stays writable; once the protocol has switched the
+attempt is over: the breaker hears a success and the target's `timeout` no
+longer applies. The connection lasts until the body is closed or the caller's
+context ends, and holds its bulkhead slot and its place in `Shutdown`'s wait
+that long.
 
 The body of an **error response** (≥ 400) is closed after its first 4 KiB are
 kept; reading off the rest to keep the connection is left to net/http.
@@ -104,7 +108,8 @@ HTTP-date), whichever is longer; a `Retry-After` above `retry_max_delay`, or a
 delay past the caller's deadline, ends the retries. The **retry budget** caps
 retries per target at `retry_budget_min_retries + retry_budget_ratio ×
 requests` over a sliding `retry_budget_window`, so an outage cannot multiply
-the load on the dependency.
+the load on the dependency. An error the budget refused to retry has
+`OutboundError.RetryBudgetExhausted` set — unlike one whose attempts ran out.
 
 **DNS** — the client has no DNS code: net/http resolves a name once per new
 connection, and what follows from that is tested against a real name server
@@ -134,10 +139,13 @@ client is idle.
 
 ## Configuration
 
-`LoadConfig` overlays the YAML on the defaults (`go.yaml.in/yaml/v3`, unknown
-keys rejected) and runs `Validate`. **Zero means disabled**, never "use the
+`ParseYAML` overlays the YAML on the defaults (`go.yaml.in/yaml/v3`, unknown
+keys rejected) and runs `Validate`; what either refuses matches
+`errors.Is(err, resilient.ErrConfig)`. **Zero means disabled**, never "use the
 default": an omitted key keeps its default, an explicit `0` turns the feature
 off. In code, start from `DefaultConfig(names...)` / `DefaultTarget(name)`.
+At least one target is required: `Validate`, and so `ParseYAML` and `New`,
+refuse a config without any.
 
 ```yaml
 max_idle_conns: 100              # 0 = unlimited
@@ -152,9 +160,10 @@ allow_cross_host_redirects: false
 user_agent: ""
 targets:
   - name: billing                # required, unique; the metric label
+    ca_file: ""                  # PEM bundle = the target's whole trust store; "" = the system's
     timeout: 5s                  # per attempt, waits included; 0 = none
     rate_limit: 0                # req/s, fractions ok, finite; 0 = off
-    rate_burst: 0                # 0 = max(1, ceil(rate_limit))
+    rate_burst: 0                # 0 = max(1, ceil(rate_limit)), at most MaxInt32
     max_concurrent: 0            # bulkhead; 0 = off
     max_concurrent_wait: 0s      # 0 = reject at once when full
     breaker:
@@ -171,7 +180,21 @@ targets:
     retry_budget_window: 10s     # 0 = no budget
 ```
 
-**In a service config.** A service does not call `LoadConfig`: it embeds
+**`ca_file`** — a server certificate must chain to the bundle; the system's
+authorities are not consulted for that target. `Validate` reads the file (a
+missing file, a damaged block or no certificate is a configuration error),
+`New` reads it once more and never again: a rotated bundle needs a restart.
+Targets naming the same file share a transport and its connection pool,
+separate from the others', so `max_idle_conns` and the per-host limits count
+per trust store. It does not combine with `WithHTTPClient` (`New` fails):
+there the trust is that client's. There is no key for a client certificate —
+mTLS goes through `WithHTTPClient`.
+
+**`rate_limit` with `timeout: 0`** — the wait for a token is bounded by the
+attempt timeout and the caller's context only. With neither, a request waits
+for as long as the bucket takes to refill.
+
+**In a service config.** A service does not call `ParseYAML`: it embeds
 `resilient.Config` under a key of its own config and loads everything with
 the workspace's one loader, `httpx.LoadYAML` (pinned by `integration/embed_test.go`):
 
@@ -191,7 +214,7 @@ the loader cannot supply them: without the preset an omitted key is zero —
 net/http's 2 idle connections per host, no health check. Targets default
 themselves either way. Two more things are the service's: call
 `cfg.HTTPClient.Validate()` in its own `Validate` (the loader parses, it does
-not validate), and keep per-environment values in that environment's file —
+not validate; a service that declared no target fails there), and keep per-environment values in that environment's file —
 the client's keys have no environment form.
 
 An undeclared target name is an error at `Send` — there is no lazily created
@@ -232,6 +255,13 @@ billing, err := resilient.New(billingCfg, resilient.WithRegisterer(
 search, err := resilient.New(searchCfg, resilient.WithRegisterer(
     prometheus.WrapRegistererWith(prometheus.Labels{"client": "search"}, reg)))
 ```
+
+**otelhttp's own metrics** — the tracing transport also records
+`http.client.request.duration` and `http.client.request.body.size` on the
+global OpenTelemetry `MeterProvider` (`otel.GetMeterProvider()`); the client
+has no option to point them elsewhere. They are not on the Prometheus
+registry and not part of `docs/METRICS.md`: with no meter provider installed
+they go nowhere, with one they are exported next to the series above.
 
 Logs (`WithLogger`), error texts and the span's `url.full` carry scheme, host
 and path only — never the query string or user info — and warnings are

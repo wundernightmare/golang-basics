@@ -11,7 +11,8 @@
 // Reading goes the other way through the same standard interface: a String
 // is an [encoding.TextUnmarshaler], which is what encoding/json, YAML,
 // caarlos0/env and flag.TextVar decode through; [DecodeHook] does the same
-// for mapstructure, and with it for viper.
+// for mapstructure, and with it for viper. Text that is itself a rendering
+// ("[redacted:1a2b3c4d]") is refused on all of them with [ErrDecode].
 //
 // "YAML" here is go.yaml.in/yaml/v3, the library the compat suite runs.
 // Rendering goes through MarshalText in any library that honours it; reading

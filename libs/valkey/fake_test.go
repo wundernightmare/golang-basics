@@ -239,6 +239,10 @@ func (s *fakeServer) set(key, value string, flags []string) string {
 			i++
 
 			ms, _ := strconv.Atoi(flags[i])
+			if ms <= 0 {
+				return "-ERR invalid expire time in 'set' command\r\n"
+			}
+
 			ttl = time.Duration(ms) * time.Millisecond
 		}
 	}

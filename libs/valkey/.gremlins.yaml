@@ -1,0 +1,42 @@
+# gremlins — mutation testing of the cache layer: config validation and its
+# translation for valkey-go, Aside (what is loaded, filled and logged), the
+# pool guard, the resubscription pause.
+#
+#   just mutate libs/valkey
+#
+# Run it through scripts/mutate.sh (`just mutate` and CI do), never bare: see
+# the script for why a bare `gremlins unleash` reports every mutant killed.
+# The oracle is the unit layer (`-short`): the tests here run against a RESP3
+# listener inside the test, the container-backed suite is a module of its own.
+#
+# Thresholds fail the run (exit 11) when the suite lets too many mutants live.
+# Efficacy = killed / (killed + lived); mutant coverage = mutants any test
+# reaches. Ratchet them up when the numbers improve, never down without a
+# reason in the commit message.
+#
+# Reading a run:
+#   - NOT COVERED is mostly a gremlins limitation, not untested code: Go's
+#     cover profile has no block for a `case` expression or a const. What is
+#     really outside the unit layer: the slot of a blocking Do (bounded.go),
+#     the pause before a resubscription (pubsub.go), Del's error path.
+#   - Known survivors — anything else is a gap:
+#       config.go   DialTimeout / OpTimeout / ConnWriteTimeout `< 0`
+#                                         (equivalent: validate runs after withDefaults,
+#                                          the zero never reaches the comparison)
+#       pubsub.go   attempt >= 5          (equivalent: 50ms << 5 is past the limit either way)
+#                   ctx.Err() != nil      (resubscription after a dropped connection needs a
+#                                          real server: integration, TestSubscribe*)
+#       valkey.go   applied.tp != nil     (spans: integration)
+#                   opt.TLSConfig != nil  (an attribute of the boot log line)
+#   - TIMED OUT is a kill: a mutated pool guard or subscription loop waits
+#     for a slot or a message that never comes.
+unleash:
+  workers: 4
+  timeout-coefficient: 8
+  output-statuses: lt # print only LIVED and TIMED OUT — the ones that matter
+  exclude-files:
+    - "doc\\.go$"
+    - "^integration/" # a module of its own: the container-backed suite
+  threshold:
+    efficacy: 88
+    mutant-coverage: 80

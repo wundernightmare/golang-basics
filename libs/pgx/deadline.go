@@ -2,7 +2,6 @@ package pgx
 
 import (
 	"context"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -18,28 +17,37 @@ func (db *DB) bound(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, db.opTimeout)
 }
 
-// bounded is a [Querier] that gives every call a deadline of its own. pgx
-// reads a result from the connection after the call that asked for it has
-// returned, under the context of that call — so the deadline is released by
-// the result, not by the call: when Rows are closed or exhausted, a Row is
+// conn is the [Querier] of [DB.Conn]. It gives every call the operation
+// deadline, when there is one, and counts the calls that fail before they
+// reach a connection (see [attempt]).
+//
+// pgx reads a result from the connection after the call that asked for it
+// has returned, under the context of that call — so the deadline is released
+// by the result, not by the call: when Rows are closed or exhausted, a Row is
 // scanned, BatchResults are closed. A result left unread holds its timer
 // until the deadline.
-type bounded struct {
-	q       Querier
-	timeout time.Duration
+type conn struct {
+	q  Querier
+	db *DB
 }
 
-func (b bounded) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	ctx, cancel := context.WithTimeout(ctx, b.timeout)
+func (c conn) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	ctx, cancel := c.db.bound(ctx)
 	defer cancel()
 
-	return b.q.Exec(ctx, sql, args...)
+	ctx, try := watch(ctx)
+	defer c.db.metrics.missed(try, queryOperation(ctx, sql))
+
+	return c.q.Exec(ctx, sql, args...)
 }
 
-func (b bounded) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	ctx, cancel := context.WithTimeout(ctx, b.timeout)
+func (c conn) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	ctx, cancel := c.db.bound(ctx)
+	ctx, try := watch(ctx)
 
-	rows, err := b.q.Query(ctx, sql, args...)
+	rows, err := c.q.Query(ctx, sql, args...)
+	c.db.metrics.missed(try, queryOperation(ctx, sql))
+
 	if err != nil {
 		cancel()
 
@@ -49,23 +57,37 @@ func (b bounded) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, 
 	return &boundedRows{Rows: rows, cancel: cancel}, nil
 }
 
-func (b bounded) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	ctx, cancel := context.WithTimeout(ctx, b.timeout)
+func (c conn) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	ctx, cancel := c.db.bound(ctx)
+	ctx, try := watch(ctx)
 
-	return boundedRow{row: b.q.QueryRow(ctx, sql, args...), cancel: cancel}
+	row := c.q.QueryRow(ctx, sql, args...)
+	c.db.metrics.missed(try, queryOperation(ctx, sql))
+
+	return boundedRow{row: row, cancel: cancel}
 }
 
-func (b bounded) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
-	ctx, cancel := context.WithTimeout(ctx, b.timeout)
+func (c conn) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
+	ctx, cancel := c.db.bound(ctx)
+	ctx, try := watch(ctx)
 
-	return &boundedBatch{BatchResults: b.q.SendBatch(ctx, batch), cancel: cancel}
+	results := c.q.SendBatch(ctx, batch)
+	// pgx does not trace a batch with nothing in it: that one is not a miss.
+	if batch.Len() > 0 {
+		c.db.metrics.missed(try, operation(ctx, "batch"))
+	}
+
+	return &boundedBatch{BatchResults: results, cancel: cancel}
 }
 
-func (b bounded) CopyFrom(ctx context.Context, table pgx.Identifier, columns []string, rows pgx.CopyFromSource) (int64, error) {
-	ctx, cancel := context.WithTimeout(ctx, b.timeout)
+func (c conn) CopyFrom(ctx context.Context, table pgx.Identifier, columns []string, rows pgx.CopyFromSource) (int64, error) {
+	ctx, cancel := c.db.bound(ctx)
 	defer cancel()
 
-	return b.q.CopyFrom(ctx, table, columns, rows)
+	ctx, try := watch(ctx)
+	defer c.db.metrics.missed(try, operation(ctx, "copy"))
+
+	return c.q.CopyFrom(ctx, table, columns, rows)
 }
 
 type boundedRows struct {

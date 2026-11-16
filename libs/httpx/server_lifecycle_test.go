@@ -335,7 +335,9 @@ func TestRun_GracefulShutdownSequence(t *testing.T) {
 	assert.NotNil(t, buf.Find(t, map[string]any{"msg": "servers stopped cleanly"}))
 
 	_, err = http.Get(api + "/ping") //nolint:bodyclose // expected to fail
-	assert.Error(t, err, "the listener is closed")
+	require.Error(t, err, "the listener is closed")
+
+	require.ErrorContains(t, srv.Run(t.Context()), "more than once", "a server runs once")
 }
 
 func TestRun_PortInUseIsReturned(t *testing.T) {

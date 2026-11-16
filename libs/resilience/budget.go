@@ -25,7 +25,8 @@ type RetryBudget struct {
 
 // NewRetryBudget builds a budget of minRetries + ratio × requests per
 // window; nil (no budget) when window is 0 or negative. now is the clock
-// (time.Now) and must not be nil. A ratio that is not a number grants no
+// (time.Now), must not be nil and is read once here: the window counts the
+// time elapsed since. A ratio that is not a number grants no
 // retries at all.
 func NewRetryBudget(ratio float64, minRetries int, window time.Duration, now func() time.Time) *RetryBudget {
 	if window <= 0 {
@@ -33,7 +34,7 @@ func NewRetryBudget(ratio float64, minRetries int, window time.Duration, now fun
 	}
 
 	return &RetryBudget{
-		w:          newWindow(window),
+		w:          newWindow(window, now()),
 		ratio:      ratio,
 		minRetries: minRetries,
 		now:        now,

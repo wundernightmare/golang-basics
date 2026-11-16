@@ -154,7 +154,7 @@ func TestCompactModeRunsOnce(t *testing.T) {
 	store, err := s3.New(context.Background(), s3.Config{
 		Bucket: bucket, Endpoint: back.store.Endpoint, Region: back.store.Region,
 		AccessKeyID: back.store.AccessKey, SecretAccessKey: secret.New(back.store.SecretKey),
-		UsePathStyle: true, Insecure: true, AutoCreateBucket: true,
+		Insecure: true, AutoCreateBucket: true,
 	}, nil)
 	require.NoError(t, err)
 	t.Cleanup(store.Close)

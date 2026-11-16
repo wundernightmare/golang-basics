@@ -247,10 +247,17 @@ const (
 	defaultMaxPollIntervalMs      = 300_000
 )
 
+// ErrConfig is in every error a config is refused with: by
+// [Config.Validate], by [LoadConfig] / [LoadConfigFrom] (a value that does
+// not parse included) and by [NewProducer] / [NewConsumer] before they build
+// a client. A client that could not be built or reach the brokers is not
+// one.
+var ErrConfig = errors.New("kafka: invalid config")
+
 // LoadConfig parses a [Config] from the environment using the given key prefix
 // (use "" for no prefix) and validates it. Every field but KAFKA_BROKERS is
 // defaulted; when KAFKA_TOPICS is unset the consumer subscribes to the single
-// Topic.
+// Topic. An error wraps [ErrConfig].
 func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, nil) }
 
 // LoadConfigFrom is [LoadConfig] reading environ instead of the process
@@ -259,11 +266,11 @@ func LoadConfig(prefix string) (Config, error) { return LoadConfigFrom(prefix, n
 func LoadConfigFrom(prefix string, environ map[string]string) (Config, error) {
 	var cfg Config
 	if err := env.ParseWithOptions(&cfg, env.Options{Prefix: prefix, Environment: environ}); err != nil {
-		return Config{}, fmt.Errorf("kafka: parse config (prefix %q): %w", prefix, err)
+		return Config{}, fmt.Errorf("%w (prefix %q): parse: %w", ErrConfig, prefix, err)
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return Config{}, fmt.Errorf("kafka: config (prefix %q): %w", prefix, err)
+	if err := cfg.validate(); err != nil {
+		return Config{}, fmt.Errorf("%w (prefix %q): %w", ErrConfig, prefix, err)
 	}
 
 	return cfg, nil
@@ -331,8 +338,19 @@ func setDuration(d *time.Duration, def time.Duration) {
 // half a client key pair, inconsistent buffer bounds, a dead-letter topic the
 // consumer would read back — and whatever the linked provider refuses (see
 // [Driver.Validate]: a value outside its client's range, extra properties).
-// A binary that links no provider checks only the neutral part.
+// A binary that links no provider checks only the neutral part. The error
+// wraps [ErrConfig].
 func (c *Config) Validate() error {
+	if err := c.validate(); err != nil {
+		return fmt.Errorf("%w: %w", ErrConfig, err)
+	}
+
+	return nil
+}
+
+// validate is [Config.Validate] without the [ErrConfig] wrap, for the
+// callers that put their own context between the two.
+func (c *Config) validate() error {
 	c.withDefaults()
 
 	var errs []error

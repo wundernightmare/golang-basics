@@ -1,0 +1,43 @@
+# gremlins — mutation testing of what in libs/pgx is logic and needs no
+# database: what Config resolves to and refuses (config.go), the operation
+# label and the count of calls that got no connection (metrics.go,
+# deadline.go), the migration file names (LoadMigrations), the isolation
+# order and the retry decision of the unit of work (tx.go).
+#
+#   just mutate libs/pgx
+#
+# Run it through scripts/mutate.sh (`just mutate` and CI do), never bare: see
+# the script for why a bare `gremlins unleash` reports every mutant killed.
+# The oracle is the unit layer (`-short`): it runs against a pool that is
+# closed and a server that accepts and never answers. What needs a real
+# PostgreSQL — the migration runner, commit and rollback, the session
+# timeouts read back — is proven by libs/pgx/integration, and its mutants
+# here are NOT COVERED, which is what the mutant-coverage threshold allows
+# for.
+#
+# Known survivors, equivalent:
+#   config.go   MinConns > 0                  (>= 0 assigns the zero it has)
+#   metrics.go  statementKeyword: nl < 0      (a "--" comment never has its
+#               line break at 0), end < 0 (a statement that starts with a
+#               non-letter is "other" either way), r > 'z' and r > 'Z' (no
+#               keyword of the allowlist has a z)
+#   migrate.go  the sort's <                  (versions are unique)
+# Known survivors a database kills (libs/pgx/integration):
+#   deadline.go batch.Len() > 0               (an empty batch on a live pool)
+#   pgx.go      the nil logger and the tracer provider of New, the "pool
+#               exhausted" branch of ReadyCheck
+#   tx.go       the retry loop of InTx
+#
+# Thresholds fail the run (exit 11) when the suite lets too many mutants live.
+# Efficacy = killed / (killed + lived); mutant coverage = mutants any test
+# reaches. Ratchet them up when the numbers improve, never down without a
+# reason in the commit message.
+unleash:
+  workers: 4
+  timeout-coefficient: 8
+  output-statuses: lt # print only LIVED and TIMED OUT — the ones that matter
+  exclude-files:
+    - "doc\\.go$"
+  threshold:
+    efficacy: 80
+    mutant-coverage: 65

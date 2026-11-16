@@ -39,7 +39,8 @@ type Producer struct {
 // NewProducer builds a producer from cfg with the linked provider (see
 // [Driver]) and verifies broker connectivity (so a misconfigured broker or
 // credential fails fast at boot; [WithLazyConnect] skips the check). The
-// caller owns it and must call [Producer.Close].
+// caller owns it and must call [Producer.Close]. A refused cfg is an error
+// wrapping [ErrConfig].
 func NewProducer(ctx context.Context, cfg Config, log *slog.Logger, opts ...Option) (*Producer, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -50,8 +51,8 @@ func NewProducer(ctx context.Context, cfg Config, log *slog.Logger, opts ...Opti
 		return nil, err
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("kafka: producer config: %w", err)
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("%w (producer): %w", ErrConfig, err)
 	}
 
 	client, err := drv.NewProducer(cfg, log)

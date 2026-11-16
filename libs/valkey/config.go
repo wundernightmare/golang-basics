@@ -27,7 +27,8 @@ import (
 //     the discrete fields are ignored.
 //  2. The discrete Addr/Username/Password/DB fields.
 //
-// TLS and CAFile apply to both.
+// TLS, CAFile and the client certificate apply to both. One server only: a URL
+// that names several (addr=) or a sentinel (master_set=) is a config error.
 //
 // Keys (with the "TASKS_" prefix as an example):
 //
@@ -38,6 +39,8 @@ import (
 //	TASKS_VALKEY_DB            [db]            logical database number                    (default 0)
 //	TASKS_VALKEY_TLS           [tls]           connect over TLS                           (default false)
 //	TASKS_VALKEY_CA_FILE       [ca_file]       PEM bundle that signs the server's cert    (default "": system roots)
+//	TASKS_VALKEY_CERT_FILE     [cert_file]     client certificate (PEM), mTLS             (default "")
+//	TASKS_VALKEY_KEY_FILE      [key_file]      its private key (PEM)                      (default "")
 //	TASKS_VALKEY_DIAL_TIMEOUT  [dial_timeout]  connection dial timeout                    (default "5s")
 //	TASKS_VALKEY_OP_TIMEOUT    [op_timeout]    per-command deadline                       (default "500ms")
 //
@@ -63,7 +66,13 @@ type Config struct {
 	// CAFile is the trust store of the TLS connection — it replaces the
 	// system roots, it does not add to them. Set without TLS (the flag or a
 	// TLS scheme in the URL) it is a config error, not an ignored key.
-	CAFile      string        `env:"VALKEY_CA_FILE" yaml:"ca_file"`
+	CAFile string `env:"VALKEY_CA_FILE" yaml:"ca_file"`
+	// CertFile and KeyFile are the certificate (PEM, the chain after it) and
+	// the private key the client presents to a server that asks for one
+	// (mTLS). Both or neither, and only with TLS on. They are read when the
+	// client is built: a rotated pair reaches the server after a restart.
+	CertFile    string        `env:"VALKEY_CERT_FILE" secret:"false" yaml:"cert_file"`
+	KeyFile     string        `env:"VALKEY_KEY_FILE" secret:"false" yaml:"key_file"`
 	DialTimeout time.Duration `env:"VALKEY_DIAL_TIMEOUT" envDefault:"5s" yaml:"dial_timeout"`
 	// OpTimeout bounds every command [Cache] sends through its own methods
 	// (the readiness PING and a subscription aside, see [Cache]). Without it a cache that
@@ -157,7 +166,7 @@ func (c Config) withDefaults() Config {
 
 // Validate reports why [New] would reject the Config without dialling, or
 // nil: everything New checks before it connects is checked here, the URL and
-// the CA file (which is read) included. A Config without an address is
+// the TLS files (which are read) included. A Config without an address is
 // rejected like any other — a service that treats the cache as optional asks
 // [Config.Configured] first.
 func (c Config) Validate() error {
@@ -170,24 +179,39 @@ func (c Config) Validate() error {
 // pool size means "1024" to it, a multiplex above its limit is an error only
 // at connect, and a negative duration means "off".
 func (c Config) validate() error {
-	switch {
-	case c.DB < 0:
+	if c.DB < 0 {
 		return fmt.Errorf("%w: db must not be negative, got %d", ErrConfig, c.DB)
-	case c.DialTimeout < 0:
+	}
+
+	if c.DialTimeout < 0 {
 		return fmt.Errorf("%w: dial_timeout must be positive, got %s", ErrConfig, c.DialTimeout)
-	case c.OpTimeout < 0:
+	}
+
+	if c.OpTimeout < 0 {
 		return fmt.Errorf("%w: op_timeout must be positive, got %s", ErrConfig, c.OpTimeout)
-	case c.PipelineConns < 1 || c.PipelineConns > maxPipelineConns || bits.OnesCount(uint(c.PipelineConns)) != 1:
+	}
+
+	if c.PipelineConns < 1 || c.PipelineConns > maxPipelineConns || bits.OnesCount(uint(c.PipelineConns)) != 1 {
 		return fmt.Errorf("%w: pipeline_conns must be a power of two from 1 to %d, got %d", ErrConfig, maxPipelineConns, c.PipelineConns)
-	case c.PoolSize < 1:
+	}
+
+	if c.PoolSize < 1 {
 		return fmt.Errorf("%w: pool_size must be positive, got %d", ErrConfig, c.PoolSize)
-	case c.PoolMinIdle < 0 || c.PoolMinIdle > c.PoolSize:
+	}
+
+	if c.PoolMinIdle < 0 || c.PoolMinIdle > c.PoolSize {
 		return fmt.Errorf("%w: pool_min_idle must be between 0 and pool_size (%d), got %d", ErrConfig, c.PoolSize, c.PoolMinIdle)
-	case c.PoolIdleTimeout < 0:
+	}
+
+	if c.PoolIdleTimeout < 0 {
 		return fmt.Errorf("%w: pool_idle_timeout must not be negative, got %s", ErrConfig, c.PoolIdleTimeout)
-	case c.ConnWriteTimeout < 0:
+	}
+
+	if c.ConnWriteTimeout < 0 {
 		return fmt.Errorf("%w: conn_write_timeout must be positive, got %s", ErrConfig, c.ConnWriteTimeout)
-	case c.ConnLifetime < 0:
+	}
+
+	if c.ConnLifetime < 0 {
 		return fmt.Errorf("%w: conn_lifetime must not be negative, got %s", ErrConfig, c.ConnLifetime)
 	}
 
@@ -251,6 +275,14 @@ func (c Config) clientOption() (valkeygo.ClientOption, error) {
 			return valkeygo.ClientOption{}, fmt.Errorf("%w: url is not usable: want valkey[s]://[user:password@]host:port[/db] "+
 				"with the special characters of the password percent-encoded (the parser's message is withheld: it quotes the URL)", ErrConfig)
 		}
+
+		// The library builds another kind of client from either — a cluster
+		// client from several addresses, a sentinel one from master_set —
+		// and nothing of this package is tested against those.
+		if len(opt.InitAddress) != 1 || opt.Sentinel.MasterSet != "" {
+			return valkeygo.ClientOption{}, fmt.Errorf("%w: url must name one server: several addresses (addr=, a cluster) "+
+				"and master_set (a sentinel) are not supported", ErrConfig)
+		}
 	}
 
 	if c.TLS && opt.TLSConfig == nil {
@@ -269,6 +301,23 @@ func (c Config) clientOption() (valkeygo.ClientOption, error) {
 		}
 
 		opt.TLSConfig.RootCAs = pool
+	}
+
+	if c.CertFile != "" || c.KeyFile != "" {
+		if c.CertFile == "" || c.KeyFile == "" {
+			return valkeygo.ClientOption{}, fmt.Errorf("%w: cert_file and key_file must be set together", ErrConfig)
+		}
+
+		if opt.TLSConfig == nil {
+			return valkeygo.ClientOption{}, fmt.Errorf("%w: cert_file is set but TLS is off: set tls or use a valkeys:// URL", ErrConfig)
+		}
+
+		pair, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+		if err != nil {
+			return valkeygo.ClientOption{}, fmt.Errorf("%w: cert_file / key_file: %w", ErrConfig, err)
+		}
+
+		opt.TLSConfig.Certificates = []tls.Certificate{pair}
 	}
 
 	opt.Dialer.Timeout = c.DialTimeout

@@ -102,7 +102,7 @@ type IngestConfig struct {
 
 // validateBreaker requires a sink's breaker and checks its policy.
 func validateBreaker(b resilience.BreakerConfig) error {
-	if b.FailureRatio <= 0 {
+	if !b.Enabled() {
 		return errors.New("failure_ratio must be in (0, 1]")
 	}
 

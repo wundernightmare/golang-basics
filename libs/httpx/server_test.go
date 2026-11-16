@@ -44,6 +44,7 @@ func TestNewServer_RejectsInvalidConfig(t *testing.T) {
 	log := httpx.NewLogger(httpx.LogConfig{Level: "error", Format: "text", Writer: io.Discard})
 	_, err := httpx.NewServer(httpx.Config{Addr: ":0", LogLevel: "verbos"}, log)
 	require.ErrorContains(t, err, "LOG_LEVEL")
+	require.ErrorIs(t, err, httpx.ErrConfig)
 
 	_, err = httpx.NewServer(httpx.Config{Addr: ":0", AdminAddr: ":9080"}, log)
 	require.ErrorContains(t, err, "ADMIN_TOKEN is empty", "an open admin surface on a routable address is rejected")
@@ -147,6 +148,18 @@ func TestBodyLimit_And_DecodeJSON(t *testing.T) {
 
 	rec = do(srv.Handler(), httptest.NewRequest(http.MethodPost, "/items", strings.NewReader(`{"title":"`+strings.Repeat("x", 100)+`"}`)))
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "MaxBodyBytes is 64")
+
+	// The service's own middleware reads under the same limit: a signature
+	// check that buffers the body is the first reader, not the handler.
+	var readErr error
+
+	srv = newTestServer(t, &testx.LogBuffer{}, httpx.WithMiddleware(func(http.Handler) http.Handler {
+		return http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { _, readErr = io.ReadAll(r.Body) })
+	}))
+	do(srv.Handler(), httptest.NewRequest(http.MethodPost, "/items", strings.NewReader(strings.Repeat("x", 100))))
+
+	var tooLarge *http.MaxBytesError
+	require.ErrorAs(t, readErr, &tooLarge)
 }
 
 func TestWriteError_LogsTheCauseOfA500(t *testing.T) {

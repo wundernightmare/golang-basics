@@ -95,7 +95,10 @@ func runIngest(ctx, bootCtx context.Context, cfg config.Config, srv *httpx.Serve
 	srv.Health.Register("s3", store.ReadyCheck(), httpx.Optional())
 
 	// The breaker policies were validated with the configuration.
-	archiveBreaker := breakers.breaker(cfg.Ingest.ArchiveBreaker, sinkArchive, logger)
+	archiveBreaker, err := breakers.breaker(cfg.Ingest.ArchiveBreaker, sinkArchive, logger)
+	if err != nil {
+		return err
+	}
 
 	writerID, err := archive.NewWriterID()
 	if err != nil {
@@ -137,7 +140,10 @@ func runIngest(ctx, bootCtx context.Context, cfg config.Config, srv *httpx.Serve
 		// pipeline, and before the store and the telemetry (deferred in Run).
 		defer producer.Close()
 
-		kafkaBreaker = breakers.breaker(cfg.Ingest.KafkaBreaker, sinkKafka, logger)
+		kafkaBreaker, err = breakers.breaker(cfg.Ingest.KafkaBreaker, sinkKafka, logger)
+		if err != nil {
+			return err
+		}
 
 		srv.Health.Register("kafka", producer.ReadyCheck(), httpx.Optional())
 		registry.MustRegister(producer.Collectors()...)
@@ -266,21 +272,25 @@ func newBreakerMetrics(reg prometheus.Registerer) *breakerMetrics {
 // breaker builds a sink's circuit breaker with its transition hook: the
 // gauge, the counter and a log line that is never sampled away — a sink
 // going down or coming back is the event an operator reads the log for.
-func (m *breakerMetrics) breaker(cfg resilience.BreakerConfig, sink string, log *slog.Logger) *resilience.Breaker {
+func (m *breakerMetrics) breaker(cfg resilience.BreakerConfig, sink string, log *slog.Logger) (*resilience.Breaker, error) {
 	var breaker *resilience.Breaker
 
 	set := func(s resilience.State) { m.state.WithLabelValues(sink).Set(float64(s)) }
 
-	breaker = resilience.NewBreaker(cfg, time.Now, func(from, to resilience.State) {
+	breaker, err := resilience.NewBreaker(cfg, time.Now, func(from, to resilience.State) {
 		m.transitions.WithLabelValues(sink, to.String()).Inc()
 		// Mirror, not `to`: hooks of concurrent transitions may run out of
 		// order, and the gauge must end on the latest state.
 		breaker.Mirror(set)
 		log.Warn("sink circuit breaker changed state", "sink", sink, "from", from.String(), "to", to.String())
 	})
+	if err != nil {
+		return nil, err
+	}
+
 	breaker.Mirror(set)
 
-	return breaker
+	return breaker, nil
 }
 
 // reportIntegrations says whether this process publishes to Kafka: a log

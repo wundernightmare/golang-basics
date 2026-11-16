@@ -78,6 +78,7 @@ func TestAsideReplacesACorruptEntry(t *testing.T) {
 
 	raw, _ := server.get("k")
 	assert.JSONEq(t, `{"id":7,"name":""}`, raw, "the entry was overwritten")
+	assert.Empty(t, warnings(t, logs, "valkey: cache write failed"), "a fill that went through is not a failure")
 
 	w, hit, err = valkey.Aside(t.Context(), cache, "k", time.Minute, loadWidget(widget{ID: 8}))
 	require.NoError(t, err)
@@ -249,7 +250,7 @@ func TestAsideReturnsItsOwnLoadsTimeout(t *testing.T) {
 func TestAsideSpreadsTheTTL(t *testing.T) {
 	t.Parallel()
 
-	cache, server, _ := fakeCache(t, valkey.Config{})
+	cache, server, logs := fakeCache(t, valkey.Config{})
 	seen := map[time.Duration]bool{}
 
 	for _, key := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
@@ -263,4 +264,5 @@ func TestAsideSpreadsTheTTL(t *testing.T) {
 	}
 
 	assert.Greater(t, len(seen), 1, "eight fills, more than one TTL")
+	assert.Empty(t, warnings(t, logs, "valkey: cache write failed"), "a fill that went through is not a failure")
 }

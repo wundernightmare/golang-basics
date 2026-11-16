@@ -16,7 +16,7 @@ grpc-go has no answer for:
 | Retry amplification | gRPC service config `retryThrottling` (token bucket per connection) |
 | Load balancing | `round_robin` (default) or `pick_first` |
 | Dead connections | gRPC keepalive pings — off by default, see below |
-| Transport | TLS with the system roots unless `insecure: true`; other credentials via `WithDialOptions` |
+| Transport | TLS unless `insecure: true`, trusting the system roots or the target's `ca_file`; other credentials (mTLS) via `WithDialOptions` |
 | Circuit breaker | **added**: [`libs/resilience`](../resilience), the one the HTTP client uses, as an interceptor |
 | Metrics | **added**: Prometheus under the workspace contract, on your registerer or a private registry |
 | Tracing | `otelgrpc` stats handler: `traceparent` injected, a client span per attempt |
@@ -24,7 +24,7 @@ grpc-go has no answer for:
 ## Use
 
 ```go
-cfg, err := grpcx.LoadConfig(yamlBytes)
+cfg, err := grpcx.ParseYAML(yamlBytes)
 if err != nil { return err }
 c, err := grpcx.New(cfg, grpcx.WithLogger(log), grpcx.WithRegisterer(srv.Metrics.Registry))
 if err != nil { return err }
@@ -67,7 +67,9 @@ Every other status means the dependency answered (`NotFound`,
 caller walked away — is ignored. An error that is not a gRPC status reads as
 `Unknown`: a failure. Half-open, generations and probes are
 [`libs/resilience`](../resilience)'s; a call that panics (an interceptor or a
-codec of yours) is recorded as a failure, so a probe never keeps its slot.
+codec of yours) is recorded as a failure, so a probe never keeps its slot, and
+counted with `outcome="unknown"` — it ended with no status. The panic itself
+goes on to the caller.
 
 **Your interceptors** (`WithDialOptions`) — one added with
 `grpc.WithChainUnaryInterceptor` / `WithChainStreamInterceptor` runs
@@ -91,7 +93,11 @@ slot. gRPC retries a stream only until the server's first message.
 `timeout` is the deadline of the **whole stream**, not of a message: a stream
 meant to stay open, or a reader slower than the timeout, needs `timeout: 0`
 on its target (or its own deadline) — otherwise it is cut mid-way with
-`DeadlineExceeded` and the breaker counts a failure.
+`DeadlineExceeded` and the breaker counts a failure. That failure is reported
+by the stream's next `RecvMsg`, not when the deadline passes: gRPC ends the
+stream at once, but a caller that is not reading then (and has not cancelled
+its context) leaves the call out of the breaker and the metrics until it
+reads again.
 
 **Retries** — only the codes in `retry_codes` (default `UNAVAILABLE`), at
 most 5 attempts (grpc-go's own cap; a larger value is rejected, not clamped).
@@ -165,8 +171,9 @@ registerer given with `WithRegisterer`, so a new client can be built on it.
 
 ## Configuration
 
-`LoadConfig` overlays each target on the defaults (`go.yaml.in/yaml/v3`,
-unknown keys rejected) and runs `Validate`. **Zero means disabled**, never
+`ParseYAML` overlays each target on the defaults (`go.yaml.in/yaml/v3`,
+unknown keys rejected) and runs `Validate`; what either refuses matches
+`errors.Is(err, grpcx.ErrConfig)`. **Zero means disabled**, never
 "use the default": an omitted key keeps its default, an explicit `0` turns the
 feature off. In code, start from `DefaultTarget(name, address)`.
 
@@ -175,6 +182,7 @@ targets:
   - name: billing                      # required, unique; the metric label
     address: dns:///billing.internal:443   # required: a gRPC target URI, or host:port
     insecure: false                    # true = plaintext
+    ca_file: ""                        # PEM bundle to trust instead of the system roots
     timeout: 5s                        # whole call, retries included; 0 = only the caller's deadline
     wait_for_ready: false              # true = queue calls while the connection is down; needs a timeout
     load_balancing: round_robin        # or pick_first
@@ -204,7 +212,16 @@ followed by `//` is otherwise taken as it is: its resolver may come with
 `grpc.WithResolvers`, which a config cannot see — so a misspelt scheme with
 three slashes still passes.
 
-**In a service config.** A service does not call `LoadConfig`: it embeds
+**`ca_file`** — the target's trust store
+([`secret.CertPool`](../secret), the rule every client of this repository
+follows): the certificates in the file **replace** the system roots, they are
+not added to them. `Validate` reads the file — a missing or damaged bundle
+stops the service at start, not at the first handshake — and rejects
+`ca_file` together with `insecure: true`. `New` reads it once more and keeps
+the pool: a rotated file is picked up by a restart. A client certificate
+still goes through `WithDialOptions`, whose credentials replace these.
+
+**In a service config.** A service does not call `ParseYAML`: it embeds
 `grpcx.Config` under a key of its own config and loads everything with the
 workspace's one loader, `httpx.LoadYAML` (pinned by
 [`integration/embed_test.go`](integration/embed_test.go) — there, so that

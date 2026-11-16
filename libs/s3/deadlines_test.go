@@ -169,8 +169,8 @@ func TestFailedCallIsRetriedWithinTheBackoffCap(t *testing.T) {
 	assert.Less(t, time.Since(start), 500*time.Millisecond)
 }
 
-// A caller whose context has ended does not wait behind another client's
-// Ensure of the same bucket.
+// Clients of one bucket check it one at a time, and a caller whose context
+// has ended does not wait for its turn.
 func TestEnsureGivesUpWaitingWithItsContext(t *testing.T) {
 	t.Parallel()
 
@@ -185,7 +185,7 @@ func TestEnsureGivesUpWaitingWithItsContext(t *testing.T) {
 		<-release
 	})
 
-	first, second := store.client(t), store.client(t)
+	first, second, third := store.client(t), store.client(t), store.client(t)
 
 	var wg sync.WaitGroup
 
@@ -206,4 +206,8 @@ func TestEnsureGivesUpWaitingWithItsContext(t *testing.T) {
 	case <-time.After(long / 3):
 		require.Fail(t, "Ensure waited for the other client with a cancelled context")
 	}
+
+	wg.Go(func() { _ = third.Ensure(context.Background()) })
+	time.Sleep(short)
+	assert.Equal(t, 1, store.calls("head_bucket"), "the store is not asked for the bucket while another client's check of it runs")
 }

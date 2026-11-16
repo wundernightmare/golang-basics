@@ -101,8 +101,9 @@ README; this file is only the high-signal, easy-to-miss bits.
   missing the workspace-resolved entries, builds fine and is invisible until
   this check — run `just tidy` after any `go get` and commit the result.
 - **Observability is opt-in.** `docker/observability.yml` (Jaeger +
-  VictoriaMetrics + Grafana) is the receiving end; `otelx` installs only
-  propagators and a no-op provider unless `*_OTEL_ENABLED=true`, so no code path
+  VictoriaMetrics + Grafana) is the receiving end; unless `*_OTEL_ENABLED=true`, `otelx`
+  installs only the propagators — the global tracer provider is left as it
+  was, the one `Init` returns is a no-op — so no code path
   requires a collector. Export is OTLP over **HTTP** (`:4318`) and **TLS by
   default**: a local collector needs `*_OTEL_EXPORTER_OTLP_INSECURE=true`.
   Metrics are Prometheus-only (scraped from the admin port); there is no OTel
@@ -144,6 +145,7 @@ README; this file is only the high-signal, easy-to-miss bits.
   address unless `*_ADMIN_INSECURE=true` (local compose / e2e set it). Kafka
   has `*_KAFKA_SECURITY_PROTOCOL` / `*_KAFKA_SASL_*` / `*_KAFKA_SSL_*`; auto
   topic creation is off unless `*_KAFKA_ALLOW_AUTO_TOPIC_CREATION=true`.
+  pgx has no default account: `DB_USER` and a password, or `DATABASE_URL`.
   Never hard-code `Insecure: true` in a service — it comes from config.
 - **Kafka has two providers behind one API.** `libs/kafka` is pure Go (API,
   config, commit/retry/DLQ policy, metrics); `libs/kafka-rdkafka`
@@ -158,7 +160,9 @@ README; this file is only the high-signal, easy-to-miss bits.
   rdkafka provider (and `go test -race` anywhere) needs cgo / gcc.
 - **The L1 of `libs/tiercache` is a contract with two stores behind it.**
   `tiercache.Store` says what a cache relies on; `tiercache/offheap`
-  (fastcache) and `tiercache/onheap` (freecache) implement it, and a service
+  (fastcache) and `tiercache/onheap` (freecache) implement it — each a module
+  of its own, so `libs/tiercache`'s `go.mod` has neither library and its own
+  tests run on a map — and a service
   names one in `tiercache.New` — nothing picks a store by size. A rule a
   cache needs from its store goes into the contract and into
   `tiercache/storetest`, which both run and which must fail a store that
@@ -202,8 +206,8 @@ README; this file is only the high-signal, easy-to-miss bits.
   port + 1000, workers have only this one). Never register ops routes on the
   API mux, and point probes / scrapes / e2e health waits at the admin port.
 - **Tracing is built into the httpx chain** (request id → debug token →
-  tracing → access log → metrics → recovery → the server's rate limit → your
-  `WithMiddleware` extras → recovery → body limit → routing; the order of
+  tracing → access log → metrics → recovery → body limit → the server's rate limit → your
+  `WithMiddleware` extras → recovery → routing; the order of
   record is the `httpx.NewServer` doc; a 401/429 from your authenticator is still traced,
   logged and counted). Do not add a tracing middleware; `otelx.Init` installs
   the provider and propagators, httpx starts the server span. The otelx
@@ -218,7 +222,15 @@ README; this file is only the high-signal, easy-to-miss bits.
   `kafka.Config.SASLSecret`, the one place both providers take it from),
   `secret.CertPool` for a CA bundle. A CA file *is* the trust store, never an
   addition to the system roots — the same in Kafka (both providers), S3,
-  Valkey and OTLP (pgx, grpcx and the HTTP client have no CA key). No `os.ReadFile` + trim, no `x509.NewCertPool` in a client.
+  Valkey, OTLP, pgx (`DB_CA_FILE`) and a target's `ca_file` in grpcx and the
+  HTTP client. No `os.ReadFile` + trim, no `x509.NewCertPool` in a client.
+- **A config key that is renamed is refused, not forgotten.** The lib's
+  `Config` names it in `RetiredKeys()` (old key → what to set instead; pgx, s3
+  and otelx have one); its `LoadConfig` and `httpx.LoadYAML` then fail on an
+  environment that still sets it. A service calls nothing for this.
+- **A configuration error matches the library's `ErrConfig`** with
+  `errors.Is` (httpx, pgx, valkey, kafka, s3, otelx, tiercache, grpcx, the
+  HTTP client) — tests and callers compare with it, never with the text.
 - **httpx defaults are written once, in the `envDefault` tags**: a hand-built
   `httpx.Config` gets them from there (`withDefaults`); a field whose zero is
   a setting of its own is listed in `keepsZero`, and for every other field a
@@ -326,8 +338,10 @@ README; this file is only the high-signal, easy-to-miss bits.
   `^libs/…` exclude and override in `.testcoverage.yml` matches nothing.
 - **Mutation testing is scoped**: `just mutate <module>` runs gremlins on the
   modules with a `.gremlins.yaml` (`libs/resilient-http-client`, `libs/grpcx`,
-  `libs/resilience`, `libs/httpx`, `libs/tiercache`, `libs/tiercache/credential`, `libs/secret`, `libs/otelx`
-  (the sampler and the retroactive buffer); each file
+  `libs/resilience`, `libs/httpx`, `libs/tiercache`, `libs/tiercache/credential`,
+  `libs/tiercache/offheap`, `libs/tiercache/onheap`, `libs/secret`, `libs/otelx`
+  (the sampler and the retroactive buffer), `libs/pgx` and `libs/valkey` (what
+  their unit layer holds: config, deadlines, `Aside`); each file
   says what it excludes and which survivors are known equivalents) with
   thresholds that fail the run. The oracle is the unit layer (`-short`). Always through `scripts/mutate.sh`, never a bare `gremlins
   unleash`: gremlins tests a copy of the module outside the workspace, and a
@@ -343,9 +357,8 @@ README; this file is only the high-signal, easy-to-miss bits.
   fall-through, a timeout) gets a chaos test with `containers.Proxied`
   (or `containers.Pause` for Kafka, which a proxy cannot front), and restores the dependency on cleanup.
   Every outbound call must carry its own deadline (`VALKEY_OP_TIMEOUT`,
-  `KAFKA_PUBLISH_TIMEOUT`, `S3_OP_TIMEOUT`, the readiness check timeout; for
-  Postgres `DB_OP_TIMEOUT` is off by default and the server-side
-  `DB_STATEMENT_TIMEOUT` is the bound) — a request context
+  `KAFKA_PUBLISH_TIMEOUT`, `S3_OP_TIMEOUT`, `DB_OP_TIMEOUT` for calls through
+  `db.Conn` / `db.InTx`, the readiness check timeout) — a request context
   is not a deadline.
 - **Schemathesis owns "bad input → 4xx"**: do not hand-write validation
   tests for what the schema already says (`minLength`, documented responses);

@@ -2,6 +2,7 @@ package resilient_test
 
 import (
 	"context"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
@@ -9,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,6 +92,15 @@ func get(t *testing.T, ctx context.Context, url string) *http.Request {
 func metric(t *testing.T, c *resilient.Client, name string, labels map[string]string) float64 {
 	t.Helper()
 	return testx.Metric(t, c.Registry(), name, labels)
+}
+
+func outbound(t *testing.T, err error) *resilient.OutboundError {
+	t.Helper()
+
+	oe, ok := errors.AsType[*resilient.OutboundError](err)
+	require.True(t, ok, "%v", err)
+
+	return oe
 }
 
 func status(code int) http.HandlerFunc {
@@ -253,6 +265,9 @@ func TestNew_RejectsInvalidConfigAndDuplicateRegistration(t *testing.T) {
 	_, err := resilient.New(resilient.Config{Targets: []resilient.TargetConfig{{Name: ""}}})
 	require.Error(t, err)
 
+	_, err = resilient.New(resilient.DefaultConfig())
+	require.ErrorContains(t, err, "at least one", "a client with no target can send nothing")
+
 	reg := prometheus.NewRegistry()
 	c, err := resilient.New(resilient.DefaultConfig("a"), resilient.WithRegisterer(reg))
 	require.NoError(t, err)
@@ -284,6 +299,48 @@ func TestNew_DoesNotReadTheDefaultTransport(t *testing.T) { //nolint:paralleltes
 	client, err := resilient.New(resilient.DefaultConfig("api"))
 	require.NoError(t, err)
 	require.NoError(t, client.Shutdown(t.Context()))
+}
+
+// A target's ca_file is its whole trust store, on the client's own transport.
+func TestSend_ATargetsCAFileIsItsTrustStore(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewTLSServer(status(http.StatusNoContent))
+	t.Cleanup(srv.Close)
+
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	require.NoError(t, os.WriteFile(caFile,
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600))
+
+	cfg := resilient.DefaultConfig("system", "pinned")
+	cfg.Targets[1].CAFile = caFile
+
+	_, err := resilient.New(cfg, resilient.WithHTTPClient(srv.Client()))
+	require.ErrorContains(t, err, "WithHTTPClient", "the caller's client has a trust store of its own")
+
+	c, err := resilient.New(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, c.Shutdown(context.WithoutCancel(t.Context()))) })
+
+	resp, err := c.Send("pinned", get(t, t.Context(), srv.URL))
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	_, err = c.Send("system", get(t, t.Context(), srv.URL))
+	require.ErrorIs(t, err, resilient.KindConnection, "the file is one target's trust, not the client's")
+}
+
+// rate_burst 0 derives the burst from the rate; a rate beyond the range of
+// int must still give a bucket that lets requests through.
+func TestSend_AHugeRateLimitStillAdmits(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := server(t, status(http.StatusNoContent))
+	c := newClient(t, target(func(tc *resilient.TargetConfig) { tc.RateLimit = 1e300 }))
+
+	resp, err := c.Send("api", get(t, t.Context(), srv.URL))
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
 }
 
 func TestSend_StatusErrorKeepsBodyAndRetryAfter(t *testing.T) {
@@ -448,6 +505,7 @@ func TestSendWithRetry_NonIdempotentNeedsKey(t *testing.T) {
 	_, err = client.SendWithRetry("api", post("k-1"))
 	require.ErrorIs(t, err, resilient.KindStatus)
 	assert.Equal(t, int32(4), hits.Load(), "with a key: 3 attempts")
+	assert.False(t, outbound(t, err).RetryBudgetExhausted, "the attempts ran out, not the budget")
 	assert.Equal(t, []string{"payload", "payload", "payload", "payload"}, bodies, "the body is replayed via GetBody")
 
 	req := post("k-2")
@@ -471,6 +529,7 @@ func TestSendWithRetry_BudgetBoundsAmplification(t *testing.T) {
 	for range 10 {
 		_, err := c.SendWithRetry("api", get(t, t.Context(), srv.URL))
 		require.ErrorIs(t, err, resilient.KindStatus)
+		assert.True(t, outbound(t, err).RetryBudgetExhausted)
 	}
 	// 10 requests → 2 + 0.1×10 = 3 retries at most, instead of 40.
 	assert.Equal(t, int32(13), hits.Load())
@@ -781,9 +840,13 @@ func TestSend_BodyReadOrClosedEarlyIsABreakerSuccess(t *testing.T) {
 	assert.Equal(t, resilient.StateClosed, st)
 }
 
-// A 101 response's body is the connection: it must stay writable.
-func TestSend_UpgradedBodyStaysWritable(t *testing.T) {
+// A 101 response's body is the connection: it stays writable, and once the
+// protocol has switched the attempt is over — the target's timeout no longer
+// applies to it and the breaker has heard a success.
+func TestSend_UpgradedConnectionOutlivesTheAttemptTimeout(t *testing.T) {
 	t.Parallel()
+
+	const timeout = 50 * time.Millisecond
 
 	srv, _ := server(t, func(w http.ResponseWriter, _ *http.Request) {
 		conn, rw, err := http.NewResponseController(w).Hijack()
@@ -800,13 +863,16 @@ func TestSend_UpgradedBodyStaysWritable(t *testing.T) {
 		_, _ = rw.WriteString(line)
 		_ = rw.Flush()
 	})
-	c := newClient(t, target(nil))
+	client := newClient(t, target(func(tc *resilient.TargetConfig) {
+		tc.Timeout = timeout
+		tc.Breaker.MinRequests = 1 // one failure would open it
+	}))
 
 	req := get(t, t.Context(), srv.URL)
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "echo")
 
-	resp, err := c.Send("api", req)
+	resp, err := client.Send("api", req)
 	require.NoError(t, err)
 
 	defer func() { _ = resp.Body.Close() }()
@@ -816,13 +882,18 @@ func TestSend_UpgradedBodyStaysWritable(t *testing.T) {
 	rw, ok := resp.Body.(io.ReadWriter)
 	require.True(t, ok, "the upgraded body must be an io.Writer")
 
+	time.Sleep(3 * timeout)
+
 	_, err = io.WriteString(rw, "ping\n")
 	require.NoError(t, err)
 
 	echo := make([]byte, 5)
 	_, err = io.ReadFull(rw, echo)
-	require.NoError(t, err)
+	require.NoError(t, err, "the connection is still there after the target's timeout")
 	assert.Equal(t, "ping\n", string(echo))
+
+	st, _ := client.BreakerState("api")
+	assert.Equal(t, resilient.StateClosed, st)
 }
 
 func TestSend_4xxDoesNotTripBreaker(t *testing.T) {

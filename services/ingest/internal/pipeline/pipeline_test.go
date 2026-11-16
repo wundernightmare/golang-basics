@@ -39,9 +39,10 @@ type options struct {
 func breaker(t *testing.T) *resilience.Breaker {
 	t.Helper()
 
-	brk := resilience.NewBreaker(resilience.BreakerConfig{
+	brk, err := resilience.NewBreaker(resilience.BreakerConfig{
 		FailureRatio: 0.5, MinRequests: 2, Window: time.Minute, OpenTimeout: 50 * time.Millisecond, HalfOpenProbes: 1,
 	}, time.Now, nil)
+	require.NoError(t, err)
 
 	return brk
 }

@@ -55,9 +55,9 @@ type Config struct {
 	// is the default (16); a negative value turns retroactive sampling off.
 	BufferMiB int `env:"BUFFER_MIB" envDefault:"16" yaml:"buffer_mib"`
 	// TriggersPerSecond is the traces triggered a second at most; the
-	// triggers above it are refused. Zero is the default (50); under a
-	// negative value every trigger is refused, with the buffer still
-	// allocated and filled.
+	// triggers above it are refused. Zero is the default (50). otelx's
+	// Config.Validate refuses a negative value; [New] given one refuses
+	// every trigger, with the buffer still allocated and filled.
 	TriggersPerSecond int `env:"TRIGGERS_PER_SECOND" envDefault:"50" yaml:"triggers_per_second"`
 }
 
