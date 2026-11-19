@@ -2,6 +2,7 @@ package otelx
 
 import (
 	"encoding/binary"
+	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- random trace sampling is not cryptographic
 	"math/rand/v2"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
