@@ -62,7 +62,7 @@ func saslSSLConfig(t *testing.T) kafka.Config {
 		Group: testx.Unique("sasl-ssl"), ClientID: testx.Unique("sasl-ssl"),
 		SecurityProtocol: "sasl_ssl", SASLMechanism: mechanism,
 		SASLUsername: username, SASLPasswordFile: passwordFile, SSLCALocation: caFile,
-		AutoOffsetReset: "latest", AllowAutoTopicCreation: true,
+		AutoOffsetReset: "earliest", AllowAutoTopicCreation: true,
 		RetryBackoff: 10 * time.Millisecond, RetryBackoffMax: 50 * time.Millisecond,
 	}
 }
@@ -87,7 +87,10 @@ func SASLSSL(t *testing.T) {
 	defer producer.Close()
 
 	want := testx.Unique("sasl-ssl-record")
-	got := make(chan string, 16)
+	got := make(chan string, 1)
+
+	require.NoError(t, producer.Send(t.Context(), kafka.Message{Value: []byte(want)}))
+
 	c, err := kafka.NewConsumer(t.Context(), cfg, nil)
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -102,24 +105,10 @@ func SASLSSL(t *testing.T) {
 
 	defer func() { cancel(); assert.NoError(t, <-done, "Run returns nil once ctx is cancelled") }()
 
-	// The consumer starts at the end: keep sending until it has joined and
-	// sees one.
-	deadline := time.After(60 * time.Second)
-
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
-
-	for {
-		require.NoError(t, producer.Send(t.Context(), kafka.Message{Value: []byte(want)}))
-
-		select {
-		case v := <-got:
-			if v == want {
-				return
-			}
-		case <-tick.C:
-		case <-deadline:
-			t.Fatal("no record came back through the SASL_SSL listener")
-		}
+	select {
+	case v := <-got:
+		require.Equal(t, want, v)
+	case <-time.After(60 * time.Second):
+		t.Fatal("no record came back through the SASL_SSL listener")
 	}
 }
