@@ -153,7 +153,7 @@ func TestTLS_TheServerRefusesTheClient(t *testing.T) {
 		assert.InDelta(t, 3, requests(t, anonymous, "connection"), 0)
 
 		identified := trusting()
-		identified.Certificates = []tls.Certificate{certs.client}
+		identified.Certificates = []tls.Certificate{certs.Client}
 		assert.Equal(t, "HTTP/2.0", whoami(t, over(t, policy(nil), identified), "https://"+srv.MTLS).Proto,
 			"the suite's client certificate is accepted")
 	})

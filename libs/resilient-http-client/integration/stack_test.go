@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -14,7 +13,10 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
+	tcredpanda "github.com/testcontainers/testcontainers-go/modules/redpanda"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/wundernightmare/golang-basics/libs/testx"
 	"github.com/wundernightmare/golang-basics/libs/testx/containers"
@@ -23,10 +25,7 @@ import (
 // Images of the suite's own fixtures (Postgres and Toxiproxy come from
 // libs/testx/containers). testcontainers prefixes them with
 // TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX in a closed network.
-const (
-	caddyImage    = "caddy:2.10.2"
-	redpandaImage = "redpandadata/redpanda:v26.2.3"
-)
+const caddyImage = "caddy:2.10.2"
 
 // Ports inside the edge (Caddy) container.
 const (
@@ -38,11 +37,8 @@ const (
 	edgeExpired = "8446/tcp" // serves an expired certificate
 )
 
-// Ports inside the Redpanda container.
-const (
-	pandaProxy = "8082/tcp" // HTTP Proxy (REST produce / fetch)
-	pandaAdmin = "9644/tcp" // admin API
-)
+// Port inside the Redpanda container used for proxied HTTP requests.
+const pandaProxy = "8082/tcp"
 
 // blobSize is the size of /files/blob: large enough to outlast a socket
 // buffer, so a cut or a throttle lands in the middle of the body.
@@ -53,37 +49,32 @@ type edge struct {
 	Plain, TLS, QUIC, TLS13, MTLS, Expired string
 }
 
-// panda is where the suite reaches Redpanda's HTTP APIs, as "host:port".
+// panda is where the suite reaches Redpanda's HTTP Proxy and Kafka API.
 type panda struct {
-	Proxy, Admin string
+	Proxy, Kafka string
 }
 
 // redpanda starts the suite's Redpanda: a real, stateful HTTP API (the HTTP
 // Proxy) whose answers show what the client really sent — how many times a
-// produce request arrived is how many records the topic holds.
+// produce request arrived is how many records the topic holds. The module
+// renders the mapped Kafka port into advertised_kafka_api for topic creation.
 func redpanda(tb testing.TB) panda {
 	tb.Helper()
 
 	return containers.Fixture(tb, "redpanda", func(ctx context.Context) (panda, testcontainers.Container, error) {
-		ctr, err := testcontainers.Run(ctx, redpandaImage,
-			testcontainers.WithExposedPorts(pandaProxy, pandaAdmin),
-			testcontainers.WithCmd("redpanda", "start",
-				"--mode", "dev-container", "--smp", "1", "--memory", "1G", "--overprovisioned",
-				"--kafka-addr", "0.0.0.0:9092", "--advertise-kafka-addr", "127.0.0.1:9092",
-				"--pandaproxy-addr", "0.0.0.0:8082", "--advertise-pandaproxy-addr", "127.0.0.1:8082",
-				"--rpc-addr", "0.0.0.0:33145", "--advertise-rpc-addr", "127.0.0.1:33145"),
-			testcontainers.WithWaitStrategy(wait.ForAll(
-				wait.ForHTTP("/v1/status/ready").WithPort(pandaAdmin),
-				wait.ForHTTP("/brokers").WithPort(pandaProxy),
-			).WithStartupTimeoutDefault(90*time.Second)))
+		ctr, err := tcredpanda.Run(ctx, containers.RedpandaImage)
 		if err != nil {
 			return panda{}, ctr, err
 		}
 
-		return panda{
-			Proxy: "localhost:" + containers.HostPort(tb, ctr, pandaProxy),
-			Admin: "localhost:" + containers.HostPort(tb, ctr, pandaAdmin),
-		}, ctr, nil
+		proxy, err := ctr.HTTPProxyAddress(ctx)
+		if err != nil {
+			return panda{}, ctr, err
+		}
+
+		kafka, err := ctr.KafkaSeedBroker(ctx)
+
+		return panda{Proxy: strings.TrimPrefix(proxy, "http://"), Kafka: kafka}, ctr, err
 	})
 }
 
@@ -214,11 +205,11 @@ func web(tb testing.TB) edge {
 			testcontainers.WithExposedPorts(edgePlain, edgeTLS, edgeQUIC, edgeTLS13, edgeMTLS, edgeExpired),
 			testcontainers.WithFiles(
 				file("/etc/caddy/Caddyfile", []byte(caddyfile("host.docker.internal:"+pandaPort))),
-				file("/certs/ca.crt", certs.caPEM),
-				file("/certs/server.crt", certs.serverCert),
-				file("/certs/server.key", certs.serverKey),
-				file("/certs/expired.crt", certs.expiredCert),
-				file("/certs/expired.key", certs.expiredKey),
+				file("/certs/ca.crt", certs.CA),
+				file("/certs/server.crt", certs.ServerCert),
+				file("/certs/server.key", certs.ServerKey),
+				file("/certs/expired.crt", certs.ExpiredCert),
+				file("/certs/expired.key", certs.ExpiredKey),
 				file("/srv/blob", blob),
 			),
 			testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) {
@@ -250,14 +241,16 @@ const (
 func topic(tb testing.TB) string {
 	tb.Helper()
 
-	redpanda(tb)
+	rp := redpanda(tb)
 
 	name := testx.Unique("it")
-	code, out, err := containers.FixtureContainer(tb, "redpanda").Exec(tb.Context(), []string{"rpk", "topic", "create", name})
+	client, err := kgo.NewClient(kgo.SeedBrokers(rp.Kafka))
 	require.NoError(tb, err)
 
-	logs, _ := io.ReadAll(out)
-	require.Zerof(tb, code, "rpk topic create %s: %s", name, logs)
+	defer client.Close()
+
+	_, err = kadm.NewClient(client).CreateTopic(tb.Context(), 1, 1, nil, name)
+	require.NoError(tb, err)
 
 	return name
 }

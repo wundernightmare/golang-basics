@@ -17,10 +17,13 @@ require (
 	github.com/quic-go/quic-go v0.65.0
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.45.0
+	github.com/testcontainers/testcontainers-go/modules/redpanda v0.45.0
 	github.com/wundernightmare/golang-basics/libs/httpx v0.0.0-00010101000000-000000000000
 	github.com/wundernightmare/golang-basics/libs/resilient-http-client v0.0.0-00010101000000-000000000000
 	github.com/wundernightmare/golang-basics/libs/testx v0.0.0
 	github.com/wundernightmare/golang-basics/libs/testx/containers v0.0.0-00010101000000-000000000000
+	github.com/twmb/franz-go v1.22.3
+	github.com/twmb/franz-go/pkg/kadm v1.20.0
 )
 
 require (
@@ -61,6 +64,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
+	github.com/pierrec/lz4/v4 v4.1.33 // indirect
 	github.com/power-devops/perfstat v0.0.0-20260805114148-88456608a4f6 // indirect
 	github.com/prometheus/client_golang v1.25.0 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
@@ -77,6 +81,7 @@ require (
 	github.com/tklauser/numcpus v0.12.0 // indirect
 	github.com/wundernightmare/golang-basics/libs/resilience v0.0.0 // indirect
 	github.com/wundernightmare/golang-basics/libs/secret v0.0.0 // indirect
+	github.com/twmb/franz-go/pkg/kmsg v1.15.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0 // indirect

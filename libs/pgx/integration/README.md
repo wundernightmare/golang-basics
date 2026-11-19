@@ -21,6 +21,7 @@ About 20 seconds. Skipped under `-short` and without Docker; **failed** when
 | Container | Image | Role |
 | --- | --- | --- |
 | postgres | `postgres:18-alpine` (shared, `libs/testx/containers`) | the database; every test owns a schema |
+| postgres-tls | same, a separate fixture | `verify-full` against a per-run CA and server certificate |
 | pgbouncer | built from `testdata/pgbouncer/Dockerfile` (1.24), twice: stock and tuned | the pooler in front of it, session and transaction pooling |
 | toxiproxy | `ghcr.io/shopify/toxiproxy` (shared) | cuts, delays and black-holes the connection to Postgres |
 
@@ -32,6 +33,7 @@ About 20 seconds. Skipped under `-short` and without Docker; **failed** when
 | `tx_test.go` | the unit of work: commit, rollback, nesting, savepoints, `AfterCommit`, retries on real serialization failures and deadlocks |
 | `tx_chaos_test.go` | the unit of work when the connection is lost, the reply to `COMMIT` is lost, the link is slow |
 | `pgbouncer_test.go` | the table of `pgx`'s README "Behind PgBouncer", setting by setting |
+| `tls_test.go` | `DB_CA_FILE` and `sslmode=verify-full` against a real TLS listener, and rejection without that CA |
 
 What needs no database — configuration, labels, client-side deadlines against
 a server that never answers — is in `pgx`'s own unit tests.

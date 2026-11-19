@@ -26,6 +26,7 @@ const (
 	PostgresImage = "postgres:18-alpine"
 	ValkeyImage   = "valkey/valkey:9.0"
 	KafkaImage    = "confluentinc/confluent-local:7.5.0"
+	RedpandaImage = "redpandadata/redpanda:v26.2.3"
 	// RustFSImage is the S3-compatible object store (Apache-2.0, a single
 	// static binary): what the S3 fixtures run instead of AWS.
 	RustFSImage = "rustfs/rustfs:1.0.5"

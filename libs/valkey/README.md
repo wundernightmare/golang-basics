@@ -191,5 +191,5 @@ file and a client certificate — against a RESP3 listener inside the test (`fak
 What only Valkey can answer is in [`integration/`](integration) (a module of
 its own, so that testcontainers and the Docker client stay out of this
 `go.mod`): round trips and TTLs, `SET NX` vs tombstones, `IFEQ`, Pub/Sub and
-resubscription, what the server sees of the pool, spans and metrics, the
-outage cases through Toxiproxy.
+resubscription, what the server sees of the pool, spans and metrics, mTLS with
+the configured CA and client key pair, and the outage cases through Toxiproxy.

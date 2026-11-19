@@ -215,7 +215,7 @@ func breakerState(tb testing.TB, client *resilient.Client) resilient.BreakerStat
 // the tests build themselves.
 func trusting() *tls.Config {
 	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(certs.caPEM)
+	pool.AppendCertsFromPEM(certs.CA)
 
 	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 }
