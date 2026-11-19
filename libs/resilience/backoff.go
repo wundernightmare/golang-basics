@@ -1,6 +1,7 @@
 package resilience
 
 import (
+	// nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- retry jitter does not need cryptographic randomness
 	"math/rand/v2"
 	"time"
 )

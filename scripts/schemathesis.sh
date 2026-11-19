@@ -54,7 +54,8 @@ log "start $svc on :$port (admin :$admin)"
 # are on by their addresses) and may create its topic on the broker.
 deps=()
 if [ "$svc" = tasks ]; then
-  deps=("TASKS_VALKEY_URL=${TASKS_VALKEY_URL:-valkey://localhost:6379}"
+  deps=("TASKS_DATABASE_URL=${TASKS_DATABASE_URL:-postgres://app:app@localhost:5432/app?sslmode=disable}"
+        "TASKS_VALKEY_URL=${TASKS_VALKEY_URL:-valkey://localhost:6379}"
         "TASKS_KAFKA_BROKERS=${TASKS_KAFKA_BROKERS:-localhost:9092}"
         "TASKS_KAFKA_ALLOW_AUTO_TOPIC_CREATION=${KAFKA_ALLOW_AUTO_TOPIC_CREATION:-true}")
 fi
