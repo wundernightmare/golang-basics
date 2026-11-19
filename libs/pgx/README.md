@@ -320,8 +320,9 @@ connection counted as a failed query, two pools on one registry.
 `just mutate libs/pgx` runs gremlins over that layer (`.gremlins.yaml`).
 
 Everything that needs a database is the module next door,
-[`integration/`](integration) — container-backed (one Postgres per test
-binary, a fresh schema per test via `search_path`), skipped under `-short`:
+[`integration/`](integration) — container-backed (a shared Postgres plus a
+dedicated TLS fixture, a fresh schema per test via `search_path`), skipped
+under `-short`:
 migration runner (fresh / re-run / concurrent runners / a runner outwaiting
 the session timeouts / failing file), session timeouts applied and enforced,
 password file re-read, spans and metrics, promlint, an exhausted pool; the
@@ -334,3 +335,5 @@ two pools kept apart — and its chaos tests through Toxiproxy in front of the
 same Postgres: the connection lost mid-unit, the reply to `COMMIT` lost, a
 deadline on a slow link. `pgbouncer_test.go` there runs the library behind
 PgBouncer in both pooling modes — see [Behind PgBouncer](#behind-pgbouncer).
+`tls_test.go` verifies a real Postgres certificate with `DB_CA_FILE` under
+`sslmode=verify-full` and rejects the same server without that trust store.

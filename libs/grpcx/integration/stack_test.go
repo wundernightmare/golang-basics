@@ -129,11 +129,11 @@ func jaeger(tb testing.TB) tracing {
 			testcontainers.WithCmd("--config", "/etc/jaeger/config.yaml"),
 			testcontainers.WithFiles(
 				file("/etc/jaeger/config.yaml", []byte(jaegerConfig)),
-				file("/certs/ca.crt", certs.caPEM),
-				file("/certs/server.crt", certs.serverCert),
-				file("/certs/server.key", certs.serverKey),
-				file("/certs/expired.crt", certs.expiredCert),
-				file("/certs/expired.key", certs.expiredKey),
+				file("/certs/ca.crt", certs.CA),
+				file("/certs/server.crt", certs.ServerCert),
+				file("/certs/server.key", certs.ServerKey),
+				file("/certs/expired.crt", certs.ExpiredCert),
+				file("/certs/expired.key", certs.ExpiredKey),
 			),
 			testcontainers.WithWaitStrategy(wait.ForAll(
 				wait.ForHTTP("/status").WithPort(healthHTTP).WithStatusCodeMatcher(func(code int) bool { return code == 200 }),
@@ -230,8 +230,8 @@ func httpGateway(tb testing.TB) gateway {
 			testcontainers.WithExposedPorts(gatewayPlain, gatewayTLS),
 			testcontainers.WithFiles(
 				file("/etc/caddy/Caddyfile", []byte(gatewayConfig)),
-				file("/certs/server.crt", certs.serverCert),
-				file("/certs/server.key", certs.serverKey),
+				file("/certs/server.crt", certs.ServerCert),
+				file("/certs/server.key", certs.ServerKey),
 			),
 			testcontainers.WithWaitStrategy(wait.ForListeningPort(gatewayPlain).WithStartupTimeout(60*time.Second)))
 		if err != nil {

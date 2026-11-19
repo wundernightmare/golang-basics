@@ -10,7 +10,7 @@ import (
 )
 
 // certs is the suite's PKI, created before any test (and any TLS handshake).
-var certs *pki
+var certs *containers.PKI
 
 // TestMain issues the certificates and makes the suite's CA the process's
 // system trust store. SSL_CERT_FILE is read once, at the first certificate
@@ -24,7 +24,7 @@ func TestMain(m *testing.M) {
 
 func run(m *testing.M) int {
 	var err error
-	if certs, err = newPKI(); err != nil {
+	if certs, err = containers.NewPKI(); err != nil {
 		fmt.Fprintln(os.Stderr, "integration: pki:", err)
 
 		return 1
@@ -40,7 +40,7 @@ func run(m *testing.M) int {
 	defer func() { _ = os.RemoveAll(dir) }()
 
 	caFile := filepath.Join(dir, "ca.pem")
-	if err := os.WriteFile(caFile, certs.caPEM, 0o600); err != nil {
+	if err := os.WriteFile(caFile, certs.CA, 0o600); err != nil {
 		fmt.Fprintln(os.Stderr, "integration: write ca:", err)
 
 		return 1

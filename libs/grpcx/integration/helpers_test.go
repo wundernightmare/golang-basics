@@ -82,7 +82,7 @@ func dial(tb testing.TB, tc grpcx.TargetConfig, opts ...grpcx.Option) (*grpcx.Cl
 // what the library's default credentials cannot express.
 func trusting(mut func(*tls.Config)) grpcx.Option {
 	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(certs.caPEM)
+	pool.AppendCertsFromPEM(certs.CA)
 
 	cfg := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	if mut != nil {

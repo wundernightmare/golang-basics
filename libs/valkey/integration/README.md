@@ -1,8 +1,9 @@
 # valkey integration suite
 
-`libs/valkey` against a real Valkey (`libs/testx/containers.Valkey`). A module
-of its own so that testcontainers, the Docker client and Toxiproxy stay out
-of the `go.mod` of `libs/valkey`.
+`libs/valkey` against a real Valkey: the shared plaintext server from
+`libs/testx/containers.Valkey` and a dedicated fixture that requires a client
+certificate. A module of its own so that testcontainers, the Docker client and
+Toxiproxy stay out of the `go.mod` of `libs/valkey`.
 
 It owns what only a real server can say:
 
@@ -15,6 +16,8 @@ It owns what only a real server can say:
   footprint, the `pool_size` bound, recycling by `conn_lifetime`, a silent
   connection dropped after `conn_write_timeout`;
 - spans and metrics of real commands; a server that refuses connections;
+- a TLS server that trusts only the generated CA and requires the configured
+  client certificate;
 - the two valkey-go defects the library works around
   (`docs/UPSTREAM-WORKAROUNDS.md`).
 

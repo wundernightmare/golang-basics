@@ -43,7 +43,7 @@ func TestExport_ArrivesOverEveryTransport(t *testing.T) {
 		{name: "TLS 1.3 only server", addr: srv.TLS13},
 		{
 			name: "mutual TLS", addr: srv.MTLS,
-			opts: []grpcx.Option{trusting(func(c *tls.Config) { c.Certificates = []tls.Certificate{certs.client} })},
+			opts: []grpcx.Option{trusting(func(c *tls.Config) { c.Certificates = []tls.Certificate{certs.Client} })},
 		},
 	}
 

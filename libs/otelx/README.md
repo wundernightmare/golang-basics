@@ -340,7 +340,9 @@ under concurrent offers and triggers, zero allocations per span, a heap that
 does not grow. [`integration/`](integration) (a
 module of its own, container-backed) covers the path from `Init` through the
 shipped collector configuration: what tail sampling keeps, and a warn line
-bringing an unsampled trace to Jaeger through the real exporter.
+bringing an unsampled trace to Jaeger through the real exporter. A separate
+collector fixture proves the exporter's client certificate on an mTLS receiver
+and its export timeout through a black-holing Toxiproxy.
 
 ```sh
 just test

@@ -16,6 +16,7 @@ require (
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.45.0
+	github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0
 	github.com/tracehubmmp/golang-basics/libs/pgx v0.0.0-00010101000000-000000000000
 	github.com/tracehubmmp/golang-basics/libs/secret v0.0.0
 	github.com/tracehubmmp/golang-basics/libs/testx v0.0.0
@@ -73,7 +74,6 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.9 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/testcontainers/testcontainers-go/modules/kafka v0.45.0 // indirect
-	github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/toxiproxy v0.45.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/valkey v0.45.0 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
