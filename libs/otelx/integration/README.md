@@ -1,12 +1,14 @@
 # otelx / integration
 
 The path a span really takes: the SDK that `otelx.Init` builds → OTLP over
-HTTP → an OpenTelemetry Collector running **the configuration this repository
-ships** ([`docker/observability/otel-collector.yml`](../../../docker/observability/otel-collector.yml),
-mounted as it is, not a copy) → a trace store. What is asserted is what the
-collector's tail sampling lets through. A Go module of its own, inside
-`otelx`'s folder: testcontainers and the Docker client are this module's
-dependencies and never appear in `otelx`'s `go.mod`.
+HTTP → an OpenTelemetry Collector → a trace store. The tail-sampling tests run
+**the configuration this repository ships**
+([`docker/observability/otel-collector.yml`](../../../docker/observability/otel-collector.yml),
+mounted as it is, not a copy); a separate mTLS receiver proves client
+certificate authentication and the export timeout. What is asserted is what
+reaches the store and what the caller sees when an export cannot answer. A Go
+module of its own, inside `otelx`'s folder: testcontainers and the Docker
+client are this module's dependencies and never appear in `otelx`'s `go.mod`.
 
 ```sh
 just mod libs/otelx/integration test   # from the repo root; needs Docker
@@ -24,7 +26,8 @@ About 20 seconds. Skipped under `-short` and without Docker; **failed** when
 | --- | --- | --- |
 | collector (baseline 0) | `otel/opentelemetry-collector-contrib:0.162.0` — the image `docker/observability.yml` runs | the shipped configuration with `OTEL_TAIL_SAMPLING_PERCENTAGE=0`: the verdict on a plain trace is "dropped", not a matter of chance |
 | collector (baseline 100) | same | the same configuration with the share at 100, to show the knob reaches the policy |
-| jaeger | `jaegertracing/jaeger:2.21.0` | the trace store behind both collectors; its query API is the ground truth |
+| collector (mTLS) | same | a receiver with a generated server certificate and a required client certificate |
+| jaeger | `jaegertracing/jaeger:2.21.0` | the trace store behind all collectors; its query API is the ground truth |
 
 Only three things differ from the local stack, all through the environment
 variables the configuration file reads: the baseline share, the decision wait
@@ -57,6 +60,8 @@ are 800 ms apart; nothing sleeps.
 | `TestTailSamplingBaselineShareIsConfigurable` | baseline 100: every fast successful trace is kept |
 | `TestHeadSamplingDecidesWhatTailSamplingSees` | the documented rule: with head sampling off in the service, error traces never reach the collector, while the same trace from a service sampling at 1.0 does |
 | `TestCollectorImageIsTheShippedOne` | the image the suite runs is the one in `docker/observability.yml` |
+| `TestExporterSendsItsClientCertificateToARealCollector` | the client key pair passes a real mTLS handshake and the span reaches Jaeger |
+| `TestExporterTimeoutBoundsARealExport` | a black-holed response ends at `ExportTimeout`, not at the five-second shutdown budget |
 
 ## What it does not cover
 
@@ -67,14 +72,16 @@ are 800 ms apart; nothing sleeps.
   (`OTEL_TAIL_DECISION_WAIT`, one collector per trace); reproducing them is
   a test of the collector, not of this configuration.
 - **`OTEL_TAIL_NUM_TRACES` and the memory limiter under load.**
-- **The export itself** (TLS, headers, batching, the resource): the unit
-  layer of `otelx` owns it.
+- **Export headers, batching and the resource:** the unit layer of `otelx`
+  owns those. Client-certificate authentication and the timeout are covered
+  here.
 
 ## Adding a test
 
 A new policy in the configuration file gets a kind of trace here: emit it
 under a `testx.Unique` service name, add a sentinel after anything that must
-be absent, assert on `settled`. Tests are serial — `otelx.Init` installs the
-OpenTelemetry globals. A new knob is an environment variable of the collector
+be absent, assert on `settled`. Tail-sampling tests that depend on the
+OpenTelemetry globals are serial; tests using only the provider returned by
+`Init` may be parallel. A new knob is an environment variable of the collector
 with a default in the file; a different value is another `collector(tb, …)`
 fixture, not another configuration file.

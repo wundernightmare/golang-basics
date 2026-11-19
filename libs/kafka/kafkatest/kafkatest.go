@@ -9,10 +9,10 @@
 // provider's integration suite calls [Run] with a [Harness] built from its
 // own admin client; the expectations are the same for both.
 //
-// It is a module of its own: [TrustStore] starts a broker container, and
-// that stack (testcontainers, the Docker client) must not reach the go.mod
-// of libs/kafka or of a provider. A provider's go.mod therefore never
-// requires this module — its integration module does.
+// It is a module of its own: [TrustStore] and [SASLSSL] start broker
+// containers, and that stack (testcontainers, the Docker client) must not
+// reach the go.mod of libs/kafka or of a provider. A provider's go.mod
+// therefore never requires this module — its integration module does.
 //
 // Test-only code: import it from _test.go files.
 package kafkatest
@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -992,85 +991,4 @@ func lazyConnect(t *testing.T, harness Harness) {
 	defer live.Close()
 
 	require.NoError(t, live.Send(t.Context(), kafka.Message{Value: []byte("x")}), "a lazy producer connects on the first send")
-}
-
-// SASLSSL produces and consumes one record through a SASL_SSL listener
-// with a custom CA — the examples/kafka-sasl-ssl broker. It runs when
-// KAFKA_SASL_SSL_BROKERS is set (`just kafka-sasl-ssl-up` prints the
-// variables), and skips otherwise.
-//
-//	KAFKA_SASL_SSL_BROKERS        localhost:29094
-//	KAFKA_SASL_SSL_CA_LOCATION    examples/kafka-sasl-ssl/certs/ca.crt
-//	KAFKA_SASL_SSL_USERNAME       app
-//	KAFKA_SASL_SSL_PASSWORD_FILE  examples/kafka-sasl-ssl/certs/app.password
-//	KAFKA_SASL_SSL_TOPIC          a topic the user may write and read (default "tasks.events")
-func SASLSSL(t *testing.T) {
-	t.Helper()
-
-	brokers := os.Getenv("KAFKA_SASL_SSL_BROKERS")
-	if brokers == "" {
-		t.Skip("KAFKA_SASL_SSL_BROKERS not set: run `just kafka-sasl-ssl-up` (examples/kafka-sasl-ssl)")
-	}
-
-	topic := os.Getenv("KAFKA_SASL_SSL_TOPIC")
-	if topic == "" {
-		topic = "tasks.events"
-	}
-
-	cfg := kafka.Config{
-		Brokers:          strings.Split(brokers, ","),
-		Topic:            topic,
-		Group:            testx.Unique("sasl-ssl"),
-		ClientID:         testx.Unique("sasl-ssl"),
-		SecurityProtocol: "sasl_ssl",
-		SASLMechanism:    "SCRAM-SHA-512",
-		SASLUsername:     os.Getenv("KAFKA_SASL_SSL_USERNAME"),
-		SASLPasswordFile: os.Getenv("KAFKA_SASL_SSL_PASSWORD_FILE"),
-		SSLCALocation:    os.Getenv("KAFKA_SASL_SSL_CA_LOCATION"),
-		AutoOffsetReset:  "latest",
-		// The example broker creates topics on demand (the ACLs allow it).
-		AllowAutoTopicCreation: true,
-		RetryBackoff:           10 * time.Millisecond, RetryBackoffMax: 50 * time.Millisecond,
-	}
-	producer, err := kafka.NewProducer(t.Context(), cfg, nil)
-	require.NoError(t, err, "connect over SASL_SSL with the custom CA")
-
-	defer producer.Close()
-
-	want := testx.Unique("sasl-ssl-record")
-	got := make(chan string, 16)
-	c, err := kafka.NewConsumer(t.Context(), cfg, nil)
-	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(t.Context())
-
-	done := make(chan error, 1)
-	go func() {
-		done <- c.Run(ctx, func(_ context.Context, m kafka.Message) error {
-			got <- string(m.Value)
-			return nil
-		})
-	}()
-
-	defer func() { cancel(); assert.NoError(t, <-done, "Run returns nil once ctx is cancelled") }()
-
-	// The consumer starts at the end: keep sending until it has joined and
-	// sees one.
-	deadline := time.After(60 * time.Second)
-
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
-
-	for {
-		require.NoError(t, producer.Send(t.Context(), kafka.Message{Value: []byte(want)}))
-
-		select {
-		case v := <-got:
-			if v == want {
-				return
-			}
-		case <-tick.C:
-		case <-deadline:
-			t.Fatal("no record came back through the SASL_SSL listener")
-		}
-	}
 }

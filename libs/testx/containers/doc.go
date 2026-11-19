@@ -13,7 +13,8 @@
 //     or slowed down; [Pause] freezes the Kafka container so it hangs instead
 //     of refusing;
 //   - [Fixture] runs a container only one package needs under the same
-//     rules, and [ProxyTo] puts Toxiproxy in front of any container's port.
+//     rules, and [ProxyTo] puts Toxiproxy in front of any container's port;
+//   - [NewPKI] issues per-run server and client certificates for TLS fixtures.
 //
 // The chaos helpers are there so that the code paths written for a failing
 // dependency — optional readiness checks, best-effort publishing, cache
