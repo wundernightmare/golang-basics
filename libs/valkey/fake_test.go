@@ -22,7 +22,7 @@ import (
 )
 
 // fakeServer speaks as much RESP3 as [valkey.Cache] sends: the handshake,
-// PING, GET, SET (NX / IFEQ / PX), DEL, PUBLISH and SUBSCRIBE. It exists for
+// PING, GET, SET (NX / PX), EVAL (Replace), DEL, PUBLISH and SUBSCRIBE. It exists for
 // what a healthy server never does — going silent, refusing a subscription —
 // and for the logic of the cache that needs no server semantics beyond a
 // map. What Valkey itself answers is the integration suite's
@@ -178,7 +178,7 @@ func (s *fakeServer) reply(cmd []string) string {
 
 	switch strings.ToUpper(cmd[0]) {
 	case "HELLO":
-		return "%2\r\n" + bulk("version") + bulk("8.1.0") + bulk("proto") + ":3\r\n"
+		return "%2\r\n" + bulk("version") + bulk("7.2.0") + bulk("proto") + ":3\r\n"
 	case "CLIENT", "SELECT":
 		return respOK
 	case "PING":
@@ -192,6 +192,8 @@ func (s *fakeServer) reply(cmd []string) string {
 		return bulk(v)
 	case "SET":
 		return s.set(cmd[1], cmd[2], cmd[3:])
+	case "EVAL":
+		return s.set(cmd[3], cmd[5], []string{"IFEQ", cmd[4], "PX", cmd[6]})
 	case "DEL":
 		n := 0
 

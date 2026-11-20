@@ -37,14 +37,17 @@ func TestLoadConfigDefaults(t *testing.T) {
 	assert.False(t, cfg.Configured())
 	assert.Equal(t, 0, cfg.DB)
 	assert.Equal(t, 500*time.Millisecond, cfg.OpTimeout)
+	assert.Equal(t, valkey.CompareAndSetIFEQ, cfg.CompareAndSet)
 
 	cfg, err = valkey.LoadConfigFrom("TASKS_", map[string]string{
-		"TASKS_VALKEY_ADDR": "cache:6380",
-		"TASKS_VALKEY_DB":   "3",
+		"TASKS_VALKEY_ADDR":            "cache:6380",
+		"TASKS_VALKEY_DB":              "3",
+		"TASKS_VALKEY_COMPARE_AND_SET": "lua",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "cache:6380", cfg.Addr)
 	assert.Equal(t, 3, cfg.DB)
+	assert.Equal(t, valkey.CompareAndSetLua, cfg.CompareAndSet)
 	assert.True(t, cfg.Configured())
 }
 
@@ -59,6 +62,7 @@ func TestConnectionSettingsDefaultFromTheEnvironment(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, cfg.PoolIdleTimeout)
 	assert.Equal(t, 10*time.Second, cfg.ConnWriteTimeout)
 	assert.Equal(t, time.Hour, cfg.ConnLifetime)
+	assert.Equal(t, valkey.CompareAndSetIFEQ, cfg.CompareAndSet)
 
 	cfg, err = valkey.LoadConfigFrom("TASKS_", map[string]string{
 		"TASKS_VALKEY_PIPELINE_CONNS":     "8",
@@ -70,7 +74,7 @@ func TestConnectionSettingsDefaultFromTheEnvironment(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, valkey.Config{
-		DialTimeout: 5 * time.Second, OpTimeout: 500 * time.Millisecond,
+		DialTimeout: 5 * time.Second, OpTimeout: 500 * time.Millisecond, CompareAndSet: valkey.CompareAndSetIFEQ,
 		PipelineConns: 8, PoolSize: 6, PoolMinIdle: 2, ConnWriteTimeout: 3 * time.Second,
 	}, cfg, "an explicit 0 turns the idle cleanup and the recycling off")
 }
@@ -118,6 +122,25 @@ func TestConfigTranslatesToClientOptions(t *testing.T) {
 	assert.Equal(t, 20*time.Minute, opt.ConnLifetime)
 }
 
+func TestClusterAndSentinelURLsTranslateToClientOptions(t *testing.T) {
+	t.Parallel()
+
+	opt, err := valkey.Config{URL: secret.New("valkey://one:6379?addr=two:6379&addr=three:6379")}.ClientOption()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"one:6379", "two:6379", "three:6379"}, opt.InitAddress)
+	assert.Empty(t, opt.Sentinel.MasterSet)
+
+	opt, err = valkey.Config{URL: secret.New("valkeys://one:26379?addr=two:26379&master_set=primary")}.ClientOption()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"one:26379", "two:26379"}, opt.InitAddress)
+	assert.Equal(t, "primary", opt.Sentinel.MasterSet)
+	assert.Equal(t, 5*time.Second, opt.Sentinel.TopologyRefreshInterval)
+	assert.Equal(t, 5*time.Second, opt.Sentinel.Dialer.Timeout)
+	assert.Empty(t, opt.TLSConfig.ServerName, "the primary's name is not the sentinel seed's")
+	assert.NotNil(t, opt.Sentinel.TLSConfig)
+	assert.NotSame(t, opt.TLSConfig, opt.Sentinel.TLSConfig)
+}
+
 // A hand-built Config with only an address is bounded all the same: the
 // library's own defaults (1024 dedicated connections) never apply.
 func TestHandBuiltConfigIsBounded(t *testing.T) {
@@ -140,29 +163,29 @@ func TestInvalidConnectionSettingsAreRejected(t *testing.T) {
 		cfg   valkey.Config
 		field string
 	}{
-		"not a power of two":       {valkey.Config{PipelineConns: 3}, "pipeline_conns"},
-		"above the library max":    {valkey.Config{PipelineConns: 512}, "pipeline_conns"},
-		"negative conns":           {valkey.Config{PipelineConns: -1}, "pipeline_conns"},
-		"negative pool":            {valkey.Config{PoolSize: -1}, "pool_size"},
-		"min idle above size":      {valkey.Config{PoolSize: 2, PoolMinIdle: 3}, "pool_min_idle"},
-		"negative min idle":        {valkey.Config{PoolMinIdle: -1}, "pool_min_idle"},
-		"negative idle timeout":    {valkey.Config{PoolIdleTimeout: -time.Second}, "pool_idle_timeout"},
-		"negative write timeout":   {valkey.Config{ConnWriteTimeout: -time.Second}, "conn_write_timeout"},
-		"negative lifetime":        {valkey.Config{ConnLifetime: -time.Second}, "conn_lifetime"},
-		"negative op timeout":      {valkey.Config{OpTimeout: -time.Second}, "op_timeout"},
-		"negative dial timeout":    {valkey.Config{DialTimeout: -time.Second}, "dial_timeout"},
-		"negative db":              {valkey.Config{DB: -5}, "db"},
-		"ca file without tls":      {valkey.Config{CAFile: "ca.pem"}, "ca_file"},
-		"ca file that is absent":   {valkey.Config{TLS: true, CAFile: "no-such-ca.pem"}, "ca_file"},
-		"no address":               {valkey.Config{Addr: "-"}, "VALKEY_URL or VALKEY_ADDR"},
-		"url of another scheme":    {valkey.Config{URL: secret.New("http://cache:6379")}, "url"},
-		"url with a bad db":        {valkey.Config{URL: secret.New("valkey://cache:6379/zz")}, "url"},
-		"url of a cluster":         {valkey.Config{URL: secret.New("valkey://cache:6379?addr=other:6379")}, "one server"},
-		"url of a sentinel":        {valkey.Config{URL: secret.New("valkey://cache:26379?master_set=primary")}, "one server"},
-		"cert without its key":     {valkey.Config{TLS: true, CertFile: "client.pem"}, "cert_file and key_file"},
-		"key without its cert":     {valkey.Config{TLS: true, KeyFile: "client.key"}, "cert_file and key_file"},
-		"cert pair without tls":    {valkey.Config{CertFile: "client.pem", KeyFile: "client.key"}, "TLS is off"},
-		"cert pair that is absent": {valkey.Config{TLS: true, CertFile: "no-such.pem", KeyFile: "no-such.key"}, "cert_file"},
+		"not a power of two":         {valkey.Config{PipelineConns: 3}, "pipeline_conns"},
+		"above the library max":      {valkey.Config{PipelineConns: 512}, "pipeline_conns"},
+		"negative conns":             {valkey.Config{PipelineConns: -1}, "pipeline_conns"},
+		"negative pool":              {valkey.Config{PoolSize: -1}, "pool_size"},
+		"min idle above size":        {valkey.Config{PoolSize: 2, PoolMinIdle: 3}, "pool_min_idle"},
+		"negative min idle":          {valkey.Config{PoolMinIdle: -1}, "pool_min_idle"},
+		"negative idle timeout":      {valkey.Config{PoolIdleTimeout: -time.Second}, "pool_idle_timeout"},
+		"negative write timeout":     {valkey.Config{ConnWriteTimeout: -time.Second}, "conn_write_timeout"},
+		"negative lifetime":          {valkey.Config{ConnLifetime: -time.Second}, "conn_lifetime"},
+		"negative op timeout":        {valkey.Config{OpTimeout: -time.Second}, "op_timeout"},
+		"unknown compare-and-set":    {valkey.Config{CompareAndSet: "watch"}, "compare_and_set"},
+		"negative dial timeout":      {valkey.Config{DialTimeout: -time.Second}, "dial_timeout"},
+		"negative db":                {valkey.Config{DB: -5}, "db"},
+		"ca file without tls":        {valkey.Config{CAFile: "ca.pem"}, "ca_file"},
+		"ca file that is absent":     {valkey.Config{TLS: true, CAFile: "no-such-ca.pem"}, "ca_file"},
+		"no address":                 {valkey.Config{Addr: "-"}, "VALKEY_URL or VALKEY_ADDR"},
+		"url of another scheme":      {valkey.Config{URL: secret.New("http://cache:6379")}, "url"},
+		"url with a bad db":          {valkey.Config{URL: secret.New("valkey://cache:6379/zz")}, "url"},
+		"url of a cluster with a db": {valkey.Config{URL: secret.New("valkey://cache:6379/1?addr=other:6379")}, "only db 0"},
+		"cert without its key":       {valkey.Config{TLS: true, CertFile: "client.pem"}, "cert_file and key_file"},
+		"key without its cert":       {valkey.Config{TLS: true, KeyFile: "client.key"}, "cert_file and key_file"},
+		"cert pair without tls":      {valkey.Config{CertFile: "client.pem", KeyFile: "client.key"}, "TLS is off"},
+		"cert pair that is absent":   {valkey.Config{TLS: true, CertFile: "no-such.pem", KeyFile: "no-such.key"}, "cert_file"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
