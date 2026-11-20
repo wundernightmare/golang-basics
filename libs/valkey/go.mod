@@ -6,11 +6,11 @@ require (
 	github.com/caarlos0/env/v11 v11.4.2
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
+	github.com/valkey-io/valkey-go v1.0.79
+	github.com/valkey-io/valkey-go/valkeyotel v1.0.79
 	github.com/wundernightmare/golang-basics/libs/resilience v0.0.0-00010101000000-000000000000
 	github.com/wundernightmare/golang-basics/libs/secret v0.0.0-00010101000000-000000000000
 	github.com/wundernightmare/golang-basics/libs/testx v0.0.0
-	github.com/valkey-io/valkey-go v1.0.79
-	github.com/valkey-io/valkey-go/valkeyotel v1.0.79
 	go.opentelemetry.io/otel/trace v1.47.0
 	golang.org/x/sync v0.25.0
 )

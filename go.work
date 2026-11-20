@@ -17,7 +17,7 @@
 //   libs/pgx                    — shared PostgreSQL pool (pgx)
 //   libs/pgx/integration        — its integration suite: a real Postgres, PgBouncer in both pooling modes, Toxiproxy (_test only)
 //   libs/valkey                 — shared Valkey cache (valkey-go)
-//   libs/valkey/integration     — its integration suite: a real Valkey (pool, Pub/Sub, IFEQ), Toxiproxy (_test only)
+//   libs/valkey/integration     — its integration suite: a real Valkey (pool, Pub/Sub, compare-and-set), Toxiproxy (_test only)
 //   libs/kafka                  — shared Kafka producer/consumer, provider-neutral (no cgo)
 //   libs/kafka/kafkatest        — its conformance suite, which every provider's integration suite runs (_test only)
 //   libs/kafka-rdkafka          — Kafka provider: librdkafka via confluent-kafka-go (cgo; the default)

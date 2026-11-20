@@ -171,7 +171,7 @@ other process drops it from its L1. Five races are closed and tested:
 - a load that straddles the commit is not written to L2 (tombstone) nor L1;
 - a value read from L2 just before the invalidation is not copied into L1
   just after it (fills are ordered against invalidations by an epoch);
-- a refresh replaces only the value it started from (`SET … IFEQ`);
+- a refresh replaces only the value it started from (atomic compare-and-set);
 - a read that begins after the invalidation does not join a lookup that
   began before it (a miss or a background refresh still holding the old
   row): once `Invalidate` has returned, the process reads its own write. The
@@ -267,7 +267,13 @@ the container limit before choosing the ratio —
 A service with a tight budget shares one cache between its logical caches
 (telling keys apart by a prefix) rather than paying for each.
 
-Valkey 8.1 or newer is required (`SET … IFEQ`).
+Valkey 8.1+ uses the default `compare_and_set: ifeq` (`SET … IFEQ`). For
+Valkey 7.2 set `compare_and_set: lua` in `valkey.Config`; both implementations
+are atomic compare-and-set. Standalone, cluster and Sentinel are supported
+through `valkey.Config.URL`; see [`libs/valkey`](../valkey#configuration) for
+the URL forms. A cluster uses DB 0. Invalidation, including Pub/Sub, works in
+all three modes and with either compare-and-set strategy; it does not have to
+be disabled on Valkey before 8.1.
 
 ## Configuration
 
@@ -309,7 +315,7 @@ Listed in [docs/METRICS.md](../../docs/METRICS.md); every series carries
 | Unit, its own module | [`credential/`](credential) | the example codec: table, fuzz, property, byte-compatibility with `google.golang.org/protobuf` |
 | Unit, virtual time | `cache_test.go` | every read rule and race above against an in-memory L2 (`testing/synctest`: no sleeps), an entry written by a clock ahead of or behind this one, a panic in a lookup, what the breaker counts, what `Close` ends and waits for, the allocation budget of a fresh read, what a key may be and where it travels — on a map behind a mutex for L1 (`export_test.go`): the stores are modules that import this one |
 | Store contract | `storetest/`, run by the modules `offheap/` and `onheap/` | each line of the `Store` contract against each store at several capacities, under concurrency; the entry limits against the libraries; a read that allocates nothing; and the suite against nine deliberately broken stores |
-| Integration | [`integration/`](integration) | the same cache on the real stores and a real Valkey: TTLs, `SET NX` / `IFEQ`, tombstones, Pub/Sub, values from 0 bytes to 4 MiB |
+| Integration | [`integration/`](integration) | the same cache on the real stores and real Valkey standalone, cluster and Sentinel (7.2+): TTLs, `SET NX` / compare-and-set, tombstones, Pub/Sub, values from 0 bytes to 4 MiB |
 | Chaos | `integration/` (`chaos_test.go`) | Valkey down, frozen, slow, black-holed, resetting, cutting replies mid-value: every read answers correctly within a bound, and L2 is picked up again |
 | Soak | `integration/` (`chaos_test.go`) | two processes reading and invalidating under flapping faults: no failed read, no foreign or uncommitted value, convergence afterwards |
 | Property | `property_test.go`, `internal_test.go` | for any history of commits, invalidations, passing time and reads across two processes: a read never fails, never returns another key's value or an uncommitted version, never one older than the last invalidation or than the hard TTL allows; the envelope round-trips any value (rapid, virtual time) |

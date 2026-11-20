@@ -180,6 +180,34 @@ func TestTTLIsRequiredWhereAKeyMustExpire(t *testing.T) {
 	assert.Zero(t, server.ttl("k"))
 }
 
+func TestReplaceUsesTheConfiguredCompareAndSetMode(t *testing.T) {
+	t.Parallel()
+
+	for name, mode := range map[string]valkey.CompareAndSetMode{
+		"ifeq": valkey.CompareAndSetIFEQ,
+		"lua":  valkey.CompareAndSetLua,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			cache, server, _ := fakeCache(t, valkey.Config{CompareAndSet: mode})
+			require.NoError(t, cache.Set(t.Context(), "k", "old", time.Minute))
+
+			replaced, err := cache.Replace(t.Context(), "k", "old", "new", time.Minute)
+			require.NoError(t, err)
+			assert.True(t, replaced)
+
+			replaced, err = cache.Replace(t.Context(), "k", "old", "stale", time.Minute)
+			require.NoError(t, err)
+			assert.False(t, replaced)
+
+			got, found := server.get("k")
+			assert.True(t, found)
+			assert.Equal(t, "new", got)
+		})
+	}
+}
+
 // TLS from the discrete keys, against a server whose certificate only the
 // configured CA file vouches for.
 func TestTLSWithACAFile(t *testing.T) {

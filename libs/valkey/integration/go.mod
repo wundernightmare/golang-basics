@@ -16,11 +16,11 @@ require (
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.45.0
+	github.com/valkey-io/valkey-go v1.0.79
 	github.com/wundernightmare/golang-basics/libs/secret v0.0.0
 	github.com/wundernightmare/golang-basics/libs/testx v0.0.0
 	github.com/wundernightmare/golang-basics/libs/testx/containers v0.0.0
 	github.com/wundernightmare/golang-basics/libs/valkey v0.0.0
-	github.com/valkey-io/valkey-go v1.0.79
 	go.opentelemetry.io/otel/trace v1.47.0
 )
 
@@ -75,8 +75,8 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/valkey v0.45.0 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
-	github.com/wundernightmare/golang-basics/libs/resilience v0.0.0 // indirect
 	github.com/valkey-io/valkey-go/valkeyotel v1.0.79 // indirect
+	github.com/wundernightmare/golang-basics/libs/resilience v0.0.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0 // indirect

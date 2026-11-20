@@ -8,7 +8,7 @@ Toxiproxy stay out of the `go.mod` of `libs/valkey`.
 It owns what only a real server can say:
 
 - commands round-trip with their TTLs; `SET NX` against a value and a
-  tombstone, `SET … IFEQ` (`Replace`), and `Aside` on top of them — one load
+  tombstone, compare-and-set (`Replace`), and `Aside` on top of them — one load
   for concurrent misses, no resurrection after an invalidation;
 - Pub/Sub delivery, resubscription after the connection was lost, and the
   pause between attempts;

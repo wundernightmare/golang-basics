@@ -18,7 +18,7 @@ import (
 
 // The integration layer: the same cache against a real Valkey. It owns what
 // the fake cannot prove — that libs/valkey's commands mean what the fake
-// says (PX, SET NX, SET IFEQ, tombstones, Pub/Sub) and that values survive
+// says (PX, SET NX, compare-and-set, tombstones, Pub/Sub) and that values survive
 // the wire at every size. The read rules themselves are the unit layer's.
 
 // valkeyAt is a client for the chaos tests: its operations give up after
@@ -142,7 +142,7 @@ func TestValkeyRefreshReplacesTheSharedValue(t *testing.T) {
 	require.Eventually(t, func() bool { return rig.version(t, key) == "v2" }, 5*time.Second, 10*time.Millisecond)
 
 	other := newHarness(t, valkeySteady(t), newSource(), realTime(rig.name, time.Minute, time.Minute))
-	assert.Equal(t, "v2", other.version(t, key), "SET IFEQ replaced the value in Valkey")
+	assert.Equal(t, "v2", other.version(t, key), "compare-and-set replaced the value in Valkey")
 }
 
 func TestValkeyTombstoneRefusesAFillThatRacedTheWrite(t *testing.T) {
