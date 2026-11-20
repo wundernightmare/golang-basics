@@ -13,6 +13,16 @@ import (
 	"github.com/tracehubmmp/golang-basics/libs/secret"
 )
 
+// CompareAndSetMode selects the server-side implementation of [Cache.Replace].
+type CompareAndSetMode string
+
+const (
+	// CompareAndSetIFEQ uses SET IFEQ, available since Valkey 8.1.
+	CompareAndSetIFEQ CompareAndSetMode = "ifeq"
+	// CompareAndSetLua uses an atomic Lua script compatible with Valkey 7.2.
+	CompareAndSetLua CompareAndSetMode = "lua"
+)
+
 // Config is the Valkey client configuration, populated from the environment
 // with a per-service prefix (e.g. "TASKS_"), or from YAML when a service
 // embeds it in its own config (field `Valkey valkey.Config` tagged yaml:"valkey", no
@@ -24,11 +34,11 @@ import (
 //
 //  1. A connection URL in <PREFIX>VALKEY_URL (e.g. "valkey://:pw@host:6379/0"
 //     or the redis:// scheme; valkeys:// and rediss:// are TLS). When set,
-//     the discrete fields are ignored.
-//  2. The discrete Addr/Username/Password/DB fields.
+//     the discrete fields are ignored. Several addresses (addr=) select a
+//     cluster; master_set= selects Sentinel and the addresses are its sentinels.
+//  2. The discrete Addr/Username/Password/DB fields for one standalone server.
 //
-// TLS, CAFile and the client certificate apply to both. One server only: a URL
-// that names several (addr=) or a sentinel (master_set=) is a config error.
+// TLS, CAFile and the client certificate apply to both. A cluster uses DB 0.
 //
 // Keys (with the "TASKS_" prefix as an example):
 //
@@ -43,6 +53,7 @@ import (
 //	TASKS_VALKEY_KEY_FILE      [key_file]      its private key (PEM)                      (default "")
 //	TASKS_VALKEY_DIAL_TIMEOUT  [dial_timeout]  connection dial timeout                    (default "5s")
 //	TASKS_VALKEY_OP_TIMEOUT    [op_timeout]    per-command deadline                       (default "500ms")
+//	TASKS_VALKEY_COMPARE_AND_SET [compare_and_set] Replace strategy: ifeq or lua          (default "ifeq")
 //
 // Connections (see the fields for what each bounds):
 //
@@ -82,6 +93,9 @@ type Config struct {
 	// are not retried by the client (see clientOption): one attempt, then
 	// the error.
 	OpTimeout time.Duration `env:"VALKEY_OP_TIMEOUT" envDefault:"500ms" yaml:"op_timeout"`
+	// CompareAndSet chooses how [Cache.Replace] is implemented. IFEQ needs
+	// Valkey 8.1; Lua works with Valkey 7.2 and needs EVAL in the user's ACL.
+	CompareAndSet CompareAndSetMode `env:"VALKEY_COMPARE_AND_SET" envDefault:"ifeq" yaml:"compare_and_set"`
 
 	// valkey-go does not hand out one connection per command. Ordinary
 	// commands (everything [Cache] itself sends, a subscription included) are
@@ -132,6 +146,7 @@ const (
 	defaultPipelineConns    = 4
 	defaultPoolSize         = 32
 	defaultConnWriteTimeout = 10 * time.Second
+	defaultSentinelRefresh  = 5 * time.Second
 	maxPipelineConns        = 1 << valkeygo.MaxPipelineMultiplex
 )
 
@@ -147,6 +162,10 @@ func (c Config) withDefaults() Config {
 
 	if c.OpTimeout == 0 {
 		c.OpTimeout = defaultOpTimeout
+	}
+
+	if c.CompareAndSet == "" {
+		c.CompareAndSet = CompareAndSetIFEQ
 	}
 
 	if c.PipelineConns == 0 {
@@ -189,6 +208,10 @@ func (c Config) validate() error {
 
 	if c.OpTimeout < 0 {
 		return fmt.Errorf("%w: op_timeout must be positive, got %s", ErrConfig, c.OpTimeout)
+	}
+
+	if c.CompareAndSet != CompareAndSetIFEQ && c.CompareAndSet != CompareAndSetLua {
+		return fmt.Errorf("%w: compare_and_set must be %q or %q, got %q", ErrConfig, CompareAndSetIFEQ, CompareAndSetLua, c.CompareAndSet)
 	}
 
 	if c.PipelineConns < 1 || c.PipelineConns > maxPipelineConns || bits.OnesCount(uint(c.PipelineConns)) != 1 {
@@ -276,12 +299,8 @@ func (c Config) clientOption() (valkeygo.ClientOption, error) {
 				"with the special characters of the password percent-encoded (the parser's message is withheld: it quotes the URL)", ErrConfig)
 		}
 
-		// The library builds another kind of client from either — a cluster
-		// client from several addresses, a sentinel one from master_set —
-		// and nothing of this package is tested against those.
-		if len(opt.InitAddress) != 1 || opt.Sentinel.MasterSet != "" {
-			return valkeygo.ClientOption{}, fmt.Errorf("%w: url must name one server: several addresses (addr=, a cluster) "+
-				"and master_set (a sentinel) are not supported", ErrConfig)
+		if len(opt.InitAddress) > 1 && opt.SelectDB != 0 {
+			return valkeygo.ClientOption{}, fmt.Errorf("%w: a cluster supports only db 0", ErrConfig)
 		}
 	}
 
@@ -318,6 +337,22 @@ func (c Config) clientOption() (valkeygo.ClientOption, error) {
 		}
 
 		opt.TLSConfig.Certificates = []tls.Certificate{pair}
+	}
+
+	if opt.TLSConfig != nil {
+		// Cluster discovery and Sentinel switch the target: each dial must derive
+		// ServerName from the address it actually connects to, not the first seed.
+		opt.TLSConfig.ServerName = ""
+	}
+
+	if opt.Sentinel.MasterSet != "" {
+		// A missed +switch-master event must not pin the client to a demoted primary.
+		opt.Sentinel.TopologyRefreshInterval = defaultSentinelRefresh
+
+		opt.Sentinel.Dialer.Timeout = c.DialTimeout
+		if opt.TLSConfig != nil {
+			opt.Sentinel.TLSConfig = opt.TLSConfig.Clone()
+		}
 	}
 
 	opt.Dialer.Timeout = c.DialTimeout

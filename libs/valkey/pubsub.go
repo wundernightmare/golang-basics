@@ -4,24 +4,35 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync/atomic"
 	"time"
 
 	valkeygo "github.com/valkey-io/valkey-go"
 )
 
+const replaceScript = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3]) else return nil end`
+
 // Replace writes value at key only when the key currently holds exactly old,
-// and reports whether it did (SET … IFEQ, Valkey ≥ 8.1). It is how a refresh
-// overwrites the value it started from: a tombstone ([Cache.Tombstone]) or a
-// newer value written in between makes the comparison fail, so a refresh
-// that raced an invalidation cannot resurrect stale data. A positive ttl is
-// required.
+// and reports whether it did. It is how a refresh overwrites the value it
+// started from: a tombstone ([Cache.Tombstone]) or a newer value written in
+// between makes the comparison fail, so a refresh that raced an invalidation
+// cannot resurrect stale data. A positive ttl is required. The atomic command
+// is selected by [Config.CompareAndSet].
 func (c *Cache) Replace(ctx context.Context, key, old, value string, ttl time.Duration) (bool, error) {
 	if ttl <= 0 {
 		return false, fmt.Errorf("valkey: replace %q: ttl must be positive", key)
 	}
 
-	err := c.do(ctx, "set", c.client.B().Set().Key(key).Value(value).Ifeq(old).Px(ttl).Build()).Error()
+	var cmd valkeygo.Completed
+	if c.compareAndSet == CompareAndSetLua {
+		cmd = c.client.B().Eval().Script(replaceScript).Numkeys(1).Key(key).
+			Arg(old, value, strconv.FormatInt(ttl.Milliseconds(), 10)).Build()
+	} else {
+		cmd = c.client.B().Set().Key(key).Value(value).Ifeq(old).Px(ttl).Build()
+	}
+
+	err := c.do(ctx, "set", cmd).Error()
 	switch {
 	case valkeygo.IsValkeyNil(err):
 		return false, nil // absent, tombstoned or changed: not written

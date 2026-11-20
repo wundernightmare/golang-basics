@@ -30,12 +30,13 @@ import (
 // [ErrClosed]; [Aside] still answers from its loader. What goes through
 // [Cache.Client] fails with the library's own valkeygo.ErrClosing.
 type Cache struct {
-	client    valkeygo.Client
-	log       *slog.Logger
-	metrics   *metrics
-	opTimeout time.Duration
-	closed    atomic.Bool // Close was called: a subscription must not come back
-	flight    singleflight.Group
+	client        valkeygo.Client
+	log           *slog.Logger
+	metrics       *metrics
+	opTimeout     time.Duration
+	compareAndSet CompareAndSetMode
+	closed        atomic.Bool // Close was called: a subscription must not come back
+	flight        singleflight.Group
 
 	// One gate per kind of failure, so that a failing fill is not hidden
 	// behind a failing lookup.
@@ -102,9 +103,11 @@ func New(cfg Config, log *slog.Logger, opts ...Option) (*Cache, error) {
 
 	// The resolved address (the URL's, when one is set), not the discrete field.
 	log.Info("valkey cache ready", "addr", opt.InitAddress, "db", opt.SelectDB, "tls", opt.TLSConfig != nil, "op_timeout", cfg.OpTimeout.String(),
-		"pipeline_conns", cfg.PipelineConns, "pool_size", cfg.PoolSize, "conn_lifetime", cfg.ConnLifetime.String())
+		"compare_and_set", cfg.CompareAndSet, "pipeline_conns", cfg.PipelineConns, "pool_size", cfg.PoolSize, "conn_lifetime", cfg.ConnLifetime.String())
 
-	return &Cache{client: newBounded(client, cfg.PoolSize), log: log, metrics: newMetrics(), opTimeout: cfg.OpTimeout}, nil
+	return &Cache{
+		client: newBounded(client, cfg.PoolSize), log: log, metrics: newMetrics(), opTimeout: cfg.OpTimeout, compareAndSet: cfg.CompareAndSet,
+	}, nil
 }
 
 // readyCheckTimeout bounds the PING of [Cache.ReadyCheck] whatever the

@@ -69,9 +69,10 @@ it.
 
 ## Compare-and-set and Pub/Sub
 
-- `Replace(key, old, value, ttl)` is `SET … IFEQ` (Valkey ≥ 8.1): it writes
-  only over exactly `old`, so a refresh cannot overwrite a tombstone or a
-  newer value.
+- `Replace(key, old, value, ttl)` is an atomic compare-and-set: it writes only
+  over exactly `old`, so a refresh cannot overwrite a tombstone or a newer
+  value. `compare_and_set: ifeq` (the default) uses `SET … IFEQ` on Valkey 8.1+;
+  `compare_and_set: lua` supports Valkey 7.2 and needs `EVAL` in the user's ACL.
 - `Publish` / `Subscribe` are at most once. `Subscribe` reconnects and
   resubscribes by itself; its `onSubscribed` callback runs each time, and is
   the only sign that messages may have been missed in between.
@@ -85,25 +86,42 @@ Both are what [`libs/tiercache`](../tiercache) is built on.
 
 | Env (`TASKS_` prefix) | YAML | Default | |
 | --- | --- | --- | --- |
-| `TASKS_VALKEY_URL` | `url` | — | `valkey://[user:pw@]host:6379[/db]` (`valkeys://`: TLS); wins over the discrete fields. One server: a URL with `addr=` (several addresses, a cluster) or `master_set=` (a sentinel) is a config error. No default address: `Config.Configured()` is false until URL or ADDR is set. The field is a `secret.String` (the URL holds the password): hand-built as `secret.New(url)`, never printed by a formatter, a logger or `/admin/config` |
+| `TASKS_VALKEY_URL` | `url` | — | `valkey://[user:pw@]host:6379[/db]` (`valkeys://`: TLS); wins over the discrete fields. Several seed addresses (`addr=`) select a cluster; `master_set=` selects Sentinel. No default address: `Config.Configured()` is false until URL or ADDR is set. The field is a `secret.String` (the URL holds the password): hand-built as `secret.New(url)`, never printed by a formatter, a logger or `/admin/config` |
 | `TASKS_VALKEY_ADDR` / `_USERNAME` / `_PASSWORD` / `_DB` | `addr` / `username` / `password` / `db` | — / — / — / `0` | the user is an ACL user; empty is the server's default user |
 | `TASKS_VALKEY_TLS` | `tls` | `false` | connect over TLS; applies to a `valkey://` URL too |
 | `TASKS_VALKEY_CA_FILE` | `ca_file` | — | PEM bundle that verifies the server; it is the trust store (the system roots are not consulted). Needs TLS on — the flag or a TLS scheme — otherwise a config error |
 | `TASKS_VALKEY_CERT_FILE` / `_KEY_FILE` | `cert_file` / `key_file` | — | client certificate and its private key (PEM) for a server that asks for one (mTLS). Both or neither, and only with TLS on. Read when the client is built: a rotated pair needs a restart |
 | `TASKS_VALKEY_DIAL_TIMEOUT` | `dial_timeout` | `5s` | also bounds the boot PING |
 | `TASKS_VALKEY_OP_TIMEOUT` | `op_timeout` | `500ms` | every command of the cache's own methods; past it the caller treats the cache as a miss |
+| `TASKS_VALKEY_COMPARE_AND_SET` | `compare_and_set` | `ifeq` | `Replace`: `SET IFEQ` on Valkey 8.1+, or `lua` for Valkey 7.2 (requires `EVAL` permission) |
 | `TASKS_VALKEY_PIPELINE_CONNS` | `pipeline_conns` | `4` | shared connections every ordinary command is pipelined over; a power of two, 1–256 |
 | `TASKS_VALKEY_POOL_SIZE` | `pool_size` | `32` | dedicated connections (blocking commands, pipelines ≥ 2000, `Dedicated`), at most |
 | `TASKS_VALKEY_POOL_MIN_IDLE` / `_POOL_IDLE_TIMEOUT` | `pool_min_idle` / `pool_idle_timeout` | `0` / `5m` | idle dedicated connections kept / closed after (`0`: never) |
 | `TASKS_VALKEY_CONN_WRITE_TIMEOUT` | `conn_write_timeout` | `10s` | a connection whose peer is silent this long is dropped and replaced |
 | `TASKS_VALKEY_CONN_LIFETIME` | `conn_lifetime` | `1h` | recycle a pipelined connection at this age (`0`: never) |
 
+Topologies are selected by the URL, with no second set of config keys:
+
+```text
+standalone: valkey://cache:6379/0
+cluster:    valkey://cache-a:6379?addr=cache-b:6379&addr=cache-c:6379
+sentinel:   valkey://sentinel-a:26379?addr=sentinel-b:26379&master_set=primary
+```
+
+The discrete `addr` form is standalone. A cluster uses DB 0 and discovers the
+rest of its nodes from any live seed. A Sentinel URL's addresses are sentinels;
+the userinfo authenticates to the data primary, and the client reconciles its
+topology with Sentinel every five seconds as well as following failover events.
+TLS, the CA file and the client key pair apply to both Sentinel and data
+connections.
+
 `Config.Validate()` reports everything `New` rejects before it dials: no
 address, a value the library would reinterpret (a negative size or duration,
-a count that is not a power of two), a URL that does not parse or names more
-than one server, a CA file or a client key pair that cannot be read. `LoadConfig` / `LoadConfigFrom` call it when an address
-is set, `New` always; every such error wraps `valkey.ErrConfig`. The error
-for a URL never quotes the URL — it is where the password is.
+a count that is not a power of two), a URL that does not parse, a nonzero DB
+for several cluster seeds, a CA file or a client key pair that cannot be read.
+`LoadConfig` / `LoadConfigFrom` call it when an address is set, `New` always;
+every such error wraps `valkey.ErrConfig`. The error for a URL never quotes
+the URL — it is where the password is.
 
 `New` takes no context: it cannot be cancelled, and a dial and the boot PING
 are each given `dial_timeout`. A server that is down at boot is an error from
@@ -190,6 +208,6 @@ file and a client certificate — against a RESP3 listener inside the test (`fak
 
 What only Valkey can answer is in [`integration/`](integration) (a module of
 its own, so that testcontainers and the Docker client stay out of this
-`go.mod`): round trips and TTLs, `SET NX` vs tombstones, `IFEQ`, Pub/Sub and
+`go.mod`): round trips and TTLs, `SET NX` vs tombstones, compare-and-set, Pub/Sub and
 resubscription, what the server sees of the pool, spans and metrics, mTLS with
 the configured CA and client key pair, and the outage cases through Toxiproxy.
