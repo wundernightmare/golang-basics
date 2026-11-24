@@ -1,0 +1,6 @@
+bin/
+out/*/stacks/
+out/*.stderr
+out/*.stdout
+out/incident-*/
+out-matrix.std*
