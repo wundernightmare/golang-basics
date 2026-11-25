@@ -6,7 +6,7 @@ require (
 	github.com/caarlos0/env/v11 v11.4.2
 	github.com/exaring/otelpgx v0.13.0
 	github.com/jackc/pgx/v5 v5.13.0
-	github.com/jackc/puddle/v2 v2.2.3
+	github.com/jackc/puddle/v2 v2.2.4
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/stretchr/testify v1.12.1
