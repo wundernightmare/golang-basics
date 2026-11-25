@@ -6,8 +6,8 @@ require (
 	github.com/caarlos0/env/v11 v11.4.2
 	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
-	github.com/valkey-io/valkey-go v1.0.79
-	github.com/valkey-io/valkey-go/valkeyotel v1.0.79
+	github.com/valkey-io/valkey-go v1.0.80
+	github.com/valkey-io/valkey-go/valkeyotel v1.0.80
 	github.com/wundernightmare/golang-basics/libs/resilience v0.0.0-00010101000000-000000000000
 	github.com/wundernightmare/golang-basics/libs/secret v0.0.0-00010101000000-000000000000
 	github.com/wundernightmare/golang-basics/libs/testx v0.0.0
@@ -32,9 +32,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.47.0 // indirect
 	go.uber.org/goleak v1.3.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.6 // indirect
-	golang.org/x/net v0.60.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
 
